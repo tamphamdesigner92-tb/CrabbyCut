@@ -9,8 +9,9 @@ trình dựng phim bình thường: lane phủ, chữ, hiệu ứng chuyển, ch
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3%20or%20later-blue.svg)](LICENSE)
 
-> **Trạng thái:** đang phát triển. Bản hiện tại chỉ hỗ trợ **Windows x64**. Mã nguồn có
-> nhánh macOS (ASR qua `mlx_whisper`) nhưng chưa được kiểm thử ở bản này.
+> **Trạng thái:** đang phát triển. **Bộ cài đóng gói chỉ có cho Windows x64.** Chạy từ mã
+> nguồn thì cả Windows lẫn **macOS** đều được — đường macOS bóc băng bằng `mlx_whisper`
+> (Apple Silicon) thay cho `faster-whisper`, xem [Chạy từ mã nguồn](#chạy-từ-mã-nguồn).
 
 ---
 
@@ -19,6 +20,7 @@ trình dựng phim bình thường: lane phủ, chữ, hiệu ứng chuyển, ch
 - [Tính năng](#tính-năng)
 - [Cài đặt cho người dùng](#cài-đặt-cho-người-dùng)
 - [Vì sao một số thư mục trong repo gần như trống](#vì-sao-một-số-thư-mục-trong-repo-gần-như-trống)
+- [Thêm tài nguyên vào thư viện](#thêm-tài-nguyên-vào-thư-viện)
 - [Chạy từ mã nguồn](#chạy-từ-mã-nguồn)
 - [Đóng gói bộ cài](#đóng-gói-bộ-cài)
 - [Kiến trúc](#kiến-trúc)
@@ -47,7 +49,7 @@ trình dựng phim bình thường: lane phủ, chữ, hiệu ứng chuyển, ch
 ## Cài đặt cho người dùng
 
 Tải `CrabbyCut Setup <phiên bản>.exe` ở mục
-[Releases](https://github.com/tamphamdesigner92-tb/CrabbyCut_Windows/releases) rồi chạy.
+[Releases](https://github.com/tamphamdesigner92-tb/CrabbyCut/releases) rồi chạy.
 
 Bộ cài sẽ:
 
@@ -112,34 +114,218 @@ Ngoại lệ: `library/luts/` **có** trong repo — 22 tệp `.cube` đó do ch
 
 ---
 
+## Thêm tài nguyên vào thư viện
+
+Kho tài nguyên (nhạc nền, hiệu ứng âm thanh, video chèn, icon/hình minh hoạ) **không đi kèm
+ứng dụng** — lý do ở [mục trên](#vì-sao-một-số-thư-mục-trong-repo-gần-như-trống). Bạn tự
+chép tệp của mình vào. Ứng dụng không có nút "nhập tài nguyên": cách duy nhất là chép thẳng
+vào thư mục.
+
+### Chép vào đâu
+
+| Bạn đang dùng | Thư mục kho |
+|---|---|
+| **Bản cài `.exe` trên Windows** | `%LOCALAPPDATA%\CrabbyCut\library` |
+| Chạy từ mã nguồn (Windows/macOS) | `library` ngay trong thư mục dự án |
+| Bản cài trên macOS | `~/Library/Application Support/CrabbyCut/library` |
+
+Dán thẳng dòng này vào thanh địa chỉ của File Explorer để mở đúng chỗ:
+
+```
+%LOCALAPPDATA%\CrabbyCut\library
+```
+
+> ⚠ **Đừng chép vào thư mục cài đặt** (`%LOCALAPPDATA%\Programs\CrabbyCut`). Trình gỡ cài
+> do `electron-builder` sinh ra, khi chạy ở nhánh **tự cập nhật**, xoá `$INSTDIR` bằng
+> `RMDir /r` **không chừa ngoại lệ nào** — tài nguyên bạn để trong đó sẽ mất sạch ở lần cập
+> nhật đầu tiên, im lặng. Đây chính là lý do kho nằm ở `%LOCALAPPDATA%\CrabbyCut`.
+
+Thư mục kho có bốn ngăn, ứng dụng **tự tạo lại nếu thiếu**:
+
+```
+library\
+├─ Video\      video chèn
+├─ Elements\   icon, hình minh hoạ, hình khối
+├─ Music\      nhạc nền
+├─ SFXs\       hiệu ứng âm thanh
+└─ luts\       LUT màu .cube (bộ dựng sẵn + bản bạn nhập)
+```
+
+Đuôi tệp được nhận (`backend/server.js`):
+
+| Loại | Đuôi |
+|---|---|
+| Video | `.mp4` `.mov` `.m4v` `.webm` |
+| Âm thanh | `.mp3` `.wav` `.m4a` `.aac` |
+| Hình ảnh | `.png` `.jpg` `.jpeg` `.webp` `.svg` |
+| LUT màu | `.cube` |
+
+Tệp đuôi khác bị **bỏ qua im lặng** — không có thông báo lỗi nào. Thấy tệp không hiện ra
+thì kiểm đuôi trước tiên.
+
+> **Đặt tệp ngay trong ngăn, đừng lồng thư mục con.** Hai đường đọc kho không giống nhau:
+> panel Thư viện liệt kê **chỉ cấp đầu** của mỗi ngăn (`readdir`, không đệ quy), còn Magic
+> Fill quét **đệ quy** cả kho. Nên `library\Video\Khach A\[Vid] ....mp4` vẫn được Magic
+> Fill chọn nhưng **không bao giờ hiện trong panel** để bạn kéo tay — một kiểu "mất tích"
+> rất khó đoán. Muốn phân loại thì gói thông tin vào **tên tệp**, đừng gói vào thư mục.
+
+### Đặt tên thế nào để Magic Fill tìm được
+
+Chép đúng thư mục là đủ để tài nguyên **hiện trong panel Thư viện** và kéo tay vào timeline.
+Nhưng muốn **Magic Fill** tự chọn được thì tên tệp phải có **tiền tố trong ngoặc vuông**:
+
+```
+[Vid] Be khoe, be tuoi cuoi - 1.mp4
+[Icon] Lactoferrin.png
+[Illus] Giam phat trien chieu cao - 1.png
+[SFXs] Pop-UI-Sound.MP3
+[Mus] Coconut-Groove.MP3
+```
+
+| Tiền tố | Magic Fill làm gì |
+|---|---|
+| `[Vid]` | Video phủ kín khung, đặt ở lane *Magic Fill Video* |
+| `[Icon]` / `[Illus]` | Giữ nguyên cỡ gốc, đặt ở nửa khung đối diện mặt người |
+| `[SFXs]` / `[Mus]` | Dành cho Auto SFX, không dùng cho Magic Fill hình |
+
+Ba điều dễ sai:
+
+- **Thư mục không ảnh hưởng luật khớp.** Magic Fill quét đệ quy cả `library/` (tối đa 6 cấp,
+  bỏ `luts/` và mọi thứ bắt đầu bằng dấu chấm). Xếp thư mục con thế nào cũng được — nhưng
+  **tiền tố thì bắt buộc**.
+- **Tiền tố viết lạ coi như không có**: `(Icon)`, `Icon -`, `[icons]`, `[Icon 2]` đều **không**
+  nhận. Phải là ngoặc vuông ở đầu tên, bên trong đúng một trong năm chữ trên. Hoa/thường,
+  dấu tiếng Việt, khoảng trắng thừa thì không sao — `[ICON ]` vẫn nhận.
+- **Nhiều bản của cùng một nội dung phải đánh hậu tố `- số`**: `[Vid] Be om, be gay - 1.mp4`
+  và `- 2.mp4` được coi là hai bản của cùng một nội dung và luân phiên ngẫu nhiên. Viết
+  `[Vid] Be om be gay 2.mp4` thì số `2` bị tính thành một từ khoá rác.
+
+Luật khớp đầy đủ — bao nhiêu chữ phải trùng, chữ được chuẩn hoá ra sao — nằm ở
+[`docs/QUY_UOC_DAT_TEN_TAI_NGUYEN.md`](docs/QUY_UOC_DAT_TEN_TAI_NGUYEN.md).
+
+### Chép xong rồi mà chưa thấy
+
+Panel đọc lại thư mục ở **mỗi lần tải danh sách**, không cache, nên thường chỉ cần mở lại
+panel là thấy. Chưa thấy thì kiểm theo thứ tự:
+
+1. Đuôi tệp có trong bảng trên không?
+2. Tệp có nằm **ngay trong** `Video` / `Elements` / `Music` / `SFXs` không, hay đang lọt vào
+   một thư mục con?
+3. Tên tệp có bắt đầu bằng dấu chấm không (bị bỏ qua)?
+4. Đúng thư mục kho chưa — bản cài `.exe` đọc `%LOCALAPPDATA%\CrabbyCut\library`, **không**
+   phải thư mục `library` trong mã nguồn.
+
+### Về bản quyền
+
+Chỉ chép vào repo công khai thứ **bạn tự tạo** hoặc thứ có giấy phép cho phép phân phối lại
+(CC0/Public Domain). Tài nguyên trong máy bạn thì tuỳ bạn — nhưng đừng commit nhạc/video
+mua từ kho stock lên repo: gần như mọi giấy phép stock cho phép *dùng* trong sản phẩm cuối
+nhưng **cấm phân phối lại tệp gốc**. Xem [`library/README.md`](library/README.md).
+
+---
+
 ## Chạy từ mã nguồn
 
 ### Cần có trước
 
-| | Ghi chú |
-|---|---|
-| **Node.js 20+** | |
-| **Python 3.9–3.12** | **Không** dùng 3.13+ — `mediapipe` chưa có wheel cho bản đó, và `pip install` sẽ *âm thầm bỏ qua* nó rồi Auto-Reframe chết sau với `No module named 'cv2'` |
-| **Visual Studio 2022** kèm workload *Desktop development with C++* | Để biên dịch native addon và C++ sidecar |
-| **FFmpeg** trên `PATH` | Cần build có `zscale` (đường tonemap HDR dựa vào nó) |
+| | Windows | macOS |
+|---|---|---|
+| **Node.js** | 20+ | 20+ |
+| **Python** | 3.9–3.12 từ [python.org](https://www.python.org/downloads/) | 3.9–3.12 — `brew install python@3.12` |
+| **Bóc băng (ASR)** | `faster-whisper` + CUDA | `mlx_whisper` — **chỉ Apple Silicon** |
+| **Toolchain C++** | Visual Studio 2022 kèm workload *Desktop development with C++* | Xcode Command Line Tools — `xcode-select --install` |
+| **FFmpeg** trên `PATH` | `winget install Gyan.FFmpeg` | `brew install ffmpeg` |
+
+Hai cái bẫy đáng nhớ trước khi cài:
+
+- **Đừng dùng Python 3.13+.** `mediapipe` chưa có wheel cho bản đó, và `requirements.txt`
+  ghim `mediapipe` + `opencv-contrib-python` kèm marker `python_version < "3.13"`. Hậu quả
+  không phải là một lỗi cài đặt mà là sự im lặng: `pip install` vẫn **báo thành công**, chỉ
+  âm thầm bỏ qua hai gói đó, rồi Auto-Reframe chết sau với `No module named 'cv2'`. Cả
+  `npm run setup` lẫn `npm run preflight` đều kiểm và chặn trước ca này.
+- **FFmpeg cần có `zscale`.** Đường tonemap HDR dựa vào bộ lọc này, mà nó không có trong
+  mọi bản build (bản *essentials* của gyan.dev và một số bản Homebrew đều thiếu). Thiếu thì
+  chỉ clip HDR bị ảnh hưởng; `npm run setup` sẽ nói rõ bản trên máy bạn có hay không.
+
+Native addon **bắt buộc** dùng MSVC trên Windows vì nó nạp cùng tiến trình với Electron.
+C++ sidecar thì dễ tính hơn — nó là một tiến trình độc lập nói chuyện qua stdio nên biên
+dịch được bằng MSVC, MinGW-w64 hay clang (đặt `CXX` để chỉ định).
 
 ### Các bước
 
 ```bash
-git clone https://github.com/tamphamdesigner92-tb/CrabbyCut_Windows.git
-cd CrabbyCut_Windows
-
-npm install                      # postinstall tự đồng bộ vendor assets
-
-py -3.12 -m venv .venv           # môi trường Python của dự án
-.venv\Scripts\python -m pip install -r requirements.txt
-
-npm run build:native             # node-gyp addon + C++ sidecar (tự tìm vcvars64.bat)
+git clone https://github.com/tamphamdesigner92-tb/CrabbyCut.git
+cd CrabbyCut
 npm start
 ```
 
-`npm start` chạy `preflight_python` trước — nó **cảnh báo** chứ không chặn nếu môi trường
-Python còn thiếu, kèm đúng lệnh cần chạy.
+Đúng một lệnh, giống hệt nhau trên Windows và macOS. `npm start` **tự kiểm và tự cài những
+gì còn thiếu**, có sẵn thì bỏ qua và chạy luôn:
+
+| Kiểm | Thiếu thì tự làm gì | Nếu bỏ qua bước này thì hỏng ra sao |
+|---|---|---|
+| `node_modules` + binary Electron | `npm install` | `Electron failed to install correctly` |
+| Native addon, C++ sidecar | `node-gyp rebuild`, biên dịch sidecar | App vẫn mở, chỉ in một dòng `Cannot load native addon` rồi chạy đường dự phòng bằng JS — không ai đọc dòng đó |
+| `.venv` + gói Python | dựng venv bằng interpreter hợp lệ, `pip install -r requirements.txt` | Lỗi nổ rất muộn, giữa lúc bấm nút bóc băng: `Missing Python package: …` |
+| `ffmpeg` / `ffprobe` trên PATH | *chỉ báo* — không tự cài được | `backend/server.js` spawn `ffmpeg` bằng tên trần, thiếu là mọi đường xuất/preview chết bằng `ENOENT`, một lỗi không hề nhắc tới FFmpeg |
+
+Máy đã đủ thì toàn bộ phép kiểm tốn khoảng **0,15 giây** và in đúng một dòng:
+
+```
+[setup] ✓ Môi trường đã đủ — không phải cài gì.
+```
+
+Lần đầu trên máy mới thì nó nói rõ đang làm gì và mất bao lâu trước khi bắt đầu. Riêng bước
+Python nặng — `requirements.txt` kéo cả `torch` lẫn `openai-whisper`, lần đầu mất 5–20 phút.
+
+Native addon **bắt buộc** dùng MSVC trên Windows vì nó nạp cùng tiến trình với Electron.
+C++ sidecar dễ tính hơn — nó là tiến trình độc lập nói chuyện qua stdio nên biên dịch được
+bằng MSVC, MinGW-w64 hay clang (đặt `CXX` để chỉ định).
+
+### Khi muốn tự quyết thay vì để nó tự làm
+
+```bash
+npm run setup                        # chạy đúng phép kiểm đó nhưng in bảng trạng thái đầy đủ
+npm run setup -- --skip-python       # chỉ dựng native, bỏ phần tải nặng
+npm run setup -- --python=/đường/dẫn # chỉ định interpreter thay vì để nó tự dò
+
+CRAB_SKIP_SETUP=1 npm start          # bỏ hẳn bước tự cài
+CRAB_SKIP_PYTHON=1 npm start         # mở app ngay, chưa đụng tới phần AI
+npm run electron:dev                 # chạy thẳng, CHỈ cảnh báo chứ không tự cài (hành vi cũ)
+```
+
+Script tự dò interpreter chứ không in một lệnh cứng: hướng dẫn kiểu `python3.12 -m venv .venv`
+sẽ chết bằng `command not found` trên máy chỉ có 3.11, hoặc máy cài Python qua pyenv/uv. Nó
+hỏi từng ứng viên phiên bản thật, và trên Windows ưu tiên launcher `py -3.12` vì `python`
+trỏ vào bản mặc định — mà mặc định hiện nay thường là 3.13/3.14, bản mediapipe không có wheel.
+
+### `npm start` tự kiểm những gì
+
+```
+setup_dev --auto → preflight (Python) → preflight:native → prepare:vendor → fix:electron-sign → electron .
+```
+
+- **`setup_dev --auto`** là bước tự cài nói ở trên. Nó **không bao giờ chặn**: hỏng bước nào
+  thì báo bước đó rồi vẫn mở app.
+- **`preflight`** dò lại gói Python và sinh `docs/MOI_TRUONG_PYTHON.md` khi còn thiếu — ghi
+  rõ gói nào thuộc tính năng nào, được import ở dòng nào, rồi tự xoá tệp đó khi đã đủ.
+- **`preflight:native`** kiểm addon + sidecar, kể cả ca `.cpp` **mới hơn** sản phẩm (sau
+  `git pull` binary cũ vẫn nạp được, chỉ là hành vi không khớp mã nguồn đang đọc). Thêm
+  `--no-build` để chỉ kiểm.
+- **`fix:electron-sign`** ký lại ad-hoc binary Electron trên macOS. Chữ ký gốc hay hỏng sau
+  khi npm giải nén, và triệu chứng là GPU/WebGL không chạy chứ không phải một lỗi rõ ràng.
+
+### Bóc băng trên macOS
+
+Trên macOS ứng dụng **luôn** dùng `mlx_whisper`, không có lựa chọn nào khác:
+`normalizeAsrEngine()` trong `backend/server.js` bỏ qua giá trị người dùng gửi lên và trả
+thẳng `mlx_whisper` cho mọi nền tảng không phải Windows. Model cố định là
+`mlx-community/whisper-large-v3-turbo`, chạy qua `asr/mac_mlx_sidecar.py`. Windows đi đường
+khác hẳn: `faster-whisper` + CUDA, qua `asr/windows_faster_whisper_sidecar.py`.
+
+MLX chạy trên Metal của **Apple Silicon**; PyPI không có wheel x86_64 nào. Nên trên **Mac
+Intel** phần bóc băng hiện chưa có engine — các phần còn lại (dựng phim, Auto-Reframe,
+Retouch, xuất video) vẫn chạy.
 
 ### Chạy từ mã nguồn khác bản đã cài ở chỗ nào
 
