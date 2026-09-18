@@ -1,5 +1,6 @@
 #include <cstdlib>
 #include <algorithm>
+#include <clocale>
 #include <cstdint>
 #include <cstdio>
 #include <cmath>
@@ -22,6 +23,13 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+// CommandLineToArgvW — xem khối "ĐƯỜNG DẪN CÓ DẤU" ngay trước main().
+#include <shellapi.h>
+#ifdef _MSC_VER
+/* scripts/build_sidecar.js gọi `cl` trần, không truyền thư viện nào. Không có dòng này thì
+ * link hỏng với LNK2019 __imp_CommandLineToArgvW. (MinGW tự link shell32.) */
+#pragma comment(lib, "shell32.lib")
+#endif
 #else
 #include <sys/wait.h>
 #endif
@@ -876,7 +884,12 @@ struct EncoderPlan {
 };
 
 std::string ReadFileText(const std::string& path) {
-  std::ifstream in(path);
+  /* Mở qua fs::path chứ KHÔNG qua std::string: ifstream(std::string) đi xuống fopen() của
+   * CRT (chuyển mã theo locale), còn ifstream(fs::path) mở bằng API wide của Windows. Tệp
+   * timeline JSON nằm trong %LOCALAPPDATA%\CrabbyCut — đường dẫn mang tên người dùng, có
+   * dấu là hỏng. Xem khối "ĐƯỜNG DẪN CÓ DẤU" trước main(). */
+  // Ngoặc NHỌN: `ifstream in(fs::path(path))` bị C++ đọc thành KHAI BÁO HÀM (most vexing parse).
+  std::ifstream in{fs::path(path)};
   std::stringstream buffer;
   buffer << in.rdbuf();
   return buffer.str();
@@ -3128,9 +3141,63 @@ void PrintUsage() {
     << "  transcribe-whispercpp <audio_wav> <model_path> <output_json>\n";
 }
 
+#ifdef _WIN32
+/* ĐƯỜNG DẪN CÓ DẤU — VÌ SAO KHÔNG ĐƯỢC DÙNG `argv` CỦA WINDOWS.
+ *
+ * Windows dựng `argv` của main() bằng cách chuyển dòng lệnh UTF-16 sang trang mã ANSI của
+ * máy (GetACP()). Ký tự nào trang mã đó KHÔNG có thì CRT thay bằng dấu `?`. Máy Việt Nam
+ * thường chạy ACP 1252: tên người dùng "Hòa Nguyễn" đi qua argv thành "Hòa Nguy?n" — mà `?`
+ * là ký tự CẤM trong tên tệp Windows, nên thao tác đầu tiên chạm tới đường dẫn đó chết với
+ * lỗi 123 ERROR_INVALID_NAME:
+ *     create_directories: The filename, directory name, or volume label syntax is incorrect.:
+ *     "C:\Users\Hòa Nguy?n\AppData\Local\CrabbyCut\temp_uploads"
+ * Backend Node truyền đường dẫn HOÀN TOÀN ĐÚNG (spawn đi thẳng vào CreateProcessW dạng
+ * UTF-16); chỗ mất chữ nằm ở phía nhận này. Máy có tên người dùng thuần ASCII không bao giờ
+ * thấy lỗi — nên lỗi chỉ lộ ra khi cài sang máy khác.
+ *
+ * Lấy lại dòng lệnh GỐC dạng UTF-16 rồi tự chuyển sang UTF-8: không mất ký tự nào, và phần
+ * còn lại của tệp vẫn làm việc với std::string như cũ. Đây đúng là cách ffmpeg tự xử lý
+ * (fftools/cmdutils.c: prepare_app_arguments), nên đường dẫn ta đưa sang ffmpeg khớp luôn.
+ *
+ * ĐI KÈM BẮT BUỘC — setlocale(LC_CTYPE, ".UTF8") ở đầu main(): std::filesystem quy đổi
+ * std::string <-> đường dẫn thật bằng trang mã của LC_CTYPE (MSVC: __std_fs_code_page).
+ * Để nguyên trang mã ANSI thì chuỗi UTF-8 vừa dựng lại bị hiểu sai một lần nữa —
+ * "Hòa" thành "HÃ²a" — và ta chỉ đổi một lỗi khó hiểu này lấy một lỗi khó hiểu khác.
+ * KHÔNG dùng LC_ALL: nó kéo theo LC_NUMERIC của máy, và ở locale dùng dấu phẩy thập phân
+ * thì mọi tham số số ta ghi vào filter ffmpeg ("scale=1920:1080", "1.5") sẽ ra dấu phẩy. */
+std::string Utf8FromWide(const wchar_t* text) {
+  if (!text || !*text) return std::string();
+  const int size = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
+  if (size <= 1) return std::string();
+  std::string out(static_cast<size_t>(size - 1), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, text, -1, out.data(), size, nullptr, nullptr);
+  return out;
+}
+#endif
+
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+  std::setlocale(LC_CTYPE, ".UTF8");
+  /* Phải sống tới hết main(): argv trỏ thẳng vào bộ đệm của hai vector này. */
+  std::vector<std::string> utf8Args;
+  std::vector<char*> utf8Argv;
+  int wideCount = 0;
+  wchar_t** wideArgv = CommandLineToArgvW(GetCommandLineW(), &wideCount);
+  if (wideArgv) {
+    utf8Args.reserve(static_cast<size_t>(wideCount));
+    for (int i = 0; i < wideCount; i++) utf8Args.push_back(Utf8FromWide(wideArgv[i]));
+    LocalFree(wideArgv);
+    utf8Argv.reserve(utf8Args.size() + 1);
+    for (std::string& arg : utf8Args) utf8Argv.push_back(arg.data());
+    utf8Argv.push_back(nullptr);
+    argc = wideCount;
+    argv = utf8Argv.data();
+  }
+  /* wideArgv == nullptr (hết bộ nhớ) thì rơi về argv của CRT: đường dẫn có dấu vẫn hỏng
+   * như trước, nhưng đó là hỏng CŨ, không phải hỏng thêm. */
+#endif
   if (argc < 2) {
     PrintUsage();
     return 1;
