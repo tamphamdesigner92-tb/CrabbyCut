@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Tam Pham <tampham.designer92@gmail.com>
+
 import os
 import platform
 import re

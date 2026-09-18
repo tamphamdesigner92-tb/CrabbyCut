@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Tam Pham <tampham.designer92@gmail.com>
+
 /* ĐÓNG GÓI DỰ ÁN — "Collect Files and Copy to New Location" của Premiere Pro.
  *
  * VẤN ĐỀ. Tệp .crab chỉ GHI ĐƯỜNG DẪN TUYỆT ĐỐI tới video nguồn, không chứa media. Chép

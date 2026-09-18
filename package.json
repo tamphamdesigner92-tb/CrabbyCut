@@ -4,7 +4,7 @@
   "private": true,
   "description": "Electron shell for native video timeline editor",
   "license": "GPL-3.0-or-later",
-  "author": "Tam Pham",
+  "author": "Tam Pham <tampham.designer92@gmail.com>",
   "homepage": "https://github.com/tamphamdesigner92-tb/CrabbyCut_Windows",
   "repository": {
     "type": "git",
@@ -115,6 +115,7 @@
   "build": {
     "appId": "com.crabbycut.app",
     "productName": "CrabbyCut",
+    "copyright": "Copyright © 2026 Tam Pham",
     "asar": false,
     "npmRebuild": false,
     "fileAssociations": [

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Tam Pham <tampham.designer92@gmail.com>
+
 /* DANH MỤC "DỰ ÁN GẦN ĐÂY" cho màn hình Home.
  *
  * Người dùng vẫn TỰ CHỌN nơi lưu tệp .crab (không có thư mục dự án do ứng dụng quản lý),

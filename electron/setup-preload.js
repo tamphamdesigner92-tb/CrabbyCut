@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Tam Pham <tampham.designer92@gmail.com>
+
 /* Cầu nối cho cửa sổ thiết lập. Giữ đúng quy ước của electron/preload.js: contextIsolation
  * bật, renderer KHÔNG chạm tới `require` — chỉ thấy đúng những kênh liệt kê ở đây. */
 'use strict';

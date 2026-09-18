@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Tam Pham <tampham.designer92@gmail.com>
+
 /* CỬA SỔ THIẾT LẬP MÔI TRƯỜNG — chạy lúc cài đặt và lúc mở app nếu môi trường chưa đủ.
  *
  * VÌ SAO KHÔNG LÀM HẲN TRONG NSIS: bước này tải về hơn 1 GB và chạy mười tới ba mươi phút.

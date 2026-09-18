@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Tam Pham <tampham.designer92@gmail.com>
+
 // Định dạng tệp dự án .crab:
 // [0..8) magic "CRABPRJ\0" | [8..10) version uint16 LE | [10..12) reserved
 // [12..44) SHA-256 của phần gzip | [44..) gzip(JSON payload)

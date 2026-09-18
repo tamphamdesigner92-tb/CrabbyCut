@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Tam Pham <tampham.designer92@gmail.com>
+
 const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');

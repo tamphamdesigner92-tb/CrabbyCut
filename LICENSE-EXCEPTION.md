@@ -3,12 +3,14 @@
 *(Bản tiếng Việt ở cuối trang — the Vietnamese text below is a courtesy translation;
 the English text above is the operative one.)*
 
+Copyright © 2026 Tam Pham <tampham.designer92@gmail.com>
+
 CrabbyCut is licensed under the GNU General Public License, version 3 or (at your
 option) any later version. See [`LICENSE`](LICENSE).
 
 ## Grant
 
-As a special exception, the copyright holders of CrabbyCut give you permission to
+As a special exception, Tam Pham, the copyright holder of CrabbyCut, gives you permission to
 combine CrabbyCut with, link CrabbyCut against, and distribute CrabbyCut together
 with the software listed under **Covered components** below, whose licenses are not
 compatible with the GNU GPL, and to convey the resulting work.
@@ -66,7 +68,7 @@ This is ordinarily covered by the GPL's own **System Libraries** exception
 
 ## Nội dung cho phép thêm
 
-Theo điều 7 của GNU GPL phiên bản 3, chủ sở hữu bản quyền CrabbyCut cho phép bạn kết
+Theo điều 7 của GNU GPL phiên bản 3, Tam Pham — chủ sở hữu bản quyền CrabbyCut — cho phép bạn kết
 hợp, liên kết và phân phối CrabbyCut cùng với các thành phần liệt kê dưới đây — những
 thành phần có giấy phép không tương thích với GNU GPL — và phân phối tác phẩm kết hợp
 thu được.

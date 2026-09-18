@@ -262,7 +262,14 @@ fixtures. Không bài nào ném traceback vì thiếu dữ liệu.
 
 ## Giấy phép
 
-**GNU General Public License v3.0 hoặc mới hơn** — xem [`LICENSE`](LICENSE).
+Copyright © 2026 Tam Pham — <tampham.designer92@gmail.com>
+
+CrabbyCut là phần mềm tự do: bạn được phép phân phối lại và/hoặc sửa đổi nó theo các điều khoản của
+**GNU General Public License** do Free Software Foundation công bố, phiên bản 3 hoặc (tùy bạn
+chọn) bất kỳ phiên bản nào mới hơn — xem [`LICENSE`](LICENSE).
+
+Chương trình này được phát hành với hy vọng nó hữu ích, nhưng **không kèm theo bất kỳ bảo đảm
+nào**, kể cả bảo đảm ngụ ý về KHẢ NĂNG THƯƠNG MẠI hay SỰ PHÙ HỢP CHO MỘT MỤC ĐÍCH CỤ THỂ.
 
 GPLv2 **không** dùng được cho dự án này: tám gói phụ thuộc mang giấy phép Apache-2.0
 (`torch`, `mediapipe`, `opencv-contrib-python`, `huggingface-hub`, `requests`, `tokenizers`,
