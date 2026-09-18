@@ -2,6 +2,10 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('desktopEnv', {
   isElectron: true,
+  /* Kiểm tra bản mới do NGƯỜI DÙNG chủ động bấm. Lượt tự kiểm lúc khởi động nằm ở main
+   * process và im lặng khi đã mới nhất; lượt này thì luôn trả lời, vì đã hỏi thì phải được
+   * đáp. Trả về phiên bản đang chạy để giao diện hiện được. */
+  checkForUpdates: async () => ipcRenderer.invoke('check-for-updates'),
   pickVideoSources: async () => ipcRenderer.invoke('pick-video-sources'),
   pickEditingAssets: async (kind) => ipcRenderer.invoke('pick-editing-assets', kind),
   pickEditingAssetFolders: async () => ipcRenderer.invoke('pick-editing-asset-folders'),

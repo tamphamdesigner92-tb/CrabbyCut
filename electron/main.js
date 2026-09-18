@@ -9,6 +9,7 @@ const {
 } = require('./project-package');
 const { registerRecentProjectIpc } = require('./recent-projects');
 const { runSetupWindow } = require('./setup-window');
+const { initUpdater, checkForUpdates } = require('./updater');
 const RuntimePaths = require('../scripts/runtime_paths.js');
 
 /* CHẾ ĐỘ THIẾT LẬP — bộ cài .exe gọi `CrabbyCut.exe --setup-runtime` rồi CHỜ (xem
@@ -231,6 +232,20 @@ function createWindow() {
       pendingOpenPath = null;
       mainWindow.webContents.send('open-project-file', filePath);
     }
+
+    /* KIỂM TRA BẢN MỚI SAU KHI GIAO DIỆN ĐÃ LÊN, KHÔNG PHẢI TRƯỚC.
+     * Đặt ở `app.whenReady()` thì một lượt gọi mạng chậm (hoặc GitHub không với tới được)
+     * chen vào giữa đường khởi động, và người dùng ngồi nhìn màn hình trắng vì một việc
+     * hoàn toàn không cấp bách. Ở đây app đã dùng được rồi.
+     *
+     * Hoãn thêm vài giây nữa: giây đầu sau khi giao diện lên là lúc renderer đang dựng
+     * timeline và nạp tài nguyên — đừng giành băng thông và CPU với nó.
+     *
+     * `silent` = im lặng khi đã là bản mới nhất. Mở app lên mà bị một hộp thoại "bạn đang
+     * dùng bản mới nhất" chặn đường là phiền vô ích. */
+    setTimeout(() => {
+      checkForUpdates(mainWindow, BACKEND_ORIGIN, { silent: true });
+    }, 8000);
   });
 
   mainWindow.loadURL(BACKEND_ORIGIN);
@@ -477,6 +492,14 @@ ipcMain.handle('autosave-list', async (_event, { projectPath, suggestedName }) =
  * Người dùng tự chọn nơi lưu .crab nên Home không quét thư mục nào được — nó đọc danh mục
  * này. Thân handler nằm ở electron/recent-projects.js để test gọi được đúng mã chạy thật. */
 registerRecentProjectIpc(ipcMain, () => app.getPath('userData'));
+
+/* Kiểm tra bản mới do NGƯỜI DÙNG chủ động bấm (menu Cài đặt). Khác lượt tự kiểm lúc
+ * khởi động ở chỗ `silent: false` — đã chủ động hỏi thì phải được trả lời, kể cả khi câu
+ * trả lời là 'đang ở bản mới nhất'. */
+ipcMain.handle('check-for-updates', async () => {
+  await checkForUpdates(mainWindow, BACKEND_ORIGIN, { silent: false });
+  return { version: app.getVersion() };
+});
 
 ipcMain.handle('save-frame-image', async (_event, { dataBase64, suggestedName }) => {
   try {
@@ -925,6 +948,7 @@ app.whenReady().then(async () => {
     const ready = await ensureRuntimeReady();
     if (!ready) { app.quit(); return; }
 
+    initUpdater();
     await ensureBackendReady();
     createWindow();
   } catch (error) {

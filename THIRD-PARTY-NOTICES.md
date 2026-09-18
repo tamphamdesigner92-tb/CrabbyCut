@@ -8,7 +8,7 @@ giấy phép của chúng. Bản quyền của từng thành phần thuộc về
 
 > Tệp này được **sinh tự động** bởi `scripts/generate_third_party_notices.js`.
 > Đừng sửa tay — sửa script rồi chạy `npm run notices`.
-> Sinh lúc: 2026-09-18T04:31:00.551Z
+> Sinh lúc: 2026-09-18T07:24:36.336Z
 
 
 ## 1. FFmpeg
@@ -40,7 +40,7 @@ Bước thiết lập tải bản Python nhúng chính thức từ python.org, p
 **PSF License Agreement** — https://docs.python.org/3/license.html
 
 
-## 4. Gói npm được đóng gói (144)
+## 4. Gói npm được đóng gói (157)
 
 Chỉ tính phụ thuộc `production`. `devDependencies` (electron-builder, node-gyp…) không
 đi kèm bản phát hành.
@@ -49,13 +49,14 @@ Chỉ tính phụ thuộc `production`. `devDependencies` (electron-builder, nod
 
 | Giấy phép | Số gói |
 |---|---|
-| MIT | 130 |
-| ISC | 5 |
+| MIT | 140 |
+| ISC | 7 |
 | BSD-2-Clause | 4 |
 | BSD-3-Clause | 2 |
 | BSD | 1 |
 | (MIT OR GPL-3.0-or-later) | 1 |
 | (MIT AND Zlib) | 1 |
+| BlueOak-1.0.0 | 1 |
 
 ### Danh sách đầy đủ
 
@@ -109,6 +110,7 @@ Chỉ tính phụ thuộc `production`. `devDependencies` (electron-builder, nod
 | [bluebird](https://github.com/petkaantonov/bluebird) | 3.4.7 | MIT |
 | [body-parser](expressjs/body-parser) | 2.2.2 | MIT |
 | [buffer-from](LinusU/buffer-from) | 1.1.2 | MIT |
+| [builder-util-runtime](https://github.com/electron-userland/electron-builder) | 9.2.4 | MIT |
 | [busboy](http://github.com/mscdex/busboy) | 1.6.0 | MIT |
 | [bytes](visionmedia/bytes.js) | 3.1.2 | MIT |
 | [call-bind-apply-helpers](https://github.com/ljharb/call-bind-apply-helpers#readme) | 1.0.2 | MIT |
@@ -126,6 +128,7 @@ Chỉ tính phụ thuộc `production`. `devDependencies` (electron-builder, nod
 | [dunder-proto](https://github.com/es-shims/dunder-proto#readme) | 1.0.1 | MIT |
 | [earcut](git://github.com/mapbox/earcut) | 2.2.4 | ISC |
 | [ee-first](jonathanong/ee-first) | 1.1.1 | MIT |
+| [electron-updater](https://github.com/electron-userland/electron-builder) | 6.8.9 | MIT |
 | [encodeurl](pillarjs/encodeurl) | 2.0.0 | MIT |
 | [es-define-property](https://github.com/ljharb/es-define-property#readme) | 1.0.1 | MIT |
 | [es-errors](https://github.com/ljharb/es-errors#readme) | 1.3.0 | MIT |
@@ -137,10 +140,12 @@ Chỉ tính phụ thuộc `production`. `devDependencies` (electron-builder, nod
 | [finalhandler](pillarjs/finalhandler) | 2.1.1 | MIT |
 | [forwarded](jshttp/forwarded) | 0.2.0 | MIT |
 | [fresh](jshttp/fresh) | 2.0.0 | MIT |
+| [fs-extra](https://github.com/jprichardson/node-fs-extra) | 8.1.0 | MIT |
 | [function-bind](https://github.com/Raynos/function-bind) | 1.1.2 | MIT |
 | [get-intrinsic](https://github.com/ljharb/get-intrinsic#readme) | 1.3.0 | MIT |
 | [get-proto](https://github.com/ljharb/get-proto#readme) | 1.0.1 | MIT |
 | [gopd](https://github.com/ljharb/gopd#readme) | 1.2.0 | MIT |
+| [graceful-fs](https://github.com/isaacs/node-graceful-fs) | 4.2.11 | ISC |
 | [has-symbols](https://github.com/ljharb/has-symbols#readme) | 1.1.0 | MIT |
 | [hasown](https://github.com/inspect-js/hasOwn#readme) | 2.0.4 | MIT |
 | [http-errors](jshttp/http-errors) | 2.0.1 | MIT |
@@ -151,8 +156,13 @@ Chỉ tính phụ thuộc `production`. `devDependencies` (electron-builder, nod
 | [is-promise](https://github.com/then/is-promise) | 4.0.0 | MIT |
 | [isarray](https://github.com/juliangruber/isarray) | 1.0.0 | MIT |
 | [ismobilejs](https://github.com/kaimallea/isMobile) | 1.1.1 | MIT |
+| [js-yaml](nodeca/js-yaml) | 4.3.1 | MIT |
+| [jsonfile](git@github.com:jprichardson/node-jsonfile) | 4.0.0 | MIT |
 | [jszip](https://github.com/Stuk/jszip) | 3.10.1 | (MIT OR GPL-3.0-or-later) |
+| [lazy-val](https://github.com/develar/lazy-val) | 1.0.5 | MIT |
 | [lie](https://github.com/calvinmetcalf/lie) | 3.3.0 | MIT |
+| [lodash.escaperegexp](https://lodash.com/) | 4.1.2 | MIT |
+| [lodash.isequal](https://lodash.com/) | 4.5.0 | MIT |
 | [lop](https://github.com/mwilliamson/lop) | 0.4.2 | BSD-2-Clause |
 | [mammoth](https://github.com/mwilliamson/mammoth.js) | 1.12.0 | BSD-2-Clause |
 | [math-intrinsics](https://github.com/es-shims/math-intrinsics#readme) | 1.1.0 | MIT |
@@ -183,6 +193,8 @@ Chỉ tính phụ thuộc `production`. `devDependencies` (electron-builder, nod
 | [router](pillarjs/router) | 2.2.0 | MIT |
 | [safe-buffer](https://github.com/feross/safe-buffer) | 5.1.2 | MIT |
 | [safer-buffer](https://github.com/ChALkeR/safer-buffer) | 2.1.2 | MIT |
+| [sax](ssh://git@github.com/isaacs/sax-js) | 1.6.1 | BlueOak-1.0.0 |
+| [semver](https://github.com/npm/node-semver) | 6.3.1 | ISC |
 | [send](pillarjs/send) | 1.2.1 | MIT |
 | [serve-static](expressjs/serve-static) | 2.2.1 | MIT |
 | [setimmediate](YuzuJS/setImmediate) | 1.0.5 | MIT |
@@ -195,10 +207,12 @@ Chỉ tính phụ thuộc `production`. `devDependencies` (electron-builder, nod
 | [statuses](jshttp/statuses) | 2.0.2 | MIT |
 | [streamsearch](http://github.com/mscdex/streamsearch) | 1.1.0 | MIT |
 | [string_decoder](https://github.com/nodejs/string_decoder) | 1.1.1 | MIT |
+| [tiny-typed-emitter](https://github.com/binier/tiny-typed-emitter) | 2.1.0 | MIT |
 | [toidentifier](component/toidentifier) | 1.0.1 | MIT |
 | [type-is](jshttp/type-is) | 2.1.0 | MIT |
 | [typedarray](https://github.com/substack/typedarray) | 0.0.6 | MIT |
 | [underscore](https://underscorejs.org) | 1.13.8 | MIT |
+| [universalify](https://github.com/RyanZim/universalify#readme) | 0.1.2 | MIT |
 | [unpipe](stream-utils/unpipe) | 1.0.0 | MIT |
 | [url](https://github.com/defunctzombie/node-url) | 0.11.4 | MIT |
 | [util-deprecate](https://github.com/TooTallNate/util-deprecate) | 1.0.2 | MIT |
@@ -206,7 +220,7 @@ Chỉ tính phụ thuộc `production`. `devDependencies` (electron-builder, nod
 | [wrappy](https://github.com/npm/wrappy) | 1.0.2 | ISC |
 | [xmlbuilder](http://github.com/oozcitak/xmlbuilder-js) | 10.1.1 | MIT |
 
-## 5. Gói Python (72)
+## 5. Gói Python (73)
 
 CrabbyCut **không phân phối lại** các gói này. Chúng do `pip` tải từ PyPI về máy người
 dùng trong bước thiết lập theo yêu cầu (xem `scripts/setup_runtime.js`), và chỉ tải nhóm
@@ -222,7 +236,7 @@ NVIDIA**, không phải mã nguồn mở; xem [`LICENSE-EXCEPTION.md`](LICENSE-E
 | MIT | 15 |
 | BSD License | 12 |
 | BSD-3-Clause | 11 |
-| MIT License | 7 |
+| MIT License | 8 |
 | Apache-2.0 | 6 |
 | Apache Software License | 6 |
 | Mozilla Public License 2.0 (MPL 2.0) | 1 |
@@ -264,6 +278,7 @@ NVIDIA**, không phải mã nguồn mở; xem [`LICENSE-EXCEPTION.md`](LICENSE-E
 | flatbuffers | 25.12.19 | Apache Software License |
 | fonttools | 4.64.0 | MIT |
 | fsspec | 2026.7.0 | BSD-3-Clause |
+| git-filter-repo | 2.47.0 | MIT License |
 | h11 | 0.16.0 | MIT License |
 | hf-xet | 1.6.0 | Apache-2.0 |
 | httpcore | 1.0.9 | BSD-3-Clause |

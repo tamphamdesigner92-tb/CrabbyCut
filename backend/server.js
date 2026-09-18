@@ -5447,7 +5447,10 @@ function createApp() {
    * của công ty, đều trả 200 (hoặc 404, cũng nằm trong khoảng được coi là "sống") cho
    * mọi đường dẫn. `message` giữ nguyên cho các chỗ đọc cũ. */
   app.get('/api/status', (_req, res) => {
-    const sig = { app: 'crabbycut', pid: process.pid, port: PORT };
+    /* `export_in_flight` để tiến trình main biết CÓ ĐƯỢC PHÉP khởi động lại hay không.
+     * Cài bản cập nhật là thoát app; thoát giữa một lượt xuất video là mất trắng lượt đó
+     * (có thể đã chạy cả chục phút) và để lại tệp ra dở dang. Xem electron/updater.js. */
+    const sig = { app: 'crabbycut', pid: process.pid, port: PORT, export_in_flight: exportInFlight };
     try {
       res.json({ ...sig, message: fs.readFileSync(PROGRESS_FILE, 'utf8') });
     } catch (_) {
