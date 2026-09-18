@@ -20,6 +20,7 @@ trình dựng phim bình thường: lane phủ, chữ, hiệu ứng chuyển, ch
 - [Tính năng](#tính-năng)
 - [Cài đặt cho người dùng](#cài-đặt-cho-người-dùng)
 - [Vì sao một số thư mục trong repo gần như trống](#vì-sao-một-số-thư-mục-trong-repo-gần-như-trống)
+- [Thêm tài nguyên vào thư viện](#thêm-tài-nguyên-vào-thư-viện)
 - [Chạy từ mã nguồn](#chạy-từ-mã-nguồn)
 - [Đóng gói bộ cài](#đóng-gói-bộ-cài)
 - [Kiến trúc](#kiến-trúc)
@@ -48,7 +49,7 @@ trình dựng phim bình thường: lane phủ, chữ, hiệu ứng chuyển, ch
 ## Cài đặt cho người dùng
 
 Tải `CrabbyCut Setup <phiên bản>.exe` ở mục
-[Releases](https://github.com/tamphamdesigner92-tb/CrabbyCut_Windows/releases) rồi chạy.
+[Releases](https://github.com/tamphamdesigner92-tb/CrabbyCut/releases) rồi chạy.
 
 Bộ cài sẽ:
 
@@ -110,6 +111,116 @@ dựng bộ ca đo.
 
 Ngoại lệ: `library/luts/` **có** trong repo — 22 tệp `.cube` đó do chính
 `scripts/generate_preset_luts.js` của dự án sinh ra.
+
+---
+
+## Thêm tài nguyên vào thư viện
+
+Kho tài nguyên (nhạc nền, hiệu ứng âm thanh, video chèn, icon/hình minh hoạ) **không đi kèm
+ứng dụng** — lý do ở [mục trên](#vì-sao-một-số-thư-mục-trong-repo-gần-như-trống). Bạn tự
+chép tệp của mình vào. Ứng dụng không có nút "nhập tài nguyên": cách duy nhất là chép thẳng
+vào thư mục.
+
+### Chép vào đâu
+
+| Bạn đang dùng | Thư mục kho |
+|---|---|
+| **Bản cài `.exe` trên Windows** | `%LOCALAPPDATA%\CrabbyCut\library` |
+| Chạy từ mã nguồn (Windows/macOS) | `library` ngay trong thư mục dự án |
+| Bản cài trên macOS | `~/Library/Application Support/CrabbyCut/library` |
+
+Dán thẳng dòng này vào thanh địa chỉ của File Explorer để mở đúng chỗ:
+
+```
+%LOCALAPPDATA%\CrabbyCut\library
+```
+
+> ⚠ **Đừng chép vào thư mục cài đặt** (`%LOCALAPPDATA%\Programs\CrabbyCut`). Trình gỡ cài
+> do `electron-builder` sinh ra, khi chạy ở nhánh **tự cập nhật**, xoá `$INSTDIR` bằng
+> `RMDir /r` **không chừa ngoại lệ nào** — tài nguyên bạn để trong đó sẽ mất sạch ở lần cập
+> nhật đầu tiên, im lặng. Đây chính là lý do kho nằm ở `%LOCALAPPDATA%\CrabbyCut`.
+
+Thư mục kho có bốn ngăn, ứng dụng **tự tạo lại nếu thiếu**:
+
+```
+library\
+├─ Video\      video chèn
+├─ Elements\   icon, hình minh hoạ, hình khối
+├─ Music\      nhạc nền
+├─ SFXs\       hiệu ứng âm thanh
+└─ luts\       LUT màu .cube (bộ dựng sẵn + bản bạn nhập)
+```
+
+Đuôi tệp được nhận (`backend/server.js`):
+
+| Loại | Đuôi |
+|---|---|
+| Video | `.mp4` `.mov` `.m4v` `.webm` |
+| Âm thanh | `.mp3` `.wav` `.m4a` `.aac` |
+| Hình ảnh | `.png` `.jpg` `.jpeg` `.webp` `.svg` |
+| LUT màu | `.cube` |
+
+Tệp đuôi khác bị **bỏ qua im lặng** — không có thông báo lỗi nào. Thấy tệp không hiện ra
+thì kiểm đuôi trước tiên.
+
+> **Đặt tệp ngay trong ngăn, đừng lồng thư mục con.** Hai đường đọc kho không giống nhau:
+> panel Thư viện liệt kê **chỉ cấp đầu** của mỗi ngăn (`readdir`, không đệ quy), còn Magic
+> Fill quét **đệ quy** cả kho. Nên `library\Video\Khach A\[Vid] ....mp4` vẫn được Magic
+> Fill chọn nhưng **không bao giờ hiện trong panel** để bạn kéo tay — một kiểu "mất tích"
+> rất khó đoán. Muốn phân loại thì gói thông tin vào **tên tệp**, đừng gói vào thư mục.
+
+### Đặt tên thế nào để Magic Fill tìm được
+
+Chép đúng thư mục là đủ để tài nguyên **hiện trong panel Thư viện** và kéo tay vào timeline.
+Nhưng muốn **Magic Fill** tự chọn được thì tên tệp phải có **tiền tố trong ngoặc vuông**:
+
+```
+[Vid] Be khoe, be tuoi cuoi - 1.mp4
+[Icon] Lactoferrin.png
+[Illus] Giam phat trien chieu cao - 1.png
+[SFXs] Pop-UI-Sound.MP3
+[Mus] Coconut-Groove.MP3
+```
+
+| Tiền tố | Magic Fill làm gì |
+|---|---|
+| `[Vid]` | Video phủ kín khung, đặt ở lane *Magic Fill Video* |
+| `[Icon]` / `[Illus]` | Giữ nguyên cỡ gốc, đặt ở nửa khung đối diện mặt người |
+| `[SFXs]` / `[Mus]` | Dành cho Auto SFX, không dùng cho Magic Fill hình |
+
+Ba điều dễ sai:
+
+- **Thư mục không ảnh hưởng luật khớp.** Magic Fill quét đệ quy cả `library/` (tối đa 6 cấp,
+  bỏ `luts/` và mọi thứ bắt đầu bằng dấu chấm). Xếp thư mục con thế nào cũng được — nhưng
+  **tiền tố thì bắt buộc**.
+- **Tiền tố viết lạ coi như không có**: `(Icon)`, `Icon -`, `[icons]`, `[Icon 2]` đều **không**
+  nhận. Phải là ngoặc vuông ở đầu tên, bên trong đúng một trong năm chữ trên. Hoa/thường,
+  dấu tiếng Việt, khoảng trắng thừa thì không sao — `[ICON ]` vẫn nhận.
+- **Nhiều bản của cùng một nội dung phải đánh hậu tố `- số`**: `[Vid] Be om, be gay - 1.mp4`
+  và `- 2.mp4` được coi là hai bản của cùng một nội dung và luân phiên ngẫu nhiên. Viết
+  `[Vid] Be om be gay 2.mp4` thì số `2` bị tính thành một từ khoá rác.
+
+Luật khớp đầy đủ — bao nhiêu chữ phải trùng, chữ được chuẩn hoá ra sao — nằm ở
+[`docs/QUY_UOC_DAT_TEN_TAI_NGUYEN.md`](docs/QUY_UOC_DAT_TEN_TAI_NGUYEN.md).
+
+### Chép xong rồi mà chưa thấy
+
+Panel đọc lại thư mục ở **mỗi lần tải danh sách**, không cache, nên thường chỉ cần mở lại
+panel là thấy. Chưa thấy thì kiểm theo thứ tự:
+
+1. Đuôi tệp có trong bảng trên không?
+2. Tệp có nằm **ngay trong** `Video` / `Elements` / `Music` / `SFXs` không, hay đang lọt vào
+   một thư mục con?
+3. Tên tệp có bắt đầu bằng dấu chấm không (bị bỏ qua)?
+4. Đúng thư mục kho chưa — bản cài `.exe` đọc `%LOCALAPPDATA%\CrabbyCut\library`, **không**
+   phải thư mục `library` trong mã nguồn.
+
+### Về bản quyền
+
+Chỉ chép vào repo công khai thứ **bạn tự tạo** hoặc thứ có giấy phép cho phép phân phối lại
+(CC0/Public Domain). Tài nguyên trong máy bạn thì tuỳ bạn — nhưng đừng commit nhạc/video
+mua từ kho stock lên repo: gần như mọi giấy phép stock cho phép *dùng* trong sản phẩm cuối
+nhưng **cấm phân phối lại tệp gốc**. Xem [`library/README.md`](library/README.md).
 
 ---
 
