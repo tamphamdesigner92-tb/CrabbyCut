@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>Kiểm tay — thumbnail hiệu ứng động</title>
+<!--
+  TRANG KIỂM CHẠY TAY cho lưới chọn hiệu ứng động (Inspector > Hiệu ứng động).
+
+  Vì sao cần: ô minh hoạ được vẽ bằng TextAnimations.drawThumb() — cùng engine với
+  preview và export. Muốn chỉnh dáng ô (kích thước tile, biên độ trượt, mốc khung
+  tĩnh) thì phải nhìn CẢ THƯ VIỆN hiệu ứng cạnh nhau; mở app thật rồi bấm từng ô
+  vừa chậm vừa không so sánh được.
+
+  Chạy: bật backend (node backend/server.js) rồi mở
+        http://localhost:17219/tests/manual/anim_thumb_preview.html
+
+  Cần thấy gì:
+   - Mỗi ô đứng yên phải KHÁC NHAU rõ (trượt thì lệch, xoay thì nghiêng, thu phóng
+     thì to/nhỏ, đánh máy thì hụt chữ) — nếu cả lưới nhìn giống nhau thì mốc khung
+     tĩnh (THUMB_STATIC_VIS) đang lấy quá sát trạng thái nghỉ.
+   - Rê chuột vào ô: chạy lặp; rời chuột: quay lại đúng khung tĩnh.
+   - Hai dải "chuỗi khung" ở cuối: kiểm chuyển động chạy đủ biên độ trong khung ô.
+-->
+<style>
+  body { background:#141517; color:#e6e8ec; font: 13px system-ui, -apple-system, sans-serif; padding:20px; }
+  h2 { font-size:13px; color:#9aa0a6; text-transform:uppercase; letter-spacing:.5px; margin:22px 0 8px; }
+  .anim-fx-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(74px,1fr)); gap:8px; max-width:640px; }
+  .anim-fx-card { padding:0; margin:0; background:transparent; border:none; cursor:pointer; text-align:center; display:block; color:inherit; }
+  .anim-fx-thumb { display:block; border-radius:6px; overflow:hidden; border:1px solid #2b2d31; background:#0c0d10; }
+  .anim-fx-thumb canvas { display:block; width:100%; height:auto; }
+  .anim-fx-card:hover .anim-fx-thumb { border-color:rgba(255,255,255,.4); }
+  .anim-fx-card.is-active .anim-fx-thumb { border-color:#0a84ff; box-shadow:0 0 0 2px #0a84ff; }
+  .anim-fx-name { display:block; margin-top:4px; font-size:10px; color:#9aa0a6; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .strip { display:flex; gap:4px; flex-wrap:wrap; }
+  .strip canvas { width:74px; border:1px solid #2b2d31; border-radius:6px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="/static/js/text-animations.js"></script>
+<script>
+const TA = window.TextAnimations;
+const root = document.getElementById('root');
+
+// Lặp hover giống hệt initAnimThumbs() của editing-runtime.js — sửa bên đó thì sửa cả đây.
+function grid(title, options, side, glyph) {
+  const h = document.createElement('h2');
+  h.textContent = title;
+  root.appendChild(h);
+  const g = document.createElement('div');
+  g.className = 'anim-fx-grid';
+  options.forEach((o, i) => {
+    const b = document.createElement('button');
+    b.className = 'anim-fx-card' + (i === 2 ? ' is-active' : '');
+    b.innerHTML = `<span class="anim-fx-thumb"><canvas width="128" height="72"></canvas></span>`
+      + `<span class="anim-fx-name">${o.label}</span>`;
+    g.appendChild(b);
+    const cv = b.querySelector('canvas');
+    const spec = { side, type: o.value, easing: o.easing || 'ease-out' };
+    const opts = { glyph };
+    TA.drawThumb(cv, spec, undefined, opts);
+    const cycleMs = (side === 'combo' ? 1550 : 1000) + 260;
+    let raf = 0;
+    let t0 = 0;
+    const loop = (ts) => {
+      if (!t0) t0 = ts;
+      const p = Math.min(1, ((ts - t0) % cycleMs) / (cycleMs - 260));
+      TA.drawThumb(cv, spec, p, opts);
+      raf = requestAnimationFrame(loop);
+    };
+    b.addEventListener('mouseenter', () => { t0 = 0; cancelAnimationFrame(raf); raf = requestAnimationFrame(loop); });
+    b.addEventListener('mouseleave', () => { cancelAnimationFrame(raf); TA.drawThumb(cv, spec, undefined, opts); });
+  });
+  root.appendChild(g);
+}
+
+function strip(title, spec, glyph) {
+  const h = document.createElement('h2');
+  h.textContent = title;
+  root.appendChild(h);
+  const box = document.createElement('div');
+  box.className = 'strip';
+  [0, 0.12, 0.24, 0.36, 0.48, 0.6, 0.8, 1].forEach((p) => {
+    const c = document.createElement('canvas');
+    c.width = 128;
+    c.height = 72;
+    TA.drawThumb(c, spec, p, { glyph });
+    box.appendChild(c);
+  });
+  root.appendChild(box);
+}
+
+grid('Vào (in) — block hình', TA.EFFECT_OPTIONS, 'in', 'media');
+grid('Vào (in) — block chữ', TA.EFFECT_OPTIONS, 'in', 'text');
+grid('Ra (out) — block hình', TA.EFFECT_OPTIONS, 'out', 'media');
+grid('Kết hợp (vào + ra)', [{ value: '', label: 'Không' }].concat(TA.COMBO_OPTIONS), 'combo', 'media');
+strip('Chuỗi khung: slide_up (in), p = 0 → 1', { side: 'in', type: 'slide_up', easing: 'ease-out' }, 'media');
+strip('Chuỗi khung: spin (in), p = 0 → 1', { side: 'in', type: 'spin', easing: 'back' }, 'text');
+</script>
+</body>
+</html>

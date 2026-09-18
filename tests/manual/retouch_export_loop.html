@@ -1,0 +1,261 @@
+<!doctype html><meta charset="utf-8"><title>Retouch export — chạy thử vòng bake</title>
+<!--
+  CHẠY THỬ VÒNG BAKE CỦA KHÂU XUẤT RETOUCH — BẰNG TAY, TRÊN DỮ LIỆU THẬT.
+
+  VÌ SAO CẦN: phần dựng payload đã có test Node (tests/scripts/retouch_export_pipeline.js),
+  nhưng cái đó không chạm được vào chỗ dễ hỏng nhất — seek nguồn thật, gọi API landmark,
+  chạy shader, cắt miếng vá, nén JPEG. Trang này chạy đúng chuỗi đó rồi HIỆN ẢNH RA để
+  nhìn (đối chiếu công thức không thay được việc nhìn ảnh một lần — xem bài học "ảnh lộn
+  ngược" trong docs/RETOUCH_HANDOFF.md).
+
+  CÁCH CHẠY:
+    npm run backend:dev
+    mở http://localhost:17219/tests/manual/retouch_export_loop.html
+  Cần temp_uploads/temp_input.mp4 (nguồn của dự án đang mở).
+-->
+<body style="font:12px/1.6 ui-monospace,monospace;background:#111;color:#ddd;padding:16px;margin:0">
+<h3 style="font:600 14px/1.4 system-ui;margin:0 0 10px">Vòng bake khâu xuất — chạy thử</h3>
+<pre id="out">đang chạy…</pre>
+<div id="shots" style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px"></div>
+<script src="/static/js/retouch.js"></script>
+<script>
+const lines = [];
+const P = (s = '') => { lines.push(s); document.getElementById('out').textContent = lines.join('\n'); };
+const show = (canvas, label) => {
+    const box = document.createElement('div');
+    box.style.cssText = 'display:flex;flex-direction:column;gap:4px;align-items:center';
+    const img = new Image();
+    img.src = canvas.toDataURL('image/png');
+    img.style.cssText = 'max-height:340px;border:1px solid #333;background:#222';
+    const cap = document.createElement('div');
+    cap.textContent = `${label} — ${canvas.width}×${canvas.height}`;
+    cap.style.cssText = 'font:11px ui-monospace,monospace;color:#9aa';
+    box.append(img, cap);
+    document.getElementById('shots').appendChild(box);
+};
+
+const CFG = {
+    enabled: true, target: 'single',
+    params: { smooth: 75, clearBlemishes: 60, whitening: 45, dewrinkle: 50,
+              brightEye: 40, darkCircles: 45, facelift: 60, plump: 40 },
+    skinTone: '', skinToneAmount: 0,
+};
+const CLIP_START = 2.0, CLIP_END = 4.0, FPS = 30;
+
+(async () => {
+  try {
+    if (!window.Retouch) throw new Error('không nạp được retouch.js');
+
+    // ---- 1. Landmark thật qua CHÍNH đường mà app dùng ----
+    P('gọi /api/retouch/track …');
+    const t0 = performance.now();
+    const resp = await fetch('/api/retouch/track', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            timeline: [{ index: 0, start: CLIP_START, end: CLIP_END }],
+            options: { fps: FPS, detect_width: 384, max_faces: 4, smooth_alpha: 0.45 },
+        }),
+    });
+    if (!resp.ok) throw new Error(`/api/retouch/track HTTP ${resp.status}`);
+    const data = await resp.json();
+    const clipData = (data.clips || [])[0];
+    if (!clipData) throw new Error('API không trả clip nào');
+    const store = { fps: Number(clipData.fps) || FPS, start: Number(clipData.start) || CLIP_START,
+                    frames: clipData.frames || [] };
+    const withFace = store.frames.filter(Boolean).length;
+    P(`  ${store.frames.length} khung, ${withFace} khung có mặt, fps=${store.fps}`
+      + `  (${((performance.now() - t0) / 1000).toFixed(2)}s)`);
+    if (!withFace) throw new Error('không khung nào có mặt — đổi CLIP_START/CLIP_END rồi chạy lại');
+
+    // ---- 2. Nguồn ----
+    const vid = document.createElement('video');
+    vid.muted = true; vid.playsInline = true; vid.preload = 'auto';
+    vid.src = '/temp_uploads/temp_input.mp4';
+    await new Promise((res, rej) => {
+        vid.addEventListener('loadeddata', res, { once: true });
+        vid.addEventListener('error', () => rej(new Error('không nạp được temp_input.mp4')), { once: true });
+    });
+    const texW = vid.videoWidth, texH = vid.videoHeight, aspect = texW / texH;
+    P(`nguồn ${texW}×${texH}`);
+
+    const facesAt = (t) => {
+        const i = Math.round((t - store.start) * store.fps);
+        return (i >= 0 && i < store.frames.length) ? store.frames[i] : null;
+    };
+
+    // ---- 3. Hộp vá = HỢP qua mọi khung (đúng như bakeRetouchSequence lượt 1) ----
+    const r = Retouch.normalize(CFG);
+    const frameCount = Math.round((CLIP_END - CLIP_START) * FPS);
+    let x0 = 1, y0 = 1, x1 = 0, y1 = 0, seen = 0;
+    for (let k = 0; k < frameCount; k++) {
+        const ff = facesAt(CLIP_START + k / FPS);
+        if (!ff) continue;
+        const faces = Retouch.selectFaces(ff, r.target);
+        if (!faces.length) continue;
+        const b = Retouch.touchedBounds(faces, r.params, aspect);
+        if (!b) continue;
+        seen++;
+        x0 = Math.min(x0, b.x0); y0 = Math.min(y0, b.y0);
+        x1 = Math.max(x1, b.x1); y1 = Math.max(y1, b.y1);
+    }
+    const rx = Math.max(0, Math.floor(x0 * texW)), ry = Math.max(0, Math.floor(y0 * texH));
+    const rw = Math.min(texW - rx, Math.ceil(x1 * texW) - rx + 2) & ~1;
+    const rh = Math.min(texH - ry, Math.ceil(y1 * texH) - ry + 2) & ~1;
+    P(`vùng vá (hợp ${seen} khung): ${rw}×${rh} px = `
+      + `${(100 * rw * rh / (texW * texH)).toFixed(1)}% khung`);
+
+    // ---- 4. Vòng bake: seek -> retouch -> cắt -> JPEG ----
+    const renderer = new Retouch.RetouchRenderer(document.createElement('canvas'));
+    if (!renderer.init()) throw new Error('không dựng được shader');
+    const src = document.createElement('canvas'); src.width = texW; src.height = texH;
+    const sctx = src.getContext('2d');
+    const scratch = document.createElement('canvas');
+    const patch = document.createElement('canvas'); patch.width = rw; patch.height = rh;
+    const pctx = patch.getContext('2d');
+    let localBuf = null;
+    const T = { seek: [], retouch: [], crop: [], jpeg: [] };
+    let bytes = 0, baked = 0, firstPatch = null, firstPlain = null;
+    let blankFrames = 0, staleFrames = 0, prevFingerprint = null;
+
+    const N = Math.min(frameCount, 24);   // đủ để đo và nhìn, không phải bake cả clip
+    for (let k = 0; k < N; k++) {
+        const srcT = CLIP_START + k / FPS;
+        let a = performance.now();
+        await new Promise((res) => {
+            // Chốt NGAY ở 'seeked' — không rVFC, không hẹn giờ. Lý do đầy đủ ở
+            // eachSourceFrame trong editing-runtime.js: rVFC không bắn cho video đang
+            // dừng, còn setTimeout thì bị bóp còn 1 lần/giây khi cửa sổ ở nền.
+            let settled = false;
+            const finish = () => { if (!settled) { settled = true; res(); } };
+            vid.addEventListener('seeked', finish, { once: true });
+            setTimeout(finish, 4000);
+            vid.currentTime = srcT;
+        });
+        sctx.drawImage(vid, 0, 0);
+        let b = performance.now(); T.seek.push(b - a);
+        // Chốt ở 'seeked' mà không chờ thêm -> phải CHỨNG MINH là bắt được khung MỚI,
+        // không phải khung cũ hay khung trống. Lấy vân tay một dải pixel giữa khung.
+        {
+            const strip = sctx.getImageData(texW >> 2, texH >> 1, texW >> 1, 1).data;
+            let sum = 0;
+            for (let i = 0; i < strip.length; i += 4) sum += strip[i] * 3 + strip[i + 1] * 5 + strip[i + 2];
+            if (sum === 0) blankFrames++;
+            if (prevFingerprint !== null && sum === prevFingerprint) staleFrames++;
+            prevFingerprint = sum;
+        }
+
+        // retouch (lặp đúng chuỗi của EditingRuntime.retouchedDrawable)
+        const ff = facesAt(srcT);
+        const faces = ff ? Retouch.selectFaces(ff, r.target) : [];
+        let outCanvas = src;
+        if (faces.length) {
+            renderer.setGrid(Retouch.FREQ_GRID);
+            const begun = renderer.beginFace(faces, aspect, CFG);
+            if (begun && !begun.cached) {
+                const G = renderer.grid;
+                if (scratch.width !== G) { scratch.width = G; scratch.height = G; }
+                const c2 = scratch.getContext('2d');
+                const B = begun.bounds;
+                c2.drawImage(src, B.x0 * texW, B.y0 * texH,
+                    Math.max(1, B.width * texW), Math.max(1, B.height * texH), 0, 0, G, G);
+                const img = c2.getImageData(0, 0, G, G);
+                if (!localBuf || localBuf.length !== G * G * 3) localBuf = new Float32Array(G * G * 3);
+                for (let i = 0; i < G * G; i++) {
+                    localBuf[i * 3] = img.data[i * 4] / 255;
+                    localBuf[i * 3 + 1] = img.data[i * 4 + 1] / 255;
+                    localBuf[i * 3 + 2] = img.data[i * 4 + 2] / 255;
+                }
+                renderer.finishFace(faces, localBuf);
+            }
+            outCanvas = renderer.draw(src, texW, texH, faces, CFG, aspect) || src;
+        }
+        a = performance.now(); T.retouch.push(a - b);
+
+        pctx.drawImage(outCanvas, rx, ry, rw, rh, 0, 0, rw, rh);
+        b = performance.now(); T.crop.push(b - a);
+
+        const blob = await new Promise((res) => patch.toBlob(res, 'image/jpeg', 0.95));
+        T.jpeg.push(performance.now() - b);
+        bytes += blob ? blob.size : 0;
+        baked++;
+
+        if (k === 8) {
+            firstPatch = document.createElement('canvas');
+            firstPatch.width = rw; firstPatch.height = rh;
+            firstPatch.getContext('2d').drawImage(patch, 0, 0);
+            firstPlain = document.createElement('canvas');
+            firstPlain.width = rw; firstPlain.height = rh;
+            firstPlain.getContext('2d').drawImage(src, rx, ry, rw, rh, 0, 0, rw, rh);
+        }
+    }
+    renderer.destroy();
+
+    const med = (a) => { const s = a.slice().sort((p, q) => p - q); return s[s.length >> 1]; };
+    const total = med(T.seek) + med(T.retouch) + med(T.crop) + med(T.jpeg);
+    P('');
+    P(`bake ${baked} khung — trung vị mỗi khung:`);
+    P(`  seek + giải mã   : ${med(T.seek).toFixed(1)} ms`);
+    P(`  retouch (shader) : ${med(T.retouch).toFixed(1)} ms`);
+    P(`  cắt miếng vá     : ${med(T.crop).toFixed(1)} ms`);
+    P(`  nén JPEG95       : ${med(T.jpeg).toFixed(1)} ms`);
+    P(`  TỔNG             : ${total.toFixed(1)} ms  -> 60s@30fps mất ${(total * 1800 / 1000).toFixed(0)} s`);
+    P(`  cỡ trung bình    : ${(bytes / baked / 1024).toFixed(0)} KB/khung`
+      + `  -> 60s@30fps = ${(bytes / baked * 1800 / 1048576).toFixed(0)} MB`);
+    P('');
+    P(`khung TRỐNG: ${blankFrames}  ·  khung LẶP LẠI khung trước: ${staleFrames}`
+      + `   => ${(blankFrames === 0 && staleFrames === 0) ? 'ĐẠT — chốt ở seeked là đủ' : 'HỎNG — bắt phải khung cũ/trống, phải chờ thêm'}`);
+    P('');
+    P('Nhìn hai ảnh dưới: bên phải phải MỊN DA / SÁNG hơn bên trái, KHÔNG lộn ngược,');
+    P('KHÔNG lệch chỗ. Lộn ngược hay lệch chỗ là hỏng ở khâu ghép, không phải ở công thức.');
+    if (firstPlain) show(firstPlain, 'gốc');
+    if (firstPatch) show(firstPatch, 'miếng vá đã retouch');
+
+    /* ---- Retouch có RỈ RA HẬU CẢNH không? ----
+     * Nhìn bằng mắt thì miếng vá "sáng hơn" cả ở phần hậu cảnh, nhưng đó có thể chỉ là
+     * BIẾN DẠNG hình học đẩy hậu cảnh đi (bán kính ảnh hưởng vươn quá viền mặt — đúng
+     * thiết kế) chứ không phải màu rỉ ra. Tách bạch bằng cách chạy lại với biến dạng = 0
+     * rồi đo đúng dải viền ngoài của miếng vá: chỗ đó phải BẤT BIẾN tuyệt đối. */
+    {
+        const noWarp = { ...CFG, params: { ...CFG.params, facelift: 0, plump: 0 } };
+        const rn = new Retouch.RetouchRenderer(document.createElement('canvas'));
+        rn.init(); rn.setGrid(Retouch.FREQ_GRID);
+        vid.currentTime = CLIP_START + 8 / FPS;
+        await new Promise((res) => { vid.addEventListener('seeked', res, { once: true }); setTimeout(res, 4000); });
+        sctx.drawImage(vid, 0, 0);
+        const faces = Retouch.selectFaces(facesAt(CLIP_START + 8 / FPS) || [], 'single');
+        const begun = rn.beginFace(faces, aspect, noWarp);
+        const G = rn.grid;
+        if (scratch.width !== G) { scratch.width = G; scratch.height = G; }
+        const c2 = scratch.getContext('2d');
+        const B = begun.bounds;
+        c2.drawImage(src, B.x0 * texW, B.y0 * texH,
+            Math.max(1, B.width * texW), Math.max(1, B.height * texH), 0, 0, G, G);
+        const im = c2.getImageData(0, 0, G, G);
+        const lb = new Float32Array(G * G * 3);
+        for (let i = 0; i < G * G; i++) {
+            lb[i * 3] = im.data[i * 4] / 255; lb[i * 3 + 1] = im.data[i * 4 + 1] / 255; lb[i * 3 + 2] = im.data[i * 4 + 2] / 255;
+        }
+        rn.finishFace(faces, lb);
+        const out = rn.draw(src, texW, texH, faces, noWarp, aspect);
+        // Đọc cùng một dải ở CẢ HAI ảnh. Dải chọn ngay dưới mép hộp mặt nạ, nơi chắc chắn
+        // là hậu cảnh nhưng vẫn nằm trong miếng vá.
+        const bandY = Math.min(texH - 2, Math.floor(B.y1 * texH) + 4);
+        const bandX = Math.max(0, Math.floor(B.x0 * texW));
+        const bandW = Math.max(2, Math.floor((B.x1 - B.x0) * texW));
+        const probe = document.createElement('canvas'); probe.width = bandW; probe.height = 2;
+        const prc = probe.getContext('2d');
+        prc.drawImage(src, bandX, bandY, bandW, 2, 0, 0, bandW, 2);
+        const before = prc.getImageData(0, 0, bandW, 2).data.slice();
+        prc.clearRect(0, 0, bandW, 2);
+        prc.drawImage(out, bandX, bandY, bandW, 2, 0, 0, bandW, 2);
+        const after = prc.getImageData(0, 0, bandW, 2).data;
+        let worst = 0;
+        for (let i = 0; i < before.length; i++) if (i % 4 !== 3) worst = Math.max(worst, Math.abs(before[i] - after[i]));
+        rn.destroy();
+        P('');
+        P(`rỉ ra hậu cảnh (biến dạng tắt, dải ${bandW}px ngay dưới hộp mặt): lệch lớn nhất ${worst}/255`
+          + `   => ${worst <= 1 ? 'ĐẠT — ngoài mặt nạ bất biến' : 'HỎNG — màu đang rỉ ra ngoài mặt nạ'}`);
+    }
+  } catch (e) { P(`LỖI: ${e.message}`); console.error(e); }
+})();
+</script>

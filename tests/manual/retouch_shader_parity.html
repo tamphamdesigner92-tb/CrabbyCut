@@ -1,0 +1,235 @@
+<!doctype html><meta charset="utf-8"><title>Retouch shader parity</title>
+<!--
+  ĐỐI CHIẾU GLSL <-> JS của engine Retouch — CHẠY BẰNG TAY TRONG TRÌNH DUYỆT.
+
+  VÌ SAO KHÔNG NẰM TRONG `npm test`: cần WebGL thật, Node không có. Dự án đã có tiền lệ
+  cho kiểu kiểm này ("Probe Electron" của color-adjust): chạy tay trên GPU thật rồi GHI
+  SỐ ĐO vào docs/APP_INTERNALS.md.
+
+  CÁCH CHẠY:
+    npm run backend:dev
+    mở http://localhost:17219/tests/manual/retouch_shader_parity.html
+  (backend phục vụ /tests qua express.static — nếu chưa có thì copy file này vào
+   temp_uploads/ rồi mở qua /temp_uploads/.)
+
+  ĐIỀU ĐANG ĐƯỢC BẢO VỆ: static/js/retouch.js có HAI bản cài đặt của cùng một phép toán
+  (hàm JS thuần + RETOUCH_FRAGMENT_SRC). Sửa một bên mà quên bên kia là preview lệch bản
+  xuất. Trang này cho cùng một ảnh chạy qua cả hai đường rồi đo chênh lệch từng pixel.
+  Mọi texture để NEAREST để tách bạch phép TOÁN khỏi phép nội suy của GPU.
+
+  NGƯỠNG: lệch lớn nhất phải <= 2/255. Đo lần gần nhất: 0.97/255 (trung bình 0.25).
+-->
+<body style="font:13px monospace;background:#111;color:#ddd;padding:16px">
+<pre id="out">đang chạy…</pre>
+<script src="/static/js/retouch.js"></script>
+<script>
+const log=[];const P=(s)=>{log.push(s);document.getElementById('out').textContent=log.join('\n');};
+(async()=>{
+try{
+const FACE=(await (await fetch('/tests/fixtures/face_landmarks.json')).json()).face;
+const W=192,H=340,A=W/H;
+// Ảnh thử: sinh từ hàm trơn + nhiễu -> có cả tần số thấp lẫn cao
+const src=new Float32Array(W*H*3);
+for(let y=0;y<H;y++)for(let x=0;x<W;x++){const i=(y*W+x)*3;
+  const u=x/W,v=y/H;
+  src[i]  =Math.min(1,Math.max(0,0.45+0.3*Math.sin(u*9)+0.10*Math.sin(x*2.3)*Math.cos(y*1.7)));
+  src[i+1]=Math.min(1,Math.max(0,0.40+0.25*Math.cos(v*7)+0.09*Math.sin(x*3.1)));
+  src[i+2]=Math.min(1,Math.max(0,0.35+0.20*Math.sin((u+v)*6)+0.08*Math.cos(y*2.9)));}
+
+const raster=Retouch.rasterizeMasks([FACE],{aspect:A});
+const B=raster.bounds, G=Retouch.FREQ_GRID;
+const rad=Retouch.freqRadiiOnGrid(FACE,B,G);
+// hai tầng mờ tính TRONG LƯỚI CỤC BỘ (đúng kiến trúc đã chốt)
+const local=new Float32Array(G*G*3);
+for(let j=0;j<G;j++)for(let i2=0;i2<G;i2++){
+  const u=B.x0+(i2+0.5)/G*B.width, v=B.y0+(j+0.5)/G*B.height;
+  const sx=Math.min(W-1,Math.max(0,Math.floor(u*W))), sy=Math.min(H-1,Math.max(0,Math.floor(v*H)));
+  for(let c=0;c<3;c++) local[(j*G+i2)*3+c]=src[(sy*W+sx)*3+c];}
+const lf=Retouch.blurRgbBoxCascade(local,G,G,rad.fine);
+const lc=Retouch.blurRgbBoxCascade(local,G,G,rad.coarse);
+
+const CFG={enabled:true,params:{smooth:60,clearBlemishes:70,clear:20,dewrinkle:50,
+  smileLines:40,even:35,sparkly:30,whitening:45,darkCircles:55,brightEye:40,whiteTeeth:50},
+  skinTone:'#c8926b',skinToneAmount:40};
+const ctrl=Retouch.warpControlPoints(FACE,{facelift:80,plump:60},A);
+const U=Retouch.shaderUniforms(CFG,ctrl,raster,A);
+
+// ---------- đường GPU ----------
+const cv=document.createElement('canvas');cv.width=W;cv.height=H;
+const gl=cv.getContext('webgl',{preserveDrawingBuffer:true,antialias:false});
+if(!gl) throw new Error('không có WebGL');
+const sh=(t,s)=>{const o=gl.createShader(t);gl.shaderSource(o,s);gl.compileShader(o);
+  if(!gl.getShaderParameter(o,gl.COMPILE_STATUS)) throw new Error('shader: '+gl.getShaderInfoLog(o));return o;};
+const prog=gl.createProgram();
+gl.attachShader(prog,sh(gl.VERTEX_SHADER,Retouch.RETOUCH_VERTEX_SRC));
+gl.attachShader(prog,sh(gl.FRAGMENT_SHADER,Retouch.RETOUCH_FRAGMENT_SRC));
+gl.linkProgram(prog);
+if(!gl.getProgramParameter(prog,gl.LINK_STATUS)) throw new Error('link: '+gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+const buf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+const loc=gl.getAttribLocation(prog,'aPos');gl.enableVertexAttribArray(loc);
+gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+const mkTex=(unit,data,w,h,linear)=>{const t=gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0+unit);gl.bindTexture(gl.TEXTURE_2D,t);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,data);
+  const f=linear?gl.LINEAR:gl.NEAREST;
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,f);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,f);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);return t;};
+const toRGBA=(f,n)=>{const a=new Uint8ClampedArray(n*4);
+  for(let i=0;i<n;i++){a[i*4]=f[i*3]*255;a[i*4+1]=f[i*3+1]*255;a[i*4+2]=f[i*3+2]*255;a[i*4+3]=255;}return a;};
+// NEAREST cho mọi texture -> tách bạch phép TOÁN khỏi phép NỘI SUY của GPU
+mkTex(0,toRGBA(src,W*H),W,H,false);
+mkTex(1,toRGBA(lf,G*G),G,G,false);
+mkTex(2,toRGBA(lc,G*G),G,G,false);
+mkTex(3,raster.textures[0],raster.width,raster.height,false);
+mkTex(4,raster.textures[1],raster.width,raster.height,false);
+const ui=(n)=>gl.getUniformLocation(prog,n);
+gl.uniform1i(ui('uSource'),0);gl.uniform1i(ui('uLowFine'),1);gl.uniform1i(ui('uLowCoarse'),2);
+gl.uniform1i(ui('uMask0'),3);gl.uniform1i(ui('uMask1'),4);
+gl.uniform4fv(ui('uBounds'),U.uBounds);gl.uniform1f(ui('uAspect'),U.uAspect);
+gl.uniform1i(ui('uWarpCount'),U.uWarpCount);
+const flat=[];U.uCtrl.forEach(c=>flat.push(...c));
+while(flat.length<Retouch.MAX_WARP_CONTROLS*4) flat.push(0);
+gl.uniform4fv(ui('uCtrl'),new Float32Array(flat));
+const rr=U.uCtrlR.slice();while(rr.length<Retouch.MAX_WARP_CONTROLS) rr.push(0);
+gl.uniform1fv(ui('uCtrlR'),new Float32Array(rr));
+['uSmooth','uBlemish','uClear','uDewrinkle','uSmileLines','uEven','uSparkly',
+ 'uWhitening','uDarkCircles','uBrightEye','uWhiteTeeth','uSkinToneAmt'].forEach(k=>gl.uniform1f(ui(k),U[k]));
+gl.uniform3fv(ui('uSkinTone'),new Float32Array(U.uSkinTone));
+gl.viewport(0,0,W,H);gl.drawArrays(gl.TRIANGLES,0,3);
+const gpu=new Uint8Array(W*H*4);gl.readPixels(0,0,W,H,gl.RGBA,gl.UNSIGNED_BYTE,gpu);
+
+// ---------- đường JS tham chiếu ----------
+const nearest=(arr,gw,gh,u,v)=>{const x=Math.min(gw-1,Math.max(0,Math.floor(u*gw)));
+  const y=Math.min(gh-1,Math.max(0,Math.floor(v*gh)));const i=(y*gw+x)*3;
+  return [arr[i],arr[i+1],arr[i+2]];};
+let max=0,sum=0,n=0,worst=null;
+for(let j=0;j<H;j++)for(let i2=0;i2<W;i2++){
+  // readPixels trả hàng DƯỚI-LÊN, còn vUv của shader tính TỪ TRÊN XUỐNG -> phải lật.
+  const u=(i2+0.5)/W, v=1-(j+0.5)/H;
+  const [du,dv]=ctrl.length?Retouch.displaceUv(u,v,ctrl,A):[u,v];
+  const sx=Math.min(W-1,Math.max(0,Math.floor(du*W))), sy=Math.min(H-1,Math.max(0,Math.floor(dv*H)));
+  let c=[src[(sy*W+sx)*3],src[(sy*W+sx)*3+1],src[(sy*W+sx)*3+2]];
+  const lu=(u-B.x0)/B.width, lv=(v-B.y0)/B.height;
+  if(lu>=0&&lu<1&&lv>=0&&lv<1){
+    const m=Retouch.sampleMasks(raster,u,v);
+    c=Retouch.applyFreqOps(c,nearest(lf,G,G,lu,lv),nearest(lc,G,G,lu,lv),CFG,
+        {skin:m.skin,nasolabial:m.nasolabial});
+    c=Retouch.applyColorOps(c,CFG,m);
+  }
+  const k=(j*W+i2)*4;
+  for(let ch=0;ch<3;ch++){
+    const d=Math.abs(c[ch]*255-gpu[k+ch]);
+    if(d>max){max=d;worst={x:i2,y:j,ch};}
+    sum+=d;n++;}
+}
+P('KÍCH THƯỚC   : '+W+'x'+H+'  | lưới cục bộ '+G+' | bán kính mịn '+rad.fine.toFixed(1)+'px thô '+rad.coarse.toFixed(1)+'px');
+P('ĐIỂM BIẾN DẠNG: '+ctrl.length);
+P('');
+P('CHÊNH LỆCH GLSL vs JS (thang 0-255):');
+P('  lớn nhất   : '+max.toFixed(2)+(worst?'  tại ('+worst.x+','+worst.y+') kênh '+worst.ch:''));
+P('  trung bình : '+(sum/n).toFixed(4));
+P('');
+P(max<=2 ? '=> ĐẠT: hai bản cài đặt khớp trong 1 bậc lượng tử 8-bit'
+        : '=> LỆCH: cần soi lại (>2/255)');
+
+/* ==========================================================================
+ * PHẦN 2 — RetouchRenderer ĐẦU-CUỐI, bảo vệ hai PHÉP RÚT GỌN
+ *
+ * Phần 1 ở trên đối chiếu CÔNG THỨC (dựng tay từng uniform, NEAREST hết). Nó KHÔNG
+ * chạm tới RetouchRenderer, nên không bắt được lớp lỗi kiểu "rút gọn đúng trên giấy
+ * nhưng nối dây sai": engine nay bỏ hẳn mặt nạ không ai đọc (requiredMasks) và bỏ tầng
+ * mờ THÔ khi nó triệt tiêu (needsCoarse) — cái sau còn TRỎ LẠI sampler uLowCoarse về
+ * đơn vị texture của tầng mịn. Trỏ nhầm đơn vị là ra ảnh sai mà không hề báo lỗi.
+ *
+ * Cách so cho sạch: tự tính lưới cục bộ bằng JS rồi đưa thẳng vào finishFace (không đi
+ * qua drawImage, vì phép thu nhỏ của trình duyệt không tái tạo được bằng JS), và để
+ * BIẾN DẠNG = 0 (renderer lọc LINEAR; không warp thì mỗi fragment rơi đúng tâm texel
+ * nên LINEAR ≡ NEAREST trên ảnh nguồn). Mặt nạ và hai tầng mờ vẫn LINEAR -> bên JS
+ * lấy mẫu SONG TUYẾN cho khớp.
+ * ======================================================================= */
+P('');P('──────────────────────────────────────────────────────────');
+P('PHẦN 2 — RetouchRenderer đầu-cuối (bảo vệ phép rút gọn)');
+
+const srcCanvas=document.createElement('canvas');srcCanvas.width=W;srcCanvas.height=H;
+{const sctx=srcCanvas.getContext('2d');const im=sctx.createImageData(W,H);
+ for(let i=0;i<W*H;i++){im.data[i*4]=src[i*3]*255;im.data[i*4+1]=src[i*3+1]*255;
+   im.data[i*4+2]=src[i*3+2]*255;im.data[i*4+3]=255;}
+ sctx.putImageData(im,0,0);}
+
+const bilin=(buf,g,lu,lv,ch,stride)=>{
+  const fx=Math.min(g-1,Math.max(0,lu*g-0.5)), fy=Math.min(g-1,Math.max(0,lv*g-0.5));
+  const x0=Math.floor(fx),y0=Math.floor(fy),x1=Math.min(g-1,x0+1),y1=Math.min(g-1,y0+1);
+  const tx=fx-x0,ty=fy-y0,at=(x,y)=>buf[(y*g+x)*stride+ch];
+  return (at(x0,y0)*(1-tx)+at(x1,y0)*tx)*(1-ty)+(at(x0,y1)*(1-tx)+at(x1,y1)*tx)*ty;};
+
+function checkRenderer(label,cfg,grid){
+  const rn=new Retouch.RetouchRenderer(document.createElement('canvas'));
+  if(!rn.init()) throw new Error('renderer không init được');
+  rn.setGrid(grid);
+  const g=rn.grid;
+  const begun=rn.beginFace([FACE],A,cfg);
+  const Bx=begun.bounds;
+  // Lưới cục bộ tính bằng JS (điểm gần nhất) — DÙNG CHUNG cho cả hai đường.
+  const loc=new Float32Array(g*g*3);
+  for(let j=0;j<g;j++)for(let i=0;i<g;i++){
+    const u=Bx.x0+(i+0.5)/g*Bx.width, v=Bx.y0+(j+0.5)/g*Bx.height;
+    const sx=Math.min(W-1,Math.max(0,Math.floor(u*W))), sy=Math.min(H-1,Math.max(0,Math.floor(v*H)));
+    for(let c=0;c<3;c++) loc[(j*g+i)*3+c]=src[(sy*W+sx)*3+c];}
+  rn.finishFace([FACE],loc);
+  const out=rn.draw(srcCanvas,W,H,[FACE],cfg,A);
+  if(!out) throw new Error('draw() trả null');
+  const px=new Uint8Array(W*H*4);
+  rn.gl.readPixels(0,0,W,H,rn.gl.RGBA,rn.gl.UNSIGNED_BYTE,px);
+
+  // ĐƯỜNG THAM CHIẾU: mặt nạ ĐẦY ĐỦ + tầng thô THẬT (cố ý KHÔNG rút gọn), vì cái đang
+  // được kiểm chính là "rút gọn cho ra đúng kết quả của bản không rút gọn".
+  const fullRaster=Retouch.rasterizeMasks([FACE],{aspect:A,size:g,bounds:Bx});
+  const radG=Retouch.freqRadiiOnGrid(FACE,Bx,g);
+  const rlf=Retouch.blurRgbBoxCascade(loc,g,g,radG.fine);
+  const rlc=Retouch.blurRgbBoxCascade(loc,g,g,radG.coarse);
+  let mx=0,sm=0,cnt=0;
+  for(let j=0;j<H;j++)for(let i=0;i<W;i++){
+    const u=(i+0.5)/W, v=1-(j+0.5)/H;   // readPixels dưới-lên
+    const sy=Math.min(H-1,Math.max(0,Math.floor(v*H)));
+    let c=[src[(sy*W+i)*3],src[(sy*W+i)*3+1],src[(sy*W+i)*3+2]];
+    const lu=(u-Bx.x0)/Bx.width, lv=(v-Bx.y0)/Bx.height;
+    if(lu>=0&&lu<1&&lv>=0&&lv<1){
+      const m={};Retouch.MASK_LAYOUT.forEach(l=>{m[l.name]=bilin(fullRaster.textures[l.tex],g,lu,lv,l.ch,4)/255;});
+      const S=(b)=>[0,1,2].map(ch=>bilin(b,g,lu,lv,ch,3));
+      c=Retouch.applyFreqOps(c,S(rlf),S(rlc),cfg,m);
+      c=Retouch.applyColorOps(c,cfg,m);
+    }
+    const k=(j*W+i)*4;
+    for(let ch=0;ch<3;ch++){const d=Math.abs(c[ch]*255-px[k+ch]);if(d>mx)mx=d;sm+=d;cnt++;}
+  }
+  rn.destroy();
+  const need=Retouch.requiredMasks(cfg);
+  const kept=Retouch.MASK_LAYOUT.filter(l=>need[l.name]).map(l=>l.name).join(',')||'(không)';
+  P('');
+  P(label);
+  P('  lưới '+g+' · mặt nạ dựng: '+kept+' · tầng thô: '+(Retouch.needsCoarse(cfg)?'CÓ tính':'BỎ (triệt tiêu)'));
+  P('  lệch lớn nhất '+mx.toFixed(2)+' · trung bình '+(sm/cnt).toFixed(4)
+    +'   => '+(mx<=2?'ĐẠT':'LỆCH — soi lại'));
+  return mx;
+}
+
+// (a) ca kích hoạt CẢ HAI phép rút gọn: không tham số nào đọc tầng thô, và chỉ mặt nạ
+//     DA được đọc. Nếu sampler uLowCoarse bị trỏ nhầm thì ca này đổ.
+const m2a=checkRenderer('(a) 3 thanh — rút gọn cả mặt nạ lẫn tầng thô',
+  {enabled:true,params:{smooth:60,clearBlemishes:45,whitening:35}},Retouch.FREQ_GRID);
+// (b) ca KHÔNG rút gọn được gì (đủ 13 thanh) — bảo đảm đường đầy đủ vẫn nguyên vẹn.
+const m2b=checkRenderer('(b) 13 thanh — không rút gọn được gì',CFG,Retouch.FREQ_GRID);
+// (c) lưới lúc PHÁT: cùng phép toán, chỉ khác độ phân giải lưới cục bộ.
+const m2c=checkRenderer('(c) lưới lúc phát',
+  {enabled:true,params:{smooth:60,even:30,darkCircles:40}},Retouch.FREQ_GRID_PLAYING);
+P('');
+P(Math.max(m2a,m2b,m2c)<=2
+  ? '=> PHẦN 2 ĐẠT: phép rút gọn cho ra đúng kết quả của bản đầy đủ'
+  : '=> PHẦN 2 LỆCH: rút gọn đang đổi ảnh — xem requiredMasks / needsCoarse / _coarseUnit');
+}catch(e){P('LỖI: '+e.message);console.error(e);}
+})();
+</script>

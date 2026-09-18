@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+<title>Thiết lập CrabbyCut</title>
+<style>
+  :root {
+    --bg: #111214;
+    --panel: #17191c;
+    --line: #26292e;
+    --text: #e8eaed;
+    --muted: #9aa0a6;
+    --accent: #e8442e;
+    --ok: #3ba55d;
+    --warn: #d9a13b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 28px;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+    user-select: none;
+  }
+  h1 { margin: 0 0 4px; font-size: 19px; font-weight: 600; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+
+  .machine {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; margin-bottom: 16px; font-size: 12.5px;
+    display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px;
+  }
+  .machine dt { color: var(--muted); }
+  .machine dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .bar-wrap { height: 8px; background: #23262a; border-radius: 99px; overflow: hidden; margin: 6px 0 8px; }
+  .bar { height: 100%; width: 0; background: var(--accent); border-radius: 99px; transition: width .25s ease; }
+  .bar.done { background: var(--ok); }
+  .bar.failed { background: var(--warn); }
+
+  .stage { display: flex; justify-content: space-between; font-size: 13px; }
+  .stage b { font-weight: 600; }
+  .stage span { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  .detail {
+    color: var(--muted); font-size: 12.5px; margin-top: 4px; height: 18px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  .steps { list-style: none; margin: 16px 0 0; padding: 0; }
+  .steps li {
+    display: flex; align-items: center; gap: 9px;
+    padding: 5px 0; font-size: 13px; color: var(--muted);
+  }
+  .steps li .dot {
+    width: 15px; height: 15px; border-radius: 50%; flex: 0 0 auto;
+    border: 2px solid #35393f;
+  }
+  .steps li.active { color: var(--text); }
+  .steps li.active .dot { border-color: var(--accent); background: rgba(232,68,46,.25); }
+  .steps li.done { color: var(--text); }
+  .steps li.done .dot { border-color: var(--ok); background: var(--ok); }
+
+  .msg {
+    margin-top: 16px; padding: 11px 13px; border-radius: 8px;
+    font-size: 13px; display: none; white-space: pre-wrap; user-select: text;
+    max-height: 120px; overflow: auto;
+  }
+  .msg.error { display: block; background: rgba(217,64,44,.12); border: 1px solid rgba(217,64,44,.4); }
+  .msg.warn  { display: block; background: rgba(217,161,59,.12); border: 1px solid rgba(217,161,59,.4); }
+  .msg.ok    { display: block; background: rgba(59,165,93,.12);  border: 1px solid rgba(59,165,93,.4); }
+
+  footer { position: fixed; left: 28px; right: 28px; bottom: 22px; display: flex; gap: 10px; justify-content: flex-end; }
+  button {
+    font: inherit; padding: 8px 18px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--line); background: #1e2126; color: var(--text);
+  }
+  button:hover:not(:disabled) { background: #262a30; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { filter: brightness(1.1); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.hidden { display: none; }
+</style>
+</head>
+<body>
+  <h1>Thiết lập môi trường CrabbyCut</h1>
+  <div class="sub" id="sub">Đang kiểm tra cấu hình máy…</div>
+
+  <dl class="machine" id="machine" style="display:none">
+    <dt>Hệ điều hành</dt><dd id="m-os">—</dd>
+    <dt>Bộ xử lý</dt><dd id="m-cpu">—</dd>
+    <dt>Card đồ hoạ</dt><dd id="m-gpu">—</dd>
+    <dt>FFmpeg</dt><dd id="m-ffmpeg">—</dd>
+    <dt>Dung lượng trống</dt><dd id="m-disk">—</dd>
+  </dl>
+
+  <div class="stage"><b id="stage-label">Chuẩn bị…</b><span id="percent">0%</span></div>
+  <div class="bar-wrap"><div class="bar" id="bar"></div></div>
+  <div class="detail" id="detail"></div>
+
+  <ul class="steps" id="steps"></ul>
+
+  <div class="msg" id="msg"></div>
+
+  <footer>
+    <button id="btn-log" class="hidden">Mở nhật ký</button>
+    <button id="btn-cancel">Huỷ</button>
+    <button id="btn-retry" class="primary hidden">Thử lại</button>
+    <button id="btn-finish" class="primary hidden">Xong</button>
+  </footer>
+
+<script>
+(() => {
+  /* Phải KHỚP STAGE_WEIGHTS ở scripts/setup_runtime.js.
+   * Không còn bước "tải thư viện AI" ở đây: chúng được tải ở lần đầu người dùng dùng đúng
+   * tính năng cần chúng, không phải lúc cài đặt. */
+  const STAGES = [
+    ['detect',   'Kiểm tra cấu hình máy'],
+    ['vcredist', 'Thư viện hệ thống Visual C++'],
+    ['python',   'Cài đặt Python'],
+    ['pip',      'Chuẩn bị trình cài gói'],
+    ['ffmpeg',   'Cài đặt FFmpeg'],
+    ['verify',   'Kiểm tra lại'],
+  ];
+
+  const $ = (id) => document.getElementById(id);
+  const stepsEl = $('steps');
+  const nodes = new Map();
+
+  for (const [id, label] of STAGES) {
+    const li = document.createElement('li');
+    li.innerHTML = '<span class="dot"></span><span></span>';
+    li.lastElementChild.textContent = label;
+    stepsEl.appendChild(li);
+    nodes.set(id, li);
+  }
+
+  let finished = false;
+
+  function humanBytes(n) {
+    if (!n || n <= 0) return '—';
+    const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let v = n, i = 0;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i += 1; }
+    return v.toFixed(v >= 10 || i === 0 ? 0 : 1) + ' ' + u[i];
+  }
+
+  function markStages(activeId) {
+    let passed = true;
+    for (const [id] of STAGES) {
+      const li = nodes.get(id);
+      if (id === activeId) { li.className = 'active'; passed = false; }
+      else if (passed) li.className = 'done';
+      else li.className = '';
+    }
+  }
+
+  function setMessage(kind, text) {
+    const el = $('msg');
+    el.className = 'msg ' + kind;
+    el.textContent = text;
+  }
+
+  window.crabSetup.onInit((payload) => {
+    $('sub').textContent = payload.reason === 'incomplete'
+      ? 'Lần thiết lập trước chưa hoàn tất. Ứng dụng sẽ tiếp tục từ chỗ còn dở.'
+      : 'CrabbyCut đang cài môi trường cơ bản để mở được ứng dụng. '
+        + 'Thư viện AI (bóc băng, Auto-Reframe) sẽ tải sau, ở lần đầu bạn dùng tính năng đó.';
+    if (payload.autoStart) window.crabSetup.start();
+  });
+
+  window.crabSetup.onReset(() => {
+    finished = false;
+    $('bar').className = 'bar';
+    $('bar').style.width = '0%';
+    $('msg').className = 'msg';
+    $('btn-retry').classList.add('hidden');
+    $('btn-finish').classList.add('hidden');
+    $('btn-log').classList.add('hidden');
+    $('btn-cancel').classList.remove('hidden');
+    $('btn-cancel').disabled = false;
+  });
+
+  window.crabSetup.onEvent((event) => {
+    if (event.type === 'machine') {
+      const m = event.machine;
+      $('machine').style.display = 'grid';
+      $('m-os').textContent = m.os + ' (' + m.arch + ')';
+      $('m-cpu').textContent = m.cpu + (m.cpu_count ? ' — ' + m.cpu_count + ' luồng' : '');
+      $('m-gpu').textContent = m.nvidia.available
+        ? m.nvidia.gpus.map((g) => g.name + (g.vram_mb ? ' (' + Math.round(g.vram_mb / 1024) + ' GB)' : '')).join(', ')
+        : 'Không có GPU NVIDIA — sẽ dùng CPU để bóc băng';
+      $('m-ffmpeg').textContent = m.ffmpeg ? 'Đã có trên máy — dùng lại' : 'Chưa có — sẽ tải về';
+      $('m-disk').textContent = humanBytes(m.disk.free_bytes) + ' trống trên ' + m.disk.path;
+      return;
+    }
+
+    if (event.type === 'progress') {
+      markStages(event.stage);
+      $('stage-label').textContent = event.stage_label;
+      const pct = Math.round(event.ratio * 100);
+      $('percent').textContent = pct + '%';
+      $('bar').style.width = pct + '%';
+      if (event.message) $('detail').textContent = event.message;
+      return;
+    }
+
+    if (event.type === 'done') {
+      finished = true;
+      $('btn-cancel').classList.add('hidden');
+      $('btn-log').classList.remove('hidden');
+
+      if (!event.ok) {
+        $('bar').className = 'bar failed';
+        $('stage-label').textContent = 'Thiết lập chưa xong';
+        $('detail').textContent = '';
+        setMessage('error', 'Không hoàn tất được: ' + (event.error || 'lỗi không rõ')
+          + '\n\nThường gặp nhất là mất mạng giữa chừng. Kiểm tra kết nối rồi bấm "Thử lại" — '
+          + 'những phần đã tải xong sẽ không phải tải lại.');
+        $('btn-retry').classList.remove('hidden');
+        return;
+      }
+
+      markStages(null);
+      for (const [id] of STAGES) nodes.get(id).className = 'done';
+      $('bar').style.width = '100%';
+      $('percent').textContent = '100%';
+
+      if (event.complete) {
+        $('bar').className = 'bar done';
+        $('stage-label').textContent = 'Đã sẵn sàng';
+        $('detail').textContent = '';
+        setMessage('ok', 'Môi trường đã cài đầy đủ. CrabbyCut sẵn sàng sử dụng.');
+        /* TỰ ĐÓNG KHI THÀNH CÔNG. Cửa sổ này được BỘ CÀI gọi và chờ (ExecWait), nên bắt
+         * buộc phải bấm nút mới đóng là khoá luôn bộ cài nếu người dùng bỏ đi giữa chừng —
+         * bước cài kéo dài hàng chục phút thì đó là chuyện thường. Chỉ tự đóng ở nhánh
+         * THÀNH CÔNG; nhánh lỗi và nhánh thiếu thành phần vẫn phải chờ người đọc. */
+        let left = 5;
+        const tick = () => {
+          $('btn-finish').textContent = 'Xong (' + left + ')';
+          if (left <= 0) { window.crabSetup.finish(); return; }
+          left -= 1;
+          setTimeout(tick, 1000);
+        };
+        tick();
+      } else {
+        $('bar').className = 'bar failed';
+        $('stage-label').textContent = 'Xong, nhưng thiếu một vài thành phần';
+        const verify = (event.manifest && event.manifest.verify) || {};
+        const lines = [];
+        if (verify.python_ok === false) lines.push('• Python không chạy được.');
+        if (verify.ffmpeg_ok === false) lines.push('• FFmpeg không chạy được.');
+        if (!lines.length) lines.push('• Có thành phần chưa đạt — xem nhật ký để biết chi tiết.');
+        setMessage('warn', 'Các phần sau chưa dùng được, những phần còn lại vẫn hoạt động bình thường:\n'
+          + lines.join('\n') + '\n\nBấm "Thử lại" để cài tiếp, hoặc "Xong" để dùng trước.');
+        $('btn-retry').classList.remove('hidden');
+      }
+      $('btn-finish').classList.remove('hidden');
+    }
+  });
+
+  $('btn-cancel').addEventListener('click', () => {
+    $('btn-cancel').disabled = true;
+    window.crabSetup.cancel();
+  });
+  $('btn-retry').addEventListener('click', () => window.crabSetup.retry());
+  $('btn-finish').addEventListener('click', () => window.crabSetup.finish());
+  $('btn-log').addEventListener('click', () => window.crabSetup.openLog());
+
+  window.addEventListener('beforeunload', (e) => {
+    if (!finished) e.returnValue = false;
+  });
+})();
+</script>
+</body>
+</html>

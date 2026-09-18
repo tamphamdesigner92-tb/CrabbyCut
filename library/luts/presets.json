@@ -1,0 +1,134 @@
+[
+  {
+    "id": "soft_milk",
+    "name": "Sữa",
+    "cat": "soft",
+    "file": "soft_milk.cube"
+  },
+  {
+    "id": "porcelain",
+    "name": "Sứ",
+    "cat": "soft",
+    "file": "porcelain.cube"
+  },
+  {
+    "id": "clean_daylight",
+    "name": "Ánh ngày",
+    "cat": "soft",
+    "file": "clean_daylight.cube"
+  },
+  {
+    "id": "soft_peach",
+    "name": "Đào nhạt",
+    "cat": "soft",
+    "file": "soft_peach.cube"
+  },
+  {
+    "id": "blush",
+    "name": "Ửng hồng",
+    "cat": "soft",
+    "file": "blush.cube"
+  },
+  {
+    "id": "misty_blue",
+    "name": "Sương lam",
+    "cat": "soft",
+    "file": "misty_blue.cube"
+  },
+  {
+    "id": "mint_air",
+    "name": "Bạc hà",
+    "cat": "soft",
+    "file": "mint_air.cube"
+  },
+  {
+    "id": "honey_light",
+    "name": "Mật nhạt",
+    "cat": "soft",
+    "file": "honey_light.cube"
+  },
+  {
+    "id": "linen",
+    "name": "Vải lanh",
+    "cat": "soft",
+    "file": "linen.cube"
+  },
+  {
+    "id": "overcast",
+    "name": "Trời râm",
+    "cat": "soft",
+    "file": "overcast.cube"
+  },
+  {
+    "id": "bright_clean",
+    "name": "Tươi sáng",
+    "cat": "bright",
+    "file": "bright_clean.cube"
+  },
+  {
+    "id": "sunny_warm",
+    "name": "Nắng ấm",
+    "cat": "bright",
+    "file": "sunny_warm.cube"
+  },
+  {
+    "id": "vivid_pop",
+    "name": "Rực rỡ",
+    "cat": "bright",
+    "file": "vivid_pop.cube"
+  },
+  {
+    "id": "pastel_soft",
+    "name": "Pastel dịu",
+    "cat": "bright",
+    "file": "pastel_soft.cube"
+  },
+  {
+    "id": "fresh_nature",
+    "name": "Xanh tươi",
+    "cat": "bright",
+    "file": "fresh_nature.cube"
+  },
+  {
+    "id": "airy_white",
+    "name": "Trong trẻo",
+    "cat": "bright",
+    "file": "airy_white.cube"
+  },
+  {
+    "id": "teal_orange",
+    "name": "Teal & Orange",
+    "cat": "cine",
+    "file": "teal_orange.cube"
+  },
+  {
+    "id": "warm_film",
+    "name": "Phim ấm",
+    "cat": "cine",
+    "file": "warm_film.cube"
+  },
+  {
+    "id": "cool_blue",
+    "name": "Lạnh xanh",
+    "cat": "cine",
+    "file": "cool_blue.cube"
+  },
+  {
+    "id": "vintage_fade",
+    "name": "Hoài cổ (fade)",
+    "cat": "cine",
+    "file": "vintage_fade.cube"
+  },
+  {
+    "id": "mono_classic",
+    "name": "Đen trắng",
+    "cat": "mono",
+    "file": "mono_classic.cube"
+  },
+  {
+    "id": "punch",
+    "name": "Đậm nét (punch)",
+    "cat": "cine",
+    "file": "punch.cube"
+  }
+]

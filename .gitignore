@@ -1,0 +1,69 @@
+node_modules/
+temp_uploads/
+asr_cache/
+asr_models/
+__pycache__/
+.venv/
+peaks_cache/
+test_temp/
+auto_sfx.txt/
+reports/
+dist/
+# Ghi chú môi trường do scripts/preflight_python.js tự sinh — ảnh chụp trạng thái MÁY,
+# không phải tài liệu dự án. Theo dõi nó thì mỗi máy lại làm bẩn cây làm việc một kiểu.
+docs/MOI_TRUONG_PYTHON.md
+proxy_cache/
+concat_cache/
+vendor/
+
+# ── KHO TÀI NGUYÊN MEDIA — KHÔNG ĐƯỢC CÔNG KHAI ────────────────────────────────
+# Nhạc, hiệu ứng âm thanh, video và hình ảnh trong library/ mang giấy phép RIÊNG của
+# chúng, và phần lớn giấy phép stock CẤM phân phối lại tệp gốc. Một phần còn là tài sản
+# thương hiệu của khách hàng (logo, icon sản phẩm, footage quay cho dự án của họ).
+# Không thứ nào trong số đó được phép nằm trong một repo công khai — GPL là giấy phép cho
+# PHẦN MỀM, nó không hợp thức hoá việc phát hành lại media của người khác.
+# Xem library/README.md.
+library/Elements/*
+library/Music/*
+library/SFXs/*
+library/Video/*
+# Giữ khung thư mục để bản clone mới vẫn có chỗ đặt tài nguyên.
+!library/*/.gitkeep
+# NGOẠI LỆ: library/luts/*.cube do chính scripts/generate_preset_luts.js sinh ra, nên
+# thuộc bản quyền của dự án và ĐƯỢC theo dõi bình thường.
+
+# Rác của macOS Finder. Ngoài việc vô dụng, nó còn ghi lại tên mọi tệp từng nằm trong
+# thư mục — kể cả tệp đã xoá — nên không nên đẩy lên repo công khai.
+.DS_Store
+**/.DS_Store
+
+# ── BỘ CA THẬT DÙNG ĐỂ ĐO (tests/fixtures/) ───────────────────────────────────
+# Kịch bản, transcript và nhãn trong các thư mục dưới đây lấy từ DỰ ÁN THẬT của khách
+# hàng: nội dung marketing, tên thương hiệu, lời thoại của người thật. Đó là tài sản trí
+# tuệ của khách chứ không phải của dự án, nên không được nằm trong repo công khai — GPL
+# cấp phép cho PHẦN MỀM, nó không cho ta quyền phát hành nội dung của người khác.
+# Xem tests/fixtures/README.md để biết cách tự dựng bộ ca của bạn.
+tests/fixtures/matching/
+tests/fixtures/reorder/
+# tests/fixtures/face_landmarks.json CỐ Ý được giữ: nó chỉ là 478 cặp toạ độ đã chuẩn
+# hoá, không kèm hình, không tái nhận diện được ai — và bộ test Retouch cần nó.
+
+# ── KẾT QUẢ BIÊN DỊCH NATIVE ──────────────────────────────────────────────────
+# Sinh bởi `npm run build:native`, mỗi máy tự dựng lấy. Ngoài việc phình repo, tệp .pdb
+# còn NHÚNG ĐƯỜNG DẪN MÃ NGUỒN của máy build — không nên nằm trong repo công khai.
+# `npm test` chạy build:native trước nên bản clone mới không thiếu gì.
+native/addon/build/
+native/sidecar/build/
+native/sidecar/*.obj
+native/node_modules/
+
+# ── CẤU HÌNH CỦA MÁY, KHÔNG PHẢI CỦA DỰ ÁN ────────────────────────────────────
+# settings/app_settings.json là cài đặt RIÊNG của người đang dùng máy này. Giá trị mặc
+# định nằm trong mã (AppSettings.defaults() ở static/js/app-settings.js) và readAppSettings()
+# đã rơi về mặc định khi thiếu tệp, nên bản clone mới không cần nó.
+settings/
+
+# Tệp trạng thái RUNTIME: backend ghi đè mỗi lần đổi bước xử lý, nên theo dõi nó là cây làm
+# việc bẩn liên tục và mỗi commit dính một thay đổi vô nghĩa. /api/status đã có đường lùi
+# ("Hệ thống đang chuẩn bị...") khi tệp thiếu, nên bản clone mới không cần nó.
+progress.txt

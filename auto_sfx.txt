@@ -1,0 +1,97 @@
+# Phân loại hiệu ứng động, hiệu ứng chuyển tiếp, Elements, SFXs.
+Hiệu ứng động
+Nhóm 1:
+    Trượt lên
+    Trượt xuống
+    Trượt trái
+    Trượt phải
+    Trôi nhẹ
+    Xoay nhẹ
+    Xoay tròn
+
+Nhóm 2:
+    Pop
+    Thu phóng vào
+
+Nhóm 3:
+    Lật
+Nhóm 4 (Hiệu ứng động cho chữ):
+    Đánh máy
+
+
+Hiệu ứng chuyển tiếp
+Nhóm 1:
+    Trượt lên
+    Trượt xuống
+    Trượt trái
+    Trượt phải
+    Quét trái
+    Quét phải
+
+Nhóm 2:
+    Mở vòng tròn
+    Đóng vòng tròn
+    Toả tròn
+    Xoắn
+
+
+Elements:
+    [Icon] True.png
+    [Icon] Wrong.png
+
+
+SFXs
+Nhóm 1:
+    [SFXs] Short-Whoosh-4.mp3
+    [SFXs] Swish-1.mp3
+    [SFXs] Fast-Whoosh-10.mp3
+    [SFXs] Fast-Whoosh-E14.mp3
+
+Nhóm 2:
+    [SFXs] Woosh-Wind-4.mp3
+    [SFXs] Deep-woosh-1.mp3
+
+Nhóm 3:
+    [SFXs] Pop-lower-sound.mp3
+    [SFXs] Pop-Sound-to-Open.mp3
+
+Nhóm 4:
+    [SFXs] Correct-Answer-1.mp3
+    [SFXs] Correct-answer-Piropyrone.mp3
+    [SFXs] Ding-the-answer-is-Correct.mp3
+
+Nhóm 5:
+    [SFXs] Drip-drip-the-wrong-answer.mp3
+    [SFXs] Wrong-answer.mp3
+
+Nhóm 6:
+    [SFXs] Typing-1.mp3
+
+Nhóm 7:
+    [SFXs] Turn-Card.mp3
+
+
+# Quy tắc ghép SFXs vào các hiệu ứng chuyển động, hiệu ứng chuyển tiếp:
+- Với các hiệu ứng chuyển tiếp nhóm 1, sử dụng SFXs nhóm 1.
+- Với các hiệu ứng chuyển tiếp nhóm 2, sử dụng SFXs nhóm 2.
+- Với các hiệu ứng động nhóm 1, nếu độ dài hiệu ứng =< 0.8s thì dùng SFXs nhóm 1, nếu > 0.8s thì dùng SFXs nhóm 2.
+- Với các hiệu ứng động nhóm 2, sử dụng SFXs nhóm 3.
+- Với các hiệu ứng động nhóm 3, sử dụng SFXs nhóm 7.
+- Với các hiệu ứng động nhóm 4, sử dụng SFXs nhóm 6.
+- Với các Elements [Icon] True.png, sử dụng SFXs nhóm 4.
+- Với các Elements [Icon] Wrong.png, sử dụng SFXs nhóm 5.
+
+# Vị trí đặt các SFXs được xác định bằng cách:
+- Điểm cao nhất trong sóng âm của SFXs (ngoại trừ SFXs nhóm 6) đặt vào đúng vị trí kết thúc của hiệu ứng chuyển động (vào) của mỗi block, điểm chuyển tiếp của 2 block có hiệu ứng chuyển tiếp tương ứng, điểm kết thúc của hiệu ứng động của [Icon] True/ Wrong.
+- Với các block không có chứa hiệu ứng động, giữa 2 block không có hiệu ứng chuyển tiếp thì bỏ qua, không thêm SFXs vào vị trí tương ứng.
+- Nhóm SFXs có nhiều hơn 1 [SFXs] thì lựa chọn ngẫu nhiên.
+- Đối với SFXs nhóm 6, vị trí bắt đầu của block SFXs trùng với vị trí bắt đầu của block có chứa hiệu ứng chuyển động Đánh máy. Độ dài của SFXs sẽ được cắt theo độ dài của hiệu ứng đánh máy.
+- Đối với các SFXs khi được thêm vào timeline, hãy tự động gán các SFXs với Volume = -6dB.
+- Mọi SFXs không được dài quá giới hạn của độ dài tổng các block hiện có trên lane main.
+
+# Quy tắt ghép [Mus]:
+- [Mus] trong thư viện được lựa chọn ngẫu nhiên và đưa vào timeline.
+- Điểm đầu của block [Mus] trùng với vị trí đầu của block đầu tiên trên lane main của timeline.
+- Độ dài của block [Mus] dài bằng thời lượng tổng của các block trên lane main.
+- Khi đưa [Mus] vào timeline, tự động gán giá trị Volume = -13dB. Cuối block [Mus] giảm dần âm lượng trong khoảng thời gian 0.8s cuối cùng. Tự động thêm Keyframe âm lượng để giảm từ -13dB xuống -25dB.
+- [Mus] không được dài quá giới hạn của độ dài tổng các block hiện có trên lane main.

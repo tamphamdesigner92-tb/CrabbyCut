@@ -1,0 +1,129 @@
+<!doctype html><meta charset="utf-8"><title>Retouch export — đo ngân sách khung vá</title>
+<!--
+  ĐO NGÂN SÁCH CHO KHÂU XUẤT RETOUCH — CHẠY TAY.
+
+  Câu hỏi: bake vùng mặt theo luồng thì MỘT KHUNG nặng bao nhiêu byte, và cả clip nặng
+  bao nhiêu? Bản bàn giao mới chỉ có tỉ lệ "mặt chiếm 5.5-6.7% diện tích khung -> rẻ hơn
+  bake cả khung ~18 lần", chưa có con số tuyệt đối — mà chính con số tuyệt đối mới quyết
+  định được thiết kế (chuỗi ảnh nội tuyến / phần file multipart / định dạng nào).
+
+  Tiền lệ đã đo trong dự án (xem khối "ĐÓNG GÓI CHUỖI KHUNG CHUYỂN CẢNH" ở
+  editing-runtime.js): khung ĐỦ 1080x1920 nén PNG = 9.5 MB, JPEG q0.95 = 0.41 MB.
+
+  CÁCH CHẠY:
+    npm run backend:dev
+    mở http://localhost:17219/tests/manual/retouch_export_budget.html
+-->
+<body style="font:12px/1.6 ui-monospace,monospace;background:#111;color:#ddd;padding:16px;margin:0">
+<h3 style="font:600 14px/1.4 system-ui;margin:0 0 10px">Ngân sách khung vá vùng mặt</h3>
+<pre id="out">đang đo…</pre>
+<script src="/static/js/retouch.js"></script>
+<script>
+const lines = [];
+const P = (s = '') => { lines.push(s); document.getElementById('out').textContent = lines.join('\n'); };
+const mb = (b) => (b / 1048576).toFixed(2);
+
+function loadVideo(url, t = 2) {
+    return new Promise((res, rej) => {
+        const v = document.createElement('video');
+        v.muted = true; v.playsInline = true; v.preload = 'auto'; v.src = url;
+        v.addEventListener('error', () => rej(new Error('không nạp được ' + url)));
+        v.addEventListener('loadeddata', () => {
+            v.currentTime = t;
+            v.addEventListener('seeked', () => res(v), { once: true });
+        }, { once: true });
+    });
+}
+const blobSize = (canvas, type, q) => new Promise((res) => {
+    try { canvas.toBlob((b) => res(b ? b.size : 0), type, q); } catch (_) { res(0); }
+});
+
+(async () => {
+  try {
+    const FACE = (await (await fetch('/tests/fixtures/face_landmarks.json')).json()).face;
+    const video = await loadVideo('/temp_uploads/temp_input.mp4');
+    const texW = video.videoWidth, texH = video.videoHeight;
+
+    // Hộp bao mặt + phần nới cho viền làm mượt, đúng hộp mà rasterizeMasks dùng.
+    const B = Retouch.faceBounds(FACE, Retouch.MASK_BOUNDS_PAD);
+    // Kích thước khung xuất giả định: 1080x1920 (dọc) — cùng cỡ mà tiền lệ chuyển cảnh đo.
+    for (const [seqW, seqH] of [[1080, 1920], [1728, 3072]]) {
+        // Clip lane chính vẽ vừa khung (contain) -> tỉ lệ nguồn->sequence.
+        const fit = Math.min(seqW / texW, seqH / texH);
+        const w = Math.round(B.width * texW * fit / 2) * 2;
+        const h = Math.round(B.height * texH * fit / 2) * 2;
+        const cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+        cv.getContext('2d').drawImage(video,
+            B.x0 * texW, B.y0 * texH, B.width * texW, B.height * texH, 0, 0, w, h);
+
+        const png = await blobSize(cv, 'image/png');
+        const j95 = await blobSize(cv, 'image/jpeg', 0.95);
+        const j88 = await blobSize(cv, 'image/jpeg', 0.88);
+        const fullPx = seqW * seqH, patchPx = w * h;
+
+        P(`\n════ khung xuất ${seqW}×${seqH} ════`);
+        P(`  vùng vá            : ${w}×${h} px  = ${(100 * patchPx / fullPx).toFixed(1)}% diện tích khung`);
+        P(`  MỘT khung   PNG    : ${(png / 1024).toFixed(0)} KB`);
+        P(`              JPEG95 : ${(j95 / 1024).toFixed(0)} KB`);
+        P(`              JPEG88 : ${(j88 / 1024).toFixed(0)} KB`);
+        [[10, 30], [60, 30], [300, 30]].forEach(([sec, fps]) => {
+            const n = sec * fps;
+            P(`  ${String(sec).padStart(3)}s @${fps}fps (${n} khung): PNG ${mb(png * n)} MB · JPEG95 ${mb(j95 * n)} MB · JPEG88 ${mb(j88 * n)} MB`);
+        });
+        P(`  (so sánh: bake CẢ KHUNG JPEG95 ~0.41 MB/khung -> 60s = ${mb(0.41 * 1048576 * 1800)} MB)`);
+    }
+    /* ---- BẮT KHUNG: SEEK từng khung hay PHÁT rồi hứng? ----
+     * Bake retouch cần MỌI khung của clip, khác hẳn chuyển cảnh (chỉ ~31 khung/điểm).
+     * Ghi chú trong editing-runtime.js đo được seek ~1s/khung trên nguồn 1728×3072 —
+     * nếu đúng vậy thì 60s @30fps = 30 PHÚT, không dùng được. Nhưng con số đó là cho
+     * seek NHẢY XA (captureSeamFrameAsync mở lại nguồn); seek TIẾN DẦN 1/30s một thì
+     * bộ giải mã đi thẳng tới, có thể rẻ hơn nhiều. Đo cả hai. */
+    P('\n════ bắt khung: đo thông lượng ════');
+    const probe = document.createElement('canvas');
+    probe.width = 320; probe.height = 569;
+    const pctx = probe.getContext('2d');
+
+    // (1) SEEK TIẾN DẦN
+    {
+        const v = await loadVideo('/temp_uploads/temp_input.mp4', 3);
+        const N = 20, t0 = performance.now();
+        for (let i = 0; i < N; i++) {
+            v.currentTime = 3 + (i + 1) / 30;
+            await new Promise((r) => v.addEventListener('seeked', r, { once: true }));
+            pctx.drawImage(v, 0, 0, probe.width, probe.height);
+        }
+        const ms = (performance.now() - t0) / N;
+        P(`  seek tiến dần 1/30s : ${ms.toFixed(1)} ms/khung  -> 60s@30fps = ${(ms * 1800 / 1000).toFixed(0)} s`);
+    }
+
+    // (2) PHÁT rồi hứng bằng requestVideoFrameCallback
+    {
+        const v = await loadVideo('/temp_uploads/temp_input.mp4', 3);
+        if (!v.requestVideoFrameCallback) {
+            P('  phát + rVFC        : trình duyệt không có requestVideoFrameCallback');
+        } else {
+            let n = 0, firstT = 0, lastT = 0;
+            const t0 = performance.now();
+            await new Promise((done) => {
+                const step = (_, meta) => {
+                    pctx.drawImage(v, 0, 0, probe.width, probe.height);
+                    if (!n) firstT = meta.mediaTime;
+                    lastT = meta.mediaTime;
+                    if (++n >= 60) { v.pause(); done(); return; }
+                    v.requestVideoFrameCallback(step);
+                };
+                v.requestVideoFrameCallback(step);
+                v.play();
+            });
+            const wall = performance.now() - t0;
+            const media = lastT - firstT;
+            P(`  phát + rVFC        : ${n} khung trong ${(wall / 1000).toFixed(2)}s`
+              + ` (nguồn trôi ${media.toFixed(2)}s) -> ${(n / (wall / 1000)).toFixed(1)} khung/s`);
+            P(`                       thời gian bake ≈ độ dài đoạn × ${(wall / 1000 / Math.max(0.001, media)).toFixed(2)}`);
+        }
+    }
+    P('\nxong.');
+  } catch (e) { P('LỖI: ' + e.message); console.error(e); }
+})();
+</script>

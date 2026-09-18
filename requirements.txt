@@ -1,0 +1,33 @@
+flask
+requests
+pydub
+# core_logic.py `from rapidfuzz import fuzz` ngay ở đầu file — THIẾU khai báo ở đây
+# nên `pip install -r requirements.txt` xong vẫn không import được core_logic (mọi
+# đường lọc/sắp xếp theo kịch bản chết). Máy cũ có sẵn gói này nên lỗi không lộ ra.
+rapidfuzz
+openai-whisper
+torch
+# mlx (Apple Silicon) KHÔNG có bản Windows/Linux. Không đánh dấu nền tảng thì
+# `pip install -r requirements.txt` DỪNG NGAY trên Windows ở đúng dòng này, và mọi
+# gói phía sau (faster-whisper, mediapipe…) không kịp cài. core_logic.py import
+# mlx_whisper BÊN TRONG hàm (lazy) nên máy khác macOS không bao giờ cần gói này.
+mlx-whisper; platform_system == "Darwin"
+# whisperx ĐÃ BỎ (2026-08-23). Không nơi nào trong repo import hay gọi nó — nhưng nó
+# ghim `ctranslate2<4.5.0`, và ctranslate2 4.4.0 lại `import pkg_resources` TRONG nhánh
+# `if sys.platform == "win32"`. setuptools >= 81 không còn pkg_resources -> trên Windows
+# `import ctranslate2` chết ngay, kéo theo TOÀN BỘ ASR (faster-whisper) chết, trong khi
+# macOS không hề lộ ra vì nhánh đó không chạy. Bỏ gói chết này thì resolver lấy được
+# ctranslate2 4.8+ (dùng importlib.metadata, không cần pkg_resources).
+# whisperx
+faster-whisper; platform_system == "Windows"
+ctranslate2; platform_system == "Windows"
+huggingface-hub; platform_system == "Windows"
+# cuBLAS cho ctranslate2 trên Windows. ct2 4.8+ đã mang sẵn cudnn64_9.dll nhưng KHÔNG
+# mang cuBLAS, mà nó nạp DLL theo PATH. Không có gói này (và cũng không có CUDA Toolkit
+# hay torch bản CUDA) thì `model.encode()` chết GIỮA phiên bóc băng với
+# "Library cublas64_12.dll is not found" — trong khi mọi phép thăm dò vẫn báo CUDA sẵn
+# sàng, nên lỗi rất khó truy. Sidecar tự nối thư mục bin của gói vào PATH, xem
+# asr/windows_faster_whisper_sidecar.py -> _ensure_cuda_dll_path().
+nvidia-cublas-cu12; platform_system == "Windows"
+opencv-contrib-python<4.12; python_version < "3.13"
+mediapipe==0.10.21; python_version < "3.13"

@@ -1,0 +1,263 @@
+<!doctype html><meta charset="utf-8"><title>Retouch — đo hiệu năng từng khâu</title>
+<!--
+  ĐO HIỆU NĂNG RETOUCH THEO TỪNG KHÂU — CHẠY BẰNG TAY TRONG TRÌNH DUYỆT.
+
+  VÌ SAO CẦN: bản bàn giao ghi "~100 ms/khung khi phát" và quy cho việc dựng lại mặt nạ
+  + hai tầng mờ. Nhưng đo CHÍNH hai khâu đó trong Node chỉ ra 9.9 + 8.0 = 17.9 ms ở
+  lưới 256. Vậy ~80 ms còn lại nằm ở khâu khác — và tối ưu nhầm khâu thì tốn công mà
+  không nhanh lên. Trang này tách bạch từng khâu trên NGUỒN THẬT.
+
+  CÁCH CHẠY:
+    npm run backend:dev
+    mở http://localhost:17219/tests/manual/retouch_perf.html
+
+  ĐỌC KẾT QUẢ: cột "ms" là trung vị trên N khung. Khâu nào chiếm phần lớn tổng thì đó
+  mới là chỗ đáng sửa. Ghi số đo vào docs/APP_INTERNALS.md sau mỗi lần chạy.
+-->
+<body style="font:12px/1.5 ui-monospace,monospace;background:#111;color:#ddd;padding:16px;margin:0">
+<h3 style="font:600 14px/1.4 system-ui;margin:0 0 10px">Retouch — chi phí từng khâu (trung vị, ms)</h3>
+<pre id="out">đang chuẩn bị…</pre>
+<script src="/static/js/retouch.js"></script>
+<script>
+const outEl = document.getElementById('out');
+const lines = [];
+const P = (s = '') => { lines.push(s); outEl.textContent = lines.join('\n'); };
+
+const median = (a) => { const s = a.slice().sort((x, y) => x - y); return s[s.length >> 1]; };
+const pad = (s, n) => String(s).padEnd(n);
+const fx = (v, n = 2) => v.toFixed(n).padStart(7);
+
+// Tham số retouch dùng để đo: bật đủ CẢ BA NHÓM phép, nếu không shader đi đường tắt
+// (`if (x > 0.0)`) và số đo sẽ đẹp một cách giả tạo.
+const CFG = {
+    enabled: true,
+    params: {
+        smooth: 60, clearBlemishes: 70, clear: 20, dewrinkle: 50, smileLines: 40,
+        even: 35, sparkly: 30, whitening: 45, darkCircles: 55, brightEye: 40,
+        whiteTeeth: 50, facelift: 80, plump: 60,
+    },
+    skinTone: '#c8926b', skinToneAmount: 40,
+};
+
+function loadVideo(url, seekTo = 2) {
+    return new Promise((resolve, reject) => {
+        const v = document.createElement('video');
+        v.muted = true; v.playsInline = true; v.preload = 'auto'; v.src = url;
+        v.addEventListener('error', () => reject(new Error(`không nạp được ${url}`)));
+        v.addEventListener('loadeddata', () => {
+            v.currentTime = seekTo;
+            v.addEventListener('seeked', () => resolve(v), { once: true });
+        }, { once: true });
+    });
+}
+
+/* Một lượt đo trọn vẹn cho MỘT cấu hình. Lặp lại đúng chuỗi mà
+ * `EditingRuntime.retouchedDrawable` chạy, nhưng bấm giờ từng khâu. */
+function runCase(video, FACE, opts) {
+    const { grid, willReadFrequently, frames } = opts;
+    const texW = video.videoWidth, texH = video.videoHeight;
+    const aspect = texW / texH;
+    const faces = [FACE];
+
+    const gcanvas = document.createElement('canvas');
+    gcanvas.width = texW; gcanvas.height = texH;
+    const gl = gcanvas.getContext('webgl', { premultipliedAlpha: false, antialias: false });
+    if (!gl) throw new Error('không có WebGL');
+    const renderer = new Retouch.RetouchRenderer(gcanvas);
+    if (!renderer.init()) throw new Error('không dựng được shader');
+
+    const scratch = document.createElement('canvas');
+    scratch.width = grid; scratch.height = grid;
+    const sctx = scratch.getContext('2d', { willReadFrequently });
+    const localBuf = new Float32Array(grid * grid * 3);
+
+    const t = { raster: [], crop: [], read: [], conv: [], blur: [], upSrc: [], upAux: [], draw: [], total: [] };
+    const now = () => performance.now();
+
+    for (let f = 0; f < frames; f++) {
+        const t0 = now();
+
+        // (A) RASTER MẶT NẠ — chạy lại mỗi khung khi mặt đổi.
+        const raster = Retouch.rasterizeMasks(faces, { aspect, size: grid });
+        const t1 = now();
+        if (!raster.bounds) throw new Error('không dựng được hộp bao mặt');
+        const B = raster.bounds;
+
+        // (B) CẮT VÙNG MẶT về lưới cục bộ.
+        sctx.drawImage(video, B.x0 * texW, B.y0 * texH,
+            Math.max(1, B.width * texW), Math.max(1, B.height * texH), 0, 0, grid, grid);
+        const t2 = now();
+        const img = sctx.getImageData(0, 0, grid, grid);
+        const t3 = now();
+        for (let i = 0; i < grid * grid; i++) {
+            localBuf[i * 3] = img.data[i * 4] / 255;
+            localBuf[i * 3 + 1] = img.data[i * 4 + 1] / 255;
+            localBuf[i * 3 + 2] = img.data[i * 4 + 2] / 255;
+        }
+        const t4 = now();
+
+        // (C) HAI TẦNG MỜ (CPU).
+        const rad = Retouch.freqRadiiOnGrid(FACE, B, grid);
+        const lowFine = Retouch.blurRgbBoxCascade(localBuf, grid, grid, rad.fine);
+        const lowCoarse = Retouch.blurRgbBoxCascade(localBuf, grid, grid, rad.coarse);
+        const t5 = now();
+
+        // (D) UPLOAD TEXTURE. Tách riêng ảnh NGUỒN (kích thước khung, đắt nhất về băng
+        // thông) khỏi các texture phụ (lưới cục bộ, nhỏ).
+        const toRGBA = (arr, n) => {
+            const a = new Uint8ClampedArray(n * 4);
+            for (let i = 0; i < n; i++) {
+                a[i * 4] = arr[i * 3] * 255;
+                a[i * 4 + 1] = arr[i * 3 + 1] * 255;
+                a[i * 4 + 2] = arr[i * 3 + 2] * 255;
+                a[i * 4 + 3] = 255;
+            }
+            return a;
+        };
+        const up = (unit, data, w, h) => {
+            gl.activeTexture(gl.TEXTURE0 + unit);
+            gl.bindTexture(gl.TEXTURE_2D, renderer.tex[unit]);
+            if (data instanceof Uint8ClampedArray) {
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+                    new Uint8Array(data.buffer));
+            } else {
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, data);
+            }
+        };
+        gl.useProgram(renderer.program);
+        up(0, video);
+        gl.flush();
+        const t6 = now();
+        up(1, toRGBA(lowFine, grid * grid), grid, grid);
+        up(2, toRGBA(lowCoarse, grid * grid), grid, grid);
+        up(3, raster.textures[0], raster.width, raster.height);
+        up(4, raster.textures[1], raster.width, raster.height);
+        gl.flush();
+        const t7 = now();
+
+        // (E) SHADER. finish() để đo GPU thật chứ không chỉ đo lệnh xếp hàng.
+        renderer.raster = raster;
+        renderer.lowFine = lowFine;
+        renderer.lowCoarse = lowCoarse;
+        renderer.faceKey = 'perf';
+        renderer._lfKey = 'perf';          // texture phụ vừa nạp ở trên rồi
+        renderer.draw(video, texW, texH, faces, CFG, aspect);
+        gl.finish();
+        const t8 = now();
+
+        if (f >= 2) {   // bỏ 2 khung đầu (nạp shader, cấp phát lần đầu)
+            t.raster.push(t1 - t0);
+            t.crop.push(t2 - t1);
+            t.read.push(t3 - t2);
+            t.conv.push(t4 - t3);
+            t.blur.push(t5 - t4);
+            t.upSrc.push(t6 - t5);
+            t.upAux.push(t7 - t6);
+            t.draw.push(t8 - t7);
+            t.total.push(t8 - t0);
+        }
+    }
+    renderer.destroy();
+    return t;
+}
+
+const ROWS = [
+    ['raster', 'A. raster mặt nạ (CPU)'],
+    ['crop', 'B1. drawImage cắt vùng mặt'],
+    ['read', 'B2. getImageData (đọc ngược GPU→CPU)'],
+    ['conv', 'B3. đổi sang Float32'],
+    ['blur', 'C. hai tầng mờ (CPU)'],
+    ['upSrc', 'D1. upload ảnh NGUỒN'],
+    ['upAux', 'D2. upload mặt nạ + 2 tầng mờ'],
+    ['draw', 'E. shader + finish()'],
+];
+
+/* ĐO TRÊN ĐÚNG ĐƯỜNG MÀ APP CHẠY — qua RetouchRenderer, tức có đủ mọi phép rút gọn
+ * (bỏ mặt nạ không ai đọc, bỏ tầng mờ thô khi nó triệt tiêu, bộ đệm dùng lại) và có
+ * nút lưới. Phần bảng ở trên là bản MỔ XẺ từng khâu; phần này là con số thật. */
+function runRendererCase(video, FACE, cfg, grid, frames = 14) {
+    const texW = video.videoWidth, texH = video.videoHeight;
+    const aspect = texW / texH;
+    const faces = [FACE];
+    const gcanvas = document.createElement('canvas');
+    const renderer = new Retouch.RetouchRenderer(gcanvas);
+    if (!renderer.init()) throw new Error('không dựng được shader');
+    renderer.setGrid(grid);
+    const scratch = document.createElement('canvas');
+    const sctx = () => {
+        if (scratch.width !== renderer.grid) { scratch.width = renderer.grid; scratch.height = renderer.grid; }
+        return scratch.getContext('2d');
+    };
+    let buf = null;
+    const times = [];
+    for (let f = 0; f < frames; f++) {
+        const t0 = performance.now();
+        renderer.invalidateFace();      // ép MISS: đúng cảnh lúc phát, mặt đổi mỗi khung
+        const begun = renderer.beginFace(faces, aspect, cfg);
+        const G = renderer.grid;
+        const ctx = sctx();
+        const B = begun.bounds;
+        ctx.drawImage(video, B.x0 * texW, B.y0 * texH,
+            Math.max(1, B.width * texW), Math.max(1, B.height * texH), 0, 0, G, G);
+        const img = ctx.getImageData(0, 0, G, G);
+        if (!buf || buf.length !== G * G * 3) buf = new Float32Array(G * G * 3);
+        for (let i = 0; i < G * G; i++) {
+            buf[i * 3] = img.data[i * 4] / 255;
+            buf[i * 3 + 1] = img.data[i * 4 + 1] / 255;
+            buf[i * 3 + 2] = img.data[i * 4 + 2] / 255;
+        }
+        renderer.finishFace(faces, buf);
+        renderer.draw(video, texW, texH, faces, cfg, aspect);
+        renderer.gl.finish();
+        if (f >= 2) times.push(performance.now() - t0);
+    }
+    renderer.destroy();
+    return median(times);
+}
+
+// Ca dùng thật: đa số người dùng chỉ kéo 2-3 thanh, không kéo cả 13.
+const CFG_TYPICAL = { enabled: true, params: { smooth: 60, whitening: 35, clearBlemishes: 40 } };
+
+(async () => {
+    try {
+        P('nạp landmark…');
+        const FACE = (await (await fetch('/tests/fixtures/face_landmarks.json')).json()).face;
+        const cases = [];
+        for (const [label, url] of [['nguồn gốc', '/temp_uploads/temp_input.mp4'],
+                                    ['proxy preview', '/temp_uploads/preview_proxy.mp4']]) {
+            let video = null;
+            try { video = await loadVideo(url); } catch (e) { P(`bỏ qua ${label}: ${e.message}`); continue; }
+            cases.push({ label, video });
+        }
+        if (!cases.length) throw new Error('không có video nào để đo');
+
+        lines.length = 0;
+        for (const c of cases) {
+            P(`\n════ ${c.label} — ${c.video.videoWidth}×${c.video.videoHeight} ════`);
+            for (const wrf of [true, false]) {
+                for (const grid of [256, 128]) {
+                    const t = runCase(c.video, FACE, { grid, willReadFrequently: wrf, frames: 14 });
+                    P(`\n  lưới ${grid} · willReadFrequently=${wrf}`);
+                    ROWS.forEach(([k, name]) => P(`    ${pad(name, 40)}${fx(median(t[k]))}`));
+                    P(`    ${pad('TỔNG', 40)}${fx(median(t.total))}   → ${(1000 / median(t.total)).toFixed(1)} fps`);
+                    await new Promise((r) => setTimeout(r, 30));
+                }
+            }
+
+            P('\n  ── qua RetouchRenderer (đường app thật chạy) ──');
+            for (const [name, cfg] of [['13 thanh (xấu nhất)', CFG], ['3 thanh (thường gặp)', CFG_TYPICAL]]) {
+                for (const [mode, grid] of [['DỪNG  lưới 256', Retouch.FREQ_GRID],
+                                            ['PHÁT  lưới 128', Retouch.FREQ_GRID_PLAYING]]) {
+                    const ms = runRendererCase(c.video, FACE, cfg, grid);
+                    P(`    ${pad(`${name} · ${mode}`, 40)}${fx(ms)}   → ${(1000 / ms).toFixed(1)} fps`);
+                    await new Promise((r) => setTimeout(r, 30));
+                }
+            }
+        }
+        P('\nxong.');
+    } catch (error) {
+        P(`LỖI: ${error.message}`);
+        console.error(error);
+    }
+})();
+</script>
