@@ -11,7 +11,14 @@ torch
 # `pip install -r requirements.txt` DỪNG NGAY trên Windows ở đúng dòng này, và mọi
 # gói phía sau (faster-whisper, mediapipe…) không kịp cài. core_logic.py import
 # mlx_whisper BÊN TRONG hàm (lazy) nên máy khác macOS không bao giờ cần gói này.
-mlx-whisper; platform_system == "Darwin"
+# Thêm `platform_machine == "arm64"` (2026-09-18): mlx là thư viện chạy trên Metal của
+# Apple Silicon, PyPI KHÔNG có wheel x86_64 nào — `pip download mlx --platform
+# macosx_11_0_x86_64` trả "No matching distribution found". Chỉ đánh dấu Darwin thì trên
+# Mac Intel `pip install -r requirements.txt` DỪNG NGAY ở dòng này và mọi gói phía sau
+# (faster-whisper, opencv, mediapipe…) không kịp cài — ĐÚNG y cái bẫy mà chú thích ngay
+# trên đã mô tả cho Windows, chỉ đổi nền tảng. Có marker thì Mac Intel cài trót lọt phần
+# còn lại; riêng bóc băng thì chưa có engine nào cho nó (xem asr/mac_mlx_sidecar.py).
+mlx-whisper; platform_system == "Darwin" and platform_machine == "arm64"
 # whisperx ĐÃ BỎ (2026-08-23). Không nơi nào trong repo import hay gọi nó — nhưng nó
 # ghim `ctranslate2<4.5.0`, và ctranslate2 4.4.0 lại `import pkg_resources` TRONG nhánh
 # `if sys.platform == "win32"`. setuptools >= 81 không còn pkg_resources -> trên Windows

@@ -9,8 +9,9 @@ trình dựng phim bình thường: lane phủ, chữ, hiệu ứng chuyển, ch
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3%20or%20later-blue.svg)](LICENSE)
 
-> **Trạng thái:** đang phát triển. Bản hiện tại chỉ hỗ trợ **Windows x64**. Mã nguồn có
-> nhánh macOS (ASR qua `mlx_whisper`) nhưng chưa được kiểm thử ở bản này.
+> **Trạng thái:** đang phát triển. **Bộ cài đóng gói chỉ có cho Windows x64.** Chạy từ mã
+> nguồn thì cả Windows lẫn **macOS** đều được — đường macOS bóc băng bằng `mlx_whisper`
+> (Apple Silicon) thay cho `faster-whisper`, xem [Chạy từ mã nguồn](#chạy-từ-mã-nguồn).
 
 ---
 
@@ -116,30 +117,104 @@ Ngoại lệ: `library/luts/` **có** trong repo — 22 tệp `.cube` đó do ch
 
 ### Cần có trước
 
-| | Ghi chú |
-|---|---|
-| **Node.js 20+** | |
-| **Python 3.9–3.12** | **Không** dùng 3.13+ — `mediapipe` chưa có wheel cho bản đó, và `pip install` sẽ *âm thầm bỏ qua* nó rồi Auto-Reframe chết sau với `No module named 'cv2'` |
-| **Visual Studio 2022** kèm workload *Desktop development with C++* | Để biên dịch native addon và C++ sidecar |
-| **FFmpeg** trên `PATH` | Cần build có `zscale` (đường tonemap HDR dựa vào nó) |
+| | Windows | macOS |
+|---|---|---|
+| **Node.js** | 20+ | 20+ |
+| **Python** | 3.9–3.12 từ [python.org](https://www.python.org/downloads/) | 3.9–3.12 — `brew install python@3.12` |
+| **Bóc băng (ASR)** | `faster-whisper` + CUDA | `mlx_whisper` — **chỉ Apple Silicon** |
+| **Toolchain C++** | Visual Studio 2022 kèm workload *Desktop development with C++* | Xcode Command Line Tools — `xcode-select --install` |
+| **FFmpeg** trên `PATH` | `winget install Gyan.FFmpeg` | `brew install ffmpeg` |
+
+Hai cái bẫy đáng nhớ trước khi cài:
+
+- **Đừng dùng Python 3.13+.** `mediapipe` chưa có wheel cho bản đó, và `requirements.txt`
+  ghim `mediapipe` + `opencv-contrib-python` kèm marker `python_version < "3.13"`. Hậu quả
+  không phải là một lỗi cài đặt mà là sự im lặng: `pip install` vẫn **báo thành công**, chỉ
+  âm thầm bỏ qua hai gói đó, rồi Auto-Reframe chết sau với `No module named 'cv2'`. Cả
+  `npm run setup` lẫn `npm run preflight` đều kiểm và chặn trước ca này.
+- **FFmpeg cần có `zscale`.** Đường tonemap HDR dựa vào bộ lọc này, mà nó không có trong
+  mọi bản build (bản *essentials* của gyan.dev và một số bản Homebrew đều thiếu). Thiếu thì
+  chỉ clip HDR bị ảnh hưởng; `npm run setup` sẽ nói rõ bản trên máy bạn có hay không.
+
+Native addon **bắt buộc** dùng MSVC trên Windows vì nó nạp cùng tiến trình với Electron.
+C++ sidecar thì dễ tính hơn — nó là một tiến trình độc lập nói chuyện qua stdio nên biên
+dịch được bằng MSVC, MinGW-w64 hay clang (đặt `CXX` để chỉ định).
 
 ### Các bước
 
 ```bash
-git clone https://github.com/tamphamdesigner92-tb/CrabbyCut_Windows.git
-cd CrabbyCut_Windows
-
-npm install                      # postinstall tự đồng bộ vendor assets
-
-py -3.12 -m venv .venv           # môi trường Python của dự án
-.venv\Scripts\python -m pip install -r requirements.txt
-
-npm run build:native             # node-gyp addon + C++ sidecar (tự tìm vcvars64.bat)
+git clone https://github.com/tamphamdesigner92-tb/CrabbyCut.git
+cd CrabbyCut
 npm start
 ```
 
-`npm start` chạy `preflight_python` trước — nó **cảnh báo** chứ không chặn nếu môi trường
-Python còn thiếu, kèm đúng lệnh cần chạy.
+Đúng một lệnh, giống hệt nhau trên Windows và macOS. `npm start` **tự kiểm và tự cài những
+gì còn thiếu**, có sẵn thì bỏ qua và chạy luôn:
+
+| Kiểm | Thiếu thì tự làm gì | Nếu bỏ qua bước này thì hỏng ra sao |
+|---|---|---|
+| `node_modules` + binary Electron | `npm install` | `Electron failed to install correctly` |
+| Native addon, C++ sidecar | `node-gyp rebuild`, biên dịch sidecar | App vẫn mở, chỉ in một dòng `Cannot load native addon` rồi chạy đường dự phòng bằng JS — không ai đọc dòng đó |
+| `.venv` + gói Python | dựng venv bằng interpreter hợp lệ, `pip install -r requirements.txt` | Lỗi nổ rất muộn, giữa lúc bấm nút bóc băng: `Missing Python package: …` |
+| `ffmpeg` / `ffprobe` trên PATH | *chỉ báo* — không tự cài được | `backend/server.js` spawn `ffmpeg` bằng tên trần, thiếu là mọi đường xuất/preview chết bằng `ENOENT`, một lỗi không hề nhắc tới FFmpeg |
+
+Máy đã đủ thì toàn bộ phép kiểm tốn khoảng **0,15 giây** và in đúng một dòng:
+
+```
+[setup] ✓ Môi trường đã đủ — không phải cài gì.
+```
+
+Lần đầu trên máy mới thì nó nói rõ đang làm gì và mất bao lâu trước khi bắt đầu. Riêng bước
+Python nặng — `requirements.txt` kéo cả `torch` lẫn `openai-whisper`, lần đầu mất 5–20 phút.
+
+Native addon **bắt buộc** dùng MSVC trên Windows vì nó nạp cùng tiến trình với Electron.
+C++ sidecar dễ tính hơn — nó là tiến trình độc lập nói chuyện qua stdio nên biên dịch được
+bằng MSVC, MinGW-w64 hay clang (đặt `CXX` để chỉ định).
+
+### Khi muốn tự quyết thay vì để nó tự làm
+
+```bash
+npm run setup                        # chạy đúng phép kiểm đó nhưng in bảng trạng thái đầy đủ
+npm run setup -- --skip-python       # chỉ dựng native, bỏ phần tải nặng
+npm run setup -- --python=/đường/dẫn # chỉ định interpreter thay vì để nó tự dò
+
+CRAB_SKIP_SETUP=1 npm start          # bỏ hẳn bước tự cài
+CRAB_SKIP_PYTHON=1 npm start         # mở app ngay, chưa đụng tới phần AI
+npm run electron:dev                 # chạy thẳng, CHỈ cảnh báo chứ không tự cài (hành vi cũ)
+```
+
+Script tự dò interpreter chứ không in một lệnh cứng: hướng dẫn kiểu `python3.12 -m venv .venv`
+sẽ chết bằng `command not found` trên máy chỉ có 3.11, hoặc máy cài Python qua pyenv/uv. Nó
+hỏi từng ứng viên phiên bản thật, và trên Windows ưu tiên launcher `py -3.12` vì `python`
+trỏ vào bản mặc định — mà mặc định hiện nay thường là 3.13/3.14, bản mediapipe không có wheel.
+
+### `npm start` tự kiểm những gì
+
+```
+setup_dev --auto → preflight (Python) → preflight:native → prepare:vendor → fix:electron-sign → electron .
+```
+
+- **`setup_dev --auto`** là bước tự cài nói ở trên. Nó **không bao giờ chặn**: hỏng bước nào
+  thì báo bước đó rồi vẫn mở app.
+- **`preflight`** dò lại gói Python và sinh `docs/MOI_TRUONG_PYTHON.md` khi còn thiếu — ghi
+  rõ gói nào thuộc tính năng nào, được import ở dòng nào, rồi tự xoá tệp đó khi đã đủ.
+- **`preflight:native`** kiểm addon + sidecar, kể cả ca `.cpp` **mới hơn** sản phẩm (sau
+  `git pull` binary cũ vẫn nạp được, chỉ là hành vi không khớp mã nguồn đang đọc). Thêm
+  `--no-build` để chỉ kiểm.
+- **`fix:electron-sign`** ký lại ad-hoc binary Electron trên macOS. Chữ ký gốc hay hỏng sau
+  khi npm giải nén, và triệu chứng là GPU/WebGL không chạy chứ không phải một lỗi rõ ràng.
+
+### Bóc băng trên macOS
+
+Trên macOS ứng dụng **luôn** dùng `mlx_whisper`, không có lựa chọn nào khác:
+`normalizeAsrEngine()` trong `backend/server.js` bỏ qua giá trị người dùng gửi lên và trả
+thẳng `mlx_whisper` cho mọi nền tảng không phải Windows. Model cố định là
+`mlx-community/whisper-large-v3-turbo`, chạy qua `asr/mac_mlx_sidecar.py`. Windows đi đường
+khác hẳn: `faster-whisper` + CUDA, qua `asr/windows_faster_whisper_sidecar.py`.
+
+MLX chạy trên Metal của **Apple Silicon**; PyPI không có wheel x86_64 nào. Nên trên **Mac
+Intel** phần bóc băng hiện chưa có engine — các phần còn lại (dựng phim, Auto-Reframe,
+Retouch, xuất video) vẫn chạy.
 
 ### Chạy từ mã nguồn khác bản đã cài ở chỗ nào
 
