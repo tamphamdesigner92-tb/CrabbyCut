@@ -5,13 +5,13 @@
   "description": "Electron shell for native video timeline editor",
   "license": "GPL-3.0-or-later",
   "author": "Tam Pham",
-  "homepage": "https://github.com/tamphamdesigner92-tb/CrabbyCut",
+  "homepage": "https://github.com/tamphamdesigner92-tb/CrabbyCut_Windows",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tamphamdesigner92-tb/CrabbyCut.git"
+    "url": "git+https://github.com/tamphamdesigner92-tb/CrabbyCut_Windows.git"
   },
   "bugs": {
-    "url": "https://github.com/tamphamdesigner92-tb/CrabbyCut/issues"
+    "url": "https://github.com/tamphamdesigner92-tb/CrabbyCut_Windows/issues"
   },
   "main": "electron/main.js",
   "scripts": {
