@@ -1,17 +1,17 @@
 {
   "name": "ai-video-auto-cutter-electron",
-  "version": "1.1.10",
+  "version": "1.1.11",
   "private": true,
   "description": "Electron shell for native video timeline editor",
   "license": "GPL-3.0-or-later",
   "author": "Tam Pham <tampham.designer92@gmail.com>",
-  "homepage": "https://github.com/tamphamdesigner92-tb/CrabbyCut_Windows",
+  "homepage": "https://github.com/tamphamdesigner92-tb/CrabbyCut",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tamphamdesigner92-tb/CrabbyCut_Windows.git"
+    "url": "git+https://github.com/tamphamdesigner92-tb/CrabbyCut.git"
   },
   "bugs": {
-    "url": "https://github.com/tamphamdesigner92-tb/CrabbyCut_Windows/issues"
+    "url": "https://github.com/tamphamdesigner92-tb/CrabbyCut/issues"
   },
   "main": "electron/main.js",
   "scripts": {
@@ -162,6 +162,7 @@
       "!progress.txt",
       "native/addon/build/Release/core_c.node",
       "native/sidecar/build/core_process.exe",
+      "native/sidecar/build/core_process",
       "!build/**",
       "build/icon.ico",
       "!settings/**",
@@ -199,7 +200,7 @@
       {
         "provider": "github",
         "owner": "tamphamdesigner92-tb",
-        "repo": "CrabbyCut_Windows",
+        "repo": "CrabbyCut",
         "releaseType": "release"
       }
     ]

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  QUYỀN CHO HARDENED RUNTIME (macOS) — bắt buộc phải có thì app mới notarize được.
+
+  KHÔNG phải App Sandbox. CrabbyCut đọc/ghi tệp ở bất cứ đâu người dùng chỉ tới, gọi ffmpeg
+  và Python nằm ngoài gói app (~/Library/Application Support/CrabbyCut/runtime) — sandbox
+  chặn sạch những việc đó. Đây là bản phát hành ngoài Mac App Store nên chỉ cần hardened
+  runtime, và mỗi dòng dưới đây là một hàng rào của nó được MỞ CÓ LÝ DO:
+-->
+<plist version="1.0">
+<dict>
+    <!-- V8 sinh mã máy lúc chạy. Thiếu quyền này thì Electron chết ngay khi khởi động. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!-- Cũng của V8: vùng nhớ vừa ghi vừa thực thi. Đi kèm allow-jit, thiếu một trong hai
+         là màn hình trắng hoặc crash không thông báo. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- backend/server.js chạy dưới ELECTRON_RUN_AS_NODE, và core_process cùng Python được
+         gọi kèm biến môi trường do ta đặt (PATH tới ffmpeg, PYTHONHOME…). Hardened runtime
+         mặc định XOÁ mọi biến DYLD_* và chặn kiểu gọi này. -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+
+    <!-- Nạp thư viện KHÔNG ký bằng cùng Team ID: native addon core_c.node, và toàn bộ
+         .so/.dylib của các gói Python (mediapipe, opencv, numpy…) được pip cài trên máy
+         người dùng SAU khi app đã ký. Không có dòng này thì runtime Python dựng xong vẫn
+         không import nổi. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- Tiến trình con (core_process, python, ffmpeg) kế thừa hardened runtime của app thay
+         vì bị macOS từ chối vì chưa ký. -->
+    <key>com.apple.security.inherit</key>
+    <true/>
+</dict>
+</plist>
