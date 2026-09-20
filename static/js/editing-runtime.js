@@ -4666,7 +4666,9 @@
                    người dùng đang canh — chọn và tua là hai ý định khác nhau. */
                 setPrimaryMainSelection(span.index, { seek: false });
             });
-            if (block.classList.contains('is-selected')) appendKeyframeMarkers(block, span.clip.keyframes, span.start);
+            if (block.classList.contains('is-selected')) {
+                appendKeyframeMarkers(block, span.clip, `main:${span.index}`, span.start, span.duration, mainTrackLocked);
+            }
             track.appendChild(block);
         });
 
@@ -4701,7 +4703,9 @@
             rightHandle.className = 'editing-resize-handle right';
             block.append(leftHandle, rightHandle);
             block.addEventListener('mousedown', (event) => startItemDrag(event, item, block));
-            if (selectedEditingItemIds.has(item.id)) appendKeyframeMarkers(block, item.keyframes, item.timeline_start);
+            if (selectedEditingItemIds.has(item.id)) {
+                appendKeyframeMarkers(block, item, item.id, item.timeline_start, item.duration, isTrackLocked(itemTrackRef));
+            }
             track.appendChild(block);
         });
 
@@ -6546,28 +6550,196 @@
         renderEditingTimeline();
     }
 
-    // Vẽ marker keyframe (hình thoi) dưới đáy block cho đối tượng ĐANG CHỌN. Vị trí x
-    // trong block = kf.t (giây cục bộ) × zoomScale. Click marker -> đưa playhead tới đó.
-    function appendKeyframeMarkers(block, keyframes, blockStartSeq) {
+    /* ===== HÌNH THOI KEYFRAME TRÊN BLOCK =====================================
+     * MỘT hình thoi = MỘT THỜI ĐIỂM, không phải một thông số: nó là HỢP các mốc của mọi
+     * trục transform + âm lượng. Vì vậy cú kéo ở dưới dời CẢ CỤM keyframe tại mốc đó —
+     * dời lẻ một trục là xé đôi một keyframe Vị trí và phá bất biến ghép cặp X/Y (xem
+     * pairPositionKeyframes ở text-animations.js).
+     *
+     * Vị trí x trong block = t (giây cục bộ) × zoomScale. Bấm -> đưa playhead tới đó;
+     * kéo ngang -> đổi thời điểm. */
+    function blockKeyframeTimes(keyframes) {
+        const times = [];
+        if (!keyframes || !window.TextAnimations) return times;
+        [...(TextAnimations.KEYFRAME_FIELDS || []), TextAnimations.VOLUME_KEYFRAME_FIELD].forEach((f) => {
+            (keyframes[f] || []).forEach((k) => {
+                const t = Math.round((Number(k.t) || 0) * 1000) / 1000;
+                /* Gom theo KF_EPS chứ không theo giá trị làm tròn: hai trục lệch nhau 1ms là
+                 * CÙNG một keyframe ở mọi chỗ khác của UI (kfListForControl), nên ở đây cũng
+                 * phải là MỘT hình thoi — hai cái chồng lên nhau thì kéo cái nào cũng đúng
+                 * một nửa dữ liệu. */
+                if (!times.some((x) => Math.abs(x - t) <= KF_EPS)) times.push(t);
+            });
+        });
+        return times.sort((a, b) => a - b);
+    }
+
+    function appendKeyframeMarkers(block, owner, ownerKey, blockStartSeq, blockDuration, locked) {
         if (!window.TextAnimations) return;
+        const keyframes = owner && owner.keyframes;
         // Âm lượng nằm ở namespace riêng nên phải cộng thêm cổng vào — nếu chỉ hỏi
         // hasKeyframes() thì block audio chỉ có keyframe âm lượng sẽ không hiện marker nào.
         if (!TextAnimations.hasKeyframes(keyframes) && !TextAnimations.hasVolumeKeyframes(keyframes)) return;
-        const times = new Set();
-        [...(TextAnimations.KEYFRAME_FIELDS || []), TextAnimations.VOLUME_KEYFRAME_FIELD].forEach((f) => {
-            (keyframes[f] || []).forEach((k) => times.add(Math.round(Number(k.t) * 1000) / 1000));
-        });
-        times.forEach((t) => {
+        blockKeyframeTimes(keyframes).forEach((t) => {
             const marker = document.createElement('div');
             marker.className = 'editing-kf-marker';
+            marker.classList.toggle('is-locked', !!locked);
+            /* Timeline được dựng LẠI mỗi bước kéo, nên "cái đang kéo" phải nhận ra được từ
+             * dữ liệu chứ không giữ bằng tham chiếu phần tử. */
+            if (keyframeDrag && keyframeDrag.ownerKey === ownerKey
+                && Math.abs(keyframeDrag.currentT - t) <= KF_EPS) {
+                marker.classList.add('is-dragging');
+            }
             marker.style.left = `${t * zoomScale}px`;
-            marker.title = `Keyframe @ ${Number(t).toFixed(2)}s`;
+            marker.title = locked
+                ? `Keyframe @ ${t.toFixed(2)}s — lane đang khoá`
+                : `Keyframe @ ${t.toFixed(2)}s — kéo ngang để đổi thời điểm`;
+            marker.addEventListener('mousedown', (event) => {
+                startKeyframeDrag(event, { owner, ownerKey, t, blockStartSeq, blockDuration, locked });
+            });
             marker.addEventListener('click', (event) => {
                 event.stopPropagation();
+                /* Vừa kéo xong: cú click sinh ra sau mouseup không còn là ý định "tua tới
+                 * keyframe" nữa. (Thường nó không tới được vì marker cũ đã bị dựng lại,
+                 * nhưng cờ vẫn phải có — xem chú thích ở finishKeyframeDrag.) */
+                if (suppressNextKeyframeClick) { suppressNextKeyframeClick = false; return; }
                 setSequenceTime(blockStartSeq + Number(t));
             });
             block.appendChild(marker);
         });
+    }
+
+    /* ---- KÉO HÌNH THOI ĐỂ ĐỔI THỜI ĐIỂM KEYFRAME (2026-09-20) ----
+     *
+     * KHÔNG ĐI QUA ĐƯỢC HÀNG XÓM, đúng nếp Premiere: mỗi cú kéo bị kẹp trong khoảng hở giữa
+     * hai keyframe liền kề. Nếu cho đi qua thì phải định nghĩa chuyện gì xảy ra khi hai mốc
+     * chồng nhau — và lựa chọn nào cũng tệ: gộp là NUỐT MẤT keyframe của người dùng ngay
+     * giữa cú kéo (họ còn chưa thả tay), đổi chỗ thì đường chuyển động lật ngược. Kẹp lại
+     * là thứ duy nhất không mất dữ liệu, và là thứ người dùng đã quen tay.
+     *
+     * Dữ liệu được sửa NGAY trong lúc kéo (không phải lúc thả) để preview đổi theo tay —
+     * giá trị tại playhead phụ thuộc mốc keyframe, nên kéo mà hình đứng im là mất hẳn phản
+     * hồi. recordHistory() chạy ở bước dịch chuyển ĐẦU TIÊN nên Ctrl+Z trả về đúng trạng
+     * thái trước cú kéo, không phải từng bước trung gian. */
+    let keyframeDrag = null;
+    let suppressNextKeyframeClick = false;
+    const KF_DRAG_THRESHOLD_PX = 3;   // dưới ngưỡng này vẫn là cú BẤM (tua playhead)
+    /* Khoảng hở tối thiểu phải chừa cho keyframe hàng xóm. Là HÀM chứ không phải hằng ở
+     * mức module: KF_EPS được khai báo bằng `const` mãi phía dưới, nên một hằng tính sẵn ở
+     * đây chạm vào vùng chết (TDZ) và ném ReferenceError NGAY LÚC NẠP — hỏng cả runtime,
+     * không chỉ hỏng cú kéo. */
+    function kfMinGap() { return KF_EPS * 1.5; }
+
+    /* Mốc keyframe làm tròn về MILI GIÂY. Phép đổi pixel -> giây và phép trừ giờ sequence
+     * sinh rác dấu phẩy động (12.4 - 10 = 2.4000000000000004), mà con số đó đi thẳng vào
+     * .crab và hiện lên tooltip. Sai số 0,5ms nhỏ hơn KF_EPS rất nhiều nên không mốc nào
+     * đổi nghĩa — chỉ là dữ liệu sạch. */
+    function kfRound(t) { return Math.round((Number(t) || 0) * 1000) / 1000; }
+
+    function startKeyframeDrag(event, ctx) {
+        if (event.button !== 0) return;
+        /* CHẶN NGAY: block nghe mousedown để kéo/trim (startItemDrag), còn lane chính thì
+         * #segmentsTrack nghe hộ (index.html). Không chặn là kéo hình thoi hoá ra kéo cả
+         * block — và block đi mất thì hình thoi cũng đi theo. */
+        event.stopPropagation();
+        suppressNextKeyframeClick = false;
+        if (ctx.locked) return;   // lane khoá: vẫn bấm để tua được, chỉ không sửa được
+        event.preventDefault();
+        const duration = Math.max(0, Number(ctx.blockDuration) || 0);
+        const others = blockKeyframeTimes(ctx.owner && ctx.owner.keyframes)
+            .filter((t) => Math.abs(t - ctx.t) > KF_EPS);
+        const prev = others.filter((t) => t < ctx.t).pop();
+        const next = others.find((t) => t > ctx.t);
+        let lo = kfRound(clamp(prev != null ? prev + kfMinGap() : 0, 0, duration));
+        let hi = kfRound(clamp(next != null ? next - kfMinGap() : duration, 0, duration));
+        // Hai hàng xóm sát nhau hơn cả khoảng hở tối thiểu -> không còn chỗ để đi: đứng yên.
+        if (lo > hi) { lo = ctx.t; hi = ctx.t; }
+        keyframeDrag = {
+            ...ctx, duration, lo, hi, startX: event.clientX, currentT: ctx.t,
+            moved: false, historySaved: false,
+        };
+    }
+
+    /* Mốc bắt dính của keyframe: playhead + hai mép block. KHÔNG bắt dính vào keyframe khác —
+     * chúng là BIÊN của cú kéo (lo/hi), dính vào đó là dừng sát rạt rồi gộp mất. */
+    function snapKeyframeTime(drag, proposed) {
+        const t = clamp(kfRound(proposed), drag.lo, drag.hi);
+        if (typeof isSnappingEnabled !== 'undefined' && !isSnappingEnabled) return t;
+        const playheadLocal = currentSequenceTime() - drag.blockStartSeq;
+        let best = t;
+        let bestDelta = editingMoveSnapThresholdSeconds();
+        [0, drag.duration, playheadLocal].forEach((cand) => {
+            if (!Number.isFinite(cand) || cand < drag.lo || cand > drag.hi) return;
+            const delta = Math.abs(cand - t);
+            if (delta <= bestDelta) { bestDelta = delta; best = cand; }
+        });
+        // Mốc bắt dính (mép block, playhead) cũng có thể lẻ -> làm tròn nốt.
+        return clamp(kfRound(best), drag.lo, drag.hi);
+    }
+
+    /* Dời MỌI keyframe đang nằm tại mốc `fromT` sang `toT` — cả trục transform, âm lượng
+     * lẫn thông số màu ('adj.*'), vì hình thoi đại diện cho THỜI ĐIỂM. Duyệt theo khoá thật
+     * có trong dữ liệu chứ không theo danh sách field cứng: thêm một họ keyframe mới mà quên
+     * sửa ở đây thì nó bị BỎ LẠI, và lỗi đó im lặng tuyệt đối. */
+    function moveKeyframesAt(owner, fromT, toT) {
+        const kfs = owner && owner.keyframes;
+        if (!kfs || typeof kfs !== 'object') return false;
+        let changed = false;
+        Object.keys(kfs).forEach((field) => {
+            const list = Array.isArray(kfs[field]) ? kfs[field] : null;
+            if (!list || !list.length) return;
+            let taken = false;
+            const next = [];
+            list.forEach((k) => {
+                if (Math.abs((Number(k.t) || 0) - fromT) > KF_EPS) { next.push(k); return; }
+                /* Hai keyframe CÙNG một trục nằm trong cùng dung sai là dữ liệu đã hỏng sẵn
+                 * (UI luôn coi chúng là một). Giữ cái đầu, bỏ phần dư — để cú kéo không nhân
+                 * chúng ra thành một cụm mới ở mốc đích. */
+                if (taken) { changed = true; return; }
+                taken = true;
+                next.push({ ...k, t: toT });
+                changed = true;
+            });
+            if (taken) {
+                next.sort((a, b) => (Number(a.t) || 0) - (Number(b.t) || 0));
+                kfs[field] = next;
+            }
+        });
+        return changed;
+    }
+
+    function handleKeyframeDrag(event) {
+        if (!keyframeDrag) return;
+        event.preventDefault();
+        const dx = event.clientX - keyframeDrag.startX;
+        if (!keyframeDrag.moved) {
+            if (Math.abs(dx) <= KF_DRAG_THRESHOLD_PX) return;
+            keyframeDrag.moved = true;
+        }
+        const target = snapKeyframeTime(keyframeDrag, keyframeDrag.t + dx / Math.max(1, Number(zoomScale) || 100));
+        if (Math.abs(target - keyframeDrag.currentT) < 1e-4) return;
+        if (!keyframeDrag.historySaved) {
+            recordHistory();
+            keyframeDrag.historySaved = true;
+        }
+        if (!moveKeyframesAt(keyframeDrag.owner, keyframeDrag.currentT, target)) return;
+        keyframeDrag.currentT = target;
+        const delta = target - keyframeDrag.t;
+        setEditingStatusText(`Keyframe @ ${target.toFixed(2)}s (${delta >= 0 ? '+' : ''}${delta.toFixed(2)}s)`);
+        renderEditingTimeline();
+        renderPreviewOverlays();
+    }
+
+    function finishKeyframeDrag() {
+        if (!keyframeDrag) return;
+        const moved = keyframeDrag.moved && Math.abs(keyframeDrag.currentT - keyframeDrag.t) > 1e-4;
+        keyframeDrag = null;
+        if (!moved) return;   // chỉ là cú bấm -> để handler click tua playhead như cũ
+        /* Marker bị dựng lại giữa cú kéo nên cú 'click' sau mouseup thường KHÔNG tới được
+         * marker nào cả; cờ này là lưới an toàn cho trường hợp ngược lại (kéo đúng 0 bước
+         * render). Nó được dọn ở startKeyframeDrag để không bao giờ nuốt nhầm cú bấm sau. */
+        suppressNextKeyframeClick = true;
+        renderAll();
     }
 
     function restoreStandardTimeline() {
@@ -19037,10 +19209,25 @@
                 background: #ffd400;
                 border: 1px solid rgba(0,0,0,0.5);
                 box-shadow: 0 0 4px rgba(255,212,0,0.7);
-                cursor: pointer;
+                cursor: grab;
                 z-index: 40;
             }
             .editing-kf-marker:hover { background: #fff; }
+            /* Vùng BẮT rộng hơn hình vẽ: hình thoi chỉ 9px và nằm sát đáy block, nắm trượt
+               tay là rơi xuống block -> hoá ra kéo cả block. Nới ra bằng lớp giả (xoay 45°
+               theo chính nó) nên hình hiển thị không to lên. */
+            .editing-kf-marker::after {
+                content: '';
+                position: absolute;
+                inset: -4px;
+            }
+            .editing-kf-marker.is-dragging {
+                background: #fff;
+                cursor: grabbing;
+                box-shadow: 0 0 6px rgba(255,255,255,0.9);
+                z-index: 41;
+            }
+            .editing-kf-marker.is-locked { cursor: pointer; }
             .editing-snap-guide {
                 position: absolute;
                 top: 0;
@@ -20971,6 +21158,12 @@
         window.addEventListener('pointerup', finishEditingInspectorScrub);
         window.addEventListener('pointercancel', finishEditingInspectorScrub);
         window.addEventListener('mousemove', handleItemDrag, { passive: false });
+        /* Kéo hình thoi keyframe: cùng khuôn với editingDrag — nghe trên window để cú kéo
+           không đứt khi con trỏ ra khỏi block, và 'blur' là lưới an toàn khi mất focus
+           giữa chừng (Alt-Tab) làm 'mouseup' không bao giờ tới. */
+        window.addEventListener('mousemove', handleKeyframeDrag, { passive: false });
+        window.addEventListener('mouseup', finishKeyframeDrag);
+        window.addEventListener('blur', finishKeyframeDrag);
         window.addEventListener('mouseup', (event) => finishItemDrag(event));
         /* Lưới an toàn: mất focus cửa sổ giữa cú kéo (Alt-Tab, mở hộp thoại) thì 'mouseup'
            có thể không bao giờ tới -> con trỏ kẹt hình bàn tay nắm trên toàn app. */

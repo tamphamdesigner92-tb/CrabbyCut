@@ -14331,6 +14331,13 @@
 
 	    document.getElementById('segmentsTrack')?.addEventListener('mousedown', (e) => {
             if (!isRazorToolActive && currentMode === 'FINAL') {
+                /* NHƯỜNG HÌNH THOI KEYFRAME. Handler này chạy ở pha CAPTURE và
+                   stopPropagation ở nhánh lane chính bên dưới, nên không nhường ở đây thì
+                   mousedown KHÔNG BAO GIỜ tới được listener của chính hình thoi -> kéo
+                   keyframe trên lane chính chết lặng (lane overlay không dính vì nhánh đó
+                   chỉ nhận .editing-main-block). Trả về mà KHÔNG stopPropagation: cú
+                   mousedown đi tiếp tới marker, và chính marker mới là nơi chặn lan. */
+                if (e.target?.closest?.('.editing-kf-marker')) return;
                 const mainEditingBlock = currentStepId === 'step4'
                     ? e.target.closest?.('.editing-main-block')
                     : null;
