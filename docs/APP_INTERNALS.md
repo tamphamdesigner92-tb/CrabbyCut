@@ -5279,7 +5279,7 @@ NỀN KHUNG PREVIEW — đen hay xanh nhấp nháy (isSequenceTransparencyWarnin
 ```text
 - MacBook/macOS:
   - ASR dùng mlx_whisper qua asr/mac_mlx_sidecar.py, phù hợp Apple Silicon/MLX.
-  - Hardware info hiển thị MPS (Mac Silicon) khi chạy trên darwin arm64.
+  - Hardware info hiển thị GPU (MLX/Metal) khi chạy trên darwin arm64.
   - Timeline (ruler + segment) render bằng PixiJS; sóng âm render bằng canvas 2D riêng (audio-waveform.js), cả hai giới hạn devicePixelRatio tối đa 2 để giảm tải.
   - Export ưu tiên VideoToolbox cho h264/hevc/prores khi FFmpeg hỗ trợ.
   - Preview proxy ưu tiên h264_videotoolbox và scale_vt nếu FFmpeg hỗ trợ, nhưng chỉ chạy sau ASR để tránh tranh MLX/MPS/unified memory.

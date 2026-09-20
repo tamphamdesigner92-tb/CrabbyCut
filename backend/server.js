@@ -1132,7 +1132,7 @@ function collectGpuInfo() {
     return {
       gpu: gpuNames.length ? [...new Set(gpuNames)].join(', ') : (isMacArm ? `Apple M-Series GPU (${process.arch})` : 'Không xác định'),
       vram: vramValues.length ? [...new Set(vramValues)].join(', ') : (isMacArm ? 'Unified memory/shared GPU memory' : 'Không xác định'),
-      device: isMacArm ? 'MPS (Mac Silicon)' : 'CPU',
+      device: isMacArm ? 'GPU (MLX/Metal)' : 'CPU',
     };
   }
   if (process.platform === 'win32') {

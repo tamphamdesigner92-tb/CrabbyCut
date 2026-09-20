@@ -151,7 +151,7 @@ def get_detailed_hardware_info() -> Dict[str, str]:
     device_used = "CPU"
 
     if sys_os == "Darwin" and machine == "arm64":
-        device_used = "MPS (Mac Silicon)"
+        device_used = "GPU (MLX/Metal)"
         gpu_name = f"Apple M-Series GPU ({machine})"
     elif torch.cuda.is_available():
         device_used = "GPU (CUDA)"
