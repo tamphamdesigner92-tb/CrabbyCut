@@ -11062,7 +11062,13 @@
     // trả về giờ tính từ 0 và keyframe bị ghi sai chỗ.
     function mirrorTransformToKeyframes(item, fields, localT = null) {
         if (!item || !item.keyframes || !Array.isArray(fields) || !fields.length) return;
-        const t = Number.isFinite(Number(localT)) ? Number(localT) : overlayLocalTime(item);
+        /* `Number.isFinite(localT)` — KHÔNG bọc `Number(...)`: `Number(null)` ra 0 (không
+         * phải NaN), nên bản cũ coi mốc "chưa tính" là mốc 0 và MỌI cú kéo box trên overlay
+         * (nơi gọi truyền thẳng null) đều ghi keyframe vào ĐẦU block. Với block đã có
+         * keyframe ở field đang kéo, giá trị tại playhead giữ nguyên -> hình không nhúc
+         * nhích, bảng thuộc tính (đọc giá trị HIỆU DỤNG tại playhead) không đổi, người dùng
+         * thấy "kéo xong không ăn" trong khi HUD (đọc base) vẫn nhảy số. Lỗi báo 2026-09-19. */
+        const t = Number.isFinite(localT) ? localT : overlayLocalTime(item);
         const tr = normalizeTransform(item.transform);
         fields.forEach((field) => {
             if (fieldHasKeyframes(item, field)) {
@@ -11989,7 +11995,10 @@
             document.body.classList.add(editingInspectorScrub.config.axis === 'y' ? 'inspector-scrubbing-y' : 'inspector-scrubbing');
         }
         event.preventDefault();
-        const multiplier = event.shiftKey ? 0.1 : 1;
+        // Cùng bộ hệ số với ô Biến đổi (inspectorScrubMultiplier ở index.html) và với cặp
+        // mũi tên tăng/giảm: Shift = bước nhỏ 1/10, Alt = bước lớn ×10. Trước đây nhánh này
+        // chỉ có Shift nên cùng một cử chỉ lại cho kết quả khác nhau tuỳ ô đang kéo.
+        const multiplier = figSpinMultiplier(event);
         const { input, config, startValue } = editingInspectorScrub;
         input.value = formatEditingScrubValue(startValue + (delta * config.step * multiplier), config);
         updateEditingInspectorField(input, { commit: false });
@@ -12007,6 +12016,178 @@
         } else {
             input?.focus?.();
         }
+    }
+
+    /* ===================================================================
+     * NÚT TĂNG/GIẢM CHO MỌI Ô SỐ CỦA BẢNG THUỘC TÍNH (kiểu CapCut)
+     *
+     * VÌ SAO GẮN TỰ ĐỘNG thay vì viết thêm markup vào từng chỗ dựng HTML: bảng thuộc tính
+     * có ~60 ô số, sinh ra từ hơn chục hàm dựng chuỗi HTML rải khắp file (text, hình, mặt
+     * nạ, màu, retouch, tốc độ, âm lượng, mẫu văn bản...) và MỖI hàm còn dựng lại panel
+     * bằng innerHTML mỗi lần làm mới. Sửa tay từng nơi là chắc chắn sót, và ô mới thêm
+     * ngày mai lại không có nút. Ở đây gắn MỘT lần theo cấu trúc DOM, rồi một
+     * MutationObserver gắn lại sau mỗi lượt dựng lại panel — ô nào có khung ô số thì tự
+     * có nút, không ai phải nhớ gì.
+     *
+     * BA loại "khung ô" của panel (xem CSS tương ứng):
+     *   .fig-field       — khung chuẩn, flex: nút là phần tử flex cuối.
+     *   .rt-row          — hàng Retouch, lưới: nút chiếm cột thứ tư.
+     *   .adj-wheel-field — ô R/G/B của Vòng tròn màu, lưới: nút chiếm cột thứ ba.
+     * Ô số nằm ngoài ba khung đó sẽ KHÔNG có nút — cố ý: chèn bừa vào một khối lưới lạ là
+     * đẩy phần tử khác xuống hàng và vỡ bố cục, hỏng còn tệ hơn là thiếu nút.
+     *
+     * GHI GIÁ TRỊ đi đúng đường sẵn có: đặt `input.value` rồi bắn 'input' + 'change'. Hai
+     * sự kiện đó là CỬA VÀO DUY NHẤT của cả hai hệ ô số (ô Biến đổi ở index.html và ô của
+     * #editingInspectorExtra ở đây), nên nút thừa hưởng nguyên vẹn phần ghi keyframe, gộp
+     * Hoàn tác, đồng bộ control anh em và vẽ lại preview — không nhân bản một dòng logic.
+     * ================================================================ */
+    const FIG_SPIN_HOSTS = '.fig-field, .rt-row, .adj-wheel-field';
+    const FIG_SPIN_TIP = 'Giữ Shift: bước nhỏ (1/10) • Giữ Alt: bước lớn (×10)';
+    let figSpinTemplate = null;
+    let figSpinObserver = null;
+
+    // Hệ số bước, DÙNG CHUNG với kéo chuột trên ô (inspectorScrubMultiplier /
+    // handleEditingInspectorScrubMove) để bấm nút và kéo chuột cùng một quy ước.
+    function figSpinMultiplier(event) {
+        if (event?.altKey) return 10;
+        if (event?.shiftKey) return 0.1;
+        return 1;
+    }
+
+    function figSpinStep(input) {
+        // Ô Biến đổi (X/Y/Scale/Xoay/Opacity): một bấm = MỘT ĐƠN VỊ. Không lấy `step` của
+        // TRANSFORM_FIELD_CONFIG vì Opacity ở đó là 0.25 — bước của thao tác KÉO, quá vụn
+        // cho một cú bấm.
+        if (input.dataset.transformField) return 1;
+        const config = editingScrubConfig(input);
+        if (config && Number(config.step) > 0) return Number(config.step);
+        const attr = Number(input.step);
+        return Number.isFinite(attr) && attr > 0 ? attr : 1;
+    }
+
+    function figSpinBounds(input) {
+        const config = editingScrubConfig(input);
+        if (config) return { min: config.min, max: config.max };
+        const field = input.dataset.transformField;
+        // TRANSFORM_FIELD_CONFIG là `const` top-level của script index.html: cùng global
+        // lexical scope nên đọc thẳng được, nhưng vẫn rào typeof phòng khi nó đổi chỗ.
+        if (field && typeof TRANSFORM_FIELD_CONFIG === 'object' && TRANSFORM_FIELD_CONFIG[field]) {
+            return { min: TRANSFORM_FIELD_CONFIG[field].min, max: TRANSFORM_FIELD_CONFIG[field].max };
+        }
+        const min = Number(input.min);
+        const max = Number(input.max);
+        return {
+            min: input.min !== '' && Number.isFinite(min) ? min : -Infinity,
+            max: input.max !== '' && Number.isFinite(max) ? max : Infinity,
+        };
+    }
+
+    // Giá trị xuất phát. Ô đang để "Auto"/rỗng (Line height) lấy số THẬT ở placeholder —
+    // cùng cách mà beginEditingInspectorScrub làm, nếu không bấm mũi tên là nhảy về 0.
+    function figSpinCurrent(input) {
+        const raw = String(input.value).trim().toLowerCase();
+        if (raw === '' || raw === 'auto') {
+            const placeholder = Number(input.placeholder);
+            return Number.isFinite(placeholder) ? placeholder : 0;
+        }
+        const parsed = Number(String(input.value).replace(',', '.'));
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    function figSpinFormat(input, value, step) {
+        const config = editingScrubConfig(input);
+        if (config) return formatEditingScrubValue(value, config);
+        const decimals = step >= 1 ? 0 : (step >= 0.1 ? 1 : 2);
+        return String(Number(value.toFixed(decimals)));
+    }
+
+    function figSpinBump(input, direction, event) {
+        if (!input || input.disabled) return;
+        const bounds = figSpinBounds(input);
+        const base = figSpinStep(input);
+        const current = figSpinCurrent(input);
+        const apply = (step) => figSpinFormat(input, clamp(current + (direction * step), bounds.min, bounds.max), step);
+        let text = apply(base * figSpinMultiplier(event));
+        /* Ô SỐ NGUYÊN mà giữ Shift: bước 1/10 làm tròn xong lại ra đúng số cũ -> bấm mà
+           màn hình đứng im, người dùng tưởng nút hỏng. Rơi về bước 1 đơn vị — đó cũng
+           CHÍNH LÀ bước nhỏ nhất ô ấy biểu diễn được, nên vẫn đúng nghĩa "bước chậm". */
+        if (text === String(input.value)) text = apply(base);
+        if (text === String(input.value)) return;   // chạm trần/sàn thật -> đừng sinh mốc Hoàn tác rỗng
+        input.value = text;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    /* Ô nào là Ô SỐ. `type=number` là hiển nhiên; phần còn lại của panel dùng
+     * `type=text inputmode=decimal` (để tự kiểm soát định dạng và bỏ spinner mặc định của
+     * trình duyệt) nên cũng tính. Loại trừ có chủ đích: ô mã màu #rrggbb, ô tìm font, ô
+     * đặt tên hiệu ứng — chữ, không phải số. */
+    function figSpinEligible(input) {
+        const type = String(input.getAttribute('type') || 'text').toLowerCase();
+        if (['range', 'color', 'checkbox', 'radio', 'file', 'hidden', 'button', 'submit'].includes(type)) return false;
+        if (input.dataset.noSpin === '1') return false;
+        if (input.classList.contains('color-hex')) return false;
+        if (input.hasAttribute('data-font-search') || input.hasAttribute('data-fx-name')) return false;
+        if (type === 'number') return true;
+        return input.getAttribute('inputmode') === 'decimal';
+    }
+
+    function figSpinNode() {
+        if (!figSpinTemplate) {
+            figSpinTemplate = document.createElement('span');
+            figSpinTemplate.className = 'fig-spin';
+            const btn = (dir, label, path) => `<button type="button" class="fig-spin-btn"`
+                + ` data-fig-spin="${dir}" tabindex="-1" aria-label="${label}" title="${label} — ${FIG_SPIN_TIP}">`
+                + `<svg viewBox="0 0 10 6" aria-hidden="true"><path d="${path}"/></svg></button>`;
+            figSpinTemplate.innerHTML = btn(1, 'Tăng', 'M1 4.8 L5 1.2 L9 4.8') + btn(-1, 'Giảm', 'M1 1.2 L5 4.8 L9 1.2');
+        }
+        return figSpinTemplate.cloneNode(true);
+    }
+
+    function decorateInspectorSpinners() {
+        const panel = document.getElementById('clipInspectorPanel');
+        if (!panel) return;
+        panel.querySelectorAll('input').forEach((input) => {
+            if (input.dataset.figSpin === '1' || !figSpinEligible(input)) return;
+            const host = input.closest(FIG_SPIN_HOSTS);
+            if (!host || host.querySelector(':scope > .fig-spin')) return;
+            input.dataset.figSpin = '1';
+            /* Đứng TRƯỚC cụm keyframe nếu cụm đó nằm chung khung: mũi tên thuộc về con số,
+               để nó rớt ra sau ba nút hình thoi là mất liên hệ thị giác với ô. */
+            const kf = host.querySelector(':scope > .kf-group');
+            if (kf) host.insertBefore(figSpinNode(), kf);
+            else host.appendChild(figSpinNode());
+        });
+    }
+
+    /* Panel được dựng lại bằng innerHTML từ rất nhiều nơi (chọn block khác, đổi tab, kéo
+     * box trên preview, keyframe chạy theo playhead...). Thay vì đi gọi decorate ở từng
+     * nơi — và sót — nghe thẳng DOM. `takeRecords()` ở cuối callback vứt đi chính những
+     * thay đổi mà decorate vừa tạo ra, nên không có vòng lặp observer tự nuôi. */
+    function watchInspectorSpinners() {
+        const panel = document.getElementById('clipInspectorPanel');
+        if (!panel || figSpinObserver) return;
+        figSpinObserver = new MutationObserver(() => {
+            decorateInspectorSpinners();
+            figSpinObserver.takeRecords();
+        });
+        figSpinObserver.observe(panel, { childList: true, subtree: true });
+        decorateInspectorSpinners();
+
+        // Pha CAPTURE + stopPropagation: panel còn có handler 'click' ở pha bubble
+        // (handleTextInspectorClick & co.) — chặn tại đây để cú bấm mũi tên không đi lạc
+        // vào chúng. mousedown chặn mặc định để ô số KHÔNG mất focus khi đang gõ dở.
+        panel.addEventListener('mousedown', (event) => {
+            if (event.target?.closest?.('.fig-spin-btn')) event.preventDefault();
+        }, true);
+        panel.addEventListener('click', (event) => {
+            const btn = event.target?.closest?.('.fig-spin-btn');
+            if (!btn || btn.disabled) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const host = btn.closest(FIG_SPIN_HOSTS);
+            figSpinBump(host?.querySelector('input[data-fig-spin="1"]'), Number(btn.dataset.figSpin) || 1, event);
+        }, true);
     }
 
     // Transform HIỂN THỊ trên bảng thông số: base khi KHÔNG có keyframe; giá trị HIỆU
@@ -20253,7 +20434,10 @@
             .adj-lut-remove:hover { background: rgba(255,90,90,0.75); color: #fff; }
             .adj-auto-hint { margin-top: -2px; }
             /* ---------------- Panel Retouch ---------------- */
-            .rt-row { display: grid; grid-template-columns: 92px 1fr 56px; gap: 8px; align-items: center; }
+            /* Cột thứ TƯ (auto) là chỗ của cặp mũi tên tăng/giảm — xem .fig-spin ở
+               index.html. Hàng Retouch không bọc ô số trong .fig-field nên nút phải
+               có cột riêng; thiếu cột này thì nút rơi xuống hàng lưới kế tiếp. */
+            .rt-row { display: grid; grid-template-columns: 92px 1fr 56px auto; gap: 8px; align-items: center; }
             .rt-row label { font-size: 0.78em; color: var(--text-muted); }
             .rt-row input[type=number] { width: 100%; }
             .rt-target-row .fig-field { min-width: 0; }
@@ -20444,7 +20628,8 @@
             .adj-wheel-body { display: grid; grid-template-columns: 108px minmax(0, 1fr); gap: 10px; align-items: center; }
             .adj-wheel { width: 108px; height: 108px; display: block; touch-action: none; cursor: crosshair; }
             .adj-wheel-fields { display: grid; gap: 4px; }
-            .adj-wheel-field { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 6px; align-items: center; }
+            /* Cột thứ BA (auto): cặp mũi tên tăng/giảm, cùng lý do như .rt-row. */
+            .adj-wheel-field { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 6px; align-items: center; }
             .adj-wheel-field input {
                 width: 100%;
                 background: rgba(255,255,255,0.06);
@@ -20710,6 +20895,9 @@
         window.addEventListener('blur', releaseCompare);
 
         document.getElementById('clipInspectorPanel')?.addEventListener('pointerdown', beginEditingInspectorScrub);
+        // Gắn cặp mũi tên tăng/giảm cho mọi ô số của bảng thuộc tính, và gắn LẠI sau mỗi
+        // lượt panel được dựng lại (xem khối chú thích ở watchInspectorSpinners).
+        watchInspectorSpinners();
         window.addEventListener('pointermove', handleEditingInspectorScrubMove, { passive: false });
         window.addEventListener('pointerup', finishEditingInspectorScrub);
         window.addEventListener('pointercancel', finishEditingInspectorScrub);

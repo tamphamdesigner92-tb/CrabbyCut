@@ -92,4 +92,25 @@ idless.forEach((m) => {
 assert.ok(/\|\|\s*isTemplateArtNumField\)\s*&&\s*!options\.commit/.test(source),
     'ô "Cỡ hình"/"Lệch hình" phải nằm trong nhánh vẽ lại ngay (isTemplateArtNumField)');
 
+/* ---- 5) Hàm ĐƯỢC VÁ không được truyền thẳng vào addEventListener ---------
+ * editing-runtime.js vá lại một loạt hàm của index.html (patchInspector) để chúng biết
+ * đường OVERLAY. Nhưng addEventListener chốt cứng THAM CHIẾU tại lúc đăng ký, mà
+ * index.html chạy TRƯỚC editing-runtime.js — truyền thẳng tên hàm là vĩnh viễn chạy bản
+ * gốc, bản vá không bao giờ được gọi.
+ * Lỗi thật đã mắc (sửa 2026-09-19): `window.addEventListener('pointerup', endInspectorScrub)`
+ * khiến thả chuột sau khi kéo một ô số của block overlay lại quy bảng thông số về
+ * transform của CLIP LANE CHÍNH (hoặc về 0/100% khi không có clip nào chọn) — giá trị đã
+ * ghi đúng vào block, chỉ riêng bảng là hiện sai, nên trông y như "kéo xong không ăn".
+ * Cách đúng: bọc trong lambda để tên được tra LÚC GỌI. */
+const indexHtml = fs.readFileSync(path.join(projectRoot, 'index.html'), 'utf8');
+const PATCHED_IN_RUNTIME = [...source.matchAll(/^\s{8}(\w+) = function patched\w+/gm)].map((m) => m[1]);
+assert.ok(PATCHED_IN_RUNTIME.length >= 5,
+    `chỉ đọc ra ${PATCHED_IN_RUNTIME.length} hàm được vá trong patchInspector — regex hỏng?`);
+PATCHED_IN_RUNTIME.forEach((name) => {
+    const direct = new RegExp(`addEventListener\\(\\s*['"][a-z]+['"]\\s*,\\s*${name}\\s*[,)]`);
+    assert.ok(!direct.test(indexHtml),
+        `index.html truyền THẲNG "${name}" vào addEventListener, mà hàm này bị editing-runtime.js vá lại`
+        + ` -> listener giữ bản GỐC và bản vá không bao giờ chạy. Bọc lại: (event) => ${name}(event)`);
+});
+
 console.log('inspector_scrub_fields: OK');

@@ -1443,6 +1443,68 @@
         }
         .fig-field input.color-swatch::-webkit-color-swatch-wrapper { padding: 0; }
         .fig-field input.color-swatch::-webkit-color-swatch { border: none; border-radius: var(--r-xs); }
+        /* ===== NÚT TĂNG/GIẢM CỦA Ô SỐ (kiểu CapCut) ==========================
+           Một cặp mũi tên ở MÉP PHẢI, NGAY TRONG khung ô: `.fig-field` vốn đã là flex nên
+           nó chỉ là phần tử flex cuối — không cần định vị tuyệt đối, và ô số tự co lại
+           đúng bề rộng còn thừa khi panel hẹp (định vị tuyệt đối thì số dài sẽ chui xuống
+           dưới mũi tên).
+           Một bấm = MỘT ĐƠN VỊ; giữ Shift = 1/10 đơn vị, giữ Alt = 10 đơn vị — cùng bộ hệ
+           số với thao tác KÉO CHUỘT trên ô, để hai cách chỉnh không nói hai thứ tiếng.
+           CHỈ HIỆN KHI RÊ/ĐANG NHẬP nhưng LUÔN CHIẾM CHỖ (opacity chứ không phải display):
+           bảng thuộc tính có tới ~60 ô số, hiện hết cùng lúc là một rừng mũi tên; mà nếu
+           ẩn bằng display thì con số nhảy ngang mỗi lần rê chuột vào. Nút nằm ngoài thứ tự
+           Tab (tabindex="-1") — bàn phím đã có sẵn đường đi qua chính ô số. */
+        /* Bề ngang phải ĐẮT ĐỎ: ô hẹp nhất của panel (Scale/Opacity) chỉ rộng 80px, trong
+           đó còn nhãn "%" — mỗi pixel lấy của cụm mũi tên là một pixel con số không bị cắt.
+           Hai lề âm nuốt lại khe gap 6px bên trái và padding 8px bên phải của .fig-field,
+           nên cụm chỉ thật sự tốn 12px thay vì 26px. */
+        .fig-spin {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            flex: 0 0 auto;
+            margin-left: -4px;
+            margin-right: -6px;
+            opacity: 0;
+            transition: opacity var(--dur-fast) var(--ease-out);
+        }
+        /* Hàng Retouch / ô R-G-B của Vòng tròn màu không có padding để nuốt lại. */
+        .rt-row .fig-spin,
+        .adj-wheel-field .fig-spin { margin-left: -2px; margin-right: 0; }
+        .fig-field:hover > .fig-spin,
+        .fig-field:focus-within > .fig-spin,
+        .rt-row:hover .fig-spin,
+        .rt-row:focus-within .fig-spin,
+        .adj-wheel-field:hover .fig-spin,
+        .adj-wheel-field:focus-within .fig-spin { opacity: 1; }
+        .fig-spin-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 12px;
+            height: 11px;
+            margin: 0;
+            padding: 0;
+            border: 0;
+            background: transparent;
+            box-shadow: none;
+            color: var(--text-muted);
+            border-radius: var(--r-xs);
+            cursor: pointer;
+        }
+        .fig-spin-btn:hover { color: var(--text-strong); background: var(--white-a12); }
+        .fig-spin-btn:active { color: var(--primary); }
+        .fig-spin-btn:disabled { opacity: 0.35; cursor: default; background: transparent; }
+        .fig-spin-btn svg {
+            display: block;
+            width: 9px;
+            height: 6px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 1.7;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
         .color-hex {
             font-size: var(--fs-xs);
             color: var(--text-main);
@@ -9216,10 +9278,11 @@
             }
         }
         const config = TRANSFORM_FIELD_CONFIG[inspectorScrubState.field] || { step: 1 };
-        let nextValue = inspectorScrubState.startValue + (deltaX * config.step * inspectorScrubMultiplier(event));
-        if (inspectorScrubState.field === 'rotation' && event.shiftKey) {
-            nextValue = Math.round(nextValue / 15) * 15;
-        }
+        /* Shift = BƯỚC NHỎ (1/10) cho MỌI ô, kể cả Xoay. Bản trước Xoay lại hiểu Shift là
+           "hít về bội số 15°" — tức đúng ngược nghĩa: người dùng giữ Shift để chỉnh cho
+           mịn thì con số nhảy theo nấc 15. Hít góc vẫn còn ở chỗ đúng của nó: giữ Shift
+           khi kéo tay cầm XOAY trên khung xem trước (PREVIEW_ROTATE_SNAP_DEG). */
+        const nextValue = inspectorScrubState.startValue + (deltaX * config.step * inspectorScrubMultiplier(event));
         updateSelectedClipTransform(inspectorScrubState.field, nextValue, { syncControls: true });
     }
 
@@ -9244,9 +9307,18 @@
         const input = event.target?.closest?.('input[data-transform-field]');
         beginInspectorScrub(input, event);
     });
-    window.addEventListener('pointermove', handleInspectorScrubMove, { passive: false });
-    window.addEventListener('pointerup', endInspectorScrub);
-    window.addEventListener('pointercancel', endInspectorScrub);
+    /* GỌI QUA HÀM BỌC, KHÔNG truyền thẳng tên hàm.
+     *
+     * `endInspectorScrub` được editing-runtime.js VÁ LẠI (patchInspector) để biết đường
+     * overlay; nhưng addEventListener chốt cứng THAM CHIẾU tại lúc đăng ký, mà lúc đó
+     * editing-runtime.js còn chưa tải. Truyền thẳng tên hàm là vĩnh viễn chạy bản GỐC:
+     * thả chuột sau khi kéo một ô số của overlay, bản gốc đi tìm `getSelectedTimelineClip()`
+     * rồi quy bảng thông số về transform của CLIP LANE CHÍNH (hoặc về mặc định 0 / 100%) —
+     * giá trị vừa kéo vẫn nằm đúng trong block, chỉ riêng bảng là hiện sai. Bọc trong
+     * lambda thì tên được tra LÚC GỌI, nên bản vá mới thực sự có hiệu lực. */
+    window.addEventListener('pointermove', (event) => handleInspectorScrubMove(event), { passive: false });
+    window.addEventListener('pointerup', (event) => endInspectorScrub(event));
+    window.addEventListener('pointercancel', (event) => endInspectorScrub(event));
     clipInspectorPanelEl?.addEventListener('input', (event) => {
         const input = event.target?.closest?.('input[data-transform-field]');
         if (!input) return;
@@ -15707,7 +15779,7 @@
         performVideoExport();
     });
 </script>
-<script src="/static/js/editing-runtime.js?v=overlay-srclimit-p1"></script>
+<script src="/static/js/editing-runtime.js?v=figspin-kfmirror-p1"></script>
 <script src="/static/js/perf-runtime.js"></script>
 <!-- Dụng cụ đo hiệu năng (Giai đoạn 0). Nạp SAU perf-runtime.js vì nó bọc chính những
      hàm toàn cục mà perf-runtime gán đè; nạp trước là bọc phải bản cũ. Lúc tắt nó chỉ
