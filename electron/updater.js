@@ -25,6 +25,27 @@ try {
   console.error('[updater] không nạp được electron-updater:', error.message);
 }
 
+/* TRANG RELEASES — đọc từ ĐÚNG cấu hình mà electron-builder dùng để phát hành
+ * (`build.publish[0]`), chứ không viết tay.
+ *
+ * LỖI ĐÃ TRẢ GIÁ: repo đổi tên `CrabbyCut_Windows` -> `CrabbyCut` ở bản 1.1.11,
+ * package.json được sửa nhưng URL viết tay ở đây thì không — nút "Xem có gì mới"
+ * dẫn tới một cái tên không còn tồn tại. Nó vẫn mở được nhờ GitHub chuyển hướng tên
+ * cũ, nên lỗi này KHÔNG bao giờ tự lộ ra; lần đổi tên sau là gãy hẳn.
+ *
+ * Hỏng thì lùi về trang chủ: thà mở trang gốc còn hơn ném lỗi giữa hộp thoại. */
+function releasesTagUrl(version) {
+  let owner = 'tamphamdesigner92-tb';
+  let repo = 'CrabbyCut';
+  try {
+    const publish = require('../package.json').build?.publish;
+    const github = (Array.isArray(publish) ? publish : [publish]).find((p) => p?.provider === 'github');
+    if (github?.owner) owner = github.owner;
+    if (github?.repo) repo = github.repo;
+  } catch (_) { /* giữ giá trị dự phòng */ }
+  return `https://github.com/${owner}/${repo}/releases/tag/v${version}`;
+}
+
 let checking = false;
 let downloadedInfo = null;
 
@@ -126,9 +147,7 @@ async function promptDownload(win, info, backendOrigin) {
   });
 
   if (response === 2) {
-    await shell.openExternal(
-      `https://github.com/tamphamdesigner92-tb/CrabbyCut_Windows/releases/tag/v${info.version}`,
-    );
+    await shell.openExternal(releasesTagUrl(info.version));
     return;
   }
   if (response !== 0) return;

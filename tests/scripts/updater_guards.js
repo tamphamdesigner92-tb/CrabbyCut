@@ -234,6 +234,27 @@ async function main() {
     check('tải hỏng -> KHÔNG cài', fa.state.quitAndInstallArgs === null);
   }
 
+  // ---- 10. Nút "Xem có gì mới" phải trỏ ĐÚNG repo đang phát hành ---------------------
+  /* VÌ SAO KHOÁ BẰNG TEST: repo đã đổi tên một lần (CrabbyCut_Windows -> CrabbyCut) và URL
+   * viết tay trong updater.js bị bỏ quên — nút vẫn mở được nhờ GitHub chuyển hướng tên cũ,
+   * nên KHÔNG có cách nào tự phát hiện. Lần đổi tên sau là gãy hẳn. Nguồn sự thật duy nhất
+   * là `build.publish` của package.json — chính chỗ electron-builder đọc để phát hành và để
+   * nướng `app-update.yml` vào bản cài. */
+  {
+    const pkg = require(path.join(PROJECT_ROOT, 'package.json'));
+    const publish = Array.isArray(pkg.build.publish) ? pkg.build.publish : [pkg.build.publish];
+    const github = publish.find((entry) => entry && entry.provider === 'github');
+    const fe = makeFakeElectron({ answers: [2] });        // 2 = Xem có gì mới
+    const fa = makeFakeAutoUpdater({ checkForUpdates: async () => ({ updateInfo: { version: '1.2.0' } }) });
+    const updater = loadUpdater(fe.module, fa.api);
+    updater.initUpdater();
+    await updater.checkForUpdates(null, 'http://127.0.0.1:1', { silent: true });
+    const opened = fe.calls.openExternal[0] || '';
+    check('mở đúng trang release của repo đang phát hành',
+      opened === `https://github.com/${github.owner}/${github.repo}/releases/tag/v1.2.0`, opened);
+    check('bấm "Xem có gì mới" thì KHÔNG tải gì', fa.state.downloadCalled === 0, fa.state.downloadCalled);
+  }
+
   console.log('');
   if (failures) {
     console.error(`updater guards: ${failures} bài KHÔNG đạt`);
