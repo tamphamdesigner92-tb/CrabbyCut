@@ -3217,7 +3217,11 @@ function queueAssetProxy(rawPath) {
   return job;
 }
 
-/* Prewarm nhiều asset cùng lúc (upload/import/link/thư viện): chỉ video mới có proxy.
+/* Prewarm nhiều asset cùng lúc (upload/import/link/thư viện). VIDEO VÀ ẢNH RASTER, không
+ * chỉ video: ảnh máy ảnh 21-45 MP là nguồn giật nặng nhất đã đo được, và bỏ ảnh ra khỏi
+ * đây là proxy ảnh chỉ được dựng khi người dùng kéo block xuống timeline — tức đúng lúc
+ * họ đang chờ xem, thay vì đã có sẵn từ lúc nhập. Lọc thật sự nằm ở queueAssetProxy
+ * (audio, .svg, đuôi lạ đều trả null), nên ở đây chỉ cần loại `audio` cho đỡ một vòng.
  *
  * CÓ TRẦN, và trần này là cố ý. `/api/editing-assets/link` nhận CẢ CÂY THƯ MỤC — hàng
  * trăm file b-roll là chuyện thường (chính vì thế nó còn bỏ qua ffprobe, xem `lazyProbe`).
@@ -3233,7 +3237,7 @@ function prewarmAssetProxiesForAssets(assets) {
   let queued = 0;
   for (const asset of (assets || [])) {
     if (queued >= PROXY_PREWARM_MAX_PER_BATCH) break;
-    if (!asset || asset.type === 'media_image' || asset.type === 'audio') continue;
+    if (!asset || asset.type === 'audio') continue;
     const job = queueAssetProxy(asset.source_path || asset.path);
     // Cache hit KHÔNG tính vào trần: nó không tốn gì cả. Tính vào là lần nhập thứ hai của
     // cùng một thư mục lại "hết ngân sách" trước khi tới file thật sự cần dựng.

@@ -71,9 +71,54 @@ Cổng an toàn: tách `resolveAllowedSourcePath(raw, extSet)` từ `resolveAudi
 ĐÚNG MỘT bộ luật thư mục + whitelist. `editingAssetPayload` và `libraryAssetPayload` cùng đi qua
 một helper `imageThumbnailUrlFor` — hai bản sao là hai bản sẽ lệch nhau.
 
-**Còn lại:** `prewarmAssetProxiesForAssets` vẫn bỏ qua `media_image`, nên proxy preview của ảnh chỉ
-dựng khi block xuống timeline chứ không dựng sẵn lúc liên kết thư mục. Thumbnail panel — phần chiếm
-gần hết 647 MB — thì sinh ngay, nên đây chỉ là độ trễ nhỏ ở lần xem trước đầu tiên.
+#### Vá tiếp 2026-09-20 — proxy dựng xong nhưng KHÔNG AI DÙNG
+
+Người dùng báo preview giật đúng lúc playhead tới block ảnh, dù tính năng trên đã có. Kiểm trên
+dự án thật (`[Eng] STEM - Sep_Reel 2`, 6 ảnh 0,6-18 MB): **5/6 ảnh không có proxy trên đĩa**, và
+ảnh duy nhất có proxy thì preview **vẫn nạp file gốc**. Ba lỗ hổng, cả ba đều ở phía TIÊU THỤ —
+bốn nhóm test cũ chỉ hỏi backend nên không nhóm nào thấy:
+
+1. **`makeMediaEl` gán `img.src = asset.url`** (editing-runtime.js). Nhánh `<video>` ngay phía
+   trên dùng `mediaUrl` (URL đã tính LQ/HQ), nhánh `<img>` thì không — cả đường proxy ảnh thành
+   vô nghĩa. Đây là toàn bộ nguyên nhân của báo cáo giật.
+2. **`prewarmAssetProxiesForAssets` bỏ qua `media_image`** (mục "Còn lại" của bản port trước).
+   Nặng hơn dự đoán ở đó: `ensureAssetProxy` chỉ chạy khi KÉO BLOCK MỚI, mà **mở lại `.crab`
+   không kéo block nào** — nên dự án cũ mở lên là không có proxy ảnh nào được hỏi cả.
+3. **`ensureItemDrawable`** (khung đứng yên của chuyển cảnh) nạp `loadImageAsync(asset.url)`,
+   tức giữ luôn một `Image` full-res 173 MB RGBA trong `transitionRasterCache`.
+
+Bản vá: `<img>` đọc `mediaUrl`; prewarm nhận ảnh; `restoreEditingHistoryState` gọi
+`prewarmProxiesForUsedAssets()` (mở lại dự án = kick proxy cho mọi asset đang có block);
+chuyển cảnh nạp bản preview và đưa `url` vào khoá cache để LQ/HQ đổi là nạp lại đúng bản.
+
+Đo lại trong Chromium trên `_FOT1731.jpg` của dự án đó:
+
+| | Gốc | Proxy |
+| --- | --- | --- |
+| Độ phân giải | 45,4 MP | 2,5 MP |
+| `createImageBitmap` | 320-384 ms | 17-19 ms |
+| RGBA | 173 MB | 9 MB |
+| Tải về | 10,3 MB | 0,44 MB |
+
+Và trên cả thư mục Media của dự án: sau khi vá, **6/6 proxy ảnh sinh xong chỉ nhờ prewarm**
+(trước đó là 0), tỉ lệ nén 5-82 lần, `asset.url` vẫn trỏ file gốc.
+
+#### Cổng LQ/HQ và mặc định khởi động
+
+Proxy ảnh cố ý đi chung cổng `previewWantsProxy()` với nút LQ/HQ — bấm HQ là ảnh quay về bản
+gốc. Nhưng `previewQualityMode` khởi tạo là `original` còn `applyGeneralSettings` **chỉ** hành
+động khi cài đặt là `original`, nên giá trị `proxy` (mặc định của bảng Cài đặt) không bao giờ
+tới được app: bảng ghi "Bản proxy (nhẹ, mượt)" trong khi app chạy HQ, và mọi proxy overlay —
+video lẫn ảnh — nằm im. Nay áp **cả hai chiều**, app khởi động đúng theo cài đặt.
+
+> Kết luận "HQ mượt hơn LQ" (2026-09-06, GTX 1060) là về **video lane chính**. Với ảnh tĩnh thì
+> proxy rẻ hơn ở mọi mặt — bảng số ngay trên. Ai đổi mặc định về HQ thì nhớ là đang tắt luôn
+> proxy ảnh.
+
+Test: `npm run test:image-proxy` — nhóm 5 của bài test khoá lại khâu tiêu thụ ở mức nguồn (Node
+không có DOM): cả hai lượt gán `src` trong `makeMediaEl` phải đi qua `mediaUrl`, nhánh ảnh tĩnh
+của `ensureItemDrawable` phải qua `previewAssetUrl`, `restoreEditingHistoryState` phải kick
+proxy, và prewarm của backend không được nhắc tới `media_image`.
 
 Test: `npm run test:image-proxy`.
 

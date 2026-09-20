@@ -8030,8 +8030,13 @@
         if (generalSettingsApplied) return;
         generalSettingsApplied = true;
         if (typeof setSnappingEnabled === 'function') setSnappingEnabled(s.general.snapDefault);
-        if (s.preview.defaultQuality === 'original' && typeof switchPreviewQuality === 'function') {
-            switchPreviewQuality('original');
+        /* ÁP CẢ HAI CHIỀU. Bản cũ chỉ hành động khi cài đặt là 'original', nên giá trị
+         * 'proxy' — vốn là MẶC ĐỊNH của bảng Cài đặt — không bao giờ tới được app: bảng ghi
+         * "Bản proxy (nhẹ, mượt)" trong khi app khởi động ở HQ. Người dùng đọc bảng rồi đi
+         * đo hiệu năng bằng một chế độ khác với chế độ mình tưởng — đúng kiểu nhiễu mà
+         * updatePreviewQualityButton đã phải sửa một lần (xem ghi chú 2026-09-06 ở đó). */
+        if (typeof switchPreviewQuality === 'function') {
+            switchPreviewQuality(s.preview.defaultQuality === 'original' ? 'original' : 'proxy');
         }
     }
 
@@ -8257,9 +8262,13 @@
     let activePreviewProxyUrl = '';
     let readyPreviewProxyUrl = '';
     let originalPreviewUrl = '';
-    /* MẶC ĐỊNH XEM TRƯỚC BẰNG BẢN GỐC (HQ), không phải proxy.
+    /* GIÁ TRỊ KHỞI TẠO — không phải mặc định của sản phẩm. Mặc định thật nằm trong Cài
+     * đặt → Xem trước → Chất lượng mặc định, và applyGeneralSettings() áp nó xuống đây ngay
+     * lượt nạp cài đặt đầu tiên. Bắt đầu bằng 'original' để quãng vài trăm ms trước lúc đó
+     * không nạp nhầm một nguồn rồi đổi lại.
      *
-     * Ngược với trực giác, nhưng đo suốt 2026-09-06 trên máy thật thì proxy LUÔN tệ hơn:
+     * VÌ SAO CÓ LỰA CHỌN NÀY, và vì sao đừng vội cho rằng proxy luôn nhẹ hơn: đo suốt
+     * 2026-09-06 trên máy thật thì với LANE CHÍNH, proxy LUÔN tệ hơn:
      *     bản gốc 1728×3072 (5,31 MP) -> rớt 0-6% khung,  nhịp UI 60 fps chằn chặn
      *     proxy    400×720  (0,29 MP) -> rớt 10-38% khung, nhịp UI 17-40 fps
      * Bản nặng hơn 18 lần lại mượt hơn hẳn, ở mọi lượt đo. Đã thử và loại: căn bề rộng
@@ -8270,7 +8279,13 @@
      *
      * ⚠️ GIỚI HẠN ĐÃ BIẾT: quyết định này dựa trên MỘT máy (GTX 1060) với nguồn ~5 MP. Máy
      * yếu hơn hoặc nguồn 4K/8K có thể ngược lại. Proxy vẫn được dựng và nút LQ/HQ vẫn đổi
-     * được — chỉ đổi mặc định. Ai gặp giật ở HQ thì bấm nút chuyển sang LQ. */
+     * được. Ai gặp giật ở HQ thì bấm nút chuyển sang LQ.
+     *
+     * LƯU Ý: cổng này chi phối CẢ asset overlay, trong đó có PROXY ẢNH (previewAssetUrl).
+     * Kết luận "HQ mượt hơn" ở trên là về video lane chính; với ảnh máy ảnh 21-45 MP thì
+     * proxy rẻ hơn ở mọi mặt (đo trên _FOT1731.jpg: 45,4 MP giải mã 320-384 ms / 173 MB
+     * RGBA, so với 2,5 MP giải mã 17-19 ms / 9 MB). Ở HQ, ảnh quay về bản gốc — đó là
+     * chủ ý, nhưng nó cũng là lý do đừng đặt mặc định HQ rồi quên mất chuyện này. */
     let previewQualityMode = 'original';
     let isSwitchingPreviewProxy = false;
     /* Số hiệu "đời" của nguồn preview — tăng mỗi lần temp_input.mp4 bị dựng lại (thêm

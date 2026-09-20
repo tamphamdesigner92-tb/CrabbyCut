@@ -15,6 +15,7 @@
  *   3) THUMBNAIL PANEL: đi qua /api/source-thumb và ra ảnh ≤ 320 — KHÔNG phải file gốc.
  *   4) HỢP ĐỒNG XUẤT BẢN: `url`/`path` của asset vẫn trỏ FILE GỐC. Proxy chỉ được đụng vào
  *      đường xem trước; lẫn sang đường xuất là người dùng nhận video 1920px từ ảnh 45 MP.
+ *   5) ĐƯỜNG TIÊU THỤ Ở FRONTEND: preview phải THẬT SỰ nạp bản proxy đó.
  *
  * Kèm hai chốt chặn hồi quy: .svg (ffmpeg không giải mã được) và audio đều phải 'unsupported'.
  */
@@ -75,6 +76,69 @@ async function waitReady(baseUrl, filePath, timeoutMs = 60000) {
         assert.ok(Date.now() - started < timeoutMs, 'job proxy ảnh quá lâu');
         await new Promise((r) => setTimeout(r, 120));
     }
+}
+
+/* ===== 5) ĐƯỜNG TIÊU THỤ Ở FRONTEND (tĩnh, không cần backend/trình duyệt) =====
+ *
+ * VÌ SAO CÓ NHÓM NÀY. Bốn nhóm trên chỉ hỏi backend, nên chúng vẫn xanh trong suốt
+ * quãng thời gian mà tính năng này KHÔNG chạy: backend dựng proxy 1920px đúng chuẩn,
+ * cache đầy file .jpg, còn `makeMediaEl` thì gán `img.src = asset.url` — nhánh <video>
+ * ngay phía trên dùng URL hiệu dụng, nhánh <img> thì không. Người dùng báo "preview giật
+ * khi playhead tới block ảnh" và mọi bài kiểm đều bảo mọi thứ ổn.
+ *
+ * Node không có DOM nên kiểm ở mức NGUỒN: cắt đúng thân hàm rồi soi những phép gán quyết
+ * định. Thô, nhưng bắt đúng loại hồi quy đã xảy ra thật. */
+const runtimeJs = fs.readFileSync(path.join(PROJECT_ROOT, 'static', 'js', 'editing-runtime.js'), 'utf8');
+const serverJs = fs.readFileSync(path.join(PROJECT_ROOT, 'backend', 'server.js'), 'utf8');
+
+// Cắt thân khối `{...}` mở ra ngay sau `marker`, đếm ngoặc để lấy đúng phạm vi hàm.
+function blockAfter(src, marker) {
+    const start = src.indexOf(marker);
+    assert.notStrictEqual(start, -1, `không tìm thấy trong nguồn: ${marker}`);
+    const open = src.indexOf('{', start + marker.length - 1);
+    let depth = 0;
+    for (let i = open; i < src.length; i += 1) {
+        if (src[i] === '{') depth += 1;
+        else if (src[i] === '}') {
+            depth -= 1;
+            if (depth === 0) return src.slice(open, i + 1);
+        }
+    }
+    throw new Error(`khối không đóng: ${marker}`);
+}
+
+{
+    // 5a. Thẻ media của preview: CẢ HAI nhánh (video và ảnh) phải nạp URL hiệu dụng.
+    const makeMediaEl = blockAfter(runtimeJs, 'const makeMediaEl = () => {');
+    const srcAssigns = makeMediaEl.match(/\w+\.src\s*=\s*[^;]+;/g) || [];
+    assert.strictEqual(srcAssigns.length, 2,
+        `makeMediaEl phải có đúng 2 lượt gán src (video + ảnh), thấy ${srcAssigns.length}`);
+    srcAssigns.forEach((line) => {
+        assert.ok(line.includes('mediaUrl'),
+            `gán src phải ưu tiên mediaUrl (URL đã tính LQ/HQ), thấy: ${line.trim()}`);
+    });
+
+    // 5b. Khung đứng yên của chuyển cảnh cũng là đường XEM TRƯỚC -> nạp bản preview trước.
+    const drawable = blockAfter(runtimeJs, 'function ensureItemDrawable(item, mode) {');
+    const stillBranch = drawable.slice(0, drawable.indexOf('if (isVideo)'));
+    assert.ok(stillBranch.includes('previewAssetUrl(asset)'),
+        'nhánh ảnh tĩnh của ensureItemDrawable phải đi qua previewAssetUrl');
+    const firstLoad = (stillBranch.match(/loadImageAsync\(([^)]*)\)/) || [])[1];
+    assert.ok(firstLoad && firstLoad.trim() !== 'asset.url',
+        'lượt nạp ĐẦU TIÊN phải là bản preview, không phải file gốc (Image full-res nằm lại trong cache)');
+
+    // 5c. Mở lại .crab: không có lượt ensureAssetProbed nào chạy -> phải tự kick proxy.
+    const restore = blockAfter(runtimeJs, 'function restoreEditingHistoryState(state) {');
+    assert.ok(restore.includes('prewarmProxiesForUsedAssets()'),
+        'nạp lại state phải kick proxy, nếu không thì dự án cũ mở lên là phát file gốc');
+    const prewarmFront = blockAfter(runtimeJs, 'function prewarmProxiesForUsedAssets() {');
+    assert.ok(prewarmFront.includes('ensureAssetProxy(asset)'),
+        'prewarmProxiesForUsedAssets phải thật sự gọi ensureAssetProxy');
+
+    // 5d. Prewarm phía backend không được loại ảnh ra (queueAssetProxy đã dựng được ảnh).
+    const prewarmBack = blockAfter(serverJs, 'function prewarmAssetProxiesForAssets(assets) {');
+    assert.ok(!prewarmBack.includes('media_image'),
+        'prewarm của backend không được bỏ qua ảnh: ảnh máy ảnh là nguồn giật nặng nhất');
 }
 
 (async () => {

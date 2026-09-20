@@ -892,15 +892,21 @@
         ask();
     }
 
+    /* Xếp hàng proxy cho mọi asset ĐANG CÓ BLOCK trên timeline. Chỉ asset đang dùng —
+     * panel Tệp phương tiện có thể chứa cả một cây thư mục mà người dùng chưa đụng tới.
+     * ensureAssetProxy tự dedupe theo đường dẫn nguồn nên gọi lại nhiều lần là vô hại. */
+    function prewarmProxiesForUsedAssets() {
+        if (!previewWantsProxy()) return;
+        const used = new Set(editingItems.map((item) => item.asset_id).filter(Boolean));
+        editingAssets.forEach((asset) => { if (used.has(asset.id)) ensureAssetProxy(asset); });
+    }
+
     /* Bấm LQ/HQ (index.html gọi qua EditingRuntime.applyPreviewQuality). Đổi nút không đủ:
      * phần tử <video> của overlay giữ `src` từ lúc TẠO, nên phải dựng lại — `mediaKey` đã
      * mang URL hiệu dụng nên renderPreviewOverlays tự lo việc đó. Lượt bấm cũng là lúc kick
      * proxy cho những asset vào dự án trước khi có tính năng này (mở lại .crab cũ). */
     function applyPreviewQuality() {
-        if (previewWantsProxy()) {
-            const used = new Set(editingItems.map((item) => item.asset_id).filter(Boolean));
-            editingAssets.forEach((asset) => { if (used.has(asset.id)) ensureAssetProxy(asset); });
-        }
+        prewarmProxiesForUsedAssets();
         renderPreviewOverlays();
     }
 
@@ -5463,11 +5469,20 @@
             // đang được chỉnh màu) — dùng canvas thì chuyển cảnh cũng thấy đúng màu.
             const el = document.getElementById(`preview_${item.id}`);
             if (previewMediaReady(el)) return { drawable: el, w0: sz.width, h0: sz.height };
+            /* Nạp BẢN PREVIEW (proxy khi đang ở LQ), không phải file gốc: đây là đường
+               xem trước, mà một Image full-res nằm lại trong cache này giữ 84-173 MB
+               RGBA cho tới khi đổi dự án — đúng thứ mà proxy ảnh sinh ra để tránh.
+               `url` đi vào khoá cache để bấm LQ/HQ là nạp lại đúng bản; hỏng thì lùi về
+               file gốc, thà nặng còn hơn chuyển cảnh mất một vế. */
+            const drawUrl = previewAssetUrl(asset);
             const c = transitionRasterCache[item.id];
-            if (c && c.drawable) return { drawable: c.drawable, w0: sz.width, h0: sz.height };
-            if (asset?.url && !(c && c.pending)) {
-                transitionRasterCache[item.id] = { pending: true };
-                loadImageAsync(asset.url).then((img) => { transitionRasterCache[item.id] = { drawable: img }; }).catch(() => {});
+            if (c && c.drawable && c.url === drawUrl) return { drawable: c.drawable, w0: sz.width, h0: sz.height };
+            if (drawUrl && !(c && c.pending && c.url === drawUrl)) {
+                transitionRasterCache[item.id] = { pending: true, url: drawUrl };
+                loadImageAsync(drawUrl)
+                    // null = nạp hỏng (loadImageAsync resolve null chứ không ném).
+                    .then((img) => ((img || drawUrl === asset.url) ? img : loadImageAsync(asset.url)))
+                    .then((img) => { transitionRasterCache[item.id] = { drawable: img, url: drawUrl }; });
             }
             return null;
         }
@@ -14328,8 +14343,13 @@
                     v.src = mediaUrl || asset.url;
                     return v;
                 }
+                /* ẢNH CŨNG ĐỌC `mediaUrl` NHƯ VIDEO. Trước đây dòng dưới ghi thẳng
+                   `asset.url`, nên cả đường proxy ảnh thành vô nghĩa: backend vẫn dựng
+                   bản 1920px, `mediaKey` vẫn khoá theo URL hiệu dụng, mà thẻ hiển thị
+                   vẫn nạp JPEG 45 MP. Hỏng ÂM THẦM đúng nghĩa — preview vẫn hiện đủ
+                   hình, chỉ giật, nên không có gì để mà nghi. */
                 const img = document.createElement('img');
-                img.src = asset?.url || '';
+                img.src = mediaUrl || asset?.url || '';
                 img.draggable = false;
                 return img;
             };
@@ -18891,6 +18911,12 @@
             ? deepClone(state.subtitleState)
             : null;
         ensureDefaultTracks();
+        /* MỞ LẠI DỰ ÁN: block đã có sẵn nên KHÔNG có lượt `ensureAssetProbed` nào chạy,
+         * mà prewarm phía backend chỉ thấy asset lúc NHẬP. Không kick ở đây thì proxy LQ
+         * của asset overlay chỉ được hỏi khi người dùng bấm LQ/HQ — tức mọi dự án cũ mở
+         * lên là phát nguyên bản gốc, giật y như trước khi có tính năng này.
+         * Undo/redo cũng đi qua đây: vô hại, ensureAssetProxy dedupe theo nguồn. */
+        prewarmProxiesForUsedAssets();
         if (selectedEditingItemId && !findItem(selectedEditingItemId)) {
             selectedEditingItemId = selectedEditingItemIds.values().next().value || '';
         }
