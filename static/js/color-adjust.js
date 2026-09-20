@@ -2402,11 +2402,19 @@ void main(void) {
     }
 
     // "Rỗng hoàn toàn" — dùng để quyết định có XOÁ field adjustments hay không.
-    // KHÁC isIdentity: một mặt nạ đã bật nhưng chưa chỉnh màu thì không đổi hình gì
-    // (isIdentity = true), NHƯNG vẫn phải lưu, nếu không người dùng vừa dựng xong mặt nạ
-    // là mất trắng khi panel ghi lại dữ liệu.
+    // KHÁC isIdentity: có những thứ KHÔNG đổi một pixel nào (isIdentity = true) nhưng vẫn
+    // là LỰA CHỌN CỦA NGƯỜI DÙNG, xoá đi là họ mất công đã bỏ ra:
+    //   - mặt nạ đã bật nhưng chưa chỉnh màu;
+    //   - BỘ LỌC (LUT) đã chọn nhưng cường độ đang để 0. Kéo cường độ về 0 là cách xem
+    //     "trước/sau" nhanh nhất, mà bản cũ lại hiểu đó là rỗng rồi gỡ luôn LUT khỏi block:
+    //     người dùng muốn kéo cường độ lên lại thì phải sang panel trái chọn LUT từ đầu
+    //     (lỗi báo 2026-09-20). Gỡ LUT nay CHỈ xảy ra khi bấm nút "×" trên chip — một hành
+    //     động rõ ràng, có chủ đích.
+    // Cường độ 0 vẫn KHÔNG tốn gì lúc vẽ/xuất: mọi cửa nhanh đó xét isIdentity (không đổi).
     function isBlank(raw) {
-        return isIdentity(raw) && !maskIsActive(normalize(raw));
+        const a = normalize(raw);
+        if (a.lut.id) return false;
+        return isIdentity(a) && !maskIsActive(a);
     }
 
     // Danh sách lượt shader cần chạy SAU lượt màu, đúng thứ tự của ffmpegFilters.

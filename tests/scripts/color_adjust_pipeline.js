@@ -1508,6 +1508,34 @@ function testEffectsKeyframeSidecar(workDir) {
         `viền phải đi từ SÁNG sang TỐI: ${vs.map((s) => s.v).join(', ')}`);
 }
 
+/* BỘ LỌC (LUT) ĐÃ CHỌN KHÔNG ĐƯỢC TỰ GỠ KHI KÉO CƯỜNG ĐỘ VỀ 0
+ *
+ * Người dùng báo 2026-09-20: kéo Cường độ về 0 để xem "trước/sau" thì bộ lọc biến mất khỏi
+ * block, muốn kéo lên lại phải sang panel trái chọn LUT từ đầu. Nguyên do: applyAdjustParam
+ * xoá hẳn field `adjustments` khi `isBlank()` true, mà isBlank lại tính LUT cường độ 0 là
+ * rỗng. Cùng một cái bẫy với mặt nạ ngay bên dưới, chỉ khác lối vào.
+ * Ranh giới cần giữ: isIdentity VẪN true (cường độ 0 thì không đổi pixel nào, mọi cửa nhanh
+ * vẽ/xuất phải bỏ qua đúng như cũ) — chỉ isBlank đổi. */
+function testLutStaysAssignedAtZero() {
+    const lut0 = mk((a) => { a.lut = { id: 'blush', name: 'Ứng hồng', intensity: 0 }; });
+    assert.ok(ColorAdjust.isIdentity(lut0),
+        'LUT cường độ 0 không đổi pixel nào -> isIdentity phải VẪN true (giữ cửa nhanh vẽ/xuất)');
+    assert.ok(!ColorAdjust.isBlank(lut0),
+        'LUT đã chọn -> isBlank phải false, nếu không panel xoá mất LUT khi cường độ về 0');
+    assert.ok(!ColorAdjust.needsLut3d(lut0),
+        'cường độ 0 -> không cần dựng lut3d (đừng nối chuỗi filter rỗng vào bản xuất)');
+
+    // Gỡ LUT (nút "×" đặt id = '') mới là lúc được phép xoá dữ liệu.
+    const cleared = mk((a) => { a.lut = { id: '', name: '', intensity: 0 }; });
+    assert.ok(ColorAdjust.isBlank(cleared), 'bỏ hẳn LUT -> lại rỗng, được phép xoá field');
+
+    // Nâng cường độ lên là bộ lọc ăn ngay trở lại.
+    const lut60 = mk((a) => { a.lut = { id: 'blush', name: 'Ứng hồng', intensity: 60 }; });
+    assert.ok(!ColorAdjust.isIdentity(lut60) && ColorAdjust.needsLut3d(lut60),
+        'cường độ > 0 -> bộ lọc có tác dụng trở lại');
+    console.log('  LUT cường độ 0 vẫn bám block ok');
+}
+
 function testMaskMath() {
     const def = ColorAdjust.defaultAdjustments();
     assert.ok(!ColorAdjust.maskIsActive(def), 'mặt nạ mặc định phải tắt');
@@ -1893,6 +1921,7 @@ function main() {
     testWhiteBalance();
     testHslBandPick();
     testMaskMath();
+    testLutStaysAssignedAtZero();
     testAdjustKeyframeMath();
     if (!ffmpegAvailable()) {
         console.log('  (bỏ qua đối chiếu FFmpeg: không tìm thấy ffmpeg trong PATH)');

@@ -8411,7 +8411,10 @@
         const withMask = options.mask !== false;
         const withRetouch = options.retouch !== false;
         const a = ColorAdjust.normalize(adj);
-        const active = !ColorAdjust.isIdentity(a);
+        /* isBlank chứ không phải isIdentity: nút "Đặt lại tất cả" xoá MỌI thứ đã lưu, kể cả
+           những lựa chọn chưa đổi pixel nào (mặt nạ vừa bật, bộ lọc đang để cường độ 0).
+           Bản cũ mờ nút đi đúng lúc người dùng cần nó nhất. */
+        const active = !ColorAdjust.isBlank(a);
 
         const basic = ADJUST_BASIC_FIELDS
             .map((f) => adjustSliderRow(`editingAdjBasic_${f.key}`, f.label, a.basic[f.key],
