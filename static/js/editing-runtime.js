@@ -13191,6 +13191,49 @@
         };
     }
 
+    /* Transform HIỆU DỤNG tại playhead của đối tượng đang đeo khung chọn — base khi field
+     * không có keyframe, giá trị NỘI SUY khi có.
+     *
+     * MỘT NGUỒN SỰ THẬT cho cả hai phía: bên VẼ khung (renderSelectionBox) và bên TOÁN KÉO
+     * (startPreviewBoxDrag). Trước đây bên vẽ dùng transform hiệu dụng còn bên kéo dùng
+     * transform BASE, nên với block đã có keyframe thì vừa chạm tay cầm là khung nhảy phắt
+     * về giá trị base (nhỏ hơn hay lớn hơn tuỳ keyframe tại playhead đang ở phía nào), và
+     * tâm quay/tâm co giãn cũng lấy sai chỗ -> suốt cú kéo con trỏ luôn lệch khỏi điểm góc
+     * thật của khung. Lỗi người dùng báo 2026-09-20.
+     *
+     * Giờ CỤC BỘ trong block: row lane chính KHÔNG có `timeline_start` (nó lưu mốc theo giờ
+     * NGUỒN của temp_input.mp4) nên phải đi qua bảng span, lấy `timeline_start` ở đó sẽ ra
+     * NaN và khung nhảy về transform gốc. */
+    function selectionBoxTransform(item, seqTime = currentSequenceTime()) {
+        const base = normalizeTransform(item?.transform);
+        if (!item || !window.TextAnimations || !TextAnimations.hasKeyframes(item.keyframes)) return base;
+        const localT = isMainLaneBoxItem(item)
+            ? mainClipLocalTime(item)
+            : Math.max(0, seqTime - Number(item.timeline_start || 0));
+        return normalizeTransform(TextAnimations.effectiveTransformAt(base, item.keyframes, localT));
+    }
+
+    /* Khung preview đo theo ĐÚNG cách renderSelectionBox đặt khung chọn: gốc toạ độ là mép
+     * `getBoundingClientRect()` của #sequencePreviewFrame, còn bề rộng/cao lấy
+     * clientWidth/clientHeight (khung có `border: 1px` nên hai con số này LỆCH nhau 2px —
+     * trộn hai nguồn là khung chọn và toán kéo lệch nhau ngay từ pixel đầu). */
+    function previewFrameMetrics() {
+        const frame = document.getElementById('sequencePreviewFrame');
+        const rect = frame?.getBoundingClientRect?.();
+        if (!frame || !rect) return null;
+        const seq = payloadSequence();
+        const frameW = Math.max(1, frame.clientWidth || rect.width);
+        const frameH = Math.max(1, frame.clientHeight || rect.height);
+        return {
+            frame,
+            frameW,
+            frameH,
+            originX: rect.left,
+            originY: rect.top,
+            previewScale: Math.min(frameW / Math.max(1, seq.width), frameH / Math.max(1, seq.height)),
+        };
+    }
+
     function renderSelectionBox(root, frameW, frameH, previewScale, seqTime) {
         let box = document.getElementById('editingSelectionBox');
         const item = selectedVisualItemForBox(seqTime);
@@ -13209,16 +13252,8 @@
         const asset = findAsset(item.asset_id);
         // Khung chọn phải theo transform HIỆU DỤNG tại playhead (nội suy keyframe), nếu
         // không khung sẽ lệch khỏi đối tượng khi item có keyframe (bug: chỉ khung đổi).
-        let transform = normalizeTransform(item.transform);
-        if (window.TextAnimations && TextAnimations.hasKeyframes(item.keyframes)) {
-            /* Giờ CỤC BỘ trong block. Row lane chính KHÔNG có `timeline_start` (nó lưu mốc
-             * theo giờ NGUỒN của temp_input.mp4), nên phải đi qua bảng span — lấy
-             * `timeline_start` ở đây sẽ ra NaN và khung nhảy về transform gốc. */
-            const localT = isMainClip
-                ? mainClipLocalTime(item)
-                : Math.max(0, seqTime - Number(item.timeline_start || 0));
-            transform = normalizeTransform(TextAnimations.effectiveTransformAt(transform, item.keyframes, localT));
-        }
+        // Dùng chung selectionBoxTransform() với startPreviewBoxDrag — xem ghi chú ở đó.
+        const transform = selectionBoxTransform(item, seqTime);
         const size = itemBaseSize(item, asset);
         const scaleRatio = Math.max(0.01, transform.scale / 100);
         const { x: frameOffsetX, y: frameOffsetY } = previewFrameOffsetIn(selectionRoot);
@@ -13645,12 +13680,16 @@
         // Row lane chính không có `track_id` -> khoá lane của nó nằm ở track 'track_main'
         // (mainLaneBoxClip đã chặn, kiểm lại ở đây cho đường gọi trực tiếp).
         if (isTrackLocked(isMainClip ? findTrack('track_main') : itemTrack(item))) return;
-        const frame = document.getElementById('sequencePreviewFrame');
-        if (!frame) return;
-        const rect = frame.getBoundingClientRect();
-        const transform = normalizeTransform(item.transform);
-        const centerX = rect.left + (rect.width / 2) + (transform.position_x * Math.min(rect.width / payloadSequence().width, rect.height / payloadSequence().height));
-        const centerY = rect.top + (rect.height / 2) + (transform.position_y * Math.min(rect.width / payloadSequence().width, rect.height / payloadSequence().height));
+        const metrics = previewFrameMetrics();
+        if (!metrics) return;
+        /* Mốc xuất phát phải là transform ĐANG THẤY (hiệu dụng tại playhead), KHÔNG phải
+         * transform base: khung chọn được vẽ theo giá trị hiệu dụng, nên lấy base làm mốc là
+         * cú kéo đầu tiên ghi thẳng base vào item -> khung nhảy phắt sang cỡ khác ngay lúc
+         * chớm rê chuột, và tâm (centerX/centerY) cũng lệch nên con trỏ không bao giờ dính
+         * vào điểm góc trong suốt cú kéo. Lỗi báo 2026-09-20. */
+        const transform = selectionBoxTransform(item);
+        const centerX = metrics.originX + (metrics.frameW / 2) + (transform.position_x * metrics.previewScale);
+        const centerY = metrics.originY + (metrics.frameH / 2) + (transform.position_y * metrics.previewScale);
         previewBoxDrag = {
             itemId: item.id,
             // Row lane chính không có id -> nhớ CHỈ SỐ. `handlePreviewBoxDrag` tra lại theo
@@ -13664,7 +13703,7 @@
             centerY,
             startDistance: Math.max(1, Math.hypot(event.clientX - centerX, event.clientY - centerY)),
             startAngle: Math.atan2(event.clientY - centerY, event.clientX - centerX),
-            startTransform: normalizeTransform(item.transform),
+            startTransform: { ...transform },
             startStyle: deepClone(item.style || {}),
             /* Bề rộng xuất phát cho 2 tay cầm trái/phải của text. Box đang TỰ CO (box_width
                = 0) thì phải bắt đầu từ bề rộng CHỮ đang thấy, không phải từ một con số mặc
@@ -13675,7 +13714,7 @@
                     ? Number(item.style.box_width)
                     : measureTextItemBox(item).contentWidth)
                 : 0,
-            previewScale: Math.min(rect.width / payloadSequence().width, rect.height / payloadSequence().height),
+            previewScale: metrics.previewScale,
             historySaved: false,
         };
         if (mode === 'line-a' || mode === 'line-b') {
@@ -13817,12 +13856,13 @@
             item.transform.rotation = clampTransformValue('rotation', nextRotation);
         } else if (previewBoxDrag.mode === 'line-a' || previewBoxDrag.mode === 'line-b') {
             // Kéo đầu mút line: giữ đầu kia cố định, đổi độ dài + góc + tâm (giống Figma)
-            const frame = document.getElementById('sequencePreviewFrame');
-            const rect = frame.getBoundingClientRect();
+            // Đo khung bằng previewFrameMetrics() — cùng gốc toạ độ với khung chọn.
+            const metrics = previewFrameMetrics();
+            if (!metrics) return;
             const ps = Math.max(0.01, previewBoxDrag.previewScale);
             const moved = [
-                (event.clientX - rect.left - rect.width / 2) / ps,
-                (event.clientY - rect.top - rect.height / 2) / ps,
+                (event.clientX - metrics.originX - metrics.frameW / 2) / ps,
+                (event.clientY - metrics.originY - metrics.frameH / 2) / ps,
             ];
             const fixed = previewBoxDrag.mode === 'line-a' ? previewBoxDrag.lineEndB : previewBoxDrag.lineEndA;
             const newCenter = [(fixed[0] + moved[0]) / 2, (fixed[1] + moved[1]) / 2];

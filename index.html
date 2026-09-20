@@ -8665,6 +8665,38 @@
 	    const PREVIEW_ZOOM_MAX = 8;
 	    let previewZoom = 1;        // 1 = vừa khung (fit)
 
+	    /* ĐỘ NHẠY ZOOM BẰNG LĂN/TRACKPAD — bước theo ĐỘ LỚN của delta, không phải một nấc
+	       cố định cho mọi sự kiện.
+	       VÌ SAO: bánh xe chuột rời bắn |deltaY| ≈ 100 mỗi nấc, nhưng trackpad (macOS: chụm
+	       hai ngón = sự kiện `wheel` có ctrlKey) bắn delta RẤT NHỎ và RẤT NHIỀU sự kiện liên
+	       tiếp. Với một nấc cố định ×1.12 thì mỗi sự kiện là một cú nhảy 12% -> chụm nhẹ ngón
+	       tay đã vọt vài trăm phần trăm, không cách nào dừng đúng mức muốn xem.
+	       Quy đổi mũ: mỗi 100 đơn vị delta = ×1.12 (giữ nguyên cảm giác của chuột rời), còn
+	       trackpad bắn 3–10 đơn vị mỗi nhịp thì mỗi nhịp chỉ nhích 0.3–1%, mượt và bấm được
+	       đúng mức. Hệ số nhân mũ nên gộp nhiều nhịp lại vẫn ra đúng tổng — không lệ thuộc
+	       trình duyệt gộp sự kiện thưa hay dày.
+	       PREVIEW_ZOOM_WHEEL_SENS: muốn chậm/nhanh hơn nữa thì chỉnh ĐÚNG số này. */
+	    const PREVIEW_ZOOM_WHEEL_SENS = Math.log(1.12) / 100;
+	    // Chặn cú bắn dị thường (một số driver gộp cả trăm đơn vị vào một sự kiện) để không
+	    // có cú nhảy nào lớn hơn đúng một nấc chuột rời.
+	    const PREVIEW_ZOOM_WHEEL_MAX_DELTA = 100;
+
+	    function previewZoomWheelDelta(event) {
+	        // deltaMode: 0 = pixel, 1 = dòng, 2 = trang. Quy hết về "pixel" để một công thức
+	        // dùng chung cho mọi trình duyệt/thiết bị.
+	        const unit = event.deltaMode === 1 ? 16 : (event.deltaMode === 2 ? 100 : 1);
+	        const raw = (Number(event.deltaY) || 0) * unit;
+	        return Math.max(-PREVIEW_ZOOM_WHEEL_MAX_DELTA, Math.min(PREVIEW_ZOOM_WHEEL_MAX_DELTA, raw));
+	    }
+
+	    /* Phần delta CHƯA ĐỔI ĐƯỢC mức zoom, để dành cộng vào nhịp sau.
+	       VÌ SAO cần: setPreviewZoom() bỏ qua thay đổi nhỏ hơn 0.0005 (chốt chống vẽ lại vô
+	       ích). Với nhịp trackpad rất mảnh ở mức zoom thấp, từng nhịp một đều rơi dưới ngưỡng
+	       đó -> người dùng chụm tay mà khung đứng im. Gom lại thì vài nhịp mảnh cộng thành một
+	       bước đủ lớn, không nhịp nào bị nuốt. Cũng bị kẹp ±MAX_DELTA nên khi đã chạm trần/đáy
+	       zoom thì phần dư không phình lên để rồi nuốt mất cú chụm ngược chiều sau đó. */
+	    let previewZoomWheelResidual = 0;
+
 	    function getPreviewZoom() { return previewZoom; }
 
 	    function setPreviewZoom(next, options = {}) {
@@ -8735,10 +8767,20 @@
 	            // Toạ độ con trỏ trong KHÔNG GIAN NỘI DUNG của vùng cuộn.
 	            const px = shell.scrollLeft + (event.clientX - rect.left);
 	            const py = shell.scrollTop + (event.clientY - rect.top);
-	            const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
+	            const wheelDelta = previewZoomWheelDelta(event);
+	            // ĐỔI CHIỀU thì bỏ phần dư cũ: đang kẹt ở trần zoom mà dồn phần dư lại thì cú
+	            // chụm ngược chiều đầu tiên bị nó nuốt mất, người dùng tưởng trackpad chết.
+	            if (wheelDelta * previewZoomWheelResidual < 0) previewZoomWheelResidual = 0;
+	            previewZoomWheelResidual = Math.max(
+	                -PREVIEW_ZOOM_WHEEL_MAX_DELTA,
+	                Math.min(PREVIEW_ZOOM_WHEEL_MAX_DELTA, previewZoomWheelResidual + wheelDelta),
+	            );
+	            const factor = Math.exp(-previewZoomWheelResidual * PREVIEW_ZOOM_WHEEL_SENS);
 	            setPreviewZoom(before * factor, { keepCenter: false });
 	            const after = getPreviewZoom();
+	            // Chưa nhúc nhích (nhịp quá mảnh, hoặc đã chạm trần/đáy) -> để dành phần dư.
 	            if (after === before) return;
+	            previewZoomWheelResidual = 0;
 	            const k = after / before;
 	            shell.scrollLeft = Math.max(0, px * k - (event.clientX - rect.left));
 	            shell.scrollTop = Math.max(0, py * k - (event.clientY - rect.top));
