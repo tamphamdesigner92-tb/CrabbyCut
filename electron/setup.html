@@ -6,12 +6,12 @@
 <title>Thiết lập CrabbyCut</title>
 <style>
   :root {
-    --bg: #111214;
-    --panel: #17191c;
-    --line: #26292e;
-    --text: #e8eaed;
-    --muted: #9aa0a6;
-    --accent: #e8442e;
+    --bg: #08090c;
+    --panel: #0f1116;
+    --line: #23262f;
+    --text: #e7e9ee;
+    --muted: #9aa0ac;
+    --accent: #ffb020;
     --ok: #3ba55d;
     --warn: #d9a13b;
   }
@@ -33,7 +33,7 @@
   .machine dt { color: var(--muted); }
   .machine dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  .bar-wrap { height: 8px; background: #23262a; border-radius: 99px; overflow: hidden; margin: 6px 0 8px; }
+  .bar-wrap { height: 8px; background: #1a1d26; border-radius: 99px; overflow: hidden; margin: 6px 0 8px; }
   .bar { height: 100%; width: 0; background: var(--accent); border-radius: 99px; transition: width .25s ease; }
   .bar.done { background: var(--ok); }
   .bar.failed { background: var(--warn); }
@@ -57,7 +57,7 @@
     border: 2px solid #35393f;
   }
   .steps li.active { color: var(--text); }
-  .steps li.active .dot { border-color: var(--accent); background: rgba(232,68,46,.25); }
+  .steps li.active .dot { border-color: var(--accent); background: rgba(255,176,32,.22); }
   .steps li.done { color: var(--text); }
   .steps li.done .dot { border-color: var(--ok); background: var(--ok); }
 
@@ -73,10 +73,10 @@
   footer { position: fixed; left: 28px; right: 28px; bottom: 22px; display: flex; gap: 10px; justify-content: flex-end; }
   button {
     font: inherit; padding: 8px 18px; border-radius: 7px; cursor: pointer;
-    border: 1px solid var(--line); background: #1e2126; color: var(--text);
+    border: 1px solid var(--line); background: #1a1d26; color: var(--text);
   }
-  button:hover:not(:disabled) { background: #262a30; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:hover:not(:disabled) { background: #222633; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #111; }
   button.primary:hover:not(:disabled) { filter: brightness(1.1); }
   button:disabled { opacity: .45; cursor: default; }
   button.hidden { display: none; }

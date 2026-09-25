@@ -305,7 +305,7 @@
             const localX = x - viewStart;
             node.block.clear();
             node.block.beginFill(color, 0.95);
-            node.block.lineStyle(isSelected ? 3 : 1, isSelected ? 0xfaea66 : color, 1);
+            node.block.lineStyle(isSelected ? 3 : 1, isSelected ? 0xffb020 : color, 1);
             node.block.drawRoundedRect(Math.round(localX), y, width, h, 4);
             node.block.endFill();
 

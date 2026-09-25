@@ -215,7 +215,7 @@ function createWindow() {
     height: 960,
     minWidth: 1200,
     minHeight: 700,
-    backgroundColor: '#111214',
+    backgroundColor: '#08090c',
     icon: path.join(__dirname, '..', 'build', 'icon.ico'),
     autoHideMenuBar: true,
     // Chốt thêm ở cấp cửa sổ, phòng khi có menu được gắn lại về sau.

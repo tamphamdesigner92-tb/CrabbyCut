@@ -149,6 +149,15 @@ const RASTER_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const IMAGE_PROXY_MAX_EDGE = 1920;
 // Cạnh dài của thumbnail ảnh trong panel Tệp phương tiện (thẻ chỉ rộng ~60px).
 const IMAGE_THUMB_MAX_EDGE = 320;
+/* Định dạng CÓ THỂ mang kênh trong suốt. Bản dẫn xuất (proxy/thumbnail) của chúng phải là
+ * .png: trước đây mọi proxy ảnh đều ghi ra .jpg, mà JPEG không có alpha nên sticker/logo PNG
+ * nền trong hiện NỀN ĐEN trên preview ở chế độ LQ — bản xuất thì vẫn đúng vì nó đọc file gốc.
+ * JPEG nguồn giữ .jpg (nhỏ hơn nhiều, và vốn không có gì trong suốt để mất). */
+const ALPHA_IMAGE_EXTENSIONS = new Set(['.png', '.webp']);
+
+function imageDerivativeExt(filePath) {
+  return ALPHA_IMAGE_EXTENSIONS.has(path.extname(String(filePath || '')).toLowerCase()) ? 'png' : 'jpg';
+}
 /* RETOUCH đọc file bằng ffmpeg TRỰC TIẾP (sidecar auto_reframe), nên danh sách của nó
  * phải là ẢNH RASTER — KHÔNG dùng lại ALLOWED_IMAGE_EXTENSIONS. `.svg` nằm trong danh
  * sách kia là hợp lý cho đường NHẬP asset (Chromium vẽ ra PNG ngay lúc nhập, xem
@@ -3035,7 +3044,10 @@ function assetProxyCachePath(key, ext = 'mp4') {
 async function scaleImageTo(source, dest, maxEdge) {
   const vf = `scale=w='min(iw,${maxEdge})':h='min(ih,${maxEdge})'`
     + ':force_original_aspect_ratio=decrease:flags=lanczos';
-  await runProcess('ffmpeg', ['-v', 'error', '-y', '-i', source, '-vf', vf, '-q:v', '4', dest]);
+  /* Đích .png -> ép rgba để GIỮ kênh trong suốt (PNG bảng màu có tRNS hay WebP yuva đều về
+   * một dạng chắc chắn còn alpha). Đích .jpg -> chất lượng q4 như cũ. */
+  const encodeArgs = dest.toLowerCase().endsWith('.png') ? ['-pix_fmt', 'rgba'] : ['-q:v', '4'];
+  await runProcess('ffmpeg', ['-v', 'error', '-y', '-i', source, '-vf', vf, ...encodeArgs, dest]);
   // ffmpeg trả 0 mà không ghi gì là ca THẬT (xem trên) — kiểm file, đừng tin mã thoát.
   const stat = fs.statSync(dest);
   if (!(stat.size > 0)) throw new Error('ảnh thu nhỏ rỗng');
@@ -3045,7 +3057,7 @@ async function scaleImageTo(source, dest, maxEdge) {
  * cùng thư mục cache, khoá có hậu tố `_img` để không đụng khoá của video. */
 async function createOrGetImageThumbnail(imagePath) {
   fs.mkdirSync(THUMBNAIL_DIR, { recursive: true });
-  const thumbName = `${thumbnailCacheKey(imagePath)}_img.jpg`;
+  const thumbName = `${thumbnailCacheKey(imagePath)}_img.${imageDerivativeExt(imagePath)}`;
   const thumbPath = path.join(THUMBNAIL_DIR, thumbName);
   if (fs.existsSync(thumbPath) && fs.statSync(thumbPath).size > 0) {
     return `/temp_uploads/thumbnails/${thumbName}`;
@@ -3184,7 +3196,7 @@ function queueAssetProxy(rawPath) {
   const source = videoSource || imageSource;
   if (!source) return null;
   const kind = videoSource ? 'video' : 'image';
-  const ext = kind === 'image' ? 'jpg' : 'mp4';
+  const ext = kind === 'image' ? imageDerivativeExt(source) : 'mp4';
   let stat;
   try {
     stat = fs.statSync(source);
@@ -3252,14 +3264,15 @@ function pruneAssetProxyCache() {
     if (!fs.existsSync(PROXY_CACHE_DIR)) return;
     const now = Date.now();
     for (const name of fs.readdirSync(PROXY_CACHE_DIR)) {
-      /* .jpg CÓ MẶT Ở ĐÂY vì proxy ẢNH ghi ra .jpg (xem queueAssetProxy). Bỏ sót đuôi này là
-       * cache ảnh phình mãi mãi và rác .part.jpg của job bị kill không ai dọn — TTL vẫn chạy
-       * đều cho video nên nhìn bên ngoài mọi thứ vẫn có vẻ ổn. */
-      if (!name.endsWith('.mp4') && !name.endsWith('.jpg')) continue;
+      /* .jpg/.png CÓ MẶT Ở ĐÂY vì proxy ẢNH ghi ra .jpg (nguồn JPEG) hoặc .png (nguồn có thể
+       * trong suốt, xem imageDerivativeExt). Bỏ sót đuôi nào là cache ảnh phình mãi mãi và rác
+       * .part.* của job bị kill không ai dọn — TTL vẫn chạy đều cho video nên nhìn bên ngoài
+       * mọi thứ vẫn có vẻ ổn. */
+      if (!/\.(mp4|jpg|png)$/.test(name)) continue;
       const item = path.join(PROXY_CACHE_DIR, name);
       const stat = fs.statSync(item);
       // .part.* = rác của job bị kill giữa đường -> xoá ngay.
-      const expired = name.endsWith('.part.mp4') || name.endsWith('.part.jpg')
+      const expired = /\.part\.(mp4|jpg|png)$/.test(name)
         || (now - stat.mtimeMs) > PROXY_CACHE_TTL_MS;
       if (expired) fs.rmSync(item, { force: true });
     }

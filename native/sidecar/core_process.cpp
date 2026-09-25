@@ -1513,6 +1513,25 @@ std::string ClipPixelFormat(const ExportSettings& settings) {
   return settings.codec == "prores" ? "format=yuv422p10le" : "format=yuv420p";
 }
 
+/* MÀU ĐẦU RA CỦA BẢN XUẤT: LUÔN BT.709, dải LIMITED (tv), gắn đủ nhãn.
+ *
+ * LỖI ĐÃ GẶP (2026-09-25, dự án thật "Yêu Con 1"): chỉ cần MỘT ảnh JPG làm lớp phủ (logo,
+ * ảnh Magic Fill) là bản xuất thành `yuvj420p · pc · bt470bg` — full range + ma trận BT.601
+ * kiểu ảnh JPEG — trong khi nguồn là `yuv420p10le · tv · bt709`. FFmpeg bản mới THƯƠNG LƯỢNG
+ * dải/ma trận màu cho cả đồ hình, và `overlay format=auto` kéo luồng chính theo thuộc tính của
+ * ảnh. `format=yuv420p` KHÔNG chặn được: từ FFmpeg 7.1 dải màu là thuộc tính RIÊNG, không còn
+ * nằm trong tên pix_fmt.
+ * Điểm ảnh vẫn đúng NẾU trình phát đọc nhãn, nhưng nhiều trình phát (KMPlayer, trình phát mặc
+ * định của nhiều máy, một số nền tảng) BỎ QUA nhãn range/matrix -> tương phản gắt hơn, sắc lệch
+ * đi: người dùng thấy "màu bản xuất khác hẳn preview". PNG không gây ra (đã đo), JPG thì có.
+ * Chuyển TƯỜNG MINH về bt709/tv ở cuối đồ hình (swscale đọc thuộc tính từng khung nên phép
+ * chuyển luôn đúng, kể cả khi luồng phía trước bị kéo sang pc/bt470bg), rồi `setparams` gắn
+ * primaries/transfer — trước đây hai nhãn này ra `unknown` ngay cả ở ca bình thường. */
+std::string OutputColorFilters(const ExportSettings& settings) {
+  return "scale=out_color_matrix=bt709:out_range=tv," + ClipPixelFormat(settings)
+    + ",setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709";
+}
+
 // Thay token LOCALT (thời gian cục bộ) bằng (<timeVar> - start). timeVar khác nhau theo
 // filter: scale/rotate/overlay dùng 't' (PTS giây); geq dùng 'T'. overlay: start tuyệt đối;
 // clip lane chính: start 0.
@@ -2076,10 +2095,19 @@ bool HasAnyExpr(std::initializer_list<const std::string*> exprs) {
 
 // Clip có thuộc tính biến thiên theo thời gian -> KHÔNG được cắt đôi.
 bool IntervalIsTimeVarying(const ExportInterval& item) {
+  /* Chuỗi màu chứa token LOCALT = có biểu thức theo thời gian bên trong: lớp Điều chỉnh
+   * phủ MỘT PHẦN block (`enable='between(LOCALT,..)'`), "Viền mờ dần" có keyframe… Cắt đôi
+   * block như vậy là nửa sau chạy lại từ t=0 và cửa sổ thời gian rơi sai chỗ. */
+  const auto hasLocalT = [](const std::string& s) { return s.find("LOCALT") != std::string::npos; };
+  if (hasLocalT(item.adjustLayerFilters) || hasLocalT(item.adjustFilters)
+      || hasLocalT(item.adjustFiltersPost)) {
+    return true;
+  }
   return HasAnyExpr({&item.animXExpr, &item.animYExpr, &item.animSxExpr, &item.animSyExpr,
                      &item.animRotExpr, &item.kfXExpr, &item.kfYExpr, &item.kfScaleExpr,
                      &item.kfRotExpr, &item.kfOpacityExpr, &item.kfVolumeExpr,
-                     &item.adjEqContrastExpr, &item.adjEqBrightnessExpr, &item.adjEqSaturationExpr});
+                     &item.adjEqContrastExpr, &item.adjEqBrightnessExpr, &item.adjEqSaturationExpr,
+                     &item.adjustLutMixExpr});
 }
 
 /* Lớp phủ có thuộc tính biến thiên theo thời gian -> không được cắt qua nó.
@@ -2548,6 +2576,9 @@ void AppendEncoderArgs(std::vector<std::string>& cmd, const ExportSettings& sett
   // Ép output CFR đúng renderFps: không có -r/-fps_mode thì ffmpeg tự đoán từ
   // stream đầu vào (VFR/lệch pha) -> frame animation bị lặp/bỏ không đều (giật)
   cmd.insert(cmd.end(), {"-r", settings.renderFps, "-fps_mode", "cfr"});
+  // Nhãn màu ở tầng bitstream/container, khớp OutputColorFilters (xem chú thích ở đó).
+  cmd.insert(cmd.end(), {"-colorspace", "bt709", "-color_primaries", "bt709",
+                         "-color_trc", "bt709", "-color_range", "tv"});
 
   /* KHOẢNG CÁCH KHUNG I = 1 GIÂY. Thiếu `-g` thì encoder dùng mặc định của nó: x264 và
    * NVENC đều là 250 KHUNG, tức 4,17 giây ở 60fps.
@@ -2628,7 +2659,12 @@ bool WriteFilterScript(
   const std::string concatSpec = std::string("concat=n=") + std::to_string(count)
     + ":v=" + (wantVideo ? "1" : "0") + ":a=" + (wantAudio ? "1" : "0");
   if (overlays.empty()) {
-    script << concatSpec << (wantVideo ? "[v]" : "") << (wantAudio ? "[a]" : "") << "\n";
+    if (wantVideo) {
+      script << concatSpec << "[vcat]" << (wantAudio ? "[a]" : "") << ";\n";
+      script << "[vcat]" << OutputColorFilters(settings) << "[v]\n";
+    } else {
+      script << concatSpec << (wantAudio ? "[a]" : "") << "\n";
+    }
     return true;
   }
 
@@ -2649,7 +2685,7 @@ bool WriteFilterScript(
     }
     currentVideo = outputLabel;
   }
-  if (wantVideo) script << currentVideo << "setsar=1," << ClipPixelFormat(settings) << "[v];\n";
+  if (wantVideo) script << currentVideo << "setsar=1," << OutputColorFilters(settings) << "[v];\n";
   if (!wantAudio) return true;
 
   std::vector<std::string> audioLabels;

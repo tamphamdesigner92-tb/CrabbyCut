@@ -151,10 +151,18 @@ Test: `npm run test:image-proxy`.
   - Shape lanes chứa object SVG nội bộ do app tạo, không phải file `.svg` import.
 - Audio lanes luôn nằm phía dưới main lane.
 - Mỗi loại lane có thể có nhiều lane: Media 1/2, Text 1/2, Shape 1/2, Audio 1/2...
-- CHIỀU CAO LANE (`LANE_HEIGHTS`, px): main 86 · media 57 · text/shape/vector 40 · audio 48 · adjust 34.
-  Lane media = 2/3 lane chính (đổi 2026-08-12, trước đó bằng nhau): lane chính là mạch
+- CHIỀU CAO LANE (`LANE_HEIGHTS`, px): main 78 · media 49 · text/shape/vector 32 · audio 40 · adjust 26
+  (2026-09-25, xếp sát kiểu CapCut: đệm block `LANE_BLOCK_INSET` 6 → 2px, `LANE_GAP` 8 → 4px;
+  CHIỀU CAO BLOCK giữ nguyên 74/45/28/36/22 — chỉ phần trống bị bớt, giữa hai block kề nhau
+  còn 8px thay vì 20px). Vị trí/chiều cao block PHẢI đi qua `laneBlockTop()` /
+  `laneBlockHeight()` — trước đây "+6/−12" chép tay ở 8 nơi. `rowIndexFromClientY` chỉ tính
+  trúng lane trong THÂN block, nên dải trống 2+4+2 giữa hai block là vùng "thả để chèn lane
+  mới" (rộng 8px như khe cũ); nó và `insertTrackAtClientY`/`trackForItemDrop`/
+  `mainOverlayDropTarget`/bóng Alt-kéo nay dùng toạ độ NỘI DUNG (`timelineContentYFromClientY`,
+  có scrollTop, trừ viền khung) — bản cũ đo từ khung nên cuộn lane xuống là kéo trúng nhầm lane.
+  Lane media ≈ 2/3 lane chính (đổi 2026-08-12, trước đó bằng nhau): lane chính là mạch
   chuyện, lane phủ chỉ là lớp chèn — cao bằng nhau thì mắt không phân được trục chính.
-  KÉO THEO: block media overlay chỉ còn 45px (lane − 12), không đủ cho bố cục 3 tầng
+  KÉO THEO: block media overlay chỉ còn 45px, không đủ cho bố cục 3 tầng
   nhãn(28) · dải phim · sóng âm(22) của block lane chính — dải phim sẽ ra chiều cao ÂM.
   Vì vậy `.editing-item-block.editing-media-block .editing-thumb-strip` đè lại thành
   top/bottom 3px: dải phim phủ TRỌN block, nhãn (có nền mờ riêng) và sóng âm (canvas
@@ -9219,3 +9227,156 @@ duyệt. Nguồn: một video tiếng Việt 11,2 s và bản nối 90 s của c
 npm run test:auto-subtitle   kế hoạch trộn (asplit/adelay/amix normalize=0/atempo) + .srt +
                              chia phụ đề + hợp đồng tiến độ sidecar ⇄ backend
 ```
+
+## Giao diện Lumen — thiết kế lại theo mẫu Figma (2026-09-25)
+
+**Bối cảnh.** Người dùng dựng một giao diện mẫu trên Figma Make ở `Edit Video App Interface/`
+(React 19 + Tailwind v4, một file `src/App.tsx`; thư mục này CHỈ là tài liệu tham khảo, không
+nạp vào app). Yêu cầu: CrabbyCut trông như mẫu, **playhead vẫn ghim giữa khung như cũ**.
+Người dùng chốt: accent đổi sang **amber**; phạm vi = restyle + chỉnh chrome nhẹ (không dời
+panel, không đổi tính năng).
+
+**Bảng màu (token `:root` của `index.html`, đổi tại chỗ):**
+
+```text
+surface-1 / bg-color   #08090c   (ink)          surface-2 / panel-bg    #0f1116 (panel)
+surface-2b (mới)       #14161d   (panel-2)      surface-3 / panel-light #1a1d26 (elev)
+surface-4              #222633                  border-color            #23262f
+border-soft (mới)      #1b1e26                  text-1 #e7e9ee · text-2 #9aa0ac · text-3 #8a8f9c
+text-4 (mới)           #626775   CHỈ cho tick thước / nhãn trang trí (dưới AA cho chữ đọc)
+primary / accent       #ffb020   primary-hover #ffc24d · primary-text #ffb020
+on-primary (mới)       #111111   chữ/icon TRÊN nền accent (amber sáng -> chữ trắng chỉ ~1.9:1)
+primary-soft (mới)     #3a2a0a   nền trạng thái active kiểu "amber-soft" của mẫu
+teal/violet/rose (mới) #34d3c2 / #8b7bff / #ff6b8b
+clip-video/text/audio/shape (mới)  #3d6fe0 / #8b7bff / #2f9e8f / #c2557a
+selection #ffb020 · selection-dim rgba(255,176,32,.6) · snap-guide #34d3c2 (teal)
+header-h 50 -> 44px · statusbar-h (mới) 26px
+```
+
+`--primary-a05…a40` tô lại thành `rgba(255,176,32,α)`. Glass (`--glass-bg*`) nâng gần đặc.
+`--font-mono` thêm Roboto Mono (bản local trong `static/fonts/google/RobotoMono/` — JetBrains
+Mono của mẫu không có sẵn và app phải chạy offline).
+
+**Vì sao tách `static/css/lumen-skin.css` thay vì sửa rải trong 5000 dòng CSS.** Lớp skin
+là một khối đọc được từ đầu đến cuối, gỡ/thử lại được bằng một dòng `<link>`. Thứ tự cascade:
+link nằm CUỐI `<head>`, còn `editing-runtime.js` và `auto-subtitle.js` (hai chỗ duy nhất tạo
+`<style>` lúc chạy) nay `insertBefore(style, #lumenSkin)` thay cho `appendChild` — cùng độ đặc
+hiệu thì skin luôn thắng mà không cần `!important`. Thiếu `#lumenSkin` thì
+`insertBefore(x, null)` chính là `appendChild`, không vỡ gì.
+
+**Chữ trên nền accent.** Mọi rule có nền `var(--primary)` + chữ `#fff` (16 chỗ, quét bằng
+regex theo khối rule trong `index.html` + CSS tiêm) đổi chữ sang `var(--on-primary)`, kể cả
+selector `button {}` thô. Các giá trị xanh viết tay `rgba(10,132,255,α)` / fallback
+`var(--primary, #0a84ff)` (~22 chỗ) đổi sang amber.
+
+**Những gì đổi, theo vùng:**
+- *Header*: nền đặc `--surface-2`, cao 44px, nút Trang chủ / Menu kiểu ghost, chấm "chưa lưu"
+  thành chấm amber, breadcrumb (luồng lọc) thành segmented tab, **`#btnExportVideo` và
+  `#btnExportFromStep4` `.btn-danger` → `.btn-primary`** (hạng mục §5.5 bàn giao cũ).
+  Header nâng z-index lên `--z-home + 5`: trước đây 100 < `#homeScreen` 150 nên **menu thả
+  xuống ở màn Home bị lớp Home che mất** (lỗi có từ trước, `elementFromPoint` trả `home-main`).
+- *Thanh trạng thái* `<footer class="app-statusbar">` sau `.main-layout`: **nhận nguyên phần tử
+  `#statusText`** (giữ id/role/aria-live) từ header; bên phải là
+  `<kbd class="app-menu-shortcut" data-shortcut-cmd=…>` nên `Shortcuts.syncLabels()` tự ghi
+  nhãn theo keymap đang dùng. Đã trừ `--statusbar-h` ở `.main-layout`, `.workspace` và
+  `bottom` của `#homeScreen`.
+- *Resizer*: vùng bắt 6px giữ nguyên, chỉ vẽ đường 1px bằng `::after`.
+- *Panel*: tab `.edit-tab` thành gạch chân amber; `.edit-subtab`/`.set-nav-item` active nền
+  `--primary-soft` chữ amber; inspector bỏ khung thẻ lồng (`.clip-inspector-panel` trong suốt),
+  tiêu đề "Thuộc tính" thành nhãn chữ hoa `.14em`; `.fig-field` nền ink, focus viền amber;
+  rail phải `.panel-toggle-btn` như ToolRail của mẫu.
+- *Preview*: khung bo 12px, **viền bằng `box-shadow` chứ KHÔNG `border`** (`previewScale` đọc
+  `frame.clientWidth`, xem §7.9 bàn giao); nút Play tròn amber; `#timeDisplay` bỏ inline style
+  → class `.tl-timecode`.
+- *Timeline*: toolbar phẳng, `.tool-icon-btn` ghost, active = `--primary-soft` + icon amber;
+  thước/rail/lane phẳng; badge lane tô theo loại (lane chính amber, V xanh, A teal, text tím,
+  shape hồng); block màu phẳng `--clip-*` + lớp phủ gradient `::after` (z 3: trên dải phim,
+  dưới nhãn z4 và tay cầm z5); khung chọn amber + tay cầm trim amber; sóng âm `WAVE_STYLE` đổi
+  tông; Pixi segment chọn `0xfaea66` → `0xffb020`.
+- *Playhead*: CHỈ CSS — nền amber, `::before` thành đầu tam giác bằng `clip-path`, **vẫn
+  `width: 12px; left: -5px`**. Không đụng inline `left:50%/translateX(-50%)`.
+- *Snap guide* (`.editing-snap-guide`, `.razor-guide-line.is-snapped`,
+  `.timeline-hover-guide.is-snapped`) vàng → teal, để không lẫn với playhead amber. Marker
+  keyframe vẫn vàng chanh `#faea66` (phân biệt được với amber).
+- *Electron*: `backgroundColor` của cửa sổ chính + cửa sổ setup `#111214` → `#08090c`;
+  `electron/setup.html` đổi bảng màu (accent đỏ → amber, chữ tối trên nút).
+
+**Kiểm tra đã làm (preview, 1440×900, cờ perf tắt như §7.1 bàn giao):**
+`playhead.style.left === '50%'`, `transform === 'translateX(-50%)'`; lệch tâm so với
+`.timeline-track-frame` = **−0.5px, giống hệt khi TẮT lớp skin** (khung rộng 1409px, số lẻ);
+thanh cuộn dọc `.timeline-track-outer` vẫn 6px; `git diff` không có dòng nào chạm
+`seekTimeline`/`scrollTimelineToCurrentTime`/`updatePlayhead`/`getTimelineSidePaddingPx`/
+`timelineTimeToPx`/`pxToTimelineTime`/handler scroll-wheel; `node --check` cho các file JS đã
+sửa; không token nào tự tham chiếu; console chỉ còn các 404 có sẵn (`main-source`, thumbnail
+thư viện). **Chưa kiểm được trong preview**: phát lại cuộn theo (`document.hidden` làm rAF
+đứng) — cần xem tay trong Electron.
+
+**Còn để ngỏ:** logo `#logo-crabbycut` vẫn chữ "Cut" đỏ (nhận diện thương hiệu — chưa đổi khi
+chưa có quyết định); `.btn-danger` vẫn đỏ cho hành động phá huỷ thật.
+
+## Màu bản xuất, lớp Điều chỉnh, PNG trong suốt, mật độ panel (2026-09-25, đợt 2)
+
+Người dùng báo 5 việc sau đợt giao diện Lumen: panel trái/phải chật, lane cách nhau quá xa,
+segmented "Cơ bản/Mặt nạ" là một khối hộp lớn, PNG trong suốt hiện nền đen trên preview, và
+"preview khác hẳn bản xuất — bật/tắt lớp Điều chỉnh có LUT thì bản xuất cũng không đổi".
+
+### 1. Màu bản xuất khác preview — nguyên nhân THẬT (đã đo trên dự án người dùng)
+
+- Dự án "Yêu Con 1": nguồn DJI HEVC `yuv420p10le · tv · bt709`, 11 clip, lớp "Điều chỉnh 1" phủ
+  trọn 0–40,9s (phơi sáng +5, tương phản −9, bão hoà +8; LUT trống ở bản lưu 10:09), có ảnh
+  JPG trong dự án. Ba bản xuất trong Downloads đều là **`yuvj420p · pc · bt470bg`**.
+- Tái hiện bằng sidecar trên chính footage đó: không lớp phủ -> `yuv420p · tv · bt709`; lớp phủ
+  PNG -> vẫn vậy; **lớp phủ JPG -> `yuvj420p · pc · bt470bg`**. FFmpeg (N-123955) thương lượng
+  dải/ma trận màu cho cả đồ hình; `overlay format=auto` kéo luồng chính theo thuộc tính của ảnh
+  JPEG, và `format=yuv420p` không chặn được vì từ 7.1 dải màu là thuộc tính riêng.
+- Điểm ảnh vẫn đúng NẾU trình phát đọc nhãn (giải mã theo nhãn, trung bình lệch ≤ 2/255), nhưng
+  KMPlayer và nhiều trình phát bỏ qua range/matrix -> tương phản/bão hoà gắt hơn ~16% và sắc lệch.
+- **Sửa** (`core_process.cpp`): `OutputColorFilters()` =
+  `scale=out_color_matrix=bt709:out_range=tv,format=…,setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709`
+  ở cuối CẢ HAI đường (có/không lớp phủ; nhánh không lớp phủ đổi `concat…[v]` thành
+  `concat…[vcat];[vcat]…[v]`), và `AppendEncoderArgs` gắn `-colorspace bt709 -color_primaries
+  bt709 -color_trc bt709 -color_range tv`. Primaries/transfer trước đây ra `unknown` ở MỌI bản xuất.
+- **Lớp Điều chỉnh CÓ vào bản xuất** ở dự án này (đo: không lớp 142,138,129 -> có lớp 147,147,133;
+  bản `1b` vs `1c` của người dùng chênh G +7 đúng hướng). Hiệu ứng +5/−9/+8 chỉ ~5/255 nên bị
+  lấn át hoàn toàn bởi lệch dải màu ở trên — đó là vì sao "bật/tắt không thấy khác".
+- Test: `npm run test:export-color` (`tests/scripts/export_color_output.js`) — JPG overlay phải ra
+  `yuv420p·tv·bt709` đủ nhãn và giữ màu so với nguồn (≤ 3/255); chạy với sidecar cũ thì fail
+  đúng câu "nhận yuvj420p".
+
+### 2. Các đường làm rơi lớp Điều chỉnh (điều tra toàn bộ, sửa phần an toàn)
+
+| Lỗi | Sửa |
+|---|---|
+| `adjustLayerExportSpec` lấy lớp ở ĐIỂM GIỮA block — lớp phủ nửa đầu clip dài bị bỏ | Lấy lớp PHỦ NHIỀU NHẤT (bằng nhau -> lớp trên cùng). Vẫn một lớp/block (một chỗ LUT3D) |
+| `enableBetween` viết `between(t,…)`; overlay giữ mốc TUYỆT ĐỐI sau setpts nên cửa sổ không bao giờ trúng | Phát `between(LOCALT,…)`; sidecar thay `(t-0)` ở lane chính, `(t-start)` ở overlay |
+| `IntervalIsTimeVarying` không coi chuỗi màu có LOCALT / LUT-mix là biến thiên -> dự án ≥ 240s có lớp phủ có thể cắt đôi block, nửa sau lệch cửa sổ | Thêm điều kiện LOCALT trong `adjustLayerFilters/adjustFilters/adjustFiltersPost` + `adjustLutMixExpr` |
+| `drawMainClipLayer` (chuyển cảnh lane chính — preview LẪN bake xuất —, bake Retouch cả khung, chụp khung) chỉ áp màu của clip | Thêm lượt lớp (`activeAdjustmentLayerAdjustments(span.start + localT)`), bộ dựng chung `maincanvas~adjlayer`; `LAYER_FX_MAX` 4 -> 6 để không bỏ-dựng-lại context mỗi khung |
+
+**Chưa sửa (ghi lại để làm riêng):** keyframe trên CHÍNH lớp Điều chỉnh (cường độ LUT, eq) bị
+`normalizeAdjustLayerFields` bỏ; bake chuyển cảnh OVERLAY (`prepareExportLayer`) và ảnh có hoạt
+ảnh (`renderImageAnimationSequence`) chưa áp lớp; proxy LQ của overlay HDR khoá theo
+`source_path` (bản HDR gốc) nên preview LQ cháy màu trong khi bản xuất đúng; nguồn KHÔNG gắn nhãn
+màu bị FFmpeg giải bằng BT.601 trong khi Chromium giả định BT.709.
+
+### 3. PNG trong suốt hiện nền đen trên preview (LQ)
+
+Proxy ảnh (`queueAssetProxy`) và thumbnail ảnh (`createOrGetImageThumbnail`) luôn ghi `.jpg` —
+JPEG không có alpha. Bản xuất đọc file gốc nên đúng. Nay `imageDerivativeExt()` trả `png` cho
+`.png/.webp` (`ALPHA_IMAGE_EXTENSIONS`), `scaleImageTo` ép `-pix_fmt rgba` khi đích là `.png`,
+`pruneAssetProxyCache` dọn cả `.png/.part.png`. Không phải bump `PROXY_FORMAT_VERSION` (sẽ dựng
+lại MỌI proxy video): đổi đuôi đã là đổi đường dẫn đích nên cache `.jpg` cũ tự bị bỏ qua. Test
+`image_proxy.js` nhóm 1b: PNG trong suốt -> proxy `.png` còn alpha + thumbnail `_img.png`.
+
+### 4. Mật độ panel (kiểu CapCut)
+
+- Thủ phạm chính: `.sidebar-left .step-panel button { padding: 8px 10px; margin-bottom: 8px }`
+  (0-2-1) đè lên MỌI nút có class trong panel trái. Nay bọc `:where()` (0-0-1).
+- Panel trái (lumen-skin): lề 12 -> 8, cột nhóm 88 -> 72, khe 8 -> 6, thanh cuộn thân panel 6px ->
+  lưới thẻ 157 -> 193px = HAI cột 82px thay vì một. Dải 9 tab thành icon trên/nhãn dưới (thêm
+  symbol `ic-transition`, `ic-palette`, `ic-library`; markup `.edit-tab-ico` + `.edit-tab-label`).
+- Inspector: `.ins-subtab` thừa hưởng `margin-bottom:10px` của selector `button` thô -> khung bao
+  41px cho nút 24px ("khối hộp lớn"). Nay segmented phẳng (không viền, nền `#0a0b0f`, mục chọn
+  `--surface-4`), `.ins-tab` chữ gọn (`width:auto` — rule `button` thô đặt 100%), đầu mục 45 -> 26px,
+  ô nhập 30 -> 28px, khe hàng 6 -> 5px.
+- Lane: xem mục "CHIỀU CAO LANE" ở đầu file (đệm 6 -> 2, khe 8 -> 4, block giữ nguyên cao).
+
