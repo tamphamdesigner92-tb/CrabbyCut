@@ -1812,16 +1812,41 @@ std::string ColorAdjustEqFilter(double start,
 //
 // Trả về đoạn chuỗi để nối vào GIỮA chuỗi filter, kết thúc bằng `null` để phần sau (bắt
 // đầu bằng dấu phẩy) nối vào được — cùng quy ước với bộ bọc mặt nạ.
+//
+// KHÔNG DÙNG `blend=all_expr` NỮA (sửa 2026-09-25, người dùng báo "render treo rất lâu"):
+// all_expr tính biểu thức CHO TỪNG ĐIỂM ẢNH của từng mặt phẳng. ĐO trên 1080x1920: 82 ms/khung
+// chỉ riêng bước trộn; dự án 2 clip 6s có lớp Điều chỉnh mang LUT + keyframe cường độ mất
+// 59,8 s để xuất — tức ~10 s cho mỗi giây phim, còn thanh trạng thái thì đứng yên ở "Đang
+// render batch 1/1" nên người dùng tưởng treo.
+// Nay: `blend` chế độ normal với `all_opacity` (tuỳ chọn có cờ T — đổi được lúc chạy), và
+// `sendcmd` cờ [expr] tính độ trộn MỘT LẦN mỗi khung rồi gửi vào. normal + opacity = B*op +
+// A*(1-op) khi input đầu là B — đúng công thức cũ. Đo: 4,9 s -> 0,54 s cho 60 khung (kể cả mã
+// hoá), dốc 0 -> 1 khớp biểu thức.
+//  - sendcmd đứng TRƯỚC split (tức trước blend): lệnh tới blend TRƯỚC khung mà nó áp cho —
+//    đặt sau blend là trễ một khung.
+//  - Lệnh phải nằm trong FILE (`sendcmd=f=`): viết thẳng `c='…'` thì dấu phẩy của biểu thức
+//    đụng cú pháp tách lệnh của sendcmd, escape qua hai tầng (graph + sendcmd) không qua được.
+//  - Biến thời gian của sendcmd [expr] là T (giây của khung), giống blend cũ.
+static fs::path g_filterAuxDir;   // thư mục của filter script đang ghi (xem WriteFilterScript)
+static int g_filterAuxSeq = 0;
+
 std::string ColorAdjustLutBlend(double start, const std::string& aPath, const std::string& bPath,
                                 const std::string& mixExpr, const std::string& tag) {
   if (aPath.empty() || bPath.empty() || mixExpr.empty()) return "";
-  const std::string mix = "(" + SubstituteLocalTimeVar(mixExpr, start, "T") + ")";
+  const std::string mix = SubstituteLocalTimeVar(mixExpr, start, "T");
+  const fs::path dir = g_filterAuxDir.empty() ? fs::temp_directory_path() : g_filterAuxDir;
+  const fs::path cmdPath = dir / ("lutmix_" + tag + std::to_string(++g_filterAuxSeq) + ".cmd");
+  {
+    std::ofstream cmd{cmdPath};
+    if (!cmd) return "";   // không ghi được -> bỏ tầng trộn (thà thiếu LUT động còn hơn hỏng graph)
+    cmd << "0.0-1000000.0 [expr] blend@" << tag << "lm all_opacity '" << mix << "';\n";
+  }
   std::ostringstream out;
+  out << "sendcmd=f='" << FilterPath(cmdPath.string()) << "',";
   out << "split[" << tag << "la][" << tag << "lb];\n";
   out << "[" << tag << "la]lut3d=file='" << FilterPath(aPath) << "':interp=trilinear[" << tag << "la2];\n";
   out << "[" << tag << "lb]lut3d=file='" << FilterPath(bPath) << "':interp=trilinear[" << tag << "lb2];\n";
-  out << "[" << tag << "la2][" << tag << "lb2]blend=all_expr='A*(1-" << mix << ")+B*" << mix
-      << "'[" << tag << "lm];\n";
+  out << "[" << tag << "lb2][" << tag << "la2]blend@" << tag << "lm=all_mode=normal:all_opacity=0[" << tag << "lm];\n";
   out << "[" << tag << "lm]null";
   return out.str();
 }
@@ -2727,6 +2752,7 @@ bool WriteFilterScript(
   const bool wantAudio = mode != FilterScriptMode::VideoOnly;
   std::ofstream script(scriptPath);
   if (!script) return false;
+  g_filterAuxDir = scriptPath.parent_path();   // file lệnh phụ (lutmix_*.cmd) nằm cạnh script
   const double renderFpsValue = ParseFpsValue(settings.renderFps);
   for (size_t i = 0; i < count; i++) {
     const auto& item = intervals[offset + i];

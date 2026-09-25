@@ -9438,3 +9438,33 @@ không nhãn, vẽ lên canvas: **cao >= 720 -> BT.709 (221,84,38), cao < 720 ->
   Sai số cho phép 5/255 (màu bão hoà qua một vòng mã hoá lại lệch ~4).
 - `test:concat-cache` hỏng EPERM khi xoá `test_temp/concat_cache/temp_input.mp4` — CÓ SẴN (hỏng y
   hệt với server.js gốc), không liên quan.
+
+## Render "treo" khi LUT có keyframe cường độ + hình thoi keyframe màu (2026-09-25, đợt 5)
+
+**1. Không treo cứng — chậm cực độ.** Cường độ LUT có keyframe đi đường 2 nhánh
+(`ColorAdjustLutBlend`: split -> 2×lut3d -> trộn). Bản cũ trộn bằng `blend=all_expr=
+'A*(1-mix)+B*mix'`, mà all_expr tính biểu thức cho TỪNG ĐIỂM ẢNH của từng mặt phẳng: đo trên
+1080x1920 là 82 ms/khung chỉ riêng bước trộn (60 khung: 4,9 s so với 0,2 s khi trộn thường).
+Tái hiện: 2 clip 6 s + 1 overlay, cùng mang lớp Điều chỉnh có LUT + keyframe cường độ ->
+**59,8 s** để xuất (≈10 s mỗi giây phim) trong khi trạng thái đứng yên ở "Đang render batch 1/1".
+Dự án 40 s của người dùng ≈ 7 phút+ -> "treo".
+- Sửa: `blend@<tag>lm=all_mode=normal:all_opacity=0` (input đầu là nhánh B nên kết quả =
+  B·op + A·(1−op), đúng công thức cũ) và `sendcmd=f='lutmix_<tag><n>.cmd'` với lệnh
+  `0.0-1000000.0 [expr] blend@<tag>lm all_opacity '<mix>'` — cờ [expr] tính độ trộn MỘT LẦN mỗi
+  khung (biến T = giây của khung; LOCALT thay bằng (T-start) như cũ). sendcmd đứng TRƯỚC split
+  để lệnh tới blend trước khung nó áp (đặt sau là trễ một khung).
+- File lệnh nằm cạnh filter script (`g_filterAuxDir` do WriteFilterScript đặt). Viết thẳng
+  `sendcmd=c='…'` KHÔNG được: dấu phẩy của biểu thức đụng cú pháp tách lệnh của sendcmd, escape
+  qua hai tầng (graph + sendcmd) không qua (đã thử).
+- Kết quả: cùng bản xuất 59,8 s -> **2,6 s**. `test:color-adjust` "lut mix preview↔export" vẫn
+  lệch ≤ 2/255; "lut mix end-to-end" dốc −20 -> +147 như trước.
+
+**2. Không có hình thoi keyframe trên block Điều chỉnh.** `blockKeyframeTimes` chỉ gom trục
+transform + âm lượng, và cổng `appendKeyframeMarkers` hỏi `hasKeyframes || hasVolumeKeyframes`
+— cả hai bỏ sót keyframe MÀU `adj.*`. Lớp Điều chỉnh chỉ có loại keyframe này nên không hiện
+hình thoi nào (video/ảnh chỉ keyframe màu cũng vậy), dù `moveKeyframesAt` vốn đã dời cả `adj.*`.
+Nay `blockKeyframeTimes` duyệt MỌI danh sách `{t,…}` có thật trong `keyframes` (cùng cách
+`moveKeyframesAt`), cổng = "có mốc nào không" theo chính hàm đó. Test `keyframe_drag.js` nhóm 2
+đổi kỳ vọng thành [1, 2, 3, 5] (mốc màu cũng là một hình thoi). Đã kiểm trong trình duyệt: lớp
+có keyframe cường độ LUT hiện 2 hình thoi, kéo +30 px @600 px/s dời 0,03 s -> 0,08 s.
+

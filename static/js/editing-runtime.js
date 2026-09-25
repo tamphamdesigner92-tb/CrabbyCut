@@ -6655,11 +6655,18 @@
      *
      * Vị trí x trong block = t (giây cục bộ) × zoomScale. Bấm -> đưa playhead tới đó;
      * kéo ngang -> đổi thời điểm. */
+    /* Duyệt MỌI danh sách keyframe có thật trong dữ liệu (transform, âm lượng VÀ thông số màu
+     * 'adj.*') — cùng cách moveKeyframesAt duyệt khi kéo. Bản trước chỉ lấy trục transform +
+     * âm lượng, nên block chỉ có keyframe MÀU (lớp Điều chỉnh với cường độ LUT / phơi sáng
+     * keyframe, hay video chỉ keyframe màu) không hiện hình thoi nào để bấm/kéo, dù preview
+     * và bản xuất vẫn chạy theo keyframe đó (người dùng báo 2026-09-25). */
     function blockKeyframeTimes(keyframes) {
         const times = [];
-        if (!keyframes || !window.TextAnimations) return times;
-        [...(TextAnimations.KEYFRAME_FIELDS || []), TextAnimations.VOLUME_KEYFRAME_FIELD].forEach((f) => {
-            (keyframes[f] || []).forEach((k) => {
+        if (!keyframes || typeof keyframes !== 'object') return times;
+        Object.keys(keyframes).forEach((f) => {
+            if (!Array.isArray(keyframes[f])) return;
+            keyframes[f].forEach((k) => {
+                if (!k || typeof k !== 'object' || !('t' in k)) return;
                 const t = Math.round((Number(k.t) || 0) * 1000) / 1000;
                 /* Gom theo KF_EPS chứ không theo giá trị làm tròn: hai trục lệch nhau 1ms là
                  * CÙNG một keyframe ở mọi chỗ khác của UI (kfListForControl), nên ở đây cũng
@@ -6672,12 +6679,12 @@
     }
 
     function appendKeyframeMarkers(block, owner, ownerKey, blockStartSeq, blockDuration, locked) {
-        if (!window.TextAnimations) return;
         const keyframes = owner && owner.keyframes;
-        // Âm lượng nằm ở namespace riêng nên phải cộng thêm cổng vào — nếu chỉ hỏi
-        // hasKeyframes() thì block audio chỉ có keyframe âm lượng sẽ không hiện marker nào.
-        if (!TextAnimations.hasKeyframes(keyframes) && !TextAnimations.hasVolumeKeyframes(keyframes)) return;
-        blockKeyframeTimes(keyframes).forEach((t) => {
+        // Cổng = "có mốc nào không" theo CHÍNH blockKeyframeTimes, không hỏi riêng từng họ
+        // (hasKeyframes / hasVolumeKeyframes đều bỏ sót keyframe màu 'adj.*').
+        const times = blockKeyframeTimes(keyframes);
+        if (!times.length) return;
+        times.forEach((t) => {
             const marker = document.createElement('div');
             marker.className = 'editing-kf-marker';
             marker.classList.toggle('is-locked', !!locked);

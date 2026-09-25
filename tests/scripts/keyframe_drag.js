@@ -130,12 +130,12 @@ const ok = (msg) => console.log(`  ok  ${msg}`);
         position_x: [{ t: 1 }, { t: 3 }],
         position_y: [{ t: 1.005 }, { t: 3 }],   // lệch 5ms — UI coi là CÙNG một keyframe
         volume: [{ t: 2 }],
-        'adj.basic.exposure': [{ t: 5 }],       // chưa hiện hình thoi (xem ghi chú bên dưới)
+        'adj.basic.exposure': [{ t: 5 }],       // keyframe MÀU cũng là một mốc (lớp Điều chỉnh chỉ có loại này)
     });
-    assert.deepStrictEqual(times, [1, 2, 3],
+    assert.deepStrictEqual(times, [1, 2, 3, 5],
         'mốc lệch dưới KF_EPS phải gom làm MỘT hình thoi — hai cái chồng nhau thì kéo cái nào'
         + ' cũng chỉ trúng một nửa dữ liệu');
-    ok('hình thoi là HỢP các mốc, gom theo dung sai KF_EPS');
+    ok('hình thoi là HỢP các mốc (transform + âm lượng + màu), gom theo dung sai KF_EPS');
 }
 
 // ---------------------------------------------------------------- 3) KẸP + BẮT DÍNH
