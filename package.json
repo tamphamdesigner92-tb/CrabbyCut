@@ -84,6 +84,7 @@
     "test:auto-grade": "node tests/scripts/auto_color_grade.js",
     "test:export": "node tests/scripts/export_smoke.js",
     "test:export-many-overlays": "node tests/scripts/export_many_overlays.js",
+    "test:export-color": "node tests/scripts/export_color_output.js",
     "test:export-long-subtitles": "node tests/scripts/export_long_subtitles.js",
     "test:sequence-fps": "node tests/scripts/export_sequence_fps.js",
     "test:preview-frame-sync": "node tests/scripts/preview_frame_sync.js",

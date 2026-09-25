@@ -1,0 +1,10 @@
+{
+  "description": "Edit videos seamlessly on your PC with intuitive tools designed for creators to enhance and customize their footage efficiently.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

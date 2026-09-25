@@ -30,7 +30,7 @@ function createSetupWindow() {
     resizable: false,
     maximizable: false,
     fullscreenable: false,
-    backgroundColor: '#111214',
+    backgroundColor: '#08090c',
     title: 'Thiết lập CrabbyCut',
     icon: path.join(__dirname, '..', 'build', 'icon.ico'),
     autoHideMenuBar: true,

@@ -9,7 +9,7 @@
     <script src="/static/js/ui-a11y.js?v=a11y-p1"></script>
     <script src="/static/vendor/mammoth.browser.min.js"></script>
     <script src="/static/vendor/pixi.min.js"></script>
-    <script src="/static/js/pixi-timeline-renderer.js?v=waveform-p3"></script>
+    <script src="/static/js/pixi-timeline-renderer.js?v=lumen-p1"></script>
     <script src="/static/js/auto-reframe-geometry.js?v=ar-chin-p3"></script>
     <script src="/static/js/script-markdown.js"></script>
     <script src="/static/js/script-reorder.js?v=reorder-p1"></script>
@@ -29,11 +29,11 @@
     <script src="/static/js/audio-waveform.js?v=waveform-strip-p4"></script>
     <script src="/static/js/audio-denoise.js?v=denoise-p1"></script>
     <script src="/static/js/clip-speed.js?v=speed-p2"></script>
-    <script src="/static/js/color-adjust.js?v=coloradjust-p13"></script>
+    <script src="/static/js/color-adjust.js?v=coloradjust-p14"></script>
     <!-- auto-grade.js đọc window.ColorAdjust lúc khởi tạo (UMD) -> phải nạp SAU color-adjust.js -->
     <script src="/static/js/auto-grade.js?v=autograde-p1"></script>
     <script src="/static/js/retouch.js?v=retouch-p1"></script>
-    <script src="/static/js/auto-subtitle.js?v=autosub-p1"></script>
+    <script src="/static/js/auto-subtitle.js?v=autosub-lumen-p1"></script>
     <style>
         /* ===== UI Font (Inter, static theo độ dày từ thư mục Inter/) ===== */
         @font-face { font-family: "Inter"; src: url("/static/fonts/google/Inter/Inter_400Regular.ttf") format("truetype"); font-weight: 400; font-display: swap; }
@@ -41,26 +41,30 @@
         @font-face { font-family: "Inter"; src: url("/static/fonts/google/Inter/Inter_600SemiBold.ttf") format("truetype"); font-weight: 600; font-display: swap; }
         @font-face { font-family: "Inter"; src: url("/static/fonts/google/Inter/Inter_700Bold.ttf") format("truetype"); font-weight: 700; font-display: swap; }
         @font-face { font-family: "Inter"; src: url("/static/fonts/google/Inter/Inter_800ExtraBold.ttf") format("truetype"); font-weight: 800; font-display: swap; }
+        /* Font mono cho timecode / số liệu (Lumen redesign) — dùng bản Roboto Mono có sẵn để chạy offline. */
+        @font-face { font-family: "Roboto Mono"; src: url("/static/fonts/google/RobotoMono/RobotoMono_400Regular.ttf") format("truetype"); font-weight: 400; font-display: swap; }
+        @font-face { font-family: "Roboto Mono"; src: url("/static/fonts/google/RobotoMono/RobotoMono_500Medium.ttf") format("truetype"); font-weight: 500; font-display: swap; }
+        @font-face { font-family: "Roboto Mono"; src: url("/static/fonts/google/RobotoMono/RobotoMono_600SemiBold.ttf") format("truetype"); font-weight: 600; font-display: swap; }
 
         :root {
             /* ---- Surfaces & color (refined neutral dark, Apple-ish) ---- */
-            --bg-color: #0e0f12;
-            --panel-bg: #17181b;
-            --panel-bg-light: #232428;
-            --border-color: #2a2c31;
-            --text-main: #f4f5f7;
-            --text-muted: #9a9ea7;
-            --primary: #0a84ff;
-            --primary-hover: #0a6fd6;
+            --bg-color: #08090c;
+            --panel-bg: #0f1116;
+            --panel-bg-light: #1a1d26;
+            --border-color: #23262f;
+            --text-main: #e7e9ee;
+            --text-muted: #8a8f9c;
+            --primary: #ffb020;
+            --primary-hover: #ffc24d;
             --success: #30c463;
             --warning: #f0b232;
             --danger: #ff453a;
-            --timeline-bg: #0c0d10;
+            --timeline-bg: #0f1116;
             --word-active: #faea66;
 
             /* ---- Typography ---- */
             --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
-            --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, "Cascadia Code", monospace;
+            --font-mono: "Roboto Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, "Cascadia Code", monospace;
             --fs-2xs: 10px;   /* meta, ruler ticks */
             --fs-xs:  11px;   /* labels, hints, captions */
             --fs-sm:  12px;   /* secondary body */
@@ -91,42 +95,38 @@
             --sh-inset-hairline: inset 0 1px 0 rgba(255,255,255,0.06);
 
             /* ---- Glassmorphism ---- */
-            --glass-bg: linear-gradient(135deg, rgba(40,43,50,0.62), rgba(22,24,29,0.46));
-            --glass-bg-strong: linear-gradient(135deg, rgba(40,43,50,0.85), rgba(22,24,29,0.72));
-            --glass-border: 1px solid rgba(255,255,255,0.10);
+            --glass-bg: linear-gradient(180deg, rgba(20,22,29,0.94), rgba(15,17,22,0.94));
+            --glass-bg-strong: linear-gradient(180deg, rgba(20,22,29,0.98), rgba(15,17,22,0.97));
+            --glass-border: 1px solid #23262f;
             --glass-blur: blur(18px) saturate(1.4);
             --glass-blur-light: blur(12px) saturate(1.3);
-            --glass-shadow: 0 18px 48px rgba(0,0,0,0.34), inset 0 1px 0 var(--white-a08);
+            --glass-shadow: 0 18px 48px rgba(0,0,0,0.5), inset 0 1px 0 var(--white-a04);
 
             /* ---- Semantic aliases (Đợt UI/UX Pro: lớp ngữ nghĩa cho token cũ) ---- */
-            --surface-1: #0e0f12;   /* nền app  = --bg-color */
-            --surface-2: #17181b;   /* nền panel = --panel-bg */
-            --surface-3: #232428;   /* nền control = --panel-bg-light */
-            --surface-4: #2d2f35;   /* nền control hover/nổi */
-            --text-1: #f4f5f7;      /* = --text-main */
-            --text-2: #b6bac3;      /* phụ, vẫn ≥4.5:1 trên surface-2 */
-            --text-3: #9a9ea7;      /* = --text-muted, nhãn/meta */
-            --border-subtle: rgba(255,255,255,0.07);
-            --border-strong: rgba(255,255,255,0.16);
+            --surface-1: #08090c;   /* nền app  = --bg-color */
+            --surface-2: #0f1116;   /* nền panel = --panel-bg */
+            --surface-3: #1a1d26;   /* nền control = --panel-bg-light */
+            --surface-4: #222633;   /* nền control hover/nổi */
+            --text-1: #e7e9ee;      /* = --text-main */
+            --text-2: #9aa0ac;      /* phụ, vẫn ≥4.5:1 trên surface-2 */
+            --text-3: #8a8f9c;      /* = --text-muted, nhãn/meta */
+            --border-subtle: rgba(255,255,255,0.06);
+            --border-strong: rgba(255,255,255,0.14);
             /* Hai token dưới đây bị dùng trong editing-runtime.js nhưng chưa hề định nghĩa */
-            --accent: #0a84ff;
-            --text-strong: #f4f5f7;
+            --accent: #ffb020;
+            --text-strong: #e7e9ee;
 
             /* ---- Thang tint primary (thay các rgba(10,132,255,α) viết tay) ---- */
-            --primary-a05: rgba(10,132,255,0.05);
-            --primary-a08: rgba(10,132,255,0.08);
-            --primary-a12: rgba(10,132,255,0.12);
-            --primary-a20: rgba(10,132,255,0.20);
-            --primary-a22: rgba(10,132,255,0.22);
-            --primary-a30: rgba(10,132,255,0.30);
-            --primary-a40: rgba(10,132,255,0.40);
-            /* Accent dùng cho CHỮ trên nền tối (Phase E).
-               #0a84ff là accent chuẩn của app và KHÔNG đổi — nhưng dùng làm màu chữ thì nó
-               chỉ đạt 4.25:1 trên --surface-3 và 3.67:1 trên --surface-4, dưới ngưỡng AA
-               4.5:1 cho chữ thường. Tông sáng hơn một nhịp đạt 5.41 / 4.67, mắt gần như
-               không phân biệt được với accent gốc. CHỈ dùng cho CHỮ: nền đặc, viền và icon
-               vẫn là --primary (icon chỉ cần 3:1, và 4.25 đã qua). */
-            --primary-text: #3d9bff;
+            --primary-a05: rgba(255,176,32,0.05);
+            --primary-a08: rgba(255,176,32,0.08);
+            --primary-a12: rgba(255,176,32,0.12);
+            --primary-a20: rgba(255,176,32,0.20);
+            --primary-a22: rgba(255,176,32,0.22);
+            --primary-a30: rgba(255,176,32,0.30);
+            --primary-a40: rgba(255,176,32,0.40);
+            /* Accent dùng cho CHỮ trên nền tối. Với accent amber (Lumen redesign) màu gốc đã
+               đạt ~9:1 trên --surface-3 nên dùng thẳng; token giữ lại để có một chỗ chỉnh. */
+            --primary-text: #ffb020;
             --focus-ring: 0 0 0 3px var(--primary-a22);
             --focus-ring-outer: 0 0 0 2px var(--surface-1), 0 0 0 4px var(--primary);
 
@@ -162,15 +162,31 @@
             --z-tooltip: 400;
 
             /* ---- Kích thước shell (trước đây hardcode ở 4 + 3 chỗ) ---- */
-            --header-h: 50px;
+            --header-h: 44px;
+            --statusbar-h: 26px;
             --timeline-h: 250px;
 
             /* ---- Timeline / NLE ---- */
             --ruler-h: 26px;
             --lane-rail-w: 168px;
-            --selection: #ffffff;              /* selection kiểu CapCut */
-            --selection-dim: rgba(255,255,255,0.62);
-            --snap-guide: #faea66;
+            --selection: #ffb020;              /* khung chọn block: amber theo mẫu Lumen */
+            --selection-dim: rgba(255,176,32,0.6);
+            --snap-guide: #34d3c2;
+
+            /* ---- Lumen redesign (2026-09): amber accent + bảng màu phụ ----
+               Accent amber sáng nên chữ TRÊN nền accent phải tối: dùng --on-primary. */
+            --on-primary: #111111;
+            --primary-soft: #3a2a0a;
+            --surface-2b: #14161d;   /* panel-2: rail, ruler, lane xen kẽ */
+            --border-soft: #1b1e26;
+            --text-4: #626775;       /* chỉ cho nhãn section / tick thước (không dùng cho chữ đọc) */
+            --teal: #34d3c2;
+            --violet: #8b7bff;
+            --rose: #ff6b8b;
+            --clip-video: #3d6fe0;
+            --clip-text: #8b7bff;
+            --clip-audio: #2f9e8f;
+            --clip-shape: #c2557a;
         }
 
         /* ===== Nền tảng chung (Đợt UI/UX Pro) =====
@@ -224,7 +240,7 @@
         
         
         /* Splitter / Resizer */
-        .main-layout { display: flex; flex-direction: column; flex: 1; height: calc(100vh - var(--header-h)); overflow: hidden; min-width: 0; }
+        .main-layout { display: flex; flex-direction: column; flex: 1; height: calc(100vh - var(--header-h) - var(--statusbar-h)); overflow: hidden; min-width: 0; }
         .workspace { display: flex; flex: 1; min-height: 200px; height: auto; min-width: 0; overflow: hidden; }
         .resizer-x { width: 6px; background: var(--border-color); cursor: col-resize; z-index: var(--z-header); transition: background var(--dur) var(--ease-out); flex-shrink: 0; }
         .resizer-x:hover, .resizer-x.resizing { background: var(--primary); }
@@ -624,7 +640,7 @@
         .workspace { 
             display: flex; 
             flex: 1; 
-            height: calc(100vh - var(--timeline-h) - var(--header-h)); 
+            height: calc(100vh - var(--timeline-h) - var(--header-h) - var(--statusbar-h)); 
             min-width: 0;
             overflow: hidden;
         }
@@ -642,8 +658,12 @@
             overflow-y: auto;
             flex: 1;
         }
-        .sidebar-left .step-panel button,
-        .project-source-panel button {
+        /* :where() hạ độ đặc hiệu về (0,0,1) — ngang selector `button` thô, thắng nó nhờ thứ tự
+           nguồn. Trước đây rule này là (0,2,1) nên đè padding 8px 10px + margin-bottom 8px lên
+           MỌI nút có class riêng trong panel trái (.edit-tab, .edit-subtab, thẻ asset, nút
+           chuyển cảnh…) — nguyên nhân chính khiến panel trái phình và chật (bàn giao §5.8).
+           Nút KHÔNG có class vẫn nhận đúng 8px 10px như cũ. */
+        :where(.sidebar-left .step-panel, .project-source-panel) button {
             padding: 8px 10px;
             margin-bottom: 8px;
         }
@@ -965,7 +985,7 @@
             border: 1px solid transparent; line-height: 1.45;
         }
         .script-take-opt:hover { border-color: var(--primary); }
-        .script-take-opt.is-selected { border-color: var(--primary); background: rgba(10,132,255,0.14); }
+        .script-take-opt.is-selected { border-color: var(--primary); background: rgba(255,176,32,0.14); }
         .script-take-opt .tk-meta { color: var(--text-muted); font-size: var(--fs-2xs); }
         .script-match-summary {
             margin: 0 0 10px; padding: 6px 8px; border-radius: var(--r-sm);
@@ -1531,7 +1551,7 @@
         }
         .ins-align-btn svg { width: 16px; height: 16px; }
         .ins-align-btn:hover { color: var(--text-main); border-color: var(--white-a18); }
-        .ins-align-btn.is-active { background: var(--primary); border-color: var(--primary); color: #fff; }
+        .ins-align-btn.is-active { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
         /* HAI Ô SỐ + NÚT TRONG MỘT Ô LƯỚI (hàng "Cỡ hình" / "Lệch hình" của mẫu Custom).
            `.ins-row` là lưới `50px 1fr` — ĐÚNG HAI cột. Nhét thẳng ba phần tử vào nó thì
            phần tử thứ ba rơi xuống hàng lưới kế tiếp, nằm dưới nhãn và bị khung cắt cụt
@@ -1656,7 +1676,7 @@
             transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
         }
         .tsp-btn:hover { border-color: var(--white-a18); }
-        .tsp-btn.is-active { background: var(--primary); border-color: var(--primary); color: #fff; }
+        .tsp-btn.is-active { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
         /* Text Style preset + controls */
         /* ===== Ô chọn font có tìm kiếm (kiểu CapCut, 2026-08-18) =====
            <select> gốc vẫn nằm đây nhưng ẩn đi — nó vẫn là nguồn sự thật của dữ liệu
@@ -1715,7 +1735,7 @@
         }
         .font-picker-row[hidden] { display: none; }
         .font-picker-row:hover { background: var(--white-a08); }
-        .font-picker-row.is-active { background: var(--primary); color: #fff; }
+        .font-picker-row.is-active { background: var(--primary); color: var(--on-primary); }
         .font-picker-empty { padding: var(--sp-4); font-size: var(--fs-xs); color: var(--text-muted); text-align: center; }
         .font-picker-empty[hidden] { display: none; }
         .text-preset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: var(--sp-3); margin-bottom: var(--sp-5); }
@@ -1789,7 +1809,7 @@
         .panel-toggle-btn.is-active {
             background: var(--primary);
             border-color: var(--primary);
-            color: #fff;
+            color: var(--on-primary);
         }
         .panel-toggle-btn:disabled {
             opacity: 0.35;
@@ -2028,7 +2048,7 @@
         .tool-icon-btn.is-active {
             background: var(--primary);
             border-color: var(--primary);
-            color: #fff;
+            color: var(--on-primary);
             box-shadow: 0 0 0 1px var(--primary-a40), 0 2px 8px var(--primary-a30);
         }
         .tool-icon-btn svg {
@@ -2232,7 +2252,7 @@
         }
         button {
             background: var(--primary);
-            color: white;
+            color: var(--on-primary);
             border: none;
             padding: var(--sp-4) var(--sp-6);
             border-radius: var(--r-sm);
@@ -2293,7 +2313,7 @@
         .btn-primary {
             background: var(--primary);
             border-color: transparent;
-            color: #fff;
+            color: var(--on-primary);
         }
         .btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
         .btn-secondary {
@@ -2758,7 +2778,7 @@
             width: 3px;
             margin-left: -1px;
             background: var(--primary);
-            box-shadow: 0 0 10px rgba(10, 132, 255, 0.85);
+            box-shadow: 0 0 10px rgba(255,176,32,0.85);
             border-radius: var(--r-xs);
             pointer-events: none;
             display: none;
@@ -2941,7 +2961,7 @@
             box-shadow: none; font-size: var(--fs-sm); font-weight: var(--fw-medium); cursor: pointer;
         }
         .set-nav-item:hover:not(:disabled) { background: var(--panel-bg-light); }
-        .set-nav-item.is-active { background: var(--primary); color: #fff; }
+        .set-nav-item.is-active { background: var(--primary); color: var(--on-primary); }
         .set-nav-item:disabled { opacity: 0.35; cursor: not-allowed; }
         .set-pane { flex: 1; overflow-y: auto; padding-right: 6px; min-width: 0; }
         .set-intro { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.5; margin: 0 0 var(--sp-4); }
@@ -3031,7 +3051,7 @@
             border: 1px solid var(--border-color); border-radius: var(--r-sm);
             box-shadow: none; font-size: var(--fs-xs); cursor: pointer;
         }
-        .kb-mod.is-on { background: var(--primary); border-color: var(--primary); color: #fff; }
+        .kb-mod.is-on { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
         .kb-hint { font-size: var(--fs-2xs); color: var(--text-muted); margin-left: 4px; }
         .kb-board {
             display: flex; flex-direction: column; gap: 4px;
@@ -3047,7 +3067,7 @@
             box-shadow: none; font-size: var(--fs-2xs); cursor: pointer; overflow: hidden;
         }
         .kb-key:hover:not(.is-dead) { border-color: rgba(255,255,255,0.3); color: var(--text-main); }
-        .kb-key.is-assigned { background: var(--primary); border-color: var(--primary); color: #fff; font-weight: var(--fw-semibold); }
+        .kb-key.is-assigned { background: var(--primary); border-color: var(--primary); color: var(--on-primary); font-weight: var(--fw-semibold); }
         .kb-key.is-picked { outline: 2px solid #fff; outline-offset: -2px; }
         .kb-key.is-dead { opacity: 0.35; cursor: default; }
         .sc-search { display: flex; gap: 8px; align-items: center; margin-bottom: var(--sp-3); }
@@ -3068,7 +3088,7 @@
             border: 1px solid var(--border-color); border-radius: var(--r-sm);
             box-shadow: none; font-size: var(--fs-xs); cursor: pointer; text-align: center;
         }
-        .sc-key.is-capturing { background: var(--primary); border-color: var(--primary); color: #fff; }
+        .sc-key.is-capturing { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
         .sc-key.is-fixed { cursor: default; opacity: 0.8; }
         .sc-none { color: var(--text-muted); font-style: italic; }
         .sc-conflict {
@@ -3195,7 +3215,7 @@
            "bước" là dự án lưu lúc đang ở Home sẽ mở lại vào Home vĩnh viễn.
            Thay vào đó là một lớp phủ bật/tắt bằng body class, cùng khuôn editing-stage-active. */
         #homeScreen {
-            position: fixed; top: var(--header-h); left: 0; right: 0; bottom: 0;
+            position: fixed; top: var(--header-h); left: 0; right: 0; bottom: var(--statusbar-h);
             z-index: var(--z-home);                 /* trên .main-layout, dưới mọi modal (210+) */
             background: var(--bg-color);
             display: none;
@@ -3601,6 +3621,9 @@
         .edit-empty[hidden],
         .font-picker-empty[hidden] { display: none; }
     </style>
+    <!-- Lớp giao diện Lumen (mẫu Figma). PHẢI là phần tử cuối trong <head>: editing-runtime.js
+         và auto-subtitle.js chèn <style> của chúng NGAY TRƯỚC #lumenSkin để lớp này thắng. -->
+    <link id="lumenSkin" rel="stylesheet" href="/static/css/lumen-skin.css?v=2">
 </head>
 <!-- home-active ghi thẳng vào markup, đúng cơ chế #step0 dùng: JS không phải gọi gì lúc
      khởi động, và không có nháy hình giữa "giao diện dựng" và "Home". -->
@@ -3623,6 +3646,11 @@
         <symbol id="ic-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
         <symbol id="ic-arrow-left" viewBox="0 0 24 24"><path d="M19 12H5M11 18l-6-6 6-6"/></symbol>
         <symbol id="ic-check" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></symbol>
+        <!-- Icon cho dải tab panel trái (Lumen): chuyển tiếp = hai tam giác chạm đỉnh kiểu CapCut,
+             LUT = bảng màu, Thư viện = kệ sách (Lucide "library"). -->
+        <symbol id="ic-transition" viewBox="0 0 24 24"><path d="M3 5l9 7-9 7ZM21 5l-9 7 9 7Z"/></symbol>
+        <symbol id="ic-palette" viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0 0 18c.9 0 1.5-.7 1.5-1.5 0-.4-.2-.8-.4-1.1-.3-.3-.4-.6-.4-1 0-.8.7-1.5 1.5-1.5H16a5 5 0 0 0 5-5c0-4.4-4-7.9-9-7.9Z"/><circle cx="7.5" cy="11" r="1"/><circle cx="10" cy="7" r="1"/><circle cx="15" cy="7.5" r="1"/></symbol>
+        <symbol id="ic-library" viewBox="0 0 24 24"><path d="M4 4v16M8 8v12M12 6v14M16 6l4 14"/></symbol>
         <symbol id="ic-sliders" viewBox="0 0 24 24"><path d="M5 21v-7M5 10V3M12 21v-9M12 8V3M19 21v-5M19 12V3"/><circle cx="5" cy="12" r="2"/><circle cx="12" cy="6" r="2"/><circle cx="19" cy="16" r="2"/></symbol>
         <symbol id="ic-film" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 7.5h4M17 7.5h4M3 12h18M3 16.5h4M17 16.5h4"/></symbol>
         <symbol id="ic-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
@@ -3716,7 +3744,6 @@
         </div>
     </div>
     <div style="display: flex; align-items: center; gap: 15px; flex-shrink: 0; z-index: 2;">
-        <div id="statusText" role="status" aria-live="polite" aria-atomic="true">Sẵn sàng</div>
         <div class="app-menu-wrap">
             <button id="btnAppMenu" type="button" class="btn btn-secondary" title="Menu" aria-haspopup="true" aria-expanded="false"><svg class="btn-ico"><use href="#ic-menu"/></svg>Menu<span class="app-menu-caret"><svg class="btn-ico" aria-hidden="true"><use href="#ic-chevron-down"/></svg></span></button>
             <div id="appMenuDropdown" class="app-menu-dropdown" role="menu" aria-hidden="true">
@@ -3732,7 +3759,7 @@
                 <button id="menuOpenSettings" type="button" class="app-menu-item" role="menuitem"><svg class="btn-ico"><use href="#ic-settings"/></svg><span>Cài đặt…</span><span class="app-menu-shortcut" data-shortcut-cmd="app.settings">⌘,</span></button>
             </div>
         </div>
-        <button id="btnExportVideo" class="btn btn-danger" disabled><svg class="btn-ico"><use href="#ic-export"/></svg>Xuất Video</button>
+        <button id="btnExportVideo" class="btn btn-primary" disabled><svg class="btn-ico"><use href="#ic-export"/></svg>Xuất Video</button>
     </div>
 </div>
 <!-- MÀN HÌNH HOME: lớp phủ NGOÀI hệ step (xem CSS #homeScreen để biết vì sao). -->
@@ -3865,7 +3892,7 @@
             </div>
         </div>
     </div>
-    <button id="btnExportFromStep4" class="btn btn-danger btn-block"><svg class="btn-ico"><use href="#ic-export"/></svg>Xuất Video Ngay</button>
+    <button id="btnExportFromStep4" class="btn btn-primary btn-block"><svg class="btn-ico"><use href="#ic-export"/></svg>Xuất Video Ngay</button>
 </div>
 
 <div id="captureModalBackdrop" aria-hidden="true"></div>
@@ -4026,17 +4053,17 @@
             <div id="step4" class="step-panel">
                 <div class="edit-panel">
                     <div class="edit-tabs" id="editPanelTabs" role="tablist" aria-label="Nhóm nội dung panel Editing">
-                        <button class="edit-tab is-active" type="button" data-edit-tab="media" role="tab" aria-selected="true" aria-controls="editPanelBody">Tệp phương tiện</button>
+                        <button class="edit-tab is-active" type="button" data-edit-tab="media" role="tab" aria-selected="true" aria-controls="editPanelBody"><svg class="edit-tab-ico" aria-hidden="true"><use href="#ic-film"/></svg><span class="edit-tab-label">Tệp phương tiện</span></button>
                         <!-- Kịch bản đặt cạnh Tệp phương tiện: hai thứ này là "nguyên liệu
                              đầu vào" của luồng Lọc video theo kịch bản, đọc liền nhau. -->
-                        <button class="edit-tab" type="button" data-edit-tab="script" role="tab" aria-selected="false" aria-controls="editPanelBody">Kịch bản</button>
-                        <button class="edit-tab" type="button" data-edit-tab="audio" role="tab" aria-selected="false" aria-controls="editPanelBody">Âm thanh</button>
-                        <button class="edit-tab" type="button" data-edit-tab="text" role="tab" aria-selected="false" aria-controls="editPanelBody">Văn bản</button>
-                        <button class="edit-tab" type="button" data-edit-tab="shape" role="tab" aria-selected="false" aria-controls="editPanelBody">Hình học</button>
-                        <button class="edit-tab" type="button" data-edit-tab="transition" role="tab" aria-selected="false" aria-controls="editPanelBody">Chuyển tiếp</button>
-                        <button class="edit-tab" type="button" data-edit-tab="lut" role="tab" aria-selected="false" aria-controls="editPanelBody">LUT</button>
-                        <button class="edit-tab" type="button" data-edit-tab="adjust" role="tab" aria-selected="false" aria-controls="editPanelBody">Điều chỉnh</button>
-                        <button class="edit-tab" type="button" data-edit-tab="library" role="tab" aria-selected="false" aria-controls="editPanelBody">Thư viện</button>
+                        <button class="edit-tab" type="button" data-edit-tab="script" role="tab" aria-selected="false" aria-controls="editPanelBody"><svg class="edit-tab-ico" aria-hidden="true"><use href="#ic-script"/></svg><span class="edit-tab-label">Kịch bản</span></button>
+                        <button class="edit-tab" type="button" data-edit-tab="audio" role="tab" aria-selected="false" aria-controls="editPanelBody"><svg class="edit-tab-ico" aria-hidden="true"><use href="#ic-music"/></svg><span class="edit-tab-label">Âm thanh</span></button>
+                        <button class="edit-tab" type="button" data-edit-tab="text" role="tab" aria-selected="false" aria-controls="editPanelBody"><svg class="edit-tab-ico" aria-hidden="true"><use href="#ic-type"/></svg><span class="edit-tab-label">Văn bản</span></button>
+                        <button class="edit-tab" type="button" data-edit-tab="shape" role="tab" aria-selected="false" aria-controls="editPanelBody"><svg class="edit-tab-ico" aria-hidden="true"><use href="#ic-shapes"/></svg><span class="edit-tab-label">Hình học</span></button>
+                        <button class="edit-tab" type="button" data-edit-tab="transition" role="tab" aria-selected="false" aria-controls="editPanelBody"><svg class="edit-tab-ico" aria-hidden="true"><use href="#ic-transition"/></svg><span class="edit-tab-label">Chuyển tiếp</span></button>
+                        <button class="edit-tab" type="button" data-edit-tab="lut" role="tab" aria-selected="false" aria-controls="editPanelBody"><svg class="edit-tab-ico" aria-hidden="true"><use href="#ic-palette"/></svg><span class="edit-tab-label">LUT</span></button>
+                        <button class="edit-tab" type="button" data-edit-tab="adjust" role="tab" aria-selected="false" aria-controls="editPanelBody"><svg class="edit-tab-ico" aria-hidden="true"><use href="#ic-sliders"/></svg><span class="edit-tab-label">Điều chỉnh</span></button>
+                        <button class="edit-tab" type="button" data-edit-tab="library" role="tab" aria-selected="false" aria-controls="editPanelBody"><svg class="edit-tab-ico" aria-hidden="true"><use href="#ic-library"/></svg><span class="edit-tab-label">Thư viện</span></button>
                     </div>
                     <div class="edit-panel-main">
                         <div class="edit-subtabs" id="editPanelSubtabs" role="tablist" aria-label="Nhóm con của tab đang mở"></div>
@@ -4258,7 +4285,7 @@
 
         <div class="timeline-controls-center">
             <button id="btnPlayPause" class="btn btn-secondary"><svg class="btn-ico"><use href="#ic-play"/></svg>Play</button>
-            <span id="timeDisplay" style="font-family: var(--font-mono); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; color: var(--text-2);">00:00:00:00 / 00:00:00:00</span>
+            <span id="timeDisplay" class="tl-timecode">00:00:00:00 / 00:00:00:00</span>
             <button id="btnCaptureFrame" class="tool-icon-btn" type="button" title="Chụp khung hình tại playhead" aria-label="Chụp khung hình" disabled><svg><use href="#ic-camera"/></svg></button>
         </div>
         
@@ -4287,6 +4314,20 @@
 	    </div>
 	</div>
 </div>
+<!-- Thanh trạng thái đáy (Lumen redesign). #statusText chuyển từ header xuống đây — giữ
+     nguyên id/role/aria-live. Nhãn phím do shortcuts.js syncLabels() ghi (class
+     .app-menu-shortcut) nên luôn khớp keymap đang dùng. -->
+<footer class="app-statusbar">
+    <div class="app-statusbar-left">
+        <span class="app-statusbar-dot" aria-hidden="true"></span>
+        <div id="statusText" role="status" aria-live="polite" aria-atomic="true">Sẵn sàng</div>
+    </div>
+    <div class="app-statusbar-right" aria-hidden="true">
+        <span><kbd class="app-menu-shortcut" data-shortcut-cmd="playback.togglePlay">Space</kbd> Phát / dừng</span>
+        <span><kbd class="app-menu-shortcut" data-shortcut-cmd="tool.razor">⌘K</kbd> Cắt</span>
+        <span><kbd class="app-menu-shortcut" data-shortcut-cmd="edit.undo">⌘Z</kbd> Hoàn tác</span>
+    </div>
+</footer>
 
 <script>
     const API_BASE = "/api";
@@ -15843,7 +15884,7 @@
         performVideoExport();
     });
 </script>
-<script src="/static/js/editing-runtime.js?v=figspin-kfmirror-p1"></script>
+<script src="/static/js/editing-runtime.js?v=lumen-p4"></script>
 <script src="/static/js/perf-runtime.js"></script>
 <!-- Dụng cụ đo hiệu năng (Giai đoạn 0). Nạp SAU perf-runtime.js vì nó bọc chính những
      hàm toàn cục mà perf-runtime gán đè; nạp trước là bọc phải bản cũ. Lúc tắt nó chỉ

@@ -1,0 +1,663 @@
+/* =====================================================================
+ * LUMEN SKIN — lớp giao diện theo mẫu Figma "Lumen Studio" (2026-09)
+ *
+ * CHỈ đổi bề mặt: màu, viền, bo góc, chữ, trạng thái. KHÔNG đổi kích thước/hình học
+ * của bất kỳ thứ gì mà JS đo (timeline, lane, block, khung preview, playhead).
+ *
+ * Thứ tự cascade: file này nạp SAU <style> của index.html, và editing-runtime.js /
+ * auto-subtitle.js chèn <style> của chúng NGAY TRƯỚC <link id="lumenSkin"> — nên với
+ * cùng độ đặc hiệu, luật ở đây luôn thắng mà không cần !important.
+ *
+ * Token màu nằm ở :root trong index.html (--surface-*, --primary = amber, --on-primary…).
+ *
+ * RÀNG BUỘC PLAYHEAD (docs/BAN_GIAO_UI_UX.md §6): không đụng .timeline-track-frame /
+ * .timeline-track-outer về position/overflow/padding/border, không đổi width của
+ * .playhead::before (12px — dung sai bắt chuột 8px quanh tâm).
+ * ===================================================================== */
+
+/* ---------------------------------------------------------------------
+ * 1. Nền tảng
+ * ------------------------------------------------------------------- */
+::selection { background: rgba(255, 176, 32, 0.28); color: #fff; }
+
+/* Slider toàn cục theo mẫu: track 3px, thumb trắng 13px viền ink, hover thumb amber. */
+input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 3px;
+    border-radius: 999px;
+    background: var(--border-color);
+    cursor: pointer;
+}
+input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 13px;
+    height: 13px;
+    border-radius: 999px;
+    background: var(--text-1);
+    border: 2px solid var(--surface-1);
+    box-shadow: 0 0 0 1px var(--border-color);
+    transition: transform var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.15); background: var(--primary); }
+input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--primary-a40); }
+
+/* Toggle .switch: 32x18, bật = amber (mẫu Toggle). */
+.switch input[type="checkbox"]:checked { background: var(--primary); }
+.switch input[type="checkbox"]:checked::after { background: #fff; }
+
+/* Ô tích / radio: dấu tích tối trên nền amber. */
+input[type="checkbox"]:checked { background-color: var(--primary); border-color: var(--primary); }
+
+/* ---------------------------------------------------------------------
+ * 2. Nút
+ * ------------------------------------------------------------------- */
+.btn { box-shadow: none; border-radius: var(--r-sm); }
+.btn-primary { background: var(--primary); color: var(--on-primary); }
+.btn-primary:hover:not(:disabled) { background: var(--primary-hover); filter: none; }
+.btn-secondary { background: var(--surface-3); border-color: var(--border-color); }
+.btn-secondary:hover:not(:disabled) { background: var(--surface-4); border-color: var(--border-strong); }
+.btn-ghost:hover:not(:disabled) { background: var(--surface-3); color: var(--text-1); }
+
+/* ---------------------------------------------------------------------
+ * 3. Header (TitleBar của mẫu) + thanh trạng thái
+ * ------------------------------------------------------------------- */
+.header-bar {
+    background: var(--surface-2);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    box-shadow: none;
+    border-bottom: 1px solid var(--border-color);
+    padding: 0 var(--sp-6);
+    /* Trên #homeScreen (--z-home 150): trước đây header ở 100 nên menu thả xuống ở màn
+       Home bị lớp Home che mất. Vẫn dưới scrim/modal (180+). */
+    z-index: calc(var(--z-home) + 5);
+}
+.header-bar .app-logo { height: 17px; }
+
+.titlebar-home {
+    background: transparent;
+    border-color: transparent;
+    color: var(--text-2);
+    box-shadow: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 28px;
+}
+.titlebar-home:hover { background: var(--surface-3); border-color: transparent; color: var(--text-1); }
+.titlebar-name { font-weight: var(--fw-semibold); color: var(--text-1); }
+.titlebar-name:hover { background: var(--surface-3); border-color: var(--border-color); }
+.titlebar-name-input { background: var(--surface-1); border-color: var(--primary); }
+.titlebar-dot {
+    display: inline-grid;
+    place-items: center;
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--primary);
+    color: transparent;
+    font-size: 0;
+    box-shadow: 0 0 0 3px var(--primary-a20);
+}
+.titlebar-dot[hidden] { display: none; }
+
+/* Breadcrumb luồng lọc -> segmented tab kiểu "Edit · Color · Audio · Deliver". */
+.breadcrumb { gap: 2px; }
+.breadcrumb-item {
+    padding: 5px 10px;
+    border-radius: var(--r-sm);
+    color: var(--text-2);
+}
+.breadcrumb-item.active { background: var(--surface-3); color: var(--text-1); }
+.breadcrumb-separator { color: var(--text-4); }
+
+/* Nút Menu trong header: ghost như các nút phụ của TitleBar mẫu. */
+.header-bar #btnAppMenu {
+    background: transparent;
+    border-color: transparent;
+    color: var(--text-2);
+    min-height: 30px;
+}
+.header-bar #btnAppMenu:hover:not(:disabled),
+.header-bar #btnAppMenu[aria-expanded="true"] { background: var(--surface-3); color: var(--text-1); }
+.header-bar #btnExportVideo { min-height: 30px; padding: 0 var(--sp-6); gap: 6px; }
+
+/* Thanh trạng thái đáy */
+.app-statusbar {
+    height: var(--statusbar-h);
+    flex: 0 0 var(--statusbar-h);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-7);
+    padding: 0 var(--sp-6);
+    background: var(--surface-2b);
+    border-top: 1px solid var(--border-color);
+    color: var(--text-3);
+    font-size: var(--fs-xs);
+    position: relative;
+    z-index: var(--z-header);
+    min-width: 0;
+}
+.app-statusbar-left,
+.app-statusbar-right { display: flex; align-items: center; gap: var(--sp-7); min-width: 0; }
+.app-statusbar-right { flex-shrink: 0; }
+.app-statusbar-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    background: var(--teal);
+    flex: 0 0 auto;
+}
+.app-statusbar #statusText {
+    max-width: 60vw;
+    font-size: var(--fs-xs);
+    color: var(--text-2);
+}
+.app-statusbar kbd.app-menu-shortcut {
+    display: inline-block;
+    min-width: 18px;
+    margin: 0 4px 0 0;
+    padding: 1px 5px;
+    border-radius: var(--r-xs);
+    background: var(--surface-3);
+    border: 1px solid var(--border-color);
+    color: var(--text-2);
+    font: var(--fw-medium) var(--fs-2xs)/1.4 var(--font-mono);
+    text-align: center;
+    opacity: 1;
+}
+@media (max-width: 1100px) { .app-statusbar-right { display: none; } }
+
+/* Resizer: vùng bắt 6px giữ nguyên, chỉ vẽ một đường 1px ở giữa. */
+.resizer-x,
+.resizer-y { background: transparent; position: relative; }
+.resizer-x::after,
+.resizer-y::after {
+    content: '';
+    position: absolute;
+    background: var(--border-color);
+    transition: background var(--dur) var(--ease-out);
+    pointer-events: none;
+}
+.resizer-x::after { top: 0; bottom: 0; left: 50%; width: 1px; transform: translateX(-50%); }
+.resizer-y::after { left: 0; right: 0; top: 50%; height: 1px; transform: translateY(-50%); }
+.resizer-x:hover,
+.resizer-x.resizing,
+.resizer-y:hover,
+.resizer-y.resizing { background: transparent; }
+.resizer-x:hover::after,
+.resizer-x.resizing::after { background: var(--primary); width: 2px; }
+.resizer-y:hover::after,
+.resizer-y.resizing::after { background: var(--primary); height: 2px; }
+
+/* ---------------------------------------------------------------------
+ * 4. Panel (trái / inspector / script / transcript / rail)
+ * ------------------------------------------------------------------- */
+.sidebar-left,
+.sidebar-inspector,
+.sidebar-script,
+.sidebar-right { background: var(--surface-2); }
+
+/* ---- Panel trái: mật độ kiểu CapCut ----
+   Ngân sách bề ngang (panel 288px): lề 8 + cột nhóm 72 + khe 6 + lưới -> lưới ~183px, vừa
+   HAI cột thẻ 82px (trước đây lề 12 + cột 88 + khe 8 còn 157px = đúng MỘT cột). */
+.sidebar-left .panel-content { padding: var(--sp-4); }
+.edit-panel { gap: var(--sp-4); }
+
+/* Dải tab: icon trên, nhãn dưới (dải tab trên cùng của CapCut). ~5 tab hiện cùng lúc thay
+   vì ~3,5 pill; phần còn lại vẫn cuộn ngang + mờ dần ở mép như cũ. */
+.edit-tabs {
+    gap: 0;
+    padding-bottom: 0;
+    margin: calc(-1 * var(--sp-4)) calc(-1 * var(--sp-4)) 0;
+    padding: 2px var(--sp-2) 0;
+    border-bottom: 1px solid var(--border-color);
+}
+.edit-tab {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    min-width: 46px;
+    padding: 7px 7px 6px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text-2);
+    font-size: 10.5px;
+    font-weight: var(--fw-medium);
+    line-height: 1.1;
+}
+.edit-tab-ico {
+    width: 18px;
+    height: 18px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    pointer-events: none;
+}
+.edit-tab-label { pointer-events: none; }
+.edit-tab:hover:not(.is-active) { background: transparent; color: var(--text-1); border-color: transparent; }
+.edit-tab.is-active {
+    background: transparent;
+    color: var(--primary);
+    border-color: transparent;
+    border-bottom-color: var(--primary);
+    font-weight: var(--fw-semibold);
+}
+
+/* Cột nhóm con: hẹp hơn, nền amber-soft + chữ amber khi chọn. */
+.edit-panel-main { gap: 6px; }
+.edit-subtabs { flex-basis: 72px; padding: 2px 0; gap: 1px; }
+.edit-subtab {
+    padding: 6px 8px 6px 10px;
+    color: var(--text-2);
+    border-radius: var(--r-sm);
+    font-size: var(--fs-xs);
+}
+.edit-subtab:hover:not(.is-active) { background: var(--surface-3); color: var(--text-1); }
+.edit-subtab.is-active {
+    background: var(--primary-soft);
+    color: var(--primary);
+    box-shadow: none;
+}
+.edit-subtab.is-active::before { background: var(--primary); left: 2px; height: 12px; }
+.edit-asset-grid { gap: 8px; }
+/* Thanh cuộn của thân panel mảnh như overlay: 10px chung ăn mất gần một cột thẻ. */
+#editPanelBody::-webkit-scrollbar { width: 6px; }
+
+/* ---- Panel Thuộc tính: mật độ kiểu CapCut ---- */
+.ins-tabs { gap: 14px; padding: 0 var(--sp-2); margin-bottom: var(--sp-5); }
+.ins-tab {
+    flex: 0 0 auto;
+    width: auto;   /* selector `button` thô đặt width:100% -> 1 tab kéo giãn hết hàng */
+    margin: 0;
+    padding: 9px 0 7px;
+    color: var(--text-2);
+    font-size: var(--fs-sm);
+    font-weight: var(--fw-medium);
+}
+.ins-tab.is-active { color: var(--primary); border-bottom-color: var(--primary); font-weight: var(--fw-semibold); }
+
+/* Nhóm con dạng segmented phẳng như CapCut: KHÔNG viền, nền tối hơn panel, mục chọn nổi lên.
+   margin:0 là chỗ sửa chính — nút thừa hưởng margin-bottom 10px của selector `button` thô
+   nên khung bao cao 41px cho một nút 24px ("khối hộp lớn"). */
+.ins-subtabs {
+    gap: 2px;
+    padding: 2px;
+    margin-bottom: var(--sp-5);
+    border: 0;
+    border-radius: var(--r-sm);
+    background: #0a0b0f;
+}
+.ins-subtab,
+.ins-subtab.is-active {
+    margin: 0;
+    width: auto;
+    min-height: 26px;
+    padding: 4px 8px;
+    border: 0;
+    border-radius: 5px;
+    box-shadow: none;
+    font-size: var(--fs-xs);
+}
+.ins-subtab { color: var(--text-2); background: transparent; }
+.ins-subtab:hover:not(.is-active) { background: rgba(255, 255, 255, 0.04); color: var(--text-1); }
+.ins-subtab.is-active { background: var(--surface-4); color: var(--text-1); font-weight: var(--fw-semibold); }
+
+/* Thẻ media / thư viện (MediaCard của mẫu): viền mảnh, hover viền đậm + ảnh phóng nhẹ. */
+.edit-asset-thumb {
+    border-radius: var(--r-md);
+    border-color: var(--border-soft);
+    background: var(--surface-2b);
+}
+.edit-asset-thumb img { transition: transform 0.5s var(--ease-out); }
+.edit-asset-card:hover .edit-asset-thumb { border-color: var(--border-strong); }
+.edit-asset-card:hover .edit-asset-thumb img { transform: scale(1.05); }
+.edit-asset-card.is-previewing .edit-asset-thumb,
+.edit-asset-card.is-multi-selected .edit-asset-thumb { border-color: var(--primary); }
+.edit-asset-name { color: var(--text-1); font-weight: var(--fw-medium); }
+
+/* Inspector phẳng như mẫu: bỏ khung thẻ lồng trong cột, tiêu đề là nhãn chữ hoa nhỏ. */
+.sidebar-inspector { padding: 0; }
+.sidebar-inspector .clip-inspector-panel {
+    padding: 0 var(--sp-6) var(--sp-6);
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+}
+.sidebar-inspector .clip-inspector-title {
+    margin: 0 calc(-1 * var(--sp-6)) 0;
+    padding: var(--sp-5) var(--sp-6);
+    border-bottom: 1px solid var(--border-color);
+}
+.clip-inspector-title > span:first-child {
+    font-size: var(--fs-2xs);
+    font-weight: var(--fw-semibold);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-3);
+}
+#clipInspectorTarget { color: var(--text-1); font-size: var(--fs-sm); font-weight: var(--fw-semibold); }
+.clip-reset-btn { background: transparent; border-color: var(--border-color); color: var(--text-2); }
+.clip-reset-btn:hover:not(:disabled) { background: var(--surface-3); color: var(--text-1); }
+.sidebar-inspector .ins-tabs { margin: 0 calc(-1 * var(--sp-6)) var(--sp-5); padding: 0 var(--sp-6); }
+
+/* Thân inspector gọn hơn (CapCut): đầu mục 26px, nút thao tác nhanh 26px, ô nhập 28px,
+   khe giữa các hàng 5px. Trước đây đầu mục "Biến đổi" cao 45px vì cụm 3 nút lật/xoay cao
+   32px còn gánh thêm margin-bottom 10px. */
+.ins-sec { padding-top: var(--sp-5); margin-top: var(--sp-4); }
+.ins-sec-head { min-height: 26px; margin-bottom: var(--sp-3); }
+.clip-transform-quick-actions { margin: 0; border-color: var(--border-color); background: transparent; }
+.clip-transform-quick-actions button { height: 26px; color: var(--text-2); }
+.clip-transform-quick-actions button:hover:not(:disabled) { background: var(--surface-3); color: var(--text-1); }
+.clip-transform-quick-actions svg { width: 15px; height: 15px; }
+.fig-field { height: 28px; }
+.ins-row,
+.ins-row-2,
+.ins-row-3,
+.ins-stack { margin-bottom: 5px; }
+.ins-sec-title {
+    font-size: var(--fs-2xs);
+    font-weight: var(--fw-semibold);
+    letter-spacing: 0.14em;
+    color: var(--text-3);
+}
+
+/* Ô nhập kiểu mẫu: nền ink, viền line, focus viền amber. */
+.fig-field { background: var(--surface-1); border-color: var(--border-color); }
+.fig-field:hover { border-color: var(--border-strong); }
+.fig-field:focus-within { border-color: var(--primary); box-shadow: none; }
+
+/* Rail bật/tắt panel bên phải: ToolRail của mẫu (active = amber đặc, icon đen). */
+.panel-toggle-rail { background: var(--surface-2); gap: 6px; }
+.panel-toggle-btn {
+    border-color: transparent;
+    background: transparent;
+    color: var(--text-2);
+    border-radius: var(--r-md);
+    box-shadow: none;
+}
+.panel-toggle-btn:hover:not(:disabled):not(.is-active) { background: var(--surface-3); color: var(--text-1); }
+.panel-toggle-btn.is-active { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
+
+/* ---------------------------------------------------------------------
+ * 5. Preview
+ * ------------------------------------------------------------------- */
+.center-stage { background: var(--surface-1); }
+/* Viền khung bằng box-shadow, KHÔNG border: previewScale đọc frame.clientWidth. */
+.sequence-preview-frame {
+    border-radius: var(--r-lg);
+    box-shadow: 0 0 0 1px var(--border-color), 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+}
+.preview-control-bar { border-top-color: transparent; }
+.preview-control-bar #timeDisplay {
+    padding: 0;
+    background: transparent;
+    font-family: var(--font-mono);
+    font-size: var(--fs-base);
+    font-weight: var(--fw-medium);
+    color: var(--text-1);
+}
+/* Nút Play tròn amber ở giữa (transport của mẫu). */
+.preview-control-bar #btnPlayPause {
+    min-height: 40px;
+    height: 40px;
+    padding: 0 var(--sp-7) 0 var(--sp-6);
+    border-radius: 999px;
+    border-color: transparent;
+    background: var(--primary);
+    color: var(--on-primary);
+    font-weight: var(--fw-semibold);
+}
+.preview-control-bar #btnPlayPause:hover:not(:disabled) { background: var(--primary-hover); }
+.preview-control-bar #btnPlayPause .btn-ico { stroke-width: 2.2; }
+.pcb-btn { background: var(--surface-3); border-color: var(--border-color); }
+.pcb-btn:hover:not(:disabled) { background: var(--surface-4); }
+.pcb-btn[aria-expanded="true"],
+.pcb-btn.is-open { border-color: var(--primary); color: var(--primary); }
+.pcb-menu { background: var(--surface-2b); border-color: var(--border-color); box-shadow: var(--sh-4); }
+.pcb-menu-item:hover { background: var(--surface-3); }
+.pcb-zone .pcb-zoom { border-right-color: var(--border-color); }
+
+/* ---------------------------------------------------------------------
+ * 6. Timeline — CHỈ bề mặt, không đổi hình học
+ * ------------------------------------------------------------------- */
+.timeline-area { background: var(--surface-2); }
+.timeline-toolbar {
+    background: var(--surface-2);
+    border-bottom-color: var(--border-color);
+}
+.timeline-left-tools { gap: 4px; }
+.tool-icon-btn {
+    border-color: transparent;
+    background: transparent;
+    color: var(--text-2);
+    border-radius: var(--r-sm);
+    box-shadow: none;
+}
+.tool-icon-btn:hover:not(:disabled) { background: var(--surface-3); border-color: transparent; color: var(--text-1); }
+.tool-icon-btn.is-active {
+    background: var(--primary-soft);
+    border-color: transparent;
+    color: var(--primary);
+    box-shadow: none;
+}
+.tool-icon-btn.is-active:hover:not(:disabled) { background: var(--primary-soft); color: var(--primary-hover); }
+.tool-icon-btn svg { width: 17px; height: 17px; stroke-width: 1.6; }
+.tool-divider { background: var(--border-color); margin: 10px 4px; }
+.tl-timecode {
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-2);
+    padding: 2px 8px;
+    border-radius: var(--r-xs);
+    background: var(--surface-3);
+}
+.zoom-readout {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-3);
+}
+
+/* Khung chứa track: nền phẳng, viền mảnh — giữ nguyên margin/border-width 1px. */
+.timeline-track-frame {
+    background: var(--surface-2);
+    border-color: var(--border-color);
+    box-shadow: none;
+    border-radius: var(--r-md);
+}
+
+/* Thước */
+.editing-ruler {
+    background: var(--surface-2b);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border-bottom: 1px solid var(--border-color);
+}
+.editing-ruler-rail {
+    background: var(--surface-2b);
+    border-right: 1px solid var(--border-color);
+    color: var(--text-4);
+}
+.er-tick { background: var(--border-color); height: 4px; }
+.er-tick.is-major { background: #3a3e4a; height: 8px; }
+.er-label { color: var(--text-4); font-size: 9.5px; top: 5px; }
+.time-ruler-label { font-family: var(--font-mono); color: var(--text-4); font-size: 10px; }
+
+/* Lane: nền xen kẽ panel / panel-2 theo loại, vạch ngăn mảnh. */
+.editing-lane {
+    border-top: 1px solid transparent;
+    border-bottom: 1px solid var(--border-soft);
+    background: var(--surface-2b);
+}
+.editing-lane-main,
+.editing-lane-type-media { background: var(--surface-2b); }
+.editing-lane-type-text,
+.editing-lane-type-shape,
+.editing-lane-type-vector { background: var(--surface-2); }
+.editing-lane-audio { background: #10141a; }
+.editing-lane.is-locked-track { background: rgba(0, 0, 0, 0.25); }
+
+/* Rail nhãn lane (track header của mẫu). */
+.editing-lane-label {
+    background: var(--surface-2b);
+    border-right: 1px solid var(--border-color);
+    box-shadow: 8px 0 14px rgba(0, 0, 0, 0.28);
+    color: var(--text-3);
+}
+.editing-lane-name { color: var(--text-1); font-weight: var(--fw-medium); }
+.editing-lane-badge {
+    min-width: 26px;
+    padding: 2px 4px;
+    border: 0;
+    border-radius: var(--r-xs);
+    background: #20304e;
+    color: #8fb2ff;
+    font-size: 10.5px;
+}
+.editing-lane-type-audio .editing-lane-badge { background: #1b3a35; color: #6fe0d0; }
+.editing-lane-type-text .editing-lane-badge { background: #2a2350; color: #c3b9ff; }
+.editing-lane-type-shape .editing-lane-badge,
+.editing-lane-type-vector .editing-lane-badge { background: #3a1c28; color: #ff9bb4; }
+.editing-lane-main .editing-lane-badge { background: var(--primary-soft); color: var(--primary); }
+.editing-lane-type-icon { color: var(--text-3); opacity: 1; }
+.editing-lane-icon-btn {
+    width: 20px;
+    height: 20px;
+    min-width: 20px;
+    line-height: 20px;
+    border-radius: var(--r-xs);
+    background: var(--surface-3);
+    color: var(--text-3);
+}
+.editing-lane-icon-btn:hover { background: var(--surface-4); color: var(--text-1); }
+.editing-lane-icon-btn .editing-control-icon,
+.editing-lane-icon-btn .editing-control-icon svg { width: 13px; height: 13px; }
+
+/* Block (TimelineClip của mẫu): màu phẳng theo loại + lớp phủ gradient + nhãn trắng. */
+.editing-block {
+    border: 1px solid rgba(0, 0, 0, 0.4);
+    border-radius: var(--r-sm);
+    box-shadow: none;
+}
+.editing-block::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    pointer-events: none;
+    background: linear-gradient(180deg, rgba(0, 0, 0, 0.45) 0%, rgba(0, 0, 0, 0) 45%, rgba(0, 0, 0, 0) 70%, rgba(0, 0, 0, 0.25) 100%);
+}
+.editing-block:hover { filter: brightness(1.1); border-color: rgba(0, 0, 0, 0.4); }
+.editing-main-block,
+.editing-item-media { background: var(--clip-video); }
+.editing-item-text { background: var(--clip-text); }
+.editing-item-shape,
+.editing-item-vector { background: var(--clip-shape); }
+.editing-item-audio { background: var(--clip-audio); }
+.editing-thumb-strip { opacity: 0.72; background-color: rgba(0, 0, 0, 0.2); }
+.editing-block-label {
+    top: 3px;
+    left: 5px;
+    padding: 1px 4px;
+    background: transparent;
+    font-size: 10.5px;
+    font-weight: var(--fw-semibold);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+.editing-item-text .editing-block-label,
+.editing-item-shape .editing-block-label,
+.editing-item-vector .editing-block-label,
+.editing-item-audio .editing-block-label { background: transparent; }
+.editing-item-audio .editing-block-label { top: 2px; }
+
+/* Khung chọn: viền amber + ring amber (mẫu), tay cầm trim amber. */
+.editing-block.is-selected {
+    border-color: var(--selection);
+    box-shadow: 0 0 0 1px var(--selection), 0 4px 14px rgba(0, 0, 0, 0.5);
+    filter: brightness(1.08);
+}
+.editing-block.is-selected.is-secondary-selection {
+    border-color: var(--selection-dim);
+    box-shadow: 0 0 0 1px rgba(255, 176, 32, 0.35);
+    filter: none;
+}
+.editing-resize-handle { background: rgba(255, 255, 255, 0.55); }
+.editing-block:hover .editing-resize-handle { background: rgba(255, 255, 255, 0.75); }
+.editing-block.is-selected .editing-resize-handle { background: var(--primary); }
+.editing-block.is-selected .editing-resize-handle:hover,
+.editing-resize-handle:hover { background: var(--primary-hover); }
+.editing-block.is-selected .editing-resize-handle::before {
+    border-left-color: rgba(0, 0, 0, 0.55);
+    border-right-color: rgba(0, 0, 0, 0.55);
+}
+
+/* Playhead: đường amber + đầu tam giác. Vị trí (left:50% / translateX) do JS đặt — không đụng.
+   ::before giữ width 12px / left -5px như cũ. */
+.playhead {
+    background: var(--primary);
+    box-shadow: 0 0 6px rgba(255, 176, 32, 0.45);
+}
+.playhead::before {
+    width: 12px;
+    height: 10px;
+    left: -5px;
+    top: 0;
+    border-radius: 0;
+    background: var(--primary);
+    clip-path: polygon(0 0, 100% 0, 100% 45%, 50% 100%, 0 45%);
+    box-shadow: none;
+}
+
+/* Guide: snap dùng teal (--snap-guide) để không lẫn với playhead amber. */
+.timeline-hover-guide { background: rgba(255, 255, 255, 0.22); }
+.razor-guide-line.is-snapped,
+.timeline-hover-guide.is-snapped,
+.editing-snap-guide {
+    background: var(--snap-guide);
+    box-shadow: 0 0 0 1px rgba(17, 18, 20, 0.7), 0 0 14px rgba(52, 211, 194, 0.5);
+}
+
+/* ---------------------------------------------------------------------
+ * 7. Home, modal, dropdown
+ * ------------------------------------------------------------------- */
+#homeScreen { background: var(--surface-1); }
+.home-rail { background: var(--surface-2); border-right-color: var(--border-color); }
+.home-cta { box-shadow: none; }
+.home-side-btn { background: var(--surface-3); border-color: var(--border-color); box-shadow: none; }
+.home-side-btn:hover:not(:disabled) { background: var(--surface-4); border-color: var(--border-strong); }
+#homeRecentSearch { background: var(--surface-1); border-color: var(--border-color); }
+#homeRecentSearch:focus { border-color: var(--primary); box-shadow: none; }
+.home-card {
+    background: var(--surface-2b);
+    border-color: var(--border-soft);
+    border-radius: var(--r-lg);
+    transition: border-color var(--dur-fast), transform 0.15s;
+}
+.home-card:hover { border-color: var(--border-strong); transform: translateY(-2px); }
+.home-card-thumb { overflow: hidden; background: var(--surface-3); }
+.home-card-thumb img { transition: transform 0.5s var(--ease-out); }
+.home-card:hover .home-card-thumb img { transform: scale(1.04); }
+.home-card-thumb.is-placeholder { background: linear-gradient(135deg, var(--surface-3), var(--surface-2)); }
+.home-card-sub { font-family: var(--font-mono); font-size: 10.5px; }
+
+/* Menu, modal, tooltip: panel gần đặc, viền line, bóng sâu. */
+.app-menu-dropdown,
+.ui-modal-panel {
+    border: 1px solid var(--border-color);
+    box-shadow: var(--sh-4);
+}
+.app-menu-item:hover:not(:disabled),
+.app-menu-item:focus-visible { background: var(--surface-3); }
+.app-tip { border: 1px solid var(--border-color); background: var(--surface-3); color: var(--text-1); }
+.set-nav-item.is-active { background: var(--primary-soft); color: var(--primary); }
+.set-nav-item:hover:not(:disabled):not(.is-active) { background: var(--surface-3); }

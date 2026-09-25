@@ -10,6 +10,8 @@
  * hiện bằng bản gốc, và không ai biết cho tới lần đo tiếp theo.
  *
  *   1) PROXY ẢNH: cạnh dài ≤ IMAGE_PROXY_MAX_EDGE, đuôi .jpg, kind='image'.
+ *   1b) ẢNH TRONG SUỐT (.png/.webp): proxy + thumbnail phải là .png CÒN KÊNH ALPHA. Trước đây
+ *      mọi proxy ảnh là .jpg nên sticker/logo PNG hiện NỀN ĐEN trên preview LQ.
  *   2) KHÔNG BAO GIỜ PHÓNG TO: ảnh nhỏ hơn trần phải đi qua gần như nguyên vẹn. Sai chiều
  *      này là "tối ưu" biến thành phản tác dụng mà số đo vẫn đẹp.
  *   3) THUMBNAIL PANEL: đi qua /api/source-thumb và ra ảnh ≤ 320 — KHÔNG phải file gốc.
@@ -43,6 +45,15 @@ function makeImage(dest, width, height) {
         '-frames:v', '1', dest,
     ]);
     assert.strictEqual(res.status, 0, `không dựng được ảnh mẫu: ${res.stderr}`);
+}
+
+function probePixFmt(file) {
+    const out = spawnSync('ffprobe', [
+        '-v', 'error', '-select_streams', 'v:0',
+        '-show_entries', 'stream=pix_fmt', '-of', 'csv=p=0', file,
+    ], { encoding: 'utf8' });
+    assert.strictEqual(out.status, 0, `ffprobe lỗi: ${out.stderr}`);
+    return out.stdout.trim();
 }
 
 function probeSize(file) {
@@ -145,6 +156,7 @@ function blockAfter(src, marker) {
     fs.mkdirSync(WORK_DIR, { recursive: true });
     const bigPath = path.join(WORK_DIR, 'big.jpg');
     const smallPath = path.join(WORK_DIR, 'small.jpg');
+    const alphaPath = path.join(WORK_DIR, 'sticker_alpha.png');
     const svgPath = path.join(WORK_DIR, 'vector.svg');
     const audioPath = path.join(WORK_DIR, 'tone.mp3');
 
@@ -152,12 +164,17 @@ function blockAfter(src, marker) {
     makeImage(bigPath, 6000, 4000);
     // 800x600 — nhỏ hơn trần, dùng cho nhóm 2.
     makeImage(smallPath, 800, 600);
+    // PNG nền TRONG SUỐT hoàn toàn, lớn hơn trần để proxy thật sự phải thu nhỏ.
+    const alphaRes = spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi',
+        '-i', 'color=c=red@0.0:size=2400x1600:rate=1', '-vf', 'format=rgba',
+        '-frames:v', '1', alphaPath]);
+    assert.strictEqual(alphaRes.status, 0, `không dựng được PNG trong suốt: ${alphaRes.stderr}`);
     fs.writeFileSync(svgPath, '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>');
     const tone = spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i',
         'sine=frequency=440:duration=1', audioPath]);
     assert.strictEqual(tone.status, 0, 'không dựng được audio mẫu');
 
-    const created = [bigPath, smallPath, svgPath, audioPath];
+    const created = [bigPath, smallPath, alphaPath, svgPath, audioPath];
     const server = await start();
     const baseUrl = `http://127.0.0.1:${server.address().port}`;
     const proxyFiles = [];
@@ -193,6 +210,31 @@ function blockAfter(src, marker) {
         const small = probeSize(smallProxyFile);
         assert.ok(small.w <= 800 && small.h <= 600,
             `ảnh nhỏ hơn trần KHÔNG được phóng to, nhận ${small.w}x${small.h}`);
+
+        // ---- 1b) ẢNH TRONG SUỐT GIỮ ALPHA ----
+        const alphaReady = await waitReady(baseUrl, alphaPath);
+        assert.ok(alphaReady.url.endsWith('.png'),
+            `proxy của PNG trong suốt phải là .png (JPEG mất alpha -> nền đen), nhận: ${alphaReady.url}`);
+        const alphaProxyFile = path.join(PROXY_CACHE_DIR, path.basename(alphaReady.url));
+        proxyFiles.push(alphaProxyFile);
+        const alphaFmt = probePixFmt(alphaProxyFile);
+        assert.ok(/a/.test(alphaFmt.replace('gray', '')),
+            `proxy PNG phải còn kênh alpha, nhận pix_fmt=${alphaFmt}`);
+        const alphaSize = probeSize(alphaProxyFile);
+        assert.ok(Math.max(alphaSize.w, alphaSize.h) <= MAX_EDGE, 'proxy PNG vẫn phải được thu nhỏ');
+        // Đi đúng đường của panel: link (đăng ký quyền đọc) rồi hỏi thumbnail_url của asset.
+        const alphaLink = await fetch(`${baseUrl}/api/editing-assets/link`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ paths: [alphaPath] }),
+        });
+        assert.strictEqual(alphaLink.status, 200);
+        const alphaAsset = ((await alphaLink.json()).assets || []).find((a) => a.path === alphaPath);
+        assert.ok(alphaAsset, 'link phải trả về asset của PNG trong suốt');
+        const alphaThumb = await fetch(`${baseUrl}${alphaAsset.thumbnail_url}`, { redirect: 'manual' });
+        assert.strictEqual(alphaThumb.status, 302, 'source-thumb của PNG phải chuyển hướng tới file thumbnail');
+        assert.ok(String(alphaThumb.headers.get('location') || '').endsWith('_img.png'),
+            `thumbnail của PNG trong suốt phải là .png, nhận: ${alphaThumb.headers.get('location')}`);
 
         // ---- 3) THUMBNAIL PANEL ----
         const linkRes = await fetch(`${baseUrl}/api/editing-assets/link`, {

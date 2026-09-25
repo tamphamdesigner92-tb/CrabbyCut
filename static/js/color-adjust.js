@@ -1967,7 +1967,11 @@
         const b = Math.min(Number(duration) || 0, Number(to) || 0);
         if (!(b > a)) return null;                       // không phủ chút nào
         if (a <= 1e-4 && b >= (Number(duration) || 0) - 1e-4) return '';   // phủ trọn
-        return `between(t,${a.toFixed(4)},${b.toFixed(4)})`;
+        /* LOCALT, KHÔNG phải `t`: sidecar thay LOCALT bằng thời gian CỤC BỘ của block —
+         * `(t-0)` ở clip lane chính (đã trim+setpts về 0), `(t-start)` ở overlay (giữ mốc
+         * TUYỆT ĐỐI trên sequence sau setpts). Viết thẳng `t` thì ở overlay cửa sổ
+         * [0..dur] không bao giờ trúng: lớp phủ một phần lên overlay im lặng biến mất. */
+        return `between(LOCALT,${a.toFixed(4)},${b.toFixed(4)})`;
     }
 
     // ---------------------------------------------------------------------

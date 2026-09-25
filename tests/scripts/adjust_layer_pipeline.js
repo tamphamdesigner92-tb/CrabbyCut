@@ -31,8 +31,10 @@ function testEnableBetween() {
     assert.strictEqual(ColorAdjust.enableBetween(3, 3, 5), null, 'không giao phải trả null');
     assert.strictEqual(ColorAdjust.enableBetween(6, 8, 5), null, 'nằm ngoài block phải trả null');
     // Phủ một phần -> biểu thức between
+    // Dùng token LOCALT (không phải `t`): sidecar thay bằng thời gian CỤC BỘ của block —
+    // overlay giữ mốc tuyệt đối sau setpts nên `t` thô ở đó không bao giờ rơi vào [0..dur].
     const e = ColorAdjust.enableBetween(1, 3, 5);
-    assert.ok(/^between\(t,1\.0000,3\.0000\)$/.test(e), `phủ một phần phải ra between, được "${e}"`);
+    assert.ok(/^between\(LOCALT,1\.0000,3\.0000\)$/.test(e), `phủ một phần phải ra between(LOCALT,..), được "${e}"`);
     // Kẹp về trong block
     assert.ok(/,0\.0000,2\.0000\)$/.test(ColorAdjust.enableBetween(-2, 2, 5)), 'phải kẹp cận dưới về 0');
     assert.ok(/,3\.0000,5\.0000\)$/.test(ColorAdjust.enableBetween(3, 99, 5)), 'phải kẹp cận trên về duration');

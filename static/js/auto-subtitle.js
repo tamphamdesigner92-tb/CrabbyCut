@@ -558,8 +558,8 @@
             .edit-sub-block { display: flex; flex-direction: column; gap: 6px; }
             .edit-sub-label { font-size: 11px; opacity: 0.75; text-transform: uppercase; letter-spacing: 0.04em; }
             .edit-sub-hint { font-size: 11px; opacity: 0.65; line-height: 1.45; }
-            .edit-sub-warn { font-size: 11px; color: #ffb454; line-height: 1.45; }
-            .edit-sub-error { font-size: 11px; color: #ff6b6b; line-height: 1.45; }
+            .edit-sub-warn { font-size: 11px; color: var(--warning); line-height: 1.45; }
+            .edit-sub-error { font-size: 11px; color: var(--danger); line-height: 1.45; }
             .edit-sub-input {
                 width: 100%; box-sizing: border-box; padding: 6px 8px; border-radius: 6px;
                 background: rgba(255,255,255,0.05); color: inherit;
@@ -580,7 +580,7 @@
                 position: absolute; inset: 0 auto 0 0; border-radius: 3px;
                 background: var(--accent, #3b82f6); transition: width 220ms ease;
             }
-            .edit-sub-progress.is-error .edit-sub-progress-fill { background: #ff6b6b; }
+            .edit-sub-progress.is-error .edit-sub-progress-fill { background: var(--danger); }
             .edit-sub-status { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; opacity: 0.85; }
             .edit-sub-status b { font-variant-numeric: tabular-nums; }
             .edit-sub-list {
@@ -596,7 +596,7 @@
             .edit-sub-cue time { font-size: 10px; opacity: 0.6; font-variant-numeric: tabular-nums; padding-top: 2px; }
             .edit-sub-cue span { font-size: 12px; line-height: 1.35; white-space: pre-wrap; }
         `;
-        document.head.appendChild(el);
+        document.head.insertBefore(el, document.getElementById('lumenSkin'));
     }
 
     function clock(seconds) {

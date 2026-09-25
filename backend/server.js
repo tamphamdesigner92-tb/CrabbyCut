@@ -149,6 +149,15 @@ const RASTER_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const IMAGE_PROXY_MAX_EDGE = 1920;
 // Cạnh dài của thumbnail ảnh trong panel Tệp phương tiện (thẻ chỉ rộng ~60px).
 const IMAGE_THUMB_MAX_EDGE = 320;
+/* Định dạng CÓ THỂ mang kênh trong suốt. Bản dẫn xuất (proxy/thumbnail) của chúng phải là
+ * .png: trước đây mọi proxy ảnh đều ghi ra .jpg, mà JPEG không có alpha nên sticker/logo PNG
+ * nền trong hiện NỀN ĐEN trên preview ở chế độ LQ — bản xuất thì vẫn đúng vì nó đọc file gốc.
+ * JPEG nguồn giữ .jpg (nhỏ hơn nhiều, và vốn không có gì trong suốt để mất). */
+const ALPHA_IMAGE_EXTENSIONS = new Set(['.png', '.webp']);
+
+function imageDerivativeExt(filePath) {
+  return ALPHA_IMAGE_EXTENSIONS.has(path.extname(String(filePath || '')).toLowerCase()) ? 'png' : 'jpg';
+}
 /* RETOUCH đọc file bằng ffmpeg TRỰC TIẾP (sidecar auto_reframe), nên danh sách của nó
  * phải là ẢNH RASTER — KHÔNG dùng lại ALLOWED_IMAGE_EXTENSIONS. `.svg` nằm trong danh
  * sách kia là hợp lý cho đường NHẬP asset (Chromium vẽ ra PNG ngay lúc nhập, xem
@@ -1872,6 +1881,43 @@ function sourceColorInfo(filePath) {
   return info;
 }
 
+/* MA TRẬN MÀU mà PREVIEW (Chromium) dùng cho một nguồn video KHÔNG gắn nhãn color_space.
+ * ĐÃ ĐO trong app (2026-09-25): Chromium đoán theo CHIỀU CAO — cao >= 720 -> BT.709, thấp hơn
+ * -> BT.601; FFmpeg thì luôn BT.601. Trả '' khi nguồn ĐÃ có nhãn (hoặc không phải YUV giới
+ * hạn: yuvj, RGB, xám không có câu hỏi này), 'bt709' hoặc 'smpte170m' khi thiếu nhãn.
+ * Cùng quy tắc với MediaColorUntagged ở sidecar. */
+const untaggedMatrixCache = new Map();
+function untaggedPreviewMatrix(filePath) {
+  let cacheKey = '';
+  try {
+    const stat = fs.statSync(filePath);
+    cacheKey = `${filePath}|${stat.size}|${Math.trunc(stat.mtimeMs)}`;
+    if (untaggedMatrixCache.has(cacheKey)) return untaggedMatrixCache.get(cacheKey);
+  } catch (_) { cacheKey = ''; }
+  const text = commandText('ffprobe', [
+    '-v', 'error', '-select_streams', 'v:0',
+    '-show_entries', 'stream=pix_fmt,color_space,height',
+    '-of', 'default=nw=1',
+    filePath,
+  ], 5000);
+  const fields = {};
+  String(text).split(/\r?\n/).forEach((line) => {
+    const at = line.indexOf('=');
+    if (at > 0) fields[line.slice(0, at).trim()] = line.slice(at + 1).trim().toLowerCase();
+  });
+  const pixFmt = fields.pix_fmt || '';
+  const space = fields.color_space || '';
+  const height = Number(fields.height) || 0;
+  const yuv = pixFmt.startsWith('yuv') && !pixFmt.startsWith('yuvj');
+  const untagged = yuv && (!space || space === 'unknown');
+  const matrix = untagged ? (height >= 720 ? 'bt709' : 'smpte170m') : '';
+  if (cacheKey) {
+    if (untaggedMatrixCache.size > 512) untaggedMatrixCache.clear();
+    untaggedMatrixCache.set(cacheKey, matrix);
+  }
+  return matrix;
+}
+
 function sourceIsHdr(filePath) {
   const { transfer, primaries } = sourceColorInfo(filePath);
   // HLG (điện thoại quay HDR) và PQ (HDR10 / Dolby Vision) đều phải nén dải trước khi hiển thị.
@@ -1937,10 +1983,14 @@ function probeConcatStreamSignature(filePath) {
   const video = commandText('ffprobe', [
     '-v', 'error',
     '-select_streams', 'v:0',
-    '-show_entries', 'stream=codec_name,width,height,pix_fmt,r_frame_rate',
+    '-show_entries', 'stream=codec_name,width,height,pix_fmt,r_frame_rate,color_space,color_range',
     '-of', 'csv=p=0',
     filePath,
   ], 5000);
+  /* NHÃN MÀU cũng thuộc chữ ký: nối `-c copy` một nguồn có nhãn với một nguồn HD thiếu nhãn
+   * cho ra temp_input.mp4 đổi ma trận giữa chừng, mà sidecar chỉ dò nhãn một lần cho cả file
+   * (MediaColorUntagged) -> một nhóm đoạn ra sai màu so với preview. Khác nhãn thì chuẩn hoá,
+   * và bước chuẩn hoá gắn nhãn tường minh (xem untaggedPreviewMatrix). */
   /* KÍCH THƯỚC HIỂN THỊ (đã tính hướng quay) là một phần của chữ ký.
    * `stream=width,height` là kích thước MÃ HOÁ: một clip dọc quay bằng điện thoại có thể
    * được mã hoá 1920×1080 kèm cờ xoay 90°. Hai file "cùng 1920×1080" theo chữ ký cũ nhưng
@@ -2096,7 +2146,11 @@ async function normalizeVideoForConcat(file, index, { withAudio = true, force = 
    * nên điều kiện dùng lại sẽ vui vẻ nhận nó — file nối lại về đúng 30 fps đã lược khung,
    * y như lỗi vừa sửa, mà không có gì báo. Đưa vào tên là không có đường nào lẫn được. */
   const fpsTag = (forceFps && targetFps) ? `_r${String(targetFps).replace('/', '-')}` : '';
-  const suffix = `${withAudio ? '' : '_na'}${isHdr ? '_sdr' : ''}${sizeTag}${fpsTag}`;
+  /* Ma trận GẮN THÊM cho nguồn thiếu nhãn cũng nằm trong tên file: bản chuẩn hoá cũ (trước
+   * 2026-09-25) của nguồn đó KHÔNG có nhãn, mà vẫn "mới hơn nguồn" nên sẽ bị dùng lại. */
+  const untaggedMatrix = isHdr ? '' : untaggedPreviewMatrix(file.path);
+  const matrixTag = untaggedMatrix ? (untaggedMatrix === 'bt709' ? '_m709' : '_m601') : '';
+  const suffix = `${withAudio ? '' : '_na'}${isHdr ? '_sdr' : ''}${sizeTag}${fpsTag}${matrixTag}`;
   /* TÊN BẢN CHUẨN HOÁ PHẢI KHOÁ THEO CHÍNH FILE NGUỒN, KHÔNG THEO VỊ TRÍ TRONG DANH SÁCH.
    *
    * LỖI ĐÃ TRẢ GIÁ (người dùng báo 2026-09-08). Bản trước đặt tên là `source_014.mp4` — tức
@@ -2138,7 +2192,14 @@ async function normalizeVideoForConcat(file, index, { withAudio = true, force = 
     if (withAudio) args.push('-map', hasAudio ? '0:a:0' : '1:a:0');
     // Tonemap (nếu có) chạy TRƯỚC bước đưa về khổ đích: hạ HDR rồi mới co/pad, ngược lại là
     // co ở dải sáng chưa nén.
-    const chain = [tonemapChain, fit].filter(Boolean).join(',');
+    /* NGUỒN THIẾU NHÃN MA TRẬN: gắn TƯỜNG MINH đúng ma trận mà preview đã dùng để hiển thị nó
+     * (theo chiều cao của CHÍNH nguồn). Không gắn thì bản chuẩn hoá vẫn thiếu nhãn, mà bước
+     * `fit` có thể đổi chiều cao (vd. 1280x540 -> khung bao 1920x1920) làm Chromium đổi cách
+     * đoán — cùng điểm ảnh bỗng hiện khác màu. Có nhãn rồi thì preview và bản xuất đọc như nhau. */
+    const tagFix = (!tonemapChain && untaggedMatrix)
+      ? `setparams=colorspace=${untaggedMatrix}:color_primaries=${untaggedMatrix === 'bt709' ? 'bt709' : 'smpte170m'}:color_trc=bt709`
+      : '';
+    const chain = [tagFix, tonemapChain, fit].filter(Boolean).join(',');
     if (chain) args.push('-vf', chain);
     args.push(
       '-c:v', 'libx264',
@@ -2157,6 +2218,10 @@ async function normalizeVideoForConcat(file, index, { withAudio = true, force = 
     // Gắn nhãn cho ĐÚNG cái vừa ghi ra. Thiếu bước này thì file 8-bit vẫn mang nhãn HLG/BT.2020
     // của nguồn — "HDR giả" mà mọi player sẽ diễn giải sai y như lỗi ban đầu.
     if (tonemapChain) args.push('-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709');
+    else if (untaggedMatrix) {  // (tính ở đầu hàm, cùng lúc với tên file)
+      args.push('-color_primaries', untaggedMatrix === 'bt709' ? 'bt709' : 'smpte170m',
+        '-color_trc', 'bt709', '-colorspace', untaggedMatrix, '-color_range', 'tv');
+    }
     args.push('-movflags', '+faststart', output);
     return args;
   };
@@ -3035,7 +3100,10 @@ function assetProxyCachePath(key, ext = 'mp4') {
 async function scaleImageTo(source, dest, maxEdge) {
   const vf = `scale=w='min(iw,${maxEdge})':h='min(ih,${maxEdge})'`
     + ':force_original_aspect_ratio=decrease:flags=lanczos';
-  await runProcess('ffmpeg', ['-v', 'error', '-y', '-i', source, '-vf', vf, '-q:v', '4', dest]);
+  /* Đích .png -> ép rgba để GIỮ kênh trong suốt (PNG bảng màu có tRNS hay WebP yuva đều về
+   * một dạng chắc chắn còn alpha). Đích .jpg -> chất lượng q4 như cũ. */
+  const encodeArgs = dest.toLowerCase().endsWith('.png') ? ['-pix_fmt', 'rgba'] : ['-q:v', '4'];
+  await runProcess('ffmpeg', ['-v', 'error', '-y', '-i', source, '-vf', vf, ...encodeArgs, dest]);
   // ffmpeg trả 0 mà không ghi gì là ca THẬT (xem trên) — kiểm file, đừng tin mã thoát.
   const stat = fs.statSync(dest);
   if (!(stat.size > 0)) throw new Error('ảnh thu nhỏ rỗng');
@@ -3045,7 +3113,7 @@ async function scaleImageTo(source, dest, maxEdge) {
  * cùng thư mục cache, khoá có hậu tố `_img` để không đụng khoá của video. */
 async function createOrGetImageThumbnail(imagePath) {
   fs.mkdirSync(THUMBNAIL_DIR, { recursive: true });
-  const thumbName = `${thumbnailCacheKey(imagePath)}_img.jpg`;
+  const thumbName = `${thumbnailCacheKey(imagePath)}_img.${imageDerivativeExt(imagePath)}`;
   const thumbPath = path.join(THUMBNAIL_DIR, thumbName);
   if (fs.existsSync(thumbPath) && fs.statSync(thumbPath).size > 0) {
     return `/temp_uploads/thumbnails/${thumbName}`;
@@ -3184,7 +3252,7 @@ function queueAssetProxy(rawPath) {
   const source = videoSource || imageSource;
   if (!source) return null;
   const kind = videoSource ? 'video' : 'image';
-  const ext = kind === 'image' ? 'jpg' : 'mp4';
+  const ext = kind === 'image' ? imageDerivativeExt(source) : 'mp4';
   let stat;
   try {
     stat = fs.statSync(source);
@@ -3252,14 +3320,15 @@ function pruneAssetProxyCache() {
     if (!fs.existsSync(PROXY_CACHE_DIR)) return;
     const now = Date.now();
     for (const name of fs.readdirSync(PROXY_CACHE_DIR)) {
-      /* .jpg CÓ MẶT Ở ĐÂY vì proxy ẢNH ghi ra .jpg (xem queueAssetProxy). Bỏ sót đuôi này là
-       * cache ảnh phình mãi mãi và rác .part.jpg của job bị kill không ai dọn — TTL vẫn chạy
-       * đều cho video nên nhìn bên ngoài mọi thứ vẫn có vẻ ổn. */
-      if (!name.endsWith('.mp4') && !name.endsWith('.jpg')) continue;
+      /* .jpg/.png CÓ MẶT Ở ĐÂY vì proxy ẢNH ghi ra .jpg (nguồn JPEG) hoặc .png (nguồn có thể
+       * trong suốt, xem imageDerivativeExt). Bỏ sót đuôi nào là cache ảnh phình mãi mãi và rác
+       * .part.* của job bị kill không ai dọn — TTL vẫn chạy đều cho video nên nhìn bên ngoài
+       * mọi thứ vẫn có vẻ ổn. */
+      if (!/\.(mp4|jpg|png)$/.test(name)) continue;
       const item = path.join(PROXY_CACHE_DIR, name);
       const stat = fs.statSync(item);
       // .part.* = rác của job bị kill giữa đường -> xoá ngay.
-      const expired = name.endsWith('.part.mp4') || name.endsWith('.part.jpg')
+      const expired = /\.part\.(mp4|jpg|png)$/.test(name)
         || (now - stat.mtimeMs) > PROXY_CACHE_TTL_MS;
       if (expired) fs.rmSync(item, { force: true });
     }
@@ -4486,13 +4555,30 @@ function materializeColorLutCube(text) {
  * Dùng lại y nguyên bộ chuẩn hoá của chuỗi chính (whitelist ký tự, ghép lut3d vào
  * chỗ trống) rồi chỉ đổi TÊN field — không viết lại bộ lọc ký tự lần thứ hai.
  */
+/* LỚP ĐIỀU CHỈNH: cùng bộ chuẩn hoá với chuỗi màu của block, rồi ĐỔI TÊN mọi trường sang
+ * `adj_layer_*` để sidecar dựng chuỗi thứ hai riêng (ColorAdjustChain với tag riêng).
+ * Bản trước chỉ giữ `adj_filters` nên KEYFRAME của lớp mất im lặng: biểu thức `eq` (phơi
+ * sáng/tương phản/bão hoà) và nhánh trộn cường độ LUT (2 cube + blend) đều bị vứt — lớp chỉ
+ * có LUT với cường độ keyframe thì bản xuất không còn gì của lớp. */
 function normalizeAdjustLayerFields(raw) {
   const base = normalizeColorAdjustFields(raw);
-  if (!base.adj_filters) return {};
-  // Mặt nạ / keyframe eq của LỚP chưa hỗ trợ ở đường này: chuỗi tĩnh mới nối được ra
-  // ngoài nhánh mặt nạ của block. Bỏ qua có Ý THỨC, và báo ra log thay vì im lặng.
+  // Mặt nạ của LỚP chưa hỗ trợ: chuỗi lớp nối ra NGOÀI nhánh mặt nạ của block. Bỏ có Ý THỨC.
   if (base.adj_mask_path) logStatus('[color-adjust] lớp Điều chỉnh: bỏ qua mặt nạ của lớp (chưa hỗ trợ).');
-  return { adj_layer_filters: base.adj_filters };
+  const rename = {
+    adj_filters: 'adj_layer_filters',
+    adj_filters_post: 'adj_layer_filters_post',
+    adj_eq_contrast_expr: 'adj_layer_eq_contrast_expr',
+    adj_eq_brightness_expr: 'adj_layer_eq_brightness_expr',
+    adj_eq_saturation_expr: 'adj_layer_eq_saturation_expr',
+    adj_lut_a_path: 'adj_layer_lut_a_path',
+    adj_lut_b_path: 'adj_layer_lut_b_path',
+    adj_lut_mix_expr: 'adj_layer_lut_mix_expr',
+  };
+  const out = {};
+  for (const [from, to] of Object.entries(rename)) {
+    if (base[from]) out[to] = base[from];
+  }
+  return out;
 }
 
 function normalizeColorAdjustFields(raw) {

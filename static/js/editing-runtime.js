@@ -2,12 +2,20 @@
     const TRACK_GROUP_ORDER = { visual: 0, main: 1, audio: 2 };
     const VISUAL_TYPES = new Set(['media', 'text', 'shape', 'vector']);
     const LANE_LABEL_WIDTH = 168;
-    const LANE_GAP = 8;
+    /* LANE XẾP SÁT KIỂU CAPCUT (2026-09-25). Trước đây block cách mép lane 6px trên/dưới
+       và lane cách nhau 8px -> giữa hai block của hai lane kề nhau trống 20px. Nay đệm 2px
+       + khe 4px = 8px. CHIỀU CAO BLOCK GIỮ NGUYÊN (74/45/28/36/22) nên dải phim, sóng âm,
+       nhãn và icon chuyển cảnh không phải tính lại — chỉ phần trống bị bớt đi.
+       Vùng "thả vào GIỮA hai lane để tạo lane mới" vẫn rộng 8px như cũ: rowIndexFromClientY
+       chỉ tính trúng lane khi con trỏ nằm trong THÂN block (bỏ phần đệm), nên dải trống
+       2 + 4 + 2 giữa hai block chính là vùng chèn. */
+    const LANE_GAP = 4;
+    const LANE_BLOCK_INSET = 2;
     const LANE_TOP_PADDING = 30;
     // Lane overlay HÌNH (media = ảnh/video) cố ý THẤP HƠN lane chính: lane chính là
     // mạch chuyện, lane phủ chỉ là lớp chèn — cao bằng nhau thì mắt không phân được
-    // đâu là trục chính. 57 = 2/3 của 86 (chốt 2026-08-12).
-    const LANE_HEIGHTS = { main: 86, media: 57, text: 40, shape: 40, vector: 40, audio: 48, adjust: 34 };
+    // đâu là trục chính. Block media 45 ≈ 2/3 block chính 74 (chốt 2026-08-12).
+    const LANE_HEIGHTS = { main: 78, media: 49, text: 32, shape: 32, vector: 32, audio: 40, adjust: 26 };
     const ASSET_KIND_ACCEPT = {
         media: '.mp4,.mov,.m4v,.webm,.png,.jpg,.jpeg,.webp,.svg',
         audio: '.mp3,.wav,.m4a,.aac',
@@ -379,6 +387,17 @@
     function laneHeight(trackOrType) {
         const type = typeof trackOrType === 'string' ? trackOrType : trackOrType?.type;
         return LANE_HEIGHTS[type] || LANE_HEIGHTS.text;
+    }
+
+    /* Vị trí/chiều cao của BLOCK trong một lane — MỘT chỗ duy nhất. Trước đây "+6 / -12" bị
+       chép tay ở 8 nơi (render block, khung chọn, sóng âm, dải chuyển cảnh, bóng kéo); lệch
+       một nơi là khung chọn/sóng âm trượt khỏi block. */
+    function laneBlockTop(rowTop) {
+        return rowTop + LANE_BLOCK_INSET;
+    }
+
+    function laneBlockHeight(trackOrType) {
+        return laneHeight(trackOrType) - (LANE_BLOCK_INSET * 2);
     }
 
     function sortTracks() {
@@ -808,6 +827,11 @@
     const assetProxyGivenUp = new Set();  // sourceKey không dựng được proxy -> thôi hỏi
 
     function assetProxyKey(asset) {
+        /* Asset HDR đã hạ SDR (ensureAssetSdr): proxy phải dựng từ BẢN SDR (`path`), không
+         * từ file HDR gốc (`source_path`). Khoá theo source_path là proxy LQ được encode
+         * thẳng từ HLG/PQ không tonemap -> preview LQ cháy màu trong khi HQ và bản xuất
+         * (cùng đọc `path` = bản SDR) vẫn đúng. */
+        if (asset?.sdr_active && asset.path) return String(asset.path);
         return String(asset?.source_path || asset?.path || '');
     }
 
@@ -3262,9 +3286,30 @@
     }
 
     function adjustLayerIsActive(it) {
+        // Giá trị TĨNH trung tính nhưng có keyframe màu (vd. phơi sáng chạy 0 -> 40) vẫn là
+        // lớp đang tác dụng — bản trước coi là "không làm gì" và bỏ cả preview lẫn xuất.
         return it.type === 'adjust'
             && isTrackVisible(itemTrack(it))
-            && it.adjustments && window.ColorAdjust && !ColorAdjust.isIdentity(it.adjustments);
+            && !!it.adjustments && !!window.ColorAdjust
+            && (!ColorAdjust.isIdentity(it.adjustments) || ColorAdjust.hasAdjustKeyframes(it.keyframes));
+    }
+
+    /* Dời mốc thời gian của mọi danh sách keyframe ({t, v, e}) đi `offset` giây.
+     * Keyframe của LỚP Điều chỉnh tính từ đầu LỚP, còn chuỗi xuất của nó chạy theo thời gian
+     * CỤC BỘ của block nhận lớp (LOCALT = 0 ở đầu block). Không dời thì clip thứ 3 (bắt đầu
+     * ở giây 10 của lớp) chạy keyframe như thể lớp mới bắt đầu -> lệch đúng 10 giây. */
+    function shiftKeyframeTimes(keyframes, offset) {
+        if (!keyframes || typeof keyframes !== 'object') return keyframes || null;
+        if (!(Math.abs(offset) > 1e-9)) return keyframes;
+        const out = {};
+        Object.entries(keyframes).forEach(([key, list]) => {
+            out[key] = Array.isArray(list)
+                ? list.map((pt) => (pt && typeof pt === 'object' && 't' in pt
+                    ? { ...pt, t: (Number(pt.t) || 0) + offset }
+                    : pt))
+                : list;
+        });
+        return out;
     }
 
     /* MỘT lớp Điều chỉnh tại một thời điểm — lớp TRÊN CÙNG thắng nếu có chồng nhau.
@@ -3277,10 +3322,22 @@
      * bằng CẤU TRÚC. Muốn nhiều tầng: đặt LUT lên chính block, hoặc trim các lớp Điều
      * chỉnh cho nối tiếp nhau thay vì chồng lên nhau.
      */
-    function activeAdjustmentLayer(t) {
+    /* PHẠM VI CỦA LỚP: chỉ những gì NẰM DƯỚI lane của nó (đúng Adjustment Layer của
+     * Premiere / CapCut). `target` = item overlay đang vẽ/xuất; null (hoặc thứ không phải
+     * editing item, như clip lane chính) = LANE CHÍNH — luôn nằm dưới mọi lane hình nên
+     * mọi lớp đều áp lên nó. Trước đây không có phép so này: lớp ở V1 nhuộm cả video ở
+     * V2/V3 phía trên (người dùng báo 2026-09-25). order nhỏ = trên cao. */
+    function adjustLayerAppliesTo(layer, target) {
+        if (!target || !target.track_id) return true;
+        if (target.id === layer.id) return false;
+        return trackOrderOf(layer) < trackOrderOf(target);
+    }
+
+    function activeAdjustmentLayer(t, target = null) {
         let best = null;
         editingItems.forEach((it) => {
             if (!adjustLayerIsActive(it)) return;
+            if (!adjustLayerAppliesTo(it, target)) return;
             if (!(t >= it.timeline_start - 1e-6 && t < it.timeline_start + it.duration - 1e-6)) return;
             if (!best || trackOrderOf(it) < trackOrderOf(best)) best = it;   // order nhỏ = trên cao
         });
@@ -3308,8 +3365,8 @@
 
     // Giá trị HIỆU DỤNG của lớp tại thời điểm sequence `t` (lớp cũng keyframe được).
     // null = lớp không còn tác dụng gì (kéo Opacity về 0) -> mọi đường vẽ bỏ qua lượt lớp.
-    function activeAdjustmentLayerAdjustments(t) {
-        const layer = activeAdjustmentLayer(t);
+    function activeAdjustmentLayerAdjustments(t, target = null) {
+        const layer = activeAdjustmentLayer(t, target);
         if (!layer) return null;
         const base = effectiveAdjustments(layer, Math.max(0, t - layer.timeline_start)) || layer.adjustments;
         const adj = ColorAdjust.scaleStrength(base, adjustLayerStrength(layer));
@@ -3331,9 +3388,25 @@
     async function adjustLayerExportSpec(seqStart, seqEnd, options = {}) {
         if (!window.ColorAdjust) return null;
         const dur = Math.max(0.05, seqEnd - seqStart);
-        // Lớp áp cho block = lớp phủ ĐIỂM GIỮA block. Một lớp tại một thời điểm (xem
-        // activeAdjustmentLayer), nên không cần trộn nhiều lớp.
-        const layer = activeAdjustmentLayer((seqStart + seqEnd) / 2);
+        /* Lớp áp cho block = lớp PHỦ BLOCK NHIỀU NHẤT (bằng nhau thì lớp trên cùng thắng,
+         * cùng luật với activeAdjustmentLayer). Bản trước lấy lớp phủ ĐIỂM GIỮA block: lớp
+         * chỉ phủ nửa đầu một clip dài (ca rất thường — dự án hay là MỘT clip dài) thì
+         * preview có lớp ở nửa đó còn bản xuất bỏ trắng. Chuỗi xuất chỉ mang được MỘT lớp
+         * (một chỗ LUT3D), nên block có nhiều lớp nối tiếp vẫn chỉ nhận lớp lớn nhất. */
+        let layer = null;
+        let bestOverlap = 0;
+        editingItems.forEach((it) => {
+            if (!adjustLayerIsActive(it)) return;
+            if (!adjustLayerAppliesTo(it, options.target || null)) return;
+            const overlap = Math.min(seqEnd, it.timeline_start + it.duration) - Math.max(seqStart, it.timeline_start);
+            if (!(overlap > 1e-4)) return;
+            const better = overlap > bestOverlap + 1e-4
+                || (Math.abs(overlap - bestOverlap) <= 1e-4 && layer && trackOrderOf(it) < trackOrderOf(layer));
+            if (!layer || better) {
+                layer = it;
+                bestOverlap = overlap;
+            }
+        });
         if (!layer) return null;
         const from = Math.max(seqStart, layer.timeline_start) - seqStart;
         const to = Math.min(seqEnd, layer.timeline_start + layer.duration) - seqStart;
@@ -3343,10 +3416,13 @@
         // bản xuất dựng biểu thức trực tiếp từ keyframe nên bỏ sót là lệch preview.
         const strength = adjustLayerStrength(layer);
         const layerAdj = ColorAdjust.scaleStrength(layer.adjustments, strength);
-        if (ColorAdjust.isIdentity(layerAdj)) return null;
-        const layerKf = ColorAdjust.scaleStrengthKeyframes(layer.keyframes, strength);
+        const layerKf = shiftKeyframeTimes(
+            ColorAdjust.scaleStrengthKeyframes(layer.keyframes, strength),
+            (Number(layer.timeline_start) || 0) - seqStart);
+        if (ColorAdjust.isIdentity(layerAdj) && !ColorAdjust.hasAdjustKeyframes(layerKf)) return null;
+        const { target: _target, ...specOptions } = options;
         const spec = await colorAdjustExportSpec(layerAdj, layerKf, {
-            ...options,
+            ...specOptions,
             duration: dur,
             label: `${options.label || 'blk'}_al`,
             enable,
@@ -4042,8 +4118,8 @@
         const rects = [];
         const mainIndex = rows.findIndex((row) => row.type === 'main');
         if (mainIndex >= 0 && !isTrackLocked(rows[mainIndex])) {
-            const top = laneRowTop(mainIndex, rows) + 6;
-            const height = laneHeight('main') - 12;
+            const top = laneBlockTop(laneRowTop(mainIndex, rows));
+            const height = laneBlockHeight('main');
             mainClipSequenceSpans().forEach((span) => {
                 if (span.duration <= 0) return;
                 const x = timelineX(span.start);
@@ -4056,14 +4132,14 @@
         editingItems.forEach((item) => {
             const rowIndex = rows.findIndex((row) => row.id === item.track_id);
             if (rowIndex < 0 || isTrackLocked(rows[rowIndex])) return;
-            const top = laneRowTop(rowIndex, rows) + 6;
+            const top = laneBlockTop(laneRowTop(rowIndex, rows));
             const x = timelineX(Number(item.timeline_start) || 0);
             rects.push({
                 kind: 'item', id: item.id,
                 x0: x,
                 x1: x + Math.max(8, (Number(item.duration) || 0) * zoomScale),
                 y0: top,
-                y1: top + laneHeight(item.type) - 12,
+                y1: top + laneBlockHeight(item.type),
             });
         });
         return rects;
@@ -4265,30 +4341,35 @@
         }
     }
 
+    /* Lane dưới con trỏ, theo TOẠ ĐỘ NỘI DUNG (có cộng scrollTop). Bản cũ đo từ khung nên
+       khi đã cuộn lane xuống, kéo block / chèn lane mới / Alt-kéo đều trúng nhầm lane.
+       Chỉ tính trúng khi con trỏ nằm trong THÂN block (bỏ phần đệm LANE_BLOCK_INSET): dải
+       trống giữa hai block là vùng "chèn lane mới" (xem ghi chú LANE_GAP). */
     function rowIndexFromClientY(clientY) {
         const frame = document.querySelector('.timeline-track-frame');
         if (!frame) return -1;
-        const rect = frame.getBoundingClientRect();
-        const y = clientY - rect.top;
+        const y = timelineContentYFromClientY(clientY);
         const rows = visibleRows();
         for (let i = 0; i < rows.length; i += 1) {
-            const top = laneRowTop(i, rows);
-            if (y >= top && y <= top + laneHeight(rows[i])) return i;
+            const top = laneBlockTop(laneRowTop(i, rows));
+            if (y >= top && y <= top + laneBlockHeight(rows[i])) return i;
         }
         return -1;
     }
 
+    // Y so với mép trong khung timeline (TRỪ viền 1px của khung). Chưa cộng scrollTop —
+    // muốn toạ độ nội dung thì dùng timelineContentYFromClientY.
     function timelineYFromClientY(clientY) {
         const frame = document.querySelector('.timeline-track-frame');
         if (!frame) return -1;
-        return clientY - frame.getBoundingClientRect().top;
+        return clientY - frame.getBoundingClientRect().top - (frame.clientTop || 0);
     }
 
     function insertTrackAtClientY(track, clientY) {
         if (!track || track.type === 'main') return;
         const group = trackGroup(track.type);
         const rows = visibleRows();
-        const y = timelineYFromClientY(clientY);
+        const y = timelineContentYFromClientY(clientY);
         const groupRows = rows.filter((row) => trackGroup(row.type) === group && row.type !== 'main' && row.id !== track.id);
         let insertAt = groupRows.length;
         for (let i = 0; i < groupRows.length; i += 1) {
@@ -4328,7 +4409,7 @@
         const mainIndex = rows.findIndex((row) => row.type === 'main');
         const mainTop = mainIndex >= 0 ? laneRowTop(mainIndex, rows) : LANE_TOP_PADDING;
         const mainBottom = mainIndex >= 0 ? mainTop + laneHeight(rows[mainIndex]) : mainTop;
-        const y = timelineYFromClientY(clientY);
+        const y = timelineContentYFromClientY(clientY);
         const inVisualZone = requiredGroup === 'visual' && y < mainTop;
         const inAudioZone = requiredGroup === 'audio' && y > mainBottom;
         if (!inVisualZone && !inAudioZone) return null;
@@ -4595,9 +4676,10 @@
             };
             nameSpan.addEventListener('dblclick', renameLane);
             label.appendChild(nameSpan);
-            // Hàng tên chỉ hiện ở lane đủ cao (main 86 / media 57 / audio 48); lane 40px chỉ
-            // còn hàng điều khiển, danh tính đã do badge V1/A1 đảm nhiệm.
-            label.classList.toggle('has-name', laneHeight(row) >= 48);
+            // Hàng tên chỉ hiện ở lane đủ cao (main 78 / media 49 / audio 40); lane 32px chỉ
+            // còn hàng điều khiển, danh tính đã do badge V1/A1 đảm nhiệm. Tên 13 + khe 3 +
+            // nút 20 = 36px vừa lane audio 40px.
+            label.classList.toggle('has-name', laneHeight(row) >= 40);
             renderTrackControls(label, row, trackBadgeText(rows, row));
             label.addEventListener('dblclick', (event) => {
                 if (event.target?.closest?.('.editing-lane-icon-btn')) return;
@@ -4632,9 +4714,9 @@
             block.classList.toggle('is-secondary-selection', block.classList.contains('is-selected') && span.index !== selectedTimelineClipIndex);
             block.dataset.index = String(span.index);
             block.style.left = `${timelineX(span.start)}px`;
-            block.style.top = `${laneRowTop(mainIndex, rows) + 6}px`;
+            block.style.top = `${laneBlockTop(laneRowTop(mainIndex, rows))}px`;
             block.style.width = `${span.duration * zoomScale}px`;
-            block.style.height = `${laneHeight('main') - 12}px`;
+            block.style.height = `${laneBlockHeight('main')}px`;
             block.appendChild(createBlockLabel(span.clip.text || `Clip ${span.index + 1}`));
             appendThumbStrip(block, mainThumbnailUrl(), true);
             // Tay cầm trim 2 đầu — giống lane overlay. Lane chính xếp gạch liền mạch nên
@@ -4687,9 +4769,9 @@
             block.classList.toggle('is-magic-fill-review', !!item.magic_fill_review);
             block.dataset.itemId = item.id;
             block.style.left = `${timelineX(item.timeline_start)}px`;
-            block.style.top = `${laneRowTop(rowIndex, rows) + 6}px`;
+            block.style.top = `${laneBlockTop(laneRowTop(rowIndex, rows))}px`;
             block.style.width = `${Math.max(8, item.duration * zoomScale)}px`;
-            block.style.height = `${laneHeight(item.type) - 12}px`;
+            block.style.height = `${laneBlockHeight(item.type)}px`;
             block.appendChild(createBlockLabel(blockLabelForItem(item)));
             const asset = findAsset(item.asset_id);
             if (item.type === 'media') {
@@ -5042,14 +5124,14 @@
     const WAVE_MEDIA_BOTTOM = 5;     // dải sóng nằm sát đáy block media/main
     /* 24 chứ không phải 16: ở 16px nửa biên độ chỉ còn 8px nên tiếng nói bình thường vẽ ra
        một sợi chỉ, phải kéo Volume lên mới nhìn được — mà Volume là thuộc tính XUẤT BẢN,
-       không phải nút phóng to hình. Lane thấp nhất có sóng là media (57-12=45px) nên 24+5
+       không phải nút phóng to hình. Lane thấp nhất có sóng là media (block 49-4=45px) nên 24+5
        vẫn thừa chỗ; text/shape không có sóng, audio đi nhánh WAVE_AUDIO_*. */
     const WAVE_MEDIA_HEIGHT = 24;
     const WAVE_AUDIO_TOP = 20;       // dưới nhãn tên của block audio
     const WAVE_AUDIO_BOTTOM = 4;
     const WAVE_STYLE = {
-        media: { peakColor: 'rgba(0,210,255,0.92)', rmsColor: 'rgba(206,247,255,0.72)' },
-        audio: { peakColor: 'rgba(173,212,255,0.95)', rmsColor: 'rgba(242,248,255,0.8)' },
+        media: { peakColor: 'rgba(143,178,255,0.9)', rmsColor: 'rgba(232,239,255,0.78)' },
+        audio: { peakColor: 'rgba(255,255,255,0.6)', rmsColor: 'rgba(255,255,255,0.88)' },
         baselineColor: 'rgba(255,255,255,0.16)',
     };
     let waveformRedrawScheduled = false;
@@ -5115,8 +5197,8 @@
         const mainIndex = rows.findIndex((row) => row.id === mainTrack?.id);
         if (mainIndex >= 0) {
             const source = waveformMainSource();
-            const laneTop = laneRowTop(mainIndex, rows) + 6;
-            const laneH = laneHeight('main') - 12;
+            const laneTop = laneBlockTop(laneRowTop(mainIndex, rows));
+            const laneH = laneBlockHeight('main');
             const mainMuted = isTrackMuted(mainTrack);
             const mainLocked = isTrackLocked(mainTrack);
             mainClipSequenceSpans().forEach((span) => {
@@ -5155,7 +5237,7 @@
                 key: source.key,
                 url: source.url,
                 rect: waveformStripRect(kind, timelineX(item.timeline_start),
-                    laneRowTop(rowIndex, rows) + 6, width, laneHeight(item.type) - 12),
+                    laneBlockTop(laneRowTop(rowIndex, rows)), width, laneBlockHeight(item.type)),
                 srcStart,
                 srcEnd: srcStart + itemSourceSpan(item),
                 gain: normalizeVolumePercent(item.volume) / 100,
@@ -5265,8 +5347,8 @@
             const trans = getBoundaryTransition(b);
             const el = document.createElement('div');
             el.dataset.key = b.key;
-            el.style.top = `${laneTop + 6}px`;
-            el.style.height = `${lh - 12}px`;
+            el.style.top = `${laneBlockTop(laneTop)}px`;
+            el.style.height = `${lh - (LANE_BLOCK_INSET * 2)}px`;
             if (trans) {
                 const half = trans.duration / 2;
                 el.className = 'editing-transition-band transition-hit is-active';
@@ -5637,7 +5719,9 @@
     // Pool giới hạn: mỗi CanvasColorRenderer giữ một WebGL context, mà trình duyệt chỉ
     // cho ~16 context/tab -> giữ tối đa LAYER_FX_MAX, quá thì bỏ cái cũ nhất.
     const layerFxPool = new Map();   // key -> { renderer, sig }
-    const LAYER_FX_MAX = 4;
+    // 6 = preview Pixi (clip + lớp) + chuyển cảnh (clip A + clip B + lượt lớp chung) + 1 dư.
+    // Ở 4, bật lớp Điều chỉnh trong vùng chuyển cảnh là pool bỏ-rồi-dựng-lại context mỗi khung.
+    const LAYER_FX_MAX = 6;
 
     /* MẶT NẠ CẮT HÌNH — nhân alpha của drawable theo mặt nạ, trả về canvas MỚI có alpha.
      *
@@ -5788,6 +5872,19 @@
         if (!options.skipColor) {
             drawable = colorAdjustedDrawable(
                 drawable, texW, texH, effectiveAdjustments(clip, localT), `main:${span.index}`);
+            /* LỚP ĐIỀU CHỈNH = lượt thứ hai, đúng thứ tự của export (chuỗi clip trước, chuỗi
+             * lớp nối sau) và của đường preview Pixi (syncSpriteTexture). Thiếu lượt này thì
+             * mọi khung dựng bằng canvas — chuyển cảnh lane chính (preview LẪN bake xuất),
+             * bake Retouch cả khung, chụp khung — mất lớp Điều chỉnh: xem thì nháy tắt ở mỗi
+             * chuyển cảnh, xuất thì đoạn đó không có lớp. Các bake này đi `color_source:
+             * 'baked'` nên backend không áp lớp lần nữa -> không bị áp hai lần. */
+            // MỘT bộ dựng chung cho lượt lớp của mọi clip (A lẫn B của chuyển cảnh): kết
+            // quả được blit NGAY bên dưới trước khi clip kia dùng lại bộ dựng, và hai clip
+            // tại cùng mốc thường chung một lớp nên uniform/LUT không phải nạp lại.
+            const layerAdj = activeAdjustmentLayerAdjustments(span.start + localT);
+            if (layerAdj) {
+                drawable = colorAdjustedDrawable(drawable, texW, texH, layerAdj, 'maincanvas~adjlayer');
+            }
         }
         /* CỠ VẼ tính từ KHUNG NỐI × hệ số vừa-khung, KHÔNG từ cỡ texture.
          *
@@ -6558,11 +6655,18 @@
      *
      * Vị trí x trong block = t (giây cục bộ) × zoomScale. Bấm -> đưa playhead tới đó;
      * kéo ngang -> đổi thời điểm. */
+    /* Duyệt MỌI danh sách keyframe có thật trong dữ liệu (transform, âm lượng VÀ thông số màu
+     * 'adj.*') — cùng cách moveKeyframesAt duyệt khi kéo. Bản trước chỉ lấy trục transform +
+     * âm lượng, nên block chỉ có keyframe MÀU (lớp Điều chỉnh với cường độ LUT / phơi sáng
+     * keyframe, hay video chỉ keyframe màu) không hiện hình thoi nào để bấm/kéo, dù preview
+     * và bản xuất vẫn chạy theo keyframe đó (người dùng báo 2026-09-25). */
     function blockKeyframeTimes(keyframes) {
         const times = [];
-        if (!keyframes || !window.TextAnimations) return times;
-        [...(TextAnimations.KEYFRAME_FIELDS || []), TextAnimations.VOLUME_KEYFRAME_FIELD].forEach((f) => {
-            (keyframes[f] || []).forEach((k) => {
+        if (!keyframes || typeof keyframes !== 'object') return times;
+        Object.keys(keyframes).forEach((f) => {
+            if (!Array.isArray(keyframes[f])) return;
+            keyframes[f].forEach((k) => {
+                if (!k || typeof k !== 'object' || !('t' in k)) return;
                 const t = Math.round((Number(k.t) || 0) * 1000) / 1000;
                 /* Gom theo KF_EPS chứ không theo giá trị làm tròn: hai trục lệch nhau 1ms là
                  * CÙNG một keyframe ở mọi chỗ khác của UI (kfListForControl), nên ở đây cũng
@@ -6575,12 +6679,12 @@
     }
 
     function appendKeyframeMarkers(block, owner, ownerKey, blockStartSeq, blockDuration, locked) {
-        if (!window.TextAnimations) return;
         const keyframes = owner && owner.keyframes;
-        // Âm lượng nằm ở namespace riêng nên phải cộng thêm cổng vào — nếu chỉ hỏi
-        // hasKeyframes() thì block audio chỉ có keyframe âm lượng sẽ không hiện marker nào.
-        if (!TextAnimations.hasKeyframes(keyframes) && !TextAnimations.hasVolumeKeyframes(keyframes)) return;
-        blockKeyframeTimes(keyframes).forEach((t) => {
+        // Cổng = "có mốc nào không" theo CHÍNH blockKeyframeTimes, không hỏi riêng từng họ
+        // (hasKeyframes / hasVolumeKeyframes đều bỏ sót keyframe màu 'adj.*').
+        const times = blockKeyframeTimes(keyframes);
+        if (!times.length) return;
+        times.forEach((t) => {
             const marker = document.createElement('div');
             marker.className = 'editing-kf-marker';
             marker.classList.toggle('is-locked', !!locked);
@@ -7126,7 +7230,7 @@
         // Ngoài mọi lane: chỉ nhận VÙNG TRỐNG phía trên lane chính (khu vực lane visual).
         const mainIndex = rows.findIndex((r) => r.type === 'main');
         const mainTop = mainIndex >= 0 ? laneRowTop(mainIndex, rows) : LANE_TOP_PADDING;
-        const y = timelineYFromClientY(clientY);
+        const y = timelineContentYFromClientY(clientY);
         if (!(y >= LANE_TOP_PADDING && y < mainTop)) return null;
         return { trackId: '', rowIndex: -1, newLane: true, clientY };
     }
@@ -7375,13 +7479,13 @@
                 const rows = visibleRows();
                 // Lane sẵn có -> bóng nằm đúng lane đó; lane mới -> bóng bám con trỏ.
                 const laneTop = (!drag.overlayTarget.newLane && drag.overlayTarget.rowIndex >= 0)
-                    ? laneRowTop(drag.overlayTarget.rowIndex, rows) + 6
-                    : Math.max(LANE_TOP_PADDING, timelineYFromClientY(event.clientY) - (LANE_HEIGHTS.media / 2));
+                    ? laneBlockTop(laneRowTop(drag.overlayTarget.rowIndex, rows))
+                    : Math.max(LANE_TOP_PADDING, timelineContentYFromClientY(event.clientY) - (laneBlockHeight('media') / 2));
                 ghost.style.display = 'block';
                 ghost.style.left = `${Math.round(timelineX(drag.overlayStart))}px`;
                 ghost.style.width = `${Math.round(width)}px`;
                 ghost.style.top = `${Math.round(laneTop)}px`;
-                ghost.style.height = `${LANE_HEIGHTS.media - 12}px`;
+                ghost.style.height = `${laneBlockHeight('media')}px`;
                 ghost.classList.toggle('is-new-lane', drag.overlayTarget.newLane === true);
             }
             setEditingStatusText(drag.overlayTarget.newLane
@@ -12869,6 +12973,8 @@
         const a1 = a0 + (Number(item.duration) || 0);
         return editingItems.some((it) => {
             if (!adjustLayerIsActive(it)) return false;
+            // Chỉ lớp NẰM TRÊN item mới áp lên nó (xem adjustLayerAppliesTo).
+            if (!adjustLayerAppliesTo(it, item)) return false;
             const b0 = Number(it.timeline_start) || 0;
             const b1 = b0 + (Number(it.duration) || 0);
             return a0 < b1 - 1e-6 && b0 < a1 - 1e-6;
@@ -12908,7 +13014,7 @@
         //             lượt 2 (màu của lớp) vào canvas hiện.
         //   không   -> y như cũ, đúng một lượt.
         // Thứ tự này khớp export: chuỗi của block chạy TRƯỚC, chuỗi của lớp nối SAU.
-        const layerAdj = activeAdjustmentLayerAdjustments(currentSequenceTime());
+        const layerAdj = activeAdjustmentLayerAdjustments(currentSequenceTime(), item);
         // RETOUCH TRƯỚC CHUỖI MÀU — cùng thứ tự với lane chính và với khâu xuất: retouch
         // sửa DA (kết cấu, khuyết điểm), grade/LUT là lớp thẩm mỹ áp LÊN kết quả đó.
         // Mốc thời gian là currentTime của chính thẻ nguồn, tức trục thời gian của ASSET —
@@ -14347,6 +14453,17 @@
         setPrimaryItemSelection(item.id);
     }
 
+    /* Gom nhiều yêu cầu vẽ lại overlay thành MỘT lượt (các sự kiện tải/tua của nhiều nguồn
+     * thường tới dồn dập). setTimeout chứ không rAF: lượt này là để vẽ khung ĐANG DỪNG. */
+    let previewOverlayRefreshTimer = 0;
+    function requestPreviewOverlayRefresh() {
+        if (previewOverlayRefreshTimer) return;
+        previewOverlayRefreshTimer = setTimeout(() => {
+            previewOverlayRefreshTimer = 0;
+            renderPreviewOverlays();
+        }, 0);
+    }
+
     function renderPreviewOverlays() {
         const root = ensurePreviewOverlayRoot();
         if (!root) return;
@@ -14535,6 +14652,14 @@
                     const srcEl = makeMediaEl();
                     srcEl.id = srcId;
                     srcEl.setAttribute('class', 'editing-preview-src');
+                    /* Canvas fx chỉ có hình khi paintColorFxCanvas CHẠY SAU lúc nguồn ẩn đã có
+                     * khung. Phần tử vừa được dựng lại (bật/tắt lane, bật/tắt lớp Điều chỉnh,
+                     * đổi LQ/HQ) thì lượt vẽ đầu luôn hụt vì nguồn còn đang tải — và lúc DỪNG
+                     * không có gì gọi vẽ lại, nên preview đứng ở khung trống/cũ tới khi người
+                     * dùng kéo playhead. Nguồn tải xong / tua xong là tự xin một lượt vẽ. */
+                    ['loadeddata', 'seeked', 'load'].forEach((ev) => {
+                        srcEl.addEventListener(ev, requestPreviewOverlayRefresh);
+                    });
                     root.appendChild(srcEl);
                 } else {
                     el = makeMediaEl();
@@ -17658,16 +17783,34 @@
         // Bỏ sót vế này thì cỡ texture rơi về baseW/baseH và chuỗi màu chạy sai tỉ lệ.
         const texW = image.naturalWidth || image.width || baseW;
         const texH = image.naturalHeight || image.height || baseH;
-        const animatedColor = !!window.ColorAdjust && ColorAdjust.hasAdjustKeyframes(item.keyframes);
-        const sourceAt = (localT) => colorAdjustedDrawable(
-            image, texW, texH, effectiveAdjustments(item, localT), `imgseq:${item.id}`);
+        /* LỚP ĐIỀU CHỈNH phía trên item: chuỗi PNG này là đường xuất DUY NHẤT của item (sidecar
+         * không nối color_adjust_layer cho item có animation_render đã bake), nên lớp phải
+         * được áp NGAY Ở ĐÂY — preview (paintColorFxCanvas) vẫn áp, thiếu là bản xuất lệch.
+         * Lớp có thể chỉ phủ một phần item hoặc có keyframe -> tính theo từng frame. */
+        const itemStart = Number(item.timeline_start) || 0;
+        const itemEnd = itemStart + (Number(item.duration) || 0);
+        const layerTouches = editingItems.some((it) => adjustLayerIsActive(it)
+            && adjustLayerAppliesTo(it, item)
+            && it.timeline_start < itemEnd && it.timeline_start + it.duration > itemStart);
+        const layerAt = (localT) => (layerTouches
+            ? activeAdjustmentLayerAdjustments(itemStart + (Number(localT) || 0), item)
+            : null);
+        const animatedColor = !!window.ColorAdjust
+            && (ColorAdjust.hasAdjustKeyframes(item.keyframes) || layerTouches);
+        const sourceAt = (localT) => {
+            let out = colorAdjustedDrawable(
+                image, texW, texH, effectiveAdjustments(item, localT), `imgseq:${item.id}`);
+            const layerAdj = layerAt(localT);
+            if (layerAdj) out = colorAdjustedDrawable(out, texW, texH, layerAdj, `imgseq:${item.id}~adjlayer`);
+            return out;
+        };
         const staticSource = animatedColor ? null : sourceAt(0);
         const drawInto = (ctx, _charFrac, localT) => ctx.drawImage(
             animatedColor ? sourceAt(Number(localT) || 0) : staticSource, 0, 0, baseW, baseH);
-        // Chữ ký nội dung = adjustments HIỆU DỤNG tại mốc đó -> frame nào màu không đổi vẫn
-        // được gộp (đoạn trước keyframe đầu / sau keyframe cuối thường là phần lớn clip).
+        // Chữ ký nội dung = adjustments HIỆU DỤNG (của item + của lớp) tại mốc đó -> frame
+        // nào màu không đổi vẫn được gộp (thường là phần lớn clip).
         const contentSigAt = animatedColor
-            ? (localT) => JSON.stringify(effectiveAdjustments(item, localT))
+            ? (localT) => JSON.stringify([effectiveAdjustments(item, localT), layerAt(localT)])
             : null;
         return renderAnimationSequence(
             item, resolved, fps, baseW, baseH, { boxHeight: baseH, fontSize: 0, charCount: 0 },
@@ -17952,6 +18095,14 @@
             const seamLocalT = side === 'A' ? Math.max(0, Number(item.duration) || 0) : 0;
             drawable = colorAdjustedDrawable(
                 drawable, texW, texH, effectiveAdjustments(item, seamLocalT), `bake:${item.id}:${side}`);
+            // Lớp Điều chỉnh phía trên item tại đúng mốc seam (nhánh A lùi 1ms vì cửa sổ lớp
+            // là nửa mở [start, end)). Khung chuyển cảnh bake xong đi `color_source:'baked'`
+            // nên sidecar không áp lớp lần nữa.
+            const seamSeqT = (Number(item.timeline_start) || 0) + (side === 'A' ? Math.max(0, seamLocalT - 0.001) : 0);
+            const layerAdj = activeAdjustmentLayerAdjustments(seamSeqT, item);
+            if (layerAdj) {
+                drawable = colorAdjustedDrawable(drawable, texW, texH, layerAdj, `bake:${item.id}:${side}~adjlayer`);
+            }
             return { drawable, w0: sz.width, h0: sz.height };
         }
         return null;
@@ -18302,7 +18453,7 @@
         for (const t of [0, d * 0.25, d * 0.5, d * 0.75, d]) {
             if (spatial(effectiveAdjustments(target, t))) return true;
             if (typeof activeAdjustmentLayerAdjustments === 'function'
-                && spatial(activeAdjustmentLayerAdjustments(seqStart + t))) return true;
+                && spatial(activeAdjustmentLayerAdjustments(seqStart + t, target))) return true;
         }
         return spatial(target.adjustments);
     }
@@ -18851,7 +19002,7 @@
                 if (spec) patch.color_adjust = spec;
                 const layerSpec = await adjustLayerExportSpec(
                     out.runStart, out.runStart + out.runDur,
-                    { frameHeight: seqH, frameWidth: seqW, label: `rtov${patch.id}`, fps: exportFps });
+                    { frameHeight: seqH, frameWidth: seqW, label: `rtov${patch.id}`, fps: exportFps, target: item });
                 if (layerSpec) patch.color_adjust_layer = layerSpec;
                 items.push(patch);
             } catch (error) {
@@ -18999,6 +19150,7 @@
                         frameWidth: Number(fxAsset?.width) || 0,
                         label: `i${copy.id}`,
                         fps: exportFps,
+                        target: copy,
                     });
                 if (layerSpec) copy.color_adjust_layer = layerSpec;
             }
@@ -19285,7 +19437,7 @@
             .edit-tab { width: auto; flex: 0 0 auto; margin: 0; padding: 6px 10px; border-radius: 999px; background: var(--panel-bg-light); color: var(--text-muted); border: 1px solid var(--border-color); font-size: var(--fs-xs); font-weight: 600; white-space: nowrap; box-shadow: none; cursor: pointer; transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
             .edit-tab:hover:not(.is-active) { background: var(--surface-4); color: var(--text-1); border-color: var(--border-strong); }
             .edit-tab:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-            .edit-tab.is-active { background: var(--primary); border-color: var(--primary); color: #fff; }
+            .edit-tab.is-active { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
             /* align-items: stretch (KHÔNG phải flex-start) để #editPanelBody nhận trọn
                chiều cao — flex-start thì nó chỉ cao bằng nội dung và ô nhập không giãn. */
             .edit-panel-main { display: flex; gap: 8px; align-items: stretch; flex: 1 1 auto; min-height: 220px; }
@@ -19314,7 +19466,7 @@
             }
             .edit-subtab.is-active {
                 background: var(--primary);
-                color: #fff;
+                color: var(--on-primary);
                 font-weight: 600;
                 box-shadow: 0 1px 2px rgba(0,0,0,0.30);
             }
@@ -19391,11 +19543,11 @@
                 box-shadow: none; cursor: pointer;
                 transition: border-color 0.16s ease, background-color 0.16s ease;
             }
-            .edit-import-drop:hover { border-color: var(--primary); background: rgba(10,132,255,0.06); }
+            .edit-import-drop:hover { border-color: var(--primary); background: rgba(255,176,32,0.06); }
             .edit-import-drop-ico {
                 display: flex; align-items: center; justify-content: center;
                 width: 26px; height: 26px; border-radius: 50%;
-                background: var(--primary); color: #fff;
+                background: var(--primary); color: var(--on-primary);
             }
             .edit-import-drop-ico .btn-ico { width: 15px; height: 15px; margin: 0; }
             .edit-import-drop-title { font-size: var(--fs-sm); font-weight: 600; color: var(--text-main); }
@@ -19412,7 +19564,7 @@
             }
             .edit-script-drop b { color: var(--text-main); }
             .edit-script-drop span { opacity: 0.75; }
-            .edit-script-drop.is-dragover { border-color: var(--primary); background: rgba(10,132,255,0.08); color: var(--text-main); }
+            .edit-script-drop.is-dragover { border-color: var(--primary); background: rgba(255,176,32,0.08); color: var(--text-main); }
             .edit-script-text {
                 width: 100%; min-height: 240px; resize: vertical; box-sizing: border-box;
                 background: var(--panel-bg-light); color: var(--text-main);
@@ -19423,7 +19575,7 @@
             .edit-script-status { margin-top: 6px; font-size: var(--fs-2xs); color: var(--text-muted); line-height: 1.5; }
             /* --- Thẻ THƯ MỤC trong tab Tệp phương tiện / Âm thanh --- */
             .edit-folder-card { cursor: pointer; }
-            .edit-folder-thumb { position: relative; color: var(--primary); background: rgba(10,132,255,0.08); }
+            .edit-folder-thumb { position: relative; color: var(--primary); background: rgba(255,176,32,0.08); }
             .edit-folder-thumb svg { width: 28px; height: 28px; }
             .edit-folder-count {
                 position: absolute;
@@ -19462,7 +19614,7 @@
             .edit-panel-body.is-import-dragover {
                 outline: 1px dashed var(--primary);
                 outline-offset: -2px;
-                background: rgba(10,132,255,0.06);
+                background: rgba(255,176,32,0.06);
             }
             /* Thumbnail KÍCH THƯỚC CỐ ĐỊNH: panel rộng ra thì chỉ xếp thêm cột, thumbnail
                không phình to (auto-fill + cột CỐ ĐỊNH, không dùng 1fr). 82px vừa đủ 2 cột ở
@@ -19553,7 +19705,7 @@
             .pmp-bar { flex: 0 0 auto; display: flex; align-items: center; gap: var(--sp-5); padding: var(--sp-4) var(--sp-5); background: var(--surface-2); }
             .pmp-play {
                 margin: 0; padding: 0; width: 28px; height: 28px; flex: 0 0 auto;
-                border-radius: 50%; border: none; background: var(--primary); color: #fff;
+                border-radius: 50%; border: none; background: var(--primary); color: var(--on-primary);
                 line-height: 1; cursor: pointer; box-shadow: none;
                 display: inline-flex; align-items: center; justify-content: center;
                 transition: background var(--dur-fast) var(--ease-out);
@@ -19620,7 +19772,7 @@
                 line-height: 1; cursor: pointer; display: none; align-items: center; justify-content: center;
                 box-shadow: 0 1px 5px rgba(0,0,0,0.45);
             }
-            .edit-asset-card .edit-asset-thumb-wrap .edit-asset-add { bottom: 5px; width: 22px; height: 22px; font-size: 16px; background: var(--primary); color: #fff; }
+            .edit-asset-card .edit-asset-thumb-wrap .edit-asset-add { bottom: 5px; width: 22px; height: 22px; font-size: 16px; background: var(--primary); color: var(--on-primary); }
             .edit-asset-card .edit-asset-thumb-wrap .edit-asset-del { top: 5px; width: 20px; height: 20px; font-size: 14px; background: rgba(20,20,22,0.78); color: #fff; }
             .edit-asset-add:hover { filter: brightness(1.12); }
             .edit-asset-del:hover { background: #d13b3b; }
@@ -19771,20 +19923,20 @@
             /* Dải sọc chéo = Node TƯƠNG TÁC: click chọn/xoá; kéo hiệu ứng khác thả vào để thay. */
             .editing-transition-band { position: absolute; z-index: 26; border-radius: 5px; cursor: pointer; overflow: visible;
                 display: flex; align-items: center; justify-content: center;
-                background: repeating-linear-gradient(45deg, rgba(255,255,255,0.20) 0, rgba(255,255,255,0.20) 5px, rgba(255,255,255,0.03) 5px, rgba(255,255,255,0.03) 10px), rgba(10,132,255,0.20);
+                background: repeating-linear-gradient(45deg, rgba(255,255,255,0.20) 0, rgba(255,255,255,0.20) 5px, rgba(255,255,255,0.03) 5px, rgba(255,255,255,0.03) 10px), rgba(255,176,32,0.20);
                 border: 1px solid rgba(255,255,255,0.45); box-shadow: inset 0 0 0 1px rgba(0,0,0,0.25);
                 transition: box-shadow 0.12s ease, background 0.12s ease, border-color 0.12s ease; }
             .editing-transition-band:hover { border-color: rgba(255,255,255,0.85); }
             .editing-transition-band.is-selected { border-color: #fff; box-shadow: 0 0 0 2px var(--primary), inset 0 0 0 1px rgba(0,0,0,0.25); }
             /* Trạng thái handover khi kéo hiệu ứng mới vào: CẢ DẢI sáng lên. */
             .editing-transition-band.drop-target { border-color: #fff;
-                background: repeating-linear-gradient(45deg, rgba(255,255,255,0.34) 0, rgba(255,255,255,0.34) 5px, rgba(255,255,255,0.10) 5px, rgba(255,255,255,0.10) 10px), rgba(10,132,255,0.5);
+                background: repeating-linear-gradient(45deg, rgba(255,255,255,0.34) 0, rgba(255,255,255,0.34) 5px, rgba(255,255,255,0.10) 5px, rgba(255,255,255,0.10) 10px), rgba(255,176,32,0.5);
                 box-shadow: 0 0 0 2px #fff, 0 0 14px 2px var(--primary); }
             /* Icon bowtie ⋈ CHỈ trang trí, không chặn chuột (click xuyên xuống dải). */
             .editing-transition-icon { pointer-events: none; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 5px; background: rgba(18,20,26,0.55); border: 1px solid rgba(255,255,255,0.55); color: rgba(255,255,255,0.92); box-shadow: 0 1px 3px rgba(0,0,0,0.5); }
             /* Điểm cắt TRỐNG: drop-zone mảnh, ẩn + không chặn chuột; chỉ hiện khi đang kéo. */
             .editing-transition-dropzone { position: absolute; z-index: 26; border-radius: 4px; transform: translateX(-50%); opacity: 0; pointer-events: none;
-                background: rgba(10,132,255,0.28); border: 1px dashed rgba(255,255,255,0.7); transition: opacity 0.12s ease, background 0.12s ease; }
+                background: rgba(255,176,32,0.28); border: 1px dashed rgba(255,255,255,0.7); transition: opacity 0.12s ease, background 0.12s ease; }
             #segmentsTrack.transition-dnd-active .editing-transition-dropzone { opacity: 0.85; }
             .editing-transition-dropzone.drop-target { opacity: 1; background: var(--primary); border-style: solid; border-color: #fff; box-shadow: 0 0 12px 2px var(--primary); }
             /* Tay cầm kéo 2 đầu dải để đổi độ dài (đối xứng). */
@@ -20190,9 +20342,9 @@
             /* Kéo-thả từ panel trái: block sắp bị THAY THẾ media (viền xanh nhấp nháy nhẹ)
                và vạch chỉ chỗ CHÈN block mới. */
             .editing-block.is-replace-target {
-                outline: 2px solid var(--primary, #0a84ff);
+                outline: 2px solid var(--primary, #ffb020);
                 outline-offset: -2px;
-                box-shadow: 0 0 0 3px rgba(10,132,255,0.35);
+                box-shadow: 0 0 0 3px rgba(255,176,32,0.35);
                 filter: brightness(1.15);
             }
             #editingPanelDropLine {
@@ -20201,8 +20353,8 @@
                 bottom: 0;
                 width: 2px;
                 margin-left: -1px;
-                background: var(--primary, #0a84ff);
-                box-shadow: 0 0 6px rgba(10,132,255,0.8);
+                background: var(--primary, #ffb020);
+                box-shadow: 0 0 6px rgba(255,176,32,0.8);
                 pointer-events: none;
                 z-index: 32;
                 display: none;
@@ -20211,7 +20363,7 @@
                rõ vạch chỉ chỗ thả (#editingMainDropIndicator). */
             .editing-block.is-main-dragging {
                 opacity: 0.55;
-                outline: 2px solid var(--primary, #0a84ff);
+                outline: 2px solid var(--primary, #ffb020);
                 outline-offset: -2px;
                 cursor: grabbing;
             }
@@ -20219,8 +20371,8 @@
                 position: absolute;
                 width: 3px;
                 margin-left: -1px;
-                background: var(--primary, #0a84ff);
-                box-shadow: 0 0 10px rgba(10, 132, 255, 0.85);
+                background: var(--primary, #ffb020);
+                box-shadow: 0 0 10px rgba(255,176,32,0.85);
                 border-radius: 2px;
                 pointer-events: none;
                 display: none;
@@ -20230,10 +20382,10 @@
                bề rộng bản sao). Nét đứt = sẽ tạo lane overlay mới. */
             #editingMainOverlayGhost {
                 position: absolute;
-                border: 2px solid var(--primary, #0a84ff);
-                background: rgba(10, 132, 255, 0.22);
+                border: 2px solid var(--primary, #ffb020);
+                background: rgba(255,176,32,0.22);
                 border-radius: 6px;
-                box-shadow: 0 0 10px rgba(10, 132, 255, 0.5);
+                box-shadow: 0 0 10px rgba(255,176,32,0.5);
                 pointer-events: none;
                 display: none;
                 z-index: 31;
@@ -20243,8 +20395,8 @@
                không bị #segmentsTrack dựng lại nuốt mất giữa cú kéo. */
             #editingMarqueeBox {
                 position: absolute;
-                border: 1px solid var(--primary, #0a84ff);
-                background: rgba(10, 132, 255, 0.16);
+                border: 1px solid var(--primary, #ffb020);
+                background: rgba(255,176,32,0.16);
                 border-radius: 2px;
                 pointer-events: none;
                 display: none;
@@ -20910,7 +21062,9 @@
                 font-size: 12px;
             }
         `;
-        document.head.appendChild(style);
+        // Chèn TRƯỚC lớp giao diện Lumen (static/css/lumen-skin.css) để lớp đó thắng khi
+        // cùng độ đặc hiệu; không có #lumenSkin thì insertBefore(null) = appendChild.
+        document.head.insertBefore(style, document.getElementById('lumenSkin'));
     }
 
     function onStepChanged() {

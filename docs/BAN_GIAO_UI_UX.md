@@ -31,7 +31,8 @@ tách riêng, cần bạn duyệt) và §4 (một hạng mục contrast chờ qu
 | `0062967` | Sửa cụm keyframe trong `.fig-field` lệch lên trên + dãn cách quá rộng |
 | `318e2a7` | **Phase D** — `static/js/ui-feedback.js` (toast 4 loại + thanh tiến độ dưới header); chuyển **toàn bộ 49 `alert()`** sang toast; `aria-live` cho `#statusText` + host toast; animation VÀO cho 5 modal + 8 dropdown; dựng lại `showRelinkModal()`/`askSaveBeforeLeave()` theo khuôn `.ui-scrim`+`.ui-modal-panel` (kính mờ, `role=dialog`, nút ×, **ESC**, trả focus); `#settingsModalPanel` `height` cứng → `max-height`; empty state Home có icon + CTA và gom 4/6 empty state; `.breadcrumb-item.active` về `var(--primary)` + `aria-current` |
 | `f43fcf5` | Sửa menu fps / kích thước khung ở thanh preview không mở ra — `.pcb-right { overflow: hidden }` cắt CẢ HAI TRỤC, xén sạch `.pcb-menu` mở lên trên. Đổi sang `overflow-x: clip; overflow-y: visible` |
-| *(đợt này)* | **Phase E** — sửa lỗi hệ tooltip Phase B **nuốt tên khả truy cập** của nút chỉ-icon; `<label for>` 0 → 40; ngữ nghĩa tab đầy đủ cho 4 dải + điều hướng ←/→/Home/End; bẫy focus + trả focus cho 4 modal khai trong HTML; scrollbar 6px → 10px (trục dọc timeline giữ 6px); 4 nút icon cuối nhận `aria-label`; `role=alert` cho xung đột phím tắt; token `--primary-text` cho accent làm màu chữ |
+| *(2026-09-25)* | **Giao diện Lumen** — thiết kế lại theo mẫu Figma: token mới + accent amber, `static/css/lumen-skin.css`, header phẳng + thanh trạng thái đáy, timeline/preview/panel restyle, playhead amber (cơ chế giữ nguyên). Chi tiết: [APP_INTERNALS.md](APP_INTERNALS.md#giao-diện-lumen--thiết-kế-lại-theo-mẫu-figma-2026-09-25) |
+| *(đợt trước)* | **Phase E** — sửa lỗi hệ tooltip Phase B **nuốt tên khả truy cập** của nút chỉ-icon; `<label for>` 0 → 40; ngữ nghĩa tab đầy đủ cho 4 dải + điều hướng ←/→/Home/End; bẫy focus + trả focus cho 4 modal khai trong HTML; scrollbar 6px → 10px (trục dọc timeline giữ 6px); 4 nút icon cuối nhận `aria-label`; `role=alert` cho xung đột phím tắt; token `--primary-text` cho accent làm màu chữ |
 
 ---
 
@@ -94,6 +95,9 @@ Chi tiết: [APP_INTERNALS.md → Phase E](APP_INTERNALS.md#đợt-uiux-pro--pha
 
 ### Còn nợ — CẦN BẠN QUYẾT: chữ trắng trên nền đặc accent / danger
 
+> **Đã hết hiệu lực (2026-09-25):** giao diện Lumen đổi accent sang amber `#ffb020` với chữ tối
+> `--on-primary` (~11:1), và nút "Xuất Video" đã thành `.btn-primary`. Phần dưới giữ làm lịch sử.
+
 Đây là hạng mục contrast duy nhất còn dưới chuẩn AA sau khi đo lại có compositing đúng alpha:
 
 ```text
@@ -137,7 +141,8 @@ Tôi khuyên phương án 2. Chưa làm gì cho tới khi bạn chọn.
    một ngôn ngữ chọn khác với khung trắng của block. Đồng bộ hay không là quyết định của bạn.
 7. **Selector `button` thô** vẫn còn `width:100%; margin-bottom:10px`. Còn 7 nút dựa vào nó
    (4 nút `btnAddEditing*` đang ẩn + 3 nút xoay/flip). Gỡ hẳn cần rà lại toàn bộ nút.
-8. **Mùi specificity**: `.sidebar-left .step-panel button { padding: 8px 10px }` (0-2-1) đang
+8. **(ĐÃ SỬA 2026-09-25 — rule nay là `:where(.sidebar-left .step-panel, .project-source-panel) button`,
+   độ đặc hiệu 0-0-1)** **Mùi specificity**: `.sidebar-left .step-panel button { padding: 8px 10px }` (0-2-1) đang
    **thắng padding riêng của mọi component** trong panel trái — `.edit-subtab`, `.adj-mini-btn`,
    `.edit-transition-card`… đều bị áp `8px 10px` dù tự khai khác. Dọn được nhưng phải đo lại
    từng tab.
@@ -160,8 +165,12 @@ Tôi khuyên phương án 2. Chưa làm gì cho tới khi bạn chọn.
   mọi id input, `data-transform-field`, `data-edit-tab`, tên hàm.
 - **Không thêm gì làm đổi `clientWidth` của `.timeline-track-outer`** (vào trực tiếp toán scroll
   của playhead) — ví dụ `scrollbar-gutter`.
-- Dark-only, Apple + glassmorphism "cân bằng", accent `#0a84ff`, body 13px Inter, icon Lucide
-  trong sprite. Không làm light mode.
+- Dark-only, **ngôn ngữ "Lumen" (mẫu Figma `Edit Video App Interface/`, 2026-09-25)**: panel
+  phẳng gần đen, rất ít glass; **accent amber `#ffb020`, chữ trên nền accent dùng
+  `--on-primary`** (thay `#0a84ff` cũ theo quyết định của người dùng); snap guide teal; body
+  13px Inter, số/timecode Roboto Mono; icon Lucide trong sprite. Không làm light mode.
+- Bề mặt component nằm ở `static/css/lumen-skin.css` — `<link id="lumenSkin">` phải là phần
+  tử CUỐI `<head>`; CSS tiêm lúc chạy phải `insertBefore(…, #lumenSkin)`.
 
 ---
 
