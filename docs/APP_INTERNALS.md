@@ -9468,3 +9468,10 @@ Nay `blockKeyframeTimes` duyệt MỌI danh sách `{t,…}` có thật trong `ke
 đổi kỳ vọng thành [1, 2, 3, 5] (mốc màu cũng là một hình thoi). Đã kiểm trong trình duyệt: lớp
 có keyframe cường độ LUT hiện 2 hình thoi, kéo +30 px @600 px/s dời 0,03 s -> 0,08 s.
 
+**Đợt 5b — quãng GIỮ 100% mất LUT.** Keyframe cường độ 100% @5s -> 0% @10s: bản xuất 0–5s
+KHÔNG có LUT, từ 5s mới hiện rồi giảm. Biểu thức trộn vẫn đúng (giữ mix = 1 trước keyframe
+đầu); lỗi là của FFmpeg (N-123955): `blend` nhận `all_opacity` đúng bằng 1 QUA LỆNH lúc chạy
+(sendcmd) thì ra nhánh DƯỚI — như opacity 0 — trong khi `all_opacity=1` tĩnh và 0.9999 đều
+đúng (đo: lệnh 1 -> 141 = nguồn, lệnh 0.9999 -> 119 = nhánh trên). Sửa: file lệnh gửi
+`min(<mix>,0.99999)` (lệch < 0.003/255). Test: `test:export-color` ca 5.
+

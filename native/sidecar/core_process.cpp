@@ -1839,7 +1839,12 @@ std::string ColorAdjustLutBlend(double start, const std::string& aPath, const st
   {
     std::ofstream cmd{cmdPath};
     if (!cmd) return "";   // không ghi được -> bỏ tầng trộn (thà thiếu LUT động còn hơn hỏng graph)
-    cmd << "0.0-1000000.0 [expr] blend@" << tag << "lm all_opacity '" << mix << "';\n";
+    /* KẸP TRẦN 0.99999 — LỖI CỦA FFMPEG (đã đo trên build N-123955): `all_opacity` gửi qua
+     * LỆNH lúc chạy mà ĐÚNG BẰNG 1 thì blend ra nhánh DƯỚI (như opacity 0), trong khi đặt tĩnh
+     * `all_opacity=1` thì đúng, và 0.9999 cũng đúng. Keyframe cường độ 100% cho mix = 1 tròn,
+     * nên cả quãng GIỮ 100% (vd. trước keyframe đầu 100% ở giây 5) mất trắng LUT trong bản
+     * xuất (người dùng báo 2026-09-25). 0.99999 lệch < 0.003/255 — không thấy được. */
+    cmd << "0.0-1000000.0 [expr] blend@" << tag << "lm all_opacity 'min(" << mix << ",0.99999)';\n";
   }
   std::ostringstream out;
   out << "sendcmd=f='" << FilterPath(cmdPath.string()) << "',";

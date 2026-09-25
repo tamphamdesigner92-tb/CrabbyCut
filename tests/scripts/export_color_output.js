@@ -181,6 +181,50 @@ function main() {
         `video overlay HD thiếu nhãn phải xuất theo BT.709: nhận ${gotOv}, 709=${as709}, 601=${as601}`);
     console.log(`  ok  video overlay HD thiếu nhãn đọc theo BT.709: xuất=${gotOv}`);
 
+    // ---- 5) Cường độ LUT keyframe: quãng GIỮ 100% (trước keyframe đầu) phải CÓ LUT ----
+    // Lỗi FFmpeg: blend nhận all_opacity = 1 TRÒN qua lệnh lúc chạy thì ra nhánh dưới (không
+    // LUT). Keyframe 100% @5s -> 0% @10s trước đây mất trắng LUT ở 0–5s.
+    global.window = global.window || {};
+    // eslint-disable-next-line global-require
+    const TextAnimations = require(path.join(ROOT, 'static', 'js', 'text-animations.js'));
+    const lutN = 9;
+    const lutData = new Float32Array(lutN * lutN * lutN * 3);
+    for (let b = 0; b < lutN; b += 1) for (let g = 0; g < lutN; g += 1) for (let r = 0; r < lutN; r += 1) {
+        const i = ((b * lutN + g) * lutN + r) * 3;
+        lutData[i] = Math.min(1, (r / (lutN - 1)) * 0.4 + 0.6);
+        lutData[i + 1] = (g / (lutN - 1)) * 0.5;
+        lutData[i + 2] = (b / (lutN - 1)) * 0.3;
+    }
+    ColorAdjust.registerUserLut('hold-lut', { size: lutN, data: lutData, domainMin: [0, 0, 0], domainMax: [1, 1, 1] });
+    const lutAdj = ColorAdjust.defaultAdjustments();
+    lutAdj.lut.id = 'hold-lut';
+    lutAdj.lut.intensity = 100;
+    const lutKf = { 'adj.lut.intensity': [{ t: 1, v: 100, e: 'linear' }, { t: 2, v: 0, e: 'linear' }] };
+    const lutMix = ColorAdjust.lutMixKeyframeExpr(lutAdj, lutKf, TextAnimations.keyframeFieldFfmpegExpr);
+    const lutCubes = ColorAdjust.lutBlendCubes(lutAdj, lutN);
+    const lutA = path.join(TEST_DIR, 'hold_a.cube');
+    const lutB = path.join(TEST_DIR, 'hold_b.cube');
+    fs.writeFileSync(lutA, lutCubes.a);
+    fs.writeFileSync(lutB, lutCubes.b);
+    const holdTl = path.join(TEST_DIR, 'hold.json');
+    fs.writeFileSync(holdTl, JSON.stringify({
+        version: 4, sequence: { width: 320, height: 180, fps: '30' },
+        intervals: [{ start: 0, end: 3, adj_layer_lut_a_path: lutA, adj_layer_lut_b_path: lutB, adj_layer_lut_mix_expr: lutMix }],
+        editingTracks: [], editingItems: [], assets: [], main_audio_volume: 100, overlays: [],
+        settings: { resolution: 'sequence', width: 320, height: 180, fps: 'source', codec: 'h264',
+            quality: 'high', audio_bitrate: '128k', render_fps: '30' },
+    }));
+    const holdOut = path.join(TEST_DIR, 'hold.mp4');
+    run(SIDECAR, ['export-video', source, holdOut, holdTl, TEST_DIR, 'sequence', 'source'], { timeout: 600000 });
+    const whole = '320:180:0:0';
+    const srcGrey = sample(source, 0.5, whole);
+    const held = sample(holdOut, 0.5, whole);     // trước keyframe đầu: GIỮ 100%
+    const faded = sample(holdOut, 2.6, whole);    // sau keyframe cuối: 0%
+    assert.ok(dist(held, srcGrey) > 30,
+        `quãng giữ 100% trước keyframe đầu phải CÓ LUT: nguồn=${srcGrey} xuất=${held}`);
+    assert.ok(dist(faded, srcGrey) <= 4, `sau keyframe 0% phải về lại nguồn: nguồn=${srcGrey} xuất=${faded}`);
+    console.log(`  ok  cường độ LUT giữ 100% trước keyframe đầu: nguồn=${srcGrey} giữ=${held} cuối=${faded}`);
+
     fs.rmSync(TEST_DIR, { recursive: true, force: true });
     console.log('export_color_output: PASS');
 }
