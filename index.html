@@ -611,7 +611,9 @@
         }
         
         /* Update existing panels for flex layout */
-        .sidebar-left { width: 288px; min-width: 250px; max-width: 600px; flex: 0 0 288px; flex-shrink: 0; }
+        /* Mặc định rộng theo cửa sổ (~27.5% màn hình, tối thiểu 288px) để lúc mở app panel trái
+           đủ rộng cho lưới thẻ media; kéo resizer vẫn ghi đè bằng style inline. */
+        .sidebar-left { width: clamp(288px, 27.5vw, 600px); min-width: 250px; max-width: 600px; flex: 0 0 clamp(288px, 27.5vw, 600px); flex-shrink: 0; }
         .sidebar-script { width: 304px; min-width: 260px; max-width: 560px; flex: 0 0 304px; flex-shrink: 0; }
         /* .sidebar-right: kích thước khai duy nhất ở khối "Cột phải: Transcript" bên dưới
            (trước đây khai 340px ở đây rồi bị 380px ghi đè -> rule chết). */
@@ -647,7 +649,7 @@
         
         /* Cột trái: Tools & Settings */
         .sidebar-left {
-            width: 288px;
+            width: clamp(288px, 27.5vw, 600px);
             background: var(--panel-bg);
             border-right: 1px solid var(--border-color);
             display: flex;
@@ -1062,10 +1064,11 @@
         }
         /* Cột Thuộc tính riêng bên phải (kiểu CapCut) */
         .sidebar-inspector {
-            width: 356px;
+            /* ~23% cửa sổ, tối thiểu 356px như trước */
+            width: clamp(356px, 23vw, 560px);
             min-width: 296px;
             max-width: 560px;
-            flex: 0 0 356px;
+            flex: 0 0 clamp(356px, 23vw, 560px);
             flex-shrink: 0;
             display: none;
             flex-direction: column;

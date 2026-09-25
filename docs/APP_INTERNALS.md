@@ -9510,8 +9510,8 @@ TRÊN CÙNG thắng" -> hai lớp cùng có LUT thì chỉ LUT lớp trên có m
   file lệnh mang hai `.cube` khác nhau và `adj_layer_count=2`.
 
 **Phần của `aa127e6` KHÔNG port** (lần đồng bộ sau đừng tưởng là sót):
-- Độ rộng panel theo cửa sổ (`.sidebar-left` / `.sidebar-inspector` dùng `clamp(…vw…)`) — thay
-  đổi giao diện không nằm trong yêu cầu.
+- ~~Độ rộng panel theo cửa sổ~~ — ĐÃ PORT sau, theo yêu cầu riêng (xem mục "Panel trái / Thuộc
+  tính rộng theo cửa sổ" ở cuối đợt này).
 - `mainClipPlacement` nhân `mainClipFitScale` (miếng vá Retouch phóng to) — **ĐÃ ĐO, nhánh này
   KHÔNG có lỗi đó, và hunk đó sẽ GÂY lỗi ngược lại** (xem mục ngay dưới). Chỉ port Ý của test
   `main_lane_fit_geometry` mục 6, viết lại theo cấu trúc Windows.
@@ -9547,4 +9547,23 @@ Ngoài hộp |B − A| TB 0.16 ở cả hai lượt. Kết luận: KHÔNG port h
 index.html, đòi cỡ trên canvas = khung × fit × scale (864x1536 cho ca trên, scale 80%) và
 `place.sx` KHÔNG mang fit. Đã thử đột biến: bê hunk macOS -> test đỏ "được 540x960"; bỏ fit khỏi
 `mainLaneFrameDrawSize` (đúng lỗi macOS) -> đỏ "được 1382.4x2457.6".
+
+### Panel trái / Thuộc tính rộng theo cửa sổ (2026-09-26)
+
+Port 3 hunk CSS của `aa127e6`: `.sidebar-left` mặc định `clamp(288px, 27.5vw, 600px)`,
+`.sidebar-inspector` mặc định `clamp(356px, 23vw, 560px)` (cả `width` lẫn `flex-basis`). Resizer
+vẫn ghi đè bằng style inline và KHÔNG lưu lại, nên mỗi lần mở app đều về giá trị mặc định này.
+`lumen-skin.css` không đặt độ rộng panel (giống hệt bản macOS).
+
+Đo trong trình duyệt (viewport giả lập, dự án có clip + panel Thuộc tính đang mở):
+
+| cửa sổ | panel trái | panel Thuộc tính | ghi chú |
+|---|---|---|---|
+| 1200 (minWidth Electron) | 330 (trước 288) | 356 (như trước) | vùng giữa 435 (trước 477) |
+| 1600x960 (cỡ mở mặc định) | 440 (trước 288) | 368 (trước 356) | |
+| 1920 (phóng to) | 528 | 442 | |
+
+Kéo resizer trái ở 1920: 528 -> 384px, inline ghi đè đúng. **Còn tồn tại ở 1200:** mã thời gian
+của thanh điều khiển preview vốn đã chạm nút Play với panel 288px ("… / 00:00:06:"); panel 330px
+che thêm ("… / 00:00:"). Không có phần tử nào báo tràn (`scrollWidth`) — nút Play nằm đè lên chữ.
 
