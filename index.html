@@ -6559,8 +6559,10 @@
 	                // đường mà hiệu ứng không gian đang dùng. Cố ý không dùng mảng
 	                // sprite.filters = [a, b]: sẽ thành HAI bản cài đặt của cùng một chuỗi
 	                // (canvas cho ca này, PIXI cho ca kia) và sớm muộn lệch nhau.
-	                const layerAdj = window.EditingRuntime?.activeAdjustmentLayerAdjustments?.(
-	                    window.EditingRuntime?.currentSequenceTime?.() ?? Number(this.videoEl.currentTime)) || null;
+	                // Nhiều lớp chồng nhau -> áp LẦN LƯỢT, dưới trước trên sau (xem
+	                // activeAdjustmentLayerAdjustmentsList ở editing-runtime.js).
+	                const layerAdjs = window.EditingRuntime?.activeAdjustmentLayerAdjustmentsList?.(
+	                    window.EditingRuntime?.currentSequenceTime?.() ?? Number(this.videoEl.currentTime)) || [];
 	                // RETOUCH — chạy TRƯỚC chuỗi chỉnh màu: nó sửa DA (kết cấu, khuyết
 	                // điểm), còn grade/LUT là lớp thẩm mỹ áp LÊN kết quả đó. Đây cũng là
 	                // thứ tự mà khâu bake khi xuất sẽ phải theo.
@@ -6573,7 +6575,7 @@
 	                const useSpatialPath = !!window.ColorAdjust
 	                    && !!window.EditingRuntime?.colorAdjustedDrawable
 	                    && this.videoEl.videoWidth > 0
-	                    && (rtOn || !!layerAdj
+	                    && (rtOn || layerAdjs.length > 0
 	                        || (!!clipAdj && !ColorAdjust.isIdentity(clipAdj) && ColorAdjust.needsMultiPass(clipAdj)));
 	                if (useSpatialPath) {
 	                    let base = this.videoEl;
@@ -6592,10 +6594,8 @@
 	                    // videoEl là dùng nó làm texture, nên ca này tự chạy đúng.
 	                    // Lượt 2: màu của lớp Điều chỉnh, ĐÚNG THỨ TỰ của export (chuỗi
 	                    // block trước, chuỗi lớp nối sau).
-	                    if (layerAdj) {
-	                        fx = window.EditingRuntime.colorAdjustedDrawable(
-	                            fx, textureW, textureH, layerAdj, 'mainpreview~adjlayer');
-	                    }
+	                    fx = window.EditingRuntime.applyAdjustmentLayers(
+	                        fx, textureW, textureH, layerAdjs, 'mainpreview');
 	                    if (fx && fx !== this.videoEl) {
 	                        /* PHẢI so cả KÍCH THƯỚC, không chỉ so danh tính đối tượng.
 	                         *

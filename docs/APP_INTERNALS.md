@@ -9475,3 +9475,76 @@ KHÔNG có LUT, từ 5s mới hiện rồi giảm. Biểu thức trộn vẫn đ
 đúng (đo: lệnh 1 -> 141 = nguồn, lệnh 0.9999 -> 119 = nhánh trên). Sửa: file lệnh gửi
 `min(<mix>,0.99999)` (lệch < 0.003/255). Test: `test:export-color` ca 5.
 
+## Lớp Điều chỉnh xếp chồng, lane riêng cho lớp mới, lane chính thấp hơn (2026-09-26, đợt 6)
+
+Port từ `CrabbyCut_Private` nhánh `CrabbyCut_v2.0.4`: commit `0a0cf02` (trọn) và một phần `aa127e6`.
+
+**1. Lane chính 78 -> 62px** (`LANE_HEIGHTS.main`). Hàng tên lane vẫn hiện (ngưỡng `>= 40`).
+
+**2. Lớp Điều chỉnh mới vào lane RIÊNG, kiểu CapCut.** `addAdjustmentLayer` bỏ luật "lấy cứng
+lane Điều chỉnh đầu tiên" (lớp thứ hai nằm ĐÈ lên lớp thứ nhất cùng lane), đi chung
+`trackForNewItemAtRange('adjust', 0, total)` với mọi block khác: còn lane trống cả khoảng thì
+dùng, hết chỗ thì tạo lane mới NẰM TRÊN lane đang bị chiếm. `createTrack` đặt tên theo số NHỎ
+NHẤT chưa dùng (hết trùng "Điều chỉnh 2" khi dự án từng xoá lane). Dòng "Đang có N lớp Điều
+chỉnh" ở panel trái nay cập nhật theo `renderAll` (`refreshAdjustLayerCount`).
+
+**3. Nhiều lớp chồng nhau -> XẾP CHỒNG, dưới áp trước.** Luật cũ "MỘT lớp tại một thời điểm, lớp
+TRÊN CÙNG thắng" -> hai lớp cùng có LUT thì chỉ LUT lớp trên có mặt, ở CẢ preview lẫn bản xuất.
+- frontend: `activeAdjustmentLayers` / `activeAdjustmentLayerAdjustmentsList` (dưới -> trên) +
+  `applyAdjustmentLayers` (mỗi lớp một khoá renderer `<key>~adjlayer<k>` — dùng chung khoá là lớp
+  sau đọc-ghi đè lên canvas đang làm nguồn của nó) ở mọi đường vẽ: Pixi lane chính (index.html),
+  `drawMainClipLayer`, overlay, bake ảnh động, bake chuyển cảnh. `adjustLayerExportSpec` trả MẢNG
+  spec, mỗi lớp một cửa sổ `enable` và nhãn `_al<k>` riêng. `LAYER_FX_MAX` 6 -> 8.
+- backend: `normalizeAdjustLayerFields` nhận mảng (hoặc object cũ): lớp 0 = `adj_layer_*`, lớp k
+  = `adj_layer<k>_*`, kèm `adj_layer_count`. Tên phẳng vì bộ đọc JSON của sidecar tìm field theo
+  TÊN trong cả object.
+- sidecar: `ExtraAdjustLayer` + `ReadExtraAdjustLayers` + `AppendExtraAdjustLayers` (tag
+  `adjl<idx>_k<k>_`), tính cả vào `IntervalIsTimeVarying` / `OverlayIsTimeVarying`. Phải
+  `npm run build:sidecar` lại.
+- `logStatus` CHƯA TỪNG được định nghĩa trong server.js dù được gọi 7 chỗ (cả trong
+  `normalizeAdjustLayerFields`) -> mọi nhánh "bỏ riêng phần hỏng, xuất tiếp" ném ReferenceError.
+  Đã định nghĩa (chỉ log, không đè dòng trạng thái).
+- Test `export_color_output` ca 6: LUT keyframe (lớp dưới) + phơi sáng (lớp trên) cùng có mặt.
+- Đã kiểm trong trình duyệt: "Ửng hồng" (lane dưới) + "Bạc hà" (lane trên) trên nguồn xám 128 ->
+  preview 169,175,179 (chỉ lớp trên: 137,160,153); bản xuất qua `/api/export-video` 167,173,179,
+  file lệnh mang hai `.cube` khác nhau và `adj_layer_count=2`.
+
+**Phần của `aa127e6` KHÔNG port** (lần đồng bộ sau đừng tưởng là sót):
+- Độ rộng panel theo cửa sổ (`.sidebar-left` / `.sidebar-inspector` dùng `clamp(…vw…)`) — thay
+  đổi giao diện không nằm trong yêu cầu.
+- `mainClipPlacement` nhân `mainClipFitScale` (miếng vá Retouch phóng to) — **ĐÃ ĐO, nhánh này
+  KHÔNG có lỗi đó, và hunk đó sẽ GÂY lỗi ngược lại** (xem mục ngay dưới). Chỉ port Ý của test
+  `main_lane_fit_geometry` mục 6, viết lại theo cấu trúc Windows.
+- `staleBackendModules` + chặn `/api/export-video` khi backend chạy mã cũ — công cụ cho lúc phát
+  triển, chưa kiểm hành vi trong bản đóng gói (đường dẫn module nằm trong app.asar).
+
+### Miếng vá Retouch "phóng to" của nhánh macOS: đo trên nhánh Windows (2026-09-26)
+
+**Vì sao hai nhánh khác nhau.** Nhánh macOS vẽ lane chính trên canvas theo cỡ TEXTURE (quy về
+`source_*`), nên thiếu hệ số vừa khung -> nguồn 1728x3072 trên sequence 1080x1920 vẽ to 1.6 lần;
+họ sửa bằng cách nhân `mainClipFitScale` vào `mainClipPlacement`. Nhánh Windows đã sửa CÙNG vấn
+đề từ 2026-09-09 (`16e575d`, v1.1.5-Win) theo đường khác: cỡ vẽ = `mainLaneFrameDrawSize` =
+khung nối × hệ số vừa khung, dùng chung cho `drawMainClipLayer` lẫn hộp cắt của
+`bakeRetouchSequence`. Hệ số đã nằm trong cỡ vẽ, nhân thêm ở phép đặt là nhân HAI lần.
+
+**Cách đo.** Nguồn tổng hợp 1728x3072 mỗi điểm ảnh mang toạ độ của nó (R = 255·x/W,
+G = 255·y/H), sequence 1080x1920, dự án dựng trong trình duyệt với server + thư mục tạm riêng.
+Landmark: chặn `fetch('/api/retouch/track')` trả `tests/fixtures/face_landmarks.json` cho mọi
+khung (không cần video có mặt người). Xuất A = tắt Retouch (toàn khung do sidecar), xuất B = bật
+"Mịn da" 100 (trên gradient gần như không đổi màu). Đo trong hộp vá: độ dốc dR/dx, dG/dy của B so
+với A (miếng vá phóng k lần thì độ dốc chia k) và |B − A|.
+
+| | hộp vá | hệ số phóng ước tính | \|B − A\| trong hộp |
+|---|---|---|---|
+| mã Windows hiện tại | 376x456 @ (220, 552) | x0.997 / y1.004 | TB 0.88, max 8 |
+| tạm áp hunk của `aa127e6` | 238x288 @ (339, 704) | x0.71 / y0.62 | TB 37.6, max 117 |
+
+(x0.71 chứ không đúng 0.625 vì dải mép mềm pha nền vào miếng vá, kéo độ dốc về phía 1.)
+Ngoài hộp |B − A| TB 0.16 ở cả hai lượt. Kết luận: KHÔNG port hunk đó.
+
+**Test khoá lại:** `main_lane_fit_geometry` mục 6 chạy chính `mainLaneFrameDrawSize` +
+`mainClipPlacement` + `layerPlacement` (editing-runtime.js) với các hàm hình học thật của
+index.html, đòi cỡ trên canvas = khung × fit × scale (864x1536 cho ca trên, scale 80%) và
+`place.sx` KHÔNG mang fit. Đã thử đột biến: bê hunk macOS -> test đỏ "được 540x960"; bỏ fit khỏi
+`mainLaneFrameDrawSize` (đúng lỗi macOS) -> đỏ "được 1382.4x2457.6".
+

@@ -252,4 +252,73 @@ function mixedProject() {
     console.log('  ok  hợp đồng backend <-> sidecar còn nguyên');
 }
 
+/* ---- 6. ĐƯỜNG VẼ CANVAS 2D (bake Retouch, bake chuyển cảnh lane chính) ----
+ * Mọi khung dựng bằng canvas của lane chính đi qua drawMainClipLayer: cỡ vẽ lấy từ
+ * mainLaneFrameDrawSize (khung nối × hệ số vừa khung), phép đặt lấy từ mainClipPlacement
+ * (scale %, vị trí, xoay). Hệ số vừa khung phải được nhân ĐÚNG MỘT LẦN:
+ *   - thiếu -> nguồn 1728x3072 trên sequence 1080x1920 vẽ to 1.6 lần: miếng vá Retouch hiện
+ *     thành ô mặt PHÓNG TO (lỗi người dùng báo ở nhánh macOS 2026-09-25, nhánh đó vẽ theo cỡ
+ *     texture nên sửa bằng cách nhân fit trong mainClipPlacement — commit aa127e6);
+ *   - thừa -> ô mặt THU NHỎ còn 0.625 lần. Đo thật 2026-09-26 trên nhánh này (nguồn gradient
+ *     toạ độ 1728x3072, sequence 1080x1920): mã hiện tại cho miếng vá hệ số x0.997/y1.004,
+ *     |vá − nền| TB 0.88/255; tạm áp nguyên hunk của aa127e6 thì hệ số x0.71/y0.62,
+ *     |vá − nền| TB 37.6, max 117.
+ * Chạy CHÍNH các hàm của editing-runtime.js + index.html với ca đó, đòi cỡ trên canvas trùng
+ * công thức của sidecar (khung × fit × scale). */
+{
+    const runtimeSource = fs.readFileSync(path.join(projectRoot, 'static', 'js', 'editing-runtime.js'), 'utf8');
+    const makeCanvasPath = (geo) => new Function('mainConcatFrameSize', 'mainClipFitScale', `
+        const window = {};
+        const normalizeTransform = (t) => ({ position_x: 0, position_y: 0, scale: 100, rotation: 0, opacity: 100, ...(t || {}) });
+        ${extractFunction(runtimeSource, 'mainLaneFrameDrawSize')}
+        ${extractFunction(runtimeSource, 'layerPlacement')}
+        ${extractFunction(runtimeSource, 'mainClipPlacement')}
+        return { mainLaneFrameDrawSize, mainClipPlacement };
+    `)(geo.mainConcatFrameSize, geo.mainClipFitScale);
+
+    const onCanvas = ({ frame, sequence }) => {
+        const segments = [{
+            source_path: 'a.mp4', start: 0, end: 10, duration: 10,
+            source_width: frame.width, source_height: frame.height,
+            content: MainLane.contentRectIn(frame, frame.width, frame.height),
+        }];
+        const geo = makeGeometry({ frame, segments, sequence });
+        const rt = makeCanvasPath(geo);
+        const clip = { start: 2, end: 6, transform: { scale: 80 } };
+        const draw = rt.mainLaneFrameDrawSize(clip);
+        const place = rt.mainClipPlacement({ clip, duration: 4 }, 0,
+            sequence.width, sequence.height, geo.mainClipBaseSize(clip).height);
+        return {
+            fit: geo.mainClipFitScale(clip),
+            sx: place.sx,
+            width: draw.width * place.sx,
+            height: draw.height * place.sy,
+        };
+    };
+
+    const tall = onCanvas({
+        frame: { width: 1728, height: 3072 },
+        sequence: { width: 1080, height: 1920, source_width: 1728, source_height: 3072 },
+    });
+    assert.strictEqual(tall.fit, 0.625);
+    assert.ok(Math.abs(tall.width - 1728 * 0.625 * 0.8) < 1e-9 && Math.abs(tall.height - 3072 * 0.625 * 0.8) < 1e-9,
+        `cỡ vẽ canvas phải là khung × fit × scale = 864x1536 (được ${tall.width}x${tall.height})`);
+    assert.strictEqual(tall.sx, 0.8,
+        'mainClipPlacement KHÔNG được nhân fit ở nhánh này — mainLaneFrameDrawSize đã nhân rồi. '
+        + 'Hunk tương ứng của nhánh macOS (aa127e6) bê sang là nhân HAI lần: miếng vá Retouch thu còn 0.625 lần');
+
+    const same = onCanvas({
+        frame: { width: 1080, height: 1920 },
+        sequence: { width: 1080, height: 1920, source_width: 1080, source_height: 1920 },
+    });
+    assert.deepStrictEqual([same.fit, same.width, same.height], [1, 864, 1536], 'cùng khổ (fit = 1) -> y như trước');
+
+    // Hộp cắt miếng vá và hình vẽ phải dùng CÙNG cỡ lớp, không thì miếng vá cắt lệch chỗ.
+    assert.ok(/mainLaneFrameDrawSize\(clip\)/.test(extractFunction(runtimeSource, 'drawMainClipLayer')),
+        'drawMainClipLayer phải lấy cỡ vẽ từ mainLaneFrameDrawSize');
+    assert.ok(/mainLaneFrameDrawSize\(clip\)/.test(extractFunction(runtimeSource, 'bakeRetouchSequence')),
+        'hộp vá Retouch phải tính trên cùng cỡ lớp mainLaneFrameDrawSize');
+    console.log('  ok  đường vẽ canvas (Retouch, chuyển cảnh) nhân hệ số vừa khung đúng một lần');
+}
+
 console.log('main lane fit geometry ok');

@@ -225,6 +225,38 @@ function main() {
     assert.ok(dist(faded, srcGrey) <= 4, `sau keyframe 0% phải về lại nguồn: nguồn=${srcGrey} xuất=${faded}`);
     console.log(`  ok  cường độ LUT giữ 100% trước keyframe đầu: nguồn=${srcGrey} giữ=${held} cuối=${faded}`);
 
+    // ---- 6) HAI LỚP ĐIỀU CHỈNH XẾP CHỒNG: lớp DƯỚI (LUT có keyframe) KHÔNG được mất ----
+    // Dự án thật "Yêu Con 1 – ver 7": lớp "Ửng hồng" (LUT, cường độ keyframe 100 -> 0) nằm DƯỚI
+    // lớp "Bạc hà" (LUT tĩnh). Luật cũ "một lớp, lớp trên thắng" bỏ trắng lớp dưới. Nay lớp 0 =
+    // lớp dưới (field adj_layer_*), lớp 1 = lớp trên (adj_layer1_*), áp đúng thứ tự đó.
+    const upperAdj = ColorAdjust.normalize(null);
+    upperAdj.basic.exposure = 25;
+    const upperFilters = ColorAdjust.ffmpegFilters(upperAdj, '', 180, {}).join(',');
+    const stackTl = path.join(TEST_DIR, 'stack.json');
+    fs.writeFileSync(stackTl, JSON.stringify({
+        version: 4, sequence: { width: 320, height: 180, fps: '30' },
+        intervals: [{ start: 0, end: 3,
+            adj_layer_lut_a_path: lutA, adj_layer_lut_b_path: lutB, adj_layer_lut_mix_expr: lutMix,
+            adj_layer1_filters: upperFilters, adj_layer_count: 2 }],
+        editingTracks: [], editingItems: [], assets: [], main_audio_volume: 100, overlays: [],
+        settings: { resolution: 'sequence', width: 320, height: 180, fps: 'source', codec: 'h264',
+            quality: 'high', audio_bitrate: '128k', render_fps: '30' },
+    }));
+    const stackOut = path.join(TEST_DIR, 'stack.mp4');
+    run(SIDECAR, ['export-video', source, stackOut, stackTl, TEST_DIR, 'sequence', 'source'], { timeout: 600000 });
+    const stackHeld = sample(stackOut, 0.5, whole);    // LUT 100% (lớp dưới) + phơi sáng (lớp trên)
+    const stackFaded = sample(stackOut, 2.6, whole);   // LUT 0% -> chỉ còn lớp trên
+    // Lớp trên phải có mặt ở cả hai quãng (sáng hơn chính quãng đó khi không có nó).
+    assert.ok(stackFaded[1] > srcGrey[1] + 20,
+        `lớp TRÊN (phơi sáng) phải có mặt: nguồn=${srcGrey} xuất=${stackFaded}`);
+    // Lớp dưới phải có mặt ở quãng giữ 100%: hình học màu của LUT (R cao, B thấp) còn nguyên,
+    // tức KHÁC hẳn "chỉ lớp trên" ở quãng cuối.
+    assert.ok(stackHeld[0] - stackHeld[2] > 60,
+        `lớp DƯỚI (LUT keyframe) phải có mặt khi xếp chồng: giữ=${stackHeld} (chỉ lớp trên=${stackFaded})`);
+    assert.ok(dist(stackHeld, stackFaded) > 30,
+        `quãng LUT 100% phải khác quãng LUT 0%: giữ=${stackHeld} cuối=${stackFaded}`);
+    console.log(`  ok  hai lớp xếp chồng: LUT keyframe (dưới) + phơi sáng (trên) giữ=${stackHeld} cuối=${stackFaded}`);
+
     fs.rmSync(TEST_DIR, { recursive: true, force: true });
     console.log('export_color_output: PASS');
 }

@@ -357,6 +357,14 @@ function setStatus(message) {
   console.log(message);
 }
 
+/* Ghi log KHÔNG đè dòng trạng thái đang hiện cho người dùng (setStatus thì đè). Trước đây
+ * hàm này được gọi ở 7 chỗ nhưng CHƯA TỪNG được định nghĩa -> mọi nhánh "bỏ riêng phần hỏng,
+ * xuất tiếp" (mất file LUT, mất file lệnh keyframe, lớp Điều chỉnh có mặt nạ...) ném
+ * ReferenceError và làm hỏng cả lượt xuất thay vì xuất tiếp như chú thích ở đó hứa. */
+function logStatus(message) {
+  console.log(message);
+}
+
 /* AUTO SUBTITLE: tiêm phụ thuộc thay vì để module job require ngược server.js (require
  * vòng tròn). `transcribe` là điểm nối DUY NHẤT tới ASR, nên job không phải biết gì về
  * engine / cache / nền tảng. `trackChild`/`untrackChild` nối vào chính sổ tiến trình con
@@ -4560,24 +4568,39 @@ function materializeColorLutCube(text) {
  * Bản trước chỉ giữ `adj_filters` nên KEYFRAME của lớp mất im lặng: biểu thức `eq` (phơi
  * sáng/tương phản/bão hoà) và nhánh trộn cường độ LUT (2 cube + blend) đều bị vứt — lớp chỉ
  * có LUT với cường độ keyframe thì bản xuất không còn gì của lớp. */
+/* NHIỀU LỚP XẾP CHỒNG (2026-09-25): `raw` là MẢNG spec, xếp DƯỚI -> TRÊN (thứ tự áp). Lớp
+ * thứ 0 giữ đúng tên field cũ `adj_layer_*`; lớp thứ k >= 1 đổi thành `adj_layer<k>_*`, kèm
+ * `adj_layer_count` để sidecar biết lặp tới đâu. Nhận cả một object (payload trước khi có
+ * xếp chồng) — coi như mảng một phần tử.
+ * Tên field phẳng thay vì mảng lồng nhau: bộ đọc JSON của sidecar tìm field theo TÊN trong cả
+ * chuỗi object, nên một mảng con chứa `adj_filters` sẽ đụng field cùng tên của chính block. */
+const ADJUST_LAYER_MAX = 8;
 function normalizeAdjustLayerFields(raw) {
-  const base = normalizeColorAdjustFields(raw);
-  // Mặt nạ của LỚP chưa hỗ trợ: chuỗi lớp nối ra NGOÀI nhánh mặt nạ của block. Bỏ có Ý THỨC.
-  if (base.adj_mask_path) logStatus('[color-adjust] lớp Điều chỉnh: bỏ qua mặt nạ của lớp (chưa hỗ trợ).');
-  const rename = {
-    adj_filters: 'adj_layer_filters',
-    adj_filters_post: 'adj_layer_filters_post',
-    adj_eq_contrast_expr: 'adj_layer_eq_contrast_expr',
-    adj_eq_brightness_expr: 'adj_layer_eq_brightness_expr',
-    adj_eq_saturation_expr: 'adj_layer_eq_saturation_expr',
-    adj_lut_a_path: 'adj_layer_lut_a_path',
-    adj_lut_b_path: 'adj_layer_lut_b_path',
-    adj_lut_mix_expr: 'adj_layer_lut_mix_expr',
-  };
+  const list = (Array.isArray(raw) ? raw : (raw ? [raw] : [])).slice(0, ADJUST_LAYER_MAX);
   const out = {};
-  for (const [from, to] of Object.entries(rename)) {
-    if (base[from]) out[to] = base[from];
+  let count = 0;
+  for (const spec of list) {
+    const base = normalizeColorAdjustFields(spec);
+    // Mặt nạ của LỚP chưa hỗ trợ: chuỗi lớp nối ra NGOÀI nhánh mặt nạ của block. Bỏ có Ý THỨC.
+    if (base.adj_mask_path) logStatus('[color-adjust] lớp Điều chỉnh: bỏ qua mặt nạ của lớp (chưa hỗ trợ).');
+    const prefix = count === 0 ? 'adj_layer_' : `adj_layer${count}_`;
+    const rename = {
+      adj_filters: 'filters',
+      adj_filters_post: 'filters_post',
+      adj_eq_contrast_expr: 'eq_contrast_expr',
+      adj_eq_brightness_expr: 'eq_brightness_expr',
+      adj_eq_saturation_expr: 'eq_saturation_expr',
+      adj_lut_a_path: 'lut_a_path',
+      adj_lut_b_path: 'lut_b_path',
+      adj_lut_mix_expr: 'lut_mix_expr',
+    };
+    let any = false;
+    for (const [from, to] of Object.entries(rename)) {
+      if (base[from]) { out[prefix + to] = base[from]; any = true; }
+    }
+    if (any) count += 1;   // lớp rỗng (spec hỏng) không chiếm chỗ -> không để lỗ trong dãy chỉ số
   }
+  if (count > 1) out.adj_layer_count = count;
   return out;
 }
 
