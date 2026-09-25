@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -752,6 +753,17 @@ struct ExportInterval {
   // block và NGOÀI nhánh mặt nạ của nó (mặt nạ là của block, không phải của lớp).
   // Cổng thời gian `enable=` đã do frontend gắn sẵn vào từng filter.
   std::string adjustLayerFilters;
+  // Keyframe của LỚP (cùng ý nghĩa với các field adjEq*/adjustLut*/adjustFiltersPost của
+  // chuỗi block, nhưng cho chuỗi THỨ HAI). Xem LayerColorChain.
+  std::string adjLayerEqContrastExpr;
+  std::string adjLayerEqBrightnessExpr;
+  std::string adjLayerEqSaturationExpr;
+  std::string adjustLayerFiltersPost;
+  std::string adjustLayerLutAPath;
+  std::string adjustLayerLutBPath;
+  std::string adjustLayerLutMixExpr;
+  // Video overlay KHÔNG gắn nhãn ma trận màu (xem MediaColorUntagged). Chỉ overlay dùng.
+  bool colorUntagged = false;
   std::string adjustLutAPath;
   std::string adjustLutBPath;
   std::string adjustLutMixExpr;
@@ -836,6 +848,17 @@ struct ExportOverlay {
   // block và NGOÀI nhánh mặt nạ của nó (mặt nạ là của block, không phải của lớp).
   // Cổng thời gian `enable=` đã do frontend gắn sẵn vào từng filter.
   std::string adjustLayerFilters;
+  // Keyframe của LỚP (cùng ý nghĩa với các field adjEq*/adjustLut*/adjustFiltersPost của
+  // chuỗi block, nhưng cho chuỗi THỨ HAI). Xem LayerColorChain.
+  std::string adjLayerEqContrastExpr;
+  std::string adjLayerEqBrightnessExpr;
+  std::string adjLayerEqSaturationExpr;
+  std::string adjustLayerFiltersPost;
+  std::string adjustLayerLutAPath;
+  std::string adjustLayerLutBPath;
+  std::string adjustLayerLutMixExpr;
+  // Video overlay KHÔNG gắn nhãn ma trận màu (xem MediaColorUntagged). Chỉ overlay dùng.
+  bool colorUntagged = false;
   std::string adjustLutAPath;
   std::string adjustLutBPath;
   std::string adjustLutMixExpr;
@@ -878,6 +901,9 @@ struct ExportSettings {
   double videoStart = 0.0;
   double audioStart = 0.0;
   double sourceFps = 0.0;
+  // Nguồn chính KHÔNG gắn nhãn ma trận màu -> chuỗi clip gắn bt709 trước khi đổi sang RGB.
+  // Xem MediaColorUntagged.
+  bool sourceColorUntagged = false;
 };
 
 struct EncoderPlan {
@@ -1228,6 +1254,55 @@ double MediaStreamStartTime(const std::string& input, const std::string& streamS
   }
 }
 
+/* NGUỒN VIDEO HD KHÔNG GẮN NHÃN MA TRẬN MÀU -> phải đọc theo BT.709 cho khớp preview.
+ *
+ * Nguồn thiếu `color_space` (màn hình quay lại, file qua trình nén/tải xuống, vài app điện
+ * thoại) thì mỗi bên TỰ ĐOÁN ma trận YUV -> RGB, và hai bên đoán khác nhau:
+ *   - FFmpeg (bản xuất): LUÔN BT.601 (swscale SWS_CS_DEFAULT).
+ *   - Chromium (preview): theo CHIỀU CAO — ĐÃ ĐO trong chính app (2026-09-25), cùng một khung
+ *     YUV đỏ cam: cao >= 720 -> 221,84,38 (BT.709), cao < 720 -> 208,72,41 (BT.601).
+ *     960x720 / 700x1000 / 720x1280 / 1080x1920 ra 709; 960x718 / 1280x540 / 1024x576 /
+ *     640x480 ra 601 — tức là xét CHIỀU CAO, không xét bề rộng.
+ * => chỉ nguồn HD (cao >= 720) là lệch: bản xuất ra màu 601 trong khi người dùng xem 709.
+ * Chuỗi của nguồn đó được `setparams` gắn bt709 ở ĐẦU (UntaggedColorFix). Nguồn SD giữ mặc
+ * định 601 của FFmpeg vì nó đã khớp Chromium. Nguồn ĐÃ có nhãn giữ nguyên. yuvj* (JPEG, full
+ * range) và RGB/xám không có câu hỏi ma trận kiểu này -> bỏ qua. */
+bool MediaColorUntagged(const std::string& input) {
+  static std::map<std::string, bool> cache;
+  const auto hit = cache.find(input);
+  if (hit != cache.end()) return hit->second;
+  // key=value thay vì csv: csv in theo thứ tự NỘI BỘ của ffprobe, không theo -show_entries.
+  const std::string text = CommandOutput({
+    "ffprobe", "-v", "error",
+    "-select_streams", "v:0",
+    "-show_entries", "stream=pix_fmt,color_space,height",
+    "-of", "default=nw=1",
+    input,
+  });
+  std::string pixFmt, space;
+  long height = 0;
+  std::istringstream lines(text);
+  std::string line;
+  while (std::getline(lines, line)) {
+    while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back()))) line.pop_back();
+    const size_t eq = line.find('=');
+    if (eq == std::string::npos) continue;
+    const std::string key = line.substr(0, eq);
+    const std::string value = line.substr(eq + 1);
+    if (key == "pix_fmt") pixFmt = value;
+    else if (key == "color_space") space = value;
+    else if (key == "height") { try { height = std::stol(value); } catch (...) { height = 0; } }
+  }
+  const bool yuv = pixFmt.rfind("yuv", 0) == 0 && pixFmt.rfind("yuvj", 0) != 0;
+  const bool untagged = yuv && (space.empty() || space == "unknown") && height >= 720;
+  cache[input] = untagged;
+  return untagged;
+}
+
+std::string UntaggedColorFix(bool untagged) {
+  return untagged ? "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709," : "";
+}
+
 // Nhịp khung của CHÍNH file nguồn (avg_frame_rate). 0.0 nếu không đọc được.
 double MediaStreamFps(const std::string& input) {
   const std::string text = CommandOutput({
@@ -1394,6 +1469,13 @@ bool ReadExportPayload(
     item.adjEqSaturationExpr = ExtractJsonStringField(objects[i], "adj_eq_saturation_expr", "");
     item.adjustFiltersPost = ExtractJsonStringField(objects[i], "adj_filters_post", "");
     item.adjustLayerFilters = ExtractJsonStringField(objects[i], "adj_layer_filters", "");
+    item.adjLayerEqContrastExpr = ExtractJsonStringField(objects[i], "adj_layer_eq_contrast_expr", "");
+    item.adjLayerEqBrightnessExpr = ExtractJsonStringField(objects[i], "adj_layer_eq_brightness_expr", "");
+    item.adjLayerEqSaturationExpr = ExtractJsonStringField(objects[i], "adj_layer_eq_saturation_expr", "");
+    item.adjustLayerFiltersPost = ExtractJsonStringField(objects[i], "adj_layer_filters_post", "");
+    item.adjustLayerLutAPath = ExtractJsonStringField(objects[i], "adj_layer_lut_a_path", "");
+    item.adjustLayerLutBPath = ExtractJsonStringField(objects[i], "adj_layer_lut_b_path", "");
+    item.adjustLayerLutMixExpr = ExtractJsonStringField(objects[i], "adj_layer_lut_mix_expr", "");
     item.adjustLutAPath = ExtractJsonStringField(objects[i], "adj_lut_a_path", "");
     item.adjustLutBPath = ExtractJsonStringField(objects[i], "adj_lut_b_path", "");
     item.adjustLutMixExpr = ExtractJsonStringField(objects[i], "adj_lut_mix_expr", "");
@@ -1463,6 +1545,13 @@ bool ReadExportPayload(
       overlay.adjEqSaturationExpr = ExtractJsonStringField(overlayObjects[i], "adj_eq_saturation_expr", "");
       overlay.adjustFiltersPost = ExtractJsonStringField(overlayObjects[i], "adj_filters_post", "");
       overlay.adjustLayerFilters = ExtractJsonStringField(overlayObjects[i], "adj_layer_filters", "");
+      overlay.adjLayerEqContrastExpr = ExtractJsonStringField(overlayObjects[i], "adj_layer_eq_contrast_expr", "");
+      overlay.adjLayerEqBrightnessExpr = ExtractJsonStringField(overlayObjects[i], "adj_layer_eq_brightness_expr", "");
+      overlay.adjLayerEqSaturationExpr = ExtractJsonStringField(overlayObjects[i], "adj_layer_eq_saturation_expr", "");
+      overlay.adjustLayerFiltersPost = ExtractJsonStringField(overlayObjects[i], "adj_layer_filters_post", "");
+      overlay.adjustLayerLutAPath = ExtractJsonStringField(overlayObjects[i], "adj_layer_lut_a_path", "");
+      overlay.adjustLayerLutBPath = ExtractJsonStringField(overlayObjects[i], "adj_layer_lut_b_path", "");
+      overlay.adjustLayerLutMixExpr = ExtractJsonStringField(overlayObjects[i], "adj_layer_lut_mix_expr", "");
       overlay.adjustLutAPath = ExtractJsonStringField(overlayObjects[i], "adj_lut_a_path", "");
       overlay.adjustLutBPath = ExtractJsonStringField(overlayObjects[i], "adj_lut_b_path", "");
       overlay.adjustLutMixExpr = ExtractJsonStringField(overlayObjects[i], "adj_lut_mix_expr", "");
@@ -1898,7 +1987,8 @@ void WriteClipVideoFilters(
     trimEnd -= halfFrame;
   }
   trimStart = std::max(0.0, trimStart);
-  script << "[0:v]trim=start=" << FixedSeconds(trimStart) << ":end=" << FixedSeconds(trimEnd)
+  script << "[0:v]" << UntaggedColorFix(settings.sourceColorUntagged)
+         << "trim=start=" << FixedSeconds(trimStart) << ":end=" << FixedSeconds(trimEnd)
          << ",setpts=PTS-STARTPTS";
   // TỐC ĐỘ: nén/dãn trục thời gian TRƯỚC bước `fps=` — sau `fps=` thì khung đã bị
   // resample về lưới renderFps rồi, đổi PTS lúc đó là lặp/bỏ khung không đều.
@@ -1929,7 +2019,14 @@ void WriteClipVideoFilters(
                            item.adjustMaskPath, "adjc" + idx + "_");
   // Lớp Điều chỉnh: gọi LẦN HAI với mặt nạ RỖNG. Nhờ vậy nó nối vào chuỗi hiện tại
   // (sau nhánh mặt nạ đã đóng ở lời gọi trên), đúng như preview áp lượt 2 lên TOÀN khung.
-  AppendColorAdjustFilters(script, SubstituteLocalTime(item.adjustLayerFilters, 0.0), "", "");
+  // Dựng qua ColorAdjustChain như chuỗi block -> có đủ keyframe eq + trộn cường độ LUT.
+  AppendColorAdjustFilters(script,
+                           ColorAdjustChain(0.0, item.adjustLayerFilters, item.adjLayerEqContrastExpr,
+                                            item.adjLayerEqBrightnessExpr, item.adjLayerEqSaturationExpr,
+                                            item.adjustLayerFiltersPost, item.adjustLayerLutAPath,
+                                            item.adjustLayerLutBPath, item.adjustLayerLutMixExpr,
+                                            "adjl" + idx + "_"),
+                           "", "");
   AppendVideoMaskFilter(script, item.videoMaskPath, "vmc" + idx + "_");
   if (!clipDynTransform) {
     script << ",scale=max(2\\,ceil(iw*" << FfmpegDouble(scaleValue) << "/2)*2)"
@@ -2100,14 +2197,15 @@ bool IntervalIsTimeVarying(const ExportInterval& item) {
    * block như vậy là nửa sau chạy lại từ t=0 và cửa sổ thời gian rơi sai chỗ. */
   const auto hasLocalT = [](const std::string& s) { return s.find("LOCALT") != std::string::npos; };
   if (hasLocalT(item.adjustLayerFilters) || hasLocalT(item.adjustFilters)
-      || hasLocalT(item.adjustFiltersPost)) {
+      || hasLocalT(item.adjustFiltersPost) || hasLocalT(item.adjustLayerFiltersPost)) {
     return true;
   }
   return HasAnyExpr({&item.animXExpr, &item.animYExpr, &item.animSxExpr, &item.animSyExpr,
                      &item.animRotExpr, &item.kfXExpr, &item.kfYExpr, &item.kfScaleExpr,
                      &item.kfRotExpr, &item.kfOpacityExpr, &item.kfVolumeExpr,
                      &item.adjEqContrastExpr, &item.adjEqBrightnessExpr, &item.adjEqSaturationExpr,
-                     &item.adjustLutMixExpr});
+                     &item.adjustLutMixExpr, &item.adjLayerEqContrastExpr, &item.adjLayerEqBrightnessExpr,
+                     &item.adjLayerEqSaturationExpr, &item.adjustLayerLutMixExpr});
 }
 
 /* Lớp phủ có thuộc tính biến thiên theo thời gian -> không được cắt qua nó.
@@ -2117,7 +2215,9 @@ bool OverlayIsTimeVarying(const ExportOverlay& overlay) {
   if (OverlayIsImageSequence(overlay)) return true;
   if (!OverlayIsImageLike(overlay)) return true;      // video/audio: có trục thời gian riêng
   if (overlay.animInDur > 0.001 || overlay.animOutDur > 0.001) return true;
-  if (!overlay.adjustLayerFilters.empty()) return true;
+  if (!overlay.adjustLayerFilters.empty() || !overlay.adjLayerEqContrastExpr.empty()
+      || !overlay.adjLayerEqBrightnessExpr.empty() || !overlay.adjLayerEqSaturationExpr.empty()
+      || !overlay.adjustLayerLutMixExpr.empty()) return true;
   return HasAnyExpr({&overlay.animXExpr, &overlay.animYExpr, &overlay.animSxExpr,
                      &overlay.animSyExpr, &overlay.animRotExpr, &overlay.kfXExpr,
                      &overlay.kfYExpr, &overlay.kfScaleExpr, &overlay.kfRotExpr,
@@ -2406,7 +2506,7 @@ void WriteVisualOverlayFilter(
     : 0.0;
   const double end = overlay.timelineStart + std::max(0.05, overlay.duration - seqEndTrim);
 
-  script << "[" << inputIndex << ":v]";
+  script << "[" << inputIndex << ":v]" << UntaggedColorFix(overlay.colorUntagged);
   if (OverlayIsImageSequence(overlay)) {
     // Sequence hữu hạn đã đúng độ dài cửa sổ hoạt ảnh — không trim;
     // sau frame cuối overlay tự biến mất nhờ eof_action=pass
@@ -2443,7 +2543,13 @@ void WriteVisualOverlayFilter(
                                             "adjo" + id + "_"),
                            overlay.adjustMaskPath, "adjo" + id + "_");
   // Lớp Điều chỉnh — xem ghi chú ở WriteClipVideoFilters.
-  AppendColorAdjustFilters(script, SubstituteLocalTime(overlay.adjustLayerFilters, start), "", "");
+  AppendColorAdjustFilters(script,
+                           ColorAdjustChain(start, overlay.adjustLayerFilters, overlay.adjLayerEqContrastExpr,
+                                            overlay.adjLayerEqBrightnessExpr, overlay.adjLayerEqSaturationExpr,
+                                            overlay.adjustLayerFiltersPost, overlay.adjustLayerLutAPath,
+                                            overlay.adjustLayerLutBPath, overlay.adjustLayerLutMixExpr,
+                                            "adjlo" + id + "_"),
+                           "", "");
   AppendVideoMaskFilter(script, overlay.videoMaskPath, "vmo" + id + "_");
   if (!overlayDynTransform) {
     script << ",scale=max(2\\,ceil(iw*" << FfmpegDouble(scaleValue) << "/2)*2)"
@@ -3017,6 +3123,16 @@ int CommandExportVideo(int argc, char** argv) {
   settings.videoStart = MediaStreamStartTime(source, "v:0");
   settings.audioStart = MediaStreamStartTime(source, "a:0");
   settings.sourceFps = MediaStreamFps(source);
+  settings.sourceColorUntagged = MediaColorUntagged(source);
+  if (settings.sourceColorUntagged) {
+    Emit("progress", "Nguồn không gắn nhãn màu — đọc theo BT.709 cho khớp preview.");
+  }
+  for (auto& overlay : overlays) {
+    if (overlay.type == "media" && !overlay.assetPath.empty()
+        && !OverlayIsImageLike(overlay) && !OverlayIsImageSequence(overlay)) {
+      overlay.colorUntagged = MediaColorUntagged(overlay.assetPath);
+    }
+  }
   if (settings.videoStart > 0.0 || settings.audioStart > 0.0) {
     Emit("progress", "Nguồn lệch mốc thời gian (video +"
                      + FixedSeconds(settings.videoStart) + "s, audio +"

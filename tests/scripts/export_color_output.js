@@ -124,6 +124,63 @@ function main() {
         `sau cửa sổ lớp phải TẮT: trước=${before} sau=${after}`);
     console.log(`  ok  lớp phủ một phần overlay: trước=${before[0]} trong=${inside[0]} sau=${after[0]}`);
 
+    // ---- 3) KEYFRAME của lớp đi tới sidecar (trước đây backend vứt mọi field ngoài adj_filters) ----
+    // Độ sáng eq của LỚP: 0 trong 1s đầu của overlay, +0.35 sau đó (LOCALT = thời gian cục bộ).
+    const withKf = exportWith('overlay_layer_kf', [imageOverlay(png, {
+        timeline_start: 1, duration: 2,
+        adj_layer_eq_brightness_expr: 'if(lt(LOCALT,1),0,0.35)',
+    })], source);
+    const kfEarly = sample(withKf, 1.4, crop);
+    const kfLate = sample(withKf, 2.6, crop);
+    assert.ok(kfLate[0] > kfEarly[0] + 30,
+        `keyframe eq của lớp phải làm sáng nửa sau: đầu=${kfEarly} sau=${kfLate}`);
+    console.log(`  ok  keyframe eq của lớp: đầu=${kfEarly[0]} sau=${kfLate[0]}`);
+
+    // ---- 4) Nguồn KHÔNG gắn nhãn màu phải được đọc ĐÚNG như preview (Chromium) ----
+    // Sai số cho phép 5/255: màu bão hoà qua một vòng mã hoá lại lệch ~4 (xám chỉ ~2).
+    // ĐO trong app: Chromium đọc nguồn thiếu nhãn theo BT.709 khi CAO >= 720, theo BT.601 khi
+    // thấp hơn; FFmpeg luôn BT.601. Chỉ ca HD là lệch -> sidecar gắn bt709 cho riêng ca đó.
+    const dist = (a, b) => Math.max(...a.map((v, i) => Math.abs(v - b[i])));
+    const makeUntagged = (name, size) => {
+        const file = path.join(TEST_DIR, name);
+        run('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', `color=c=0xD04828:size=${size}:rate=30:duration=3`,
+            '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3',
+            '-vf', 'format=yuv420p', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', file]);
+        assert.ok(['unknown', undefined].includes(probeColor(file).color_space),
+            `bối cảnh: ${name} phải KHÔNG có nhãn color_space`);
+        return file;
+    };
+    const decodeAs = (file, matrix) => {
+        const r = spawnSync('ffmpeg', ['-v', 'error', '-ss', '1.5', '-i', file, '-frames:v', '1',
+            '-vf', `setparams=colorspace=${matrix},scale=1:1:flags=area`,
+            '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { cwd: ROOT, encoding: 'buffer' });
+        return [...r.stdout.slice(0, 3)];
+    };
+    const hd = makeUntagged('untagged_hd.mp4', '1280x720');
+    const sd = makeUntagged('untagged_sd.mp4', '320x180');
+    const as709 = decodeAs(hd, 'bt709');
+    const as601 = decodeAs(hd, 'smpte170m');
+    assert.ok(dist(as709, as601) >= 6, `bối cảnh: 709 và 601 phải khác nhau rõ (${as709} vs ${as601})`);
+
+    const gotHd = sample(exportWith('untagged_hd_main', [], hd), 1.5, '40:40:140:70');
+    assert.ok(dist(gotHd, as709) <= 5 && dist(gotHd, as709) < dist(gotHd, as601),
+        `nguồn HD thiếu nhãn phải xuất theo BT.709 (như preview): nhận ${gotHd}, 709=${as709}, 601=${as601}`);
+    const gotSd = sample(exportWith('untagged_sd_main', [], sd), 1.5, '40:40:140:70');
+    const sd601 = decodeAs(sd, 'smpte170m');
+    const sd709 = decodeAs(sd, 'bt709');
+    assert.ok(dist(gotSd, sd601) <= 5 && dist(gotSd, sd601) < dist(gotSd, sd709),
+        `nguồn SD thiếu nhãn phải GIỮ BT.601 (như preview): nhận ${gotSd}, 601=${sd601}, 709=${sd709}`);
+    console.log(`  ok  nguồn thiếu nhãn: HD xuất=${gotHd} (709=${as709}) · SD xuất=${gotSd} (601=${sd601})`);
+
+    // Nguồn HD đó làm VIDEO overlay.
+    const withUntaggedOv = exportWith('untagged_overlay', [{
+        ...imageOverlay(hd), asset_type: 'media_video', has_audio: false,
+    }], source);
+    const gotOv = sample(withUntaggedOv, 1.5, '40:40:140:70');
+    assert.ok(dist(gotOv, as709) <= 5 && dist(gotOv, as709) < dist(gotOv, as601),
+        `video overlay HD thiếu nhãn phải xuất theo BT.709: nhận ${gotOv}, 709=${as709}, 601=${as601}`);
+    console.log(`  ok  video overlay HD thiếu nhãn đọc theo BT.709: xuất=${gotOv}`);
+
     fs.rmSync(TEST_DIR, { recursive: true, force: true });
     console.log('export_color_output: PASS');
 }

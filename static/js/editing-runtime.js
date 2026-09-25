@@ -827,6 +827,11 @@
     const assetProxyGivenUp = new Set();  // sourceKey không dựng được proxy -> thôi hỏi
 
     function assetProxyKey(asset) {
+        /* Asset HDR đã hạ SDR (ensureAssetSdr): proxy phải dựng từ BẢN SDR (`path`), không
+         * từ file HDR gốc (`source_path`). Khoá theo source_path là proxy LQ được encode
+         * thẳng từ HLG/PQ không tonemap -> preview LQ cháy màu trong khi HQ và bản xuất
+         * (cùng đọc `path` = bản SDR) vẫn đúng. */
+        if (asset?.sdr_active && asset.path) return String(asset.path);
         return String(asset?.source_path || asset?.path || '');
     }
 
@@ -3281,9 +3286,30 @@
     }
 
     function adjustLayerIsActive(it) {
+        // Giá trị TĨNH trung tính nhưng có keyframe màu (vd. phơi sáng chạy 0 -> 40) vẫn là
+        // lớp đang tác dụng — bản trước coi là "không làm gì" và bỏ cả preview lẫn xuất.
         return it.type === 'adjust'
             && isTrackVisible(itemTrack(it))
-            && it.adjustments && window.ColorAdjust && !ColorAdjust.isIdentity(it.adjustments);
+            && !!it.adjustments && !!window.ColorAdjust
+            && (!ColorAdjust.isIdentity(it.adjustments) || ColorAdjust.hasAdjustKeyframes(it.keyframes));
+    }
+
+    /* Dời mốc thời gian của mọi danh sách keyframe ({t, v, e}) đi `offset` giây.
+     * Keyframe của LỚP Điều chỉnh tính từ đầu LỚP, còn chuỗi xuất của nó chạy theo thời gian
+     * CỤC BỘ của block nhận lớp (LOCALT = 0 ở đầu block). Không dời thì clip thứ 3 (bắt đầu
+     * ở giây 10 của lớp) chạy keyframe như thể lớp mới bắt đầu -> lệch đúng 10 giây. */
+    function shiftKeyframeTimes(keyframes, offset) {
+        if (!keyframes || typeof keyframes !== 'object') return keyframes || null;
+        if (!(Math.abs(offset) > 1e-9)) return keyframes;
+        const out = {};
+        Object.entries(keyframes).forEach(([key, list]) => {
+            out[key] = Array.isArray(list)
+                ? list.map((pt) => (pt && typeof pt === 'object' && 't' in pt
+                    ? { ...pt, t: (Number(pt.t) || 0) + offset }
+                    : pt))
+                : list;
+        });
+        return out;
     }
 
     /* MỘT lớp Điều chỉnh tại một thời điểm — lớp TRÊN CÙNG thắng nếu có chồng nhau.
@@ -3296,10 +3322,22 @@
      * bằng CẤU TRÚC. Muốn nhiều tầng: đặt LUT lên chính block, hoặc trim các lớp Điều
      * chỉnh cho nối tiếp nhau thay vì chồng lên nhau.
      */
-    function activeAdjustmentLayer(t) {
+    /* PHẠM VI CỦA LỚP: chỉ những gì NẰM DƯỚI lane của nó (đúng Adjustment Layer của
+     * Premiere / CapCut). `target` = item overlay đang vẽ/xuất; null (hoặc thứ không phải
+     * editing item, như clip lane chính) = LANE CHÍNH — luôn nằm dưới mọi lane hình nên
+     * mọi lớp đều áp lên nó. Trước đây không có phép so này: lớp ở V1 nhuộm cả video ở
+     * V2/V3 phía trên (người dùng báo 2026-09-25). order nhỏ = trên cao. */
+    function adjustLayerAppliesTo(layer, target) {
+        if (!target || !target.track_id) return true;
+        if (target.id === layer.id) return false;
+        return trackOrderOf(layer) < trackOrderOf(target);
+    }
+
+    function activeAdjustmentLayer(t, target = null) {
         let best = null;
         editingItems.forEach((it) => {
             if (!adjustLayerIsActive(it)) return;
+            if (!adjustLayerAppliesTo(it, target)) return;
             if (!(t >= it.timeline_start - 1e-6 && t < it.timeline_start + it.duration - 1e-6)) return;
             if (!best || trackOrderOf(it) < trackOrderOf(best)) best = it;   // order nhỏ = trên cao
         });
@@ -3327,8 +3365,8 @@
 
     // Giá trị HIỆU DỤNG của lớp tại thời điểm sequence `t` (lớp cũng keyframe được).
     // null = lớp không còn tác dụng gì (kéo Opacity về 0) -> mọi đường vẽ bỏ qua lượt lớp.
-    function activeAdjustmentLayerAdjustments(t) {
-        const layer = activeAdjustmentLayer(t);
+    function activeAdjustmentLayerAdjustments(t, target = null) {
+        const layer = activeAdjustmentLayer(t, target);
         if (!layer) return null;
         const base = effectiveAdjustments(layer, Math.max(0, t - layer.timeline_start)) || layer.adjustments;
         const adj = ColorAdjust.scaleStrength(base, adjustLayerStrength(layer));
@@ -3359,6 +3397,7 @@
         let bestOverlap = 0;
         editingItems.forEach((it) => {
             if (!adjustLayerIsActive(it)) return;
+            if (!adjustLayerAppliesTo(it, options.target || null)) return;
             const overlap = Math.min(seqEnd, it.timeline_start + it.duration) - Math.max(seqStart, it.timeline_start);
             if (!(overlap > 1e-4)) return;
             const better = overlap > bestOverlap + 1e-4
@@ -3377,10 +3416,13 @@
         // bản xuất dựng biểu thức trực tiếp từ keyframe nên bỏ sót là lệch preview.
         const strength = adjustLayerStrength(layer);
         const layerAdj = ColorAdjust.scaleStrength(layer.adjustments, strength);
-        if (ColorAdjust.isIdentity(layerAdj)) return null;
-        const layerKf = ColorAdjust.scaleStrengthKeyframes(layer.keyframes, strength);
+        const layerKf = shiftKeyframeTimes(
+            ColorAdjust.scaleStrengthKeyframes(layer.keyframes, strength),
+            (Number(layer.timeline_start) || 0) - seqStart);
+        if (ColorAdjust.isIdentity(layerAdj) && !ColorAdjust.hasAdjustKeyframes(layerKf)) return null;
+        const { target: _target, ...specOptions } = options;
         const spec = await colorAdjustExportSpec(layerAdj, layerKf, {
-            ...options,
+            ...specOptions,
             duration: dur,
             label: `${options.label || 'blk'}_al`,
             enable,
@@ -12924,6 +12966,8 @@
         const a1 = a0 + (Number(item.duration) || 0);
         return editingItems.some((it) => {
             if (!adjustLayerIsActive(it)) return false;
+            // Chỉ lớp NẰM TRÊN item mới áp lên nó (xem adjustLayerAppliesTo).
+            if (!adjustLayerAppliesTo(it, item)) return false;
             const b0 = Number(it.timeline_start) || 0;
             const b1 = b0 + (Number(it.duration) || 0);
             return a0 < b1 - 1e-6 && b0 < a1 - 1e-6;
@@ -12963,7 +13007,7 @@
         //             lượt 2 (màu của lớp) vào canvas hiện.
         //   không   -> y như cũ, đúng một lượt.
         // Thứ tự này khớp export: chuỗi của block chạy TRƯỚC, chuỗi của lớp nối SAU.
-        const layerAdj = activeAdjustmentLayerAdjustments(currentSequenceTime());
+        const layerAdj = activeAdjustmentLayerAdjustments(currentSequenceTime(), item);
         // RETOUCH TRƯỚC CHUỖI MÀU — cùng thứ tự với lane chính và với khâu xuất: retouch
         // sửa DA (kết cấu, khuyết điểm), grade/LUT là lớp thẩm mỹ áp LÊN kết quả đó.
         // Mốc thời gian là currentTime của chính thẻ nguồn, tức trục thời gian của ASSET —
@@ -14402,6 +14446,17 @@
         setPrimaryItemSelection(item.id);
     }
 
+    /* Gom nhiều yêu cầu vẽ lại overlay thành MỘT lượt (các sự kiện tải/tua của nhiều nguồn
+     * thường tới dồn dập). setTimeout chứ không rAF: lượt này là để vẽ khung ĐANG DỪNG. */
+    let previewOverlayRefreshTimer = 0;
+    function requestPreviewOverlayRefresh() {
+        if (previewOverlayRefreshTimer) return;
+        previewOverlayRefreshTimer = setTimeout(() => {
+            previewOverlayRefreshTimer = 0;
+            renderPreviewOverlays();
+        }, 0);
+    }
+
     function renderPreviewOverlays() {
         const root = ensurePreviewOverlayRoot();
         if (!root) return;
@@ -14590,6 +14645,14 @@
                     const srcEl = makeMediaEl();
                     srcEl.id = srcId;
                     srcEl.setAttribute('class', 'editing-preview-src');
+                    /* Canvas fx chỉ có hình khi paintColorFxCanvas CHẠY SAU lúc nguồn ẩn đã có
+                     * khung. Phần tử vừa được dựng lại (bật/tắt lane, bật/tắt lớp Điều chỉnh,
+                     * đổi LQ/HQ) thì lượt vẽ đầu luôn hụt vì nguồn còn đang tải — và lúc DỪNG
+                     * không có gì gọi vẽ lại, nên preview đứng ở khung trống/cũ tới khi người
+                     * dùng kéo playhead. Nguồn tải xong / tua xong là tự xin một lượt vẽ. */
+                    ['loadeddata', 'seeked', 'load'].forEach((ev) => {
+                        srcEl.addEventListener(ev, requestPreviewOverlayRefresh);
+                    });
                     root.appendChild(srcEl);
                 } else {
                     el = makeMediaEl();
@@ -17713,16 +17776,34 @@
         // Bỏ sót vế này thì cỡ texture rơi về baseW/baseH và chuỗi màu chạy sai tỉ lệ.
         const texW = image.naturalWidth || image.width || baseW;
         const texH = image.naturalHeight || image.height || baseH;
-        const animatedColor = !!window.ColorAdjust && ColorAdjust.hasAdjustKeyframes(item.keyframes);
-        const sourceAt = (localT) => colorAdjustedDrawable(
-            image, texW, texH, effectiveAdjustments(item, localT), `imgseq:${item.id}`);
+        /* LỚP ĐIỀU CHỈNH phía trên item: chuỗi PNG này là đường xuất DUY NHẤT của item (sidecar
+         * không nối color_adjust_layer cho item có animation_render đã bake), nên lớp phải
+         * được áp NGAY Ở ĐÂY — preview (paintColorFxCanvas) vẫn áp, thiếu là bản xuất lệch.
+         * Lớp có thể chỉ phủ một phần item hoặc có keyframe -> tính theo từng frame. */
+        const itemStart = Number(item.timeline_start) || 0;
+        const itemEnd = itemStart + (Number(item.duration) || 0);
+        const layerTouches = editingItems.some((it) => adjustLayerIsActive(it)
+            && adjustLayerAppliesTo(it, item)
+            && it.timeline_start < itemEnd && it.timeline_start + it.duration > itemStart);
+        const layerAt = (localT) => (layerTouches
+            ? activeAdjustmentLayerAdjustments(itemStart + (Number(localT) || 0), item)
+            : null);
+        const animatedColor = !!window.ColorAdjust
+            && (ColorAdjust.hasAdjustKeyframes(item.keyframes) || layerTouches);
+        const sourceAt = (localT) => {
+            let out = colorAdjustedDrawable(
+                image, texW, texH, effectiveAdjustments(item, localT), `imgseq:${item.id}`);
+            const layerAdj = layerAt(localT);
+            if (layerAdj) out = colorAdjustedDrawable(out, texW, texH, layerAdj, `imgseq:${item.id}~adjlayer`);
+            return out;
+        };
         const staticSource = animatedColor ? null : sourceAt(0);
         const drawInto = (ctx, _charFrac, localT) => ctx.drawImage(
             animatedColor ? sourceAt(Number(localT) || 0) : staticSource, 0, 0, baseW, baseH);
-        // Chữ ký nội dung = adjustments HIỆU DỤNG tại mốc đó -> frame nào màu không đổi vẫn
-        // được gộp (đoạn trước keyframe đầu / sau keyframe cuối thường là phần lớn clip).
+        // Chữ ký nội dung = adjustments HIỆU DỤNG (của item + của lớp) tại mốc đó -> frame
+        // nào màu không đổi vẫn được gộp (thường là phần lớn clip).
         const contentSigAt = animatedColor
-            ? (localT) => JSON.stringify(effectiveAdjustments(item, localT))
+            ? (localT) => JSON.stringify([effectiveAdjustments(item, localT), layerAt(localT)])
             : null;
         return renderAnimationSequence(
             item, resolved, fps, baseW, baseH, { boxHeight: baseH, fontSize: 0, charCount: 0 },
@@ -18007,6 +18088,14 @@
             const seamLocalT = side === 'A' ? Math.max(0, Number(item.duration) || 0) : 0;
             drawable = colorAdjustedDrawable(
                 drawable, texW, texH, effectiveAdjustments(item, seamLocalT), `bake:${item.id}:${side}`);
+            // Lớp Điều chỉnh phía trên item tại đúng mốc seam (nhánh A lùi 1ms vì cửa sổ lớp
+            // là nửa mở [start, end)). Khung chuyển cảnh bake xong đi `color_source:'baked'`
+            // nên sidecar không áp lớp lần nữa.
+            const seamSeqT = (Number(item.timeline_start) || 0) + (side === 'A' ? Math.max(0, seamLocalT - 0.001) : 0);
+            const layerAdj = activeAdjustmentLayerAdjustments(seamSeqT, item);
+            if (layerAdj) {
+                drawable = colorAdjustedDrawable(drawable, texW, texH, layerAdj, `bake:${item.id}:${side}~adjlayer`);
+            }
             return { drawable, w0: sz.width, h0: sz.height };
         }
         return null;
@@ -18357,7 +18446,7 @@
         for (const t of [0, d * 0.25, d * 0.5, d * 0.75, d]) {
             if (spatial(effectiveAdjustments(target, t))) return true;
             if (typeof activeAdjustmentLayerAdjustments === 'function'
-                && spatial(activeAdjustmentLayerAdjustments(seqStart + t))) return true;
+                && spatial(activeAdjustmentLayerAdjustments(seqStart + t, target))) return true;
         }
         return spatial(target.adjustments);
     }
@@ -18906,7 +18995,7 @@
                 if (spec) patch.color_adjust = spec;
                 const layerSpec = await adjustLayerExportSpec(
                     out.runStart, out.runStart + out.runDur,
-                    { frameHeight: seqH, frameWidth: seqW, label: `rtov${patch.id}`, fps: exportFps });
+                    { frameHeight: seqH, frameWidth: seqW, label: `rtov${patch.id}`, fps: exportFps, target: item });
                 if (layerSpec) patch.color_adjust_layer = layerSpec;
                 items.push(patch);
             } catch (error) {
@@ -19054,6 +19143,7 @@
                         frameWidth: Number(fxAsset?.width) || 0,
                         label: `i${copy.id}`,
                         fps: exportFps,
+                        target: copy,
                     });
                 if (layerSpec) copy.color_adjust_layer = layerSpec;
             }

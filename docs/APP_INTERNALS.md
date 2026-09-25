@@ -9352,11 +9352,9 @@ segmented "Cơ bản/Mặt nạ" là một khối hộp lớn, PNG trong suốt 
 | `IntervalIsTimeVarying` không coi chuỗi màu có LOCALT / LUT-mix là biến thiên -> dự án ≥ 240s có lớp phủ có thể cắt đôi block, nửa sau lệch cửa sổ | Thêm điều kiện LOCALT trong `adjustLayerFilters/adjustFilters/adjustFiltersPost` + `adjustLutMixExpr` |
 | `drawMainClipLayer` (chuyển cảnh lane chính — preview LẪN bake xuất —, bake Retouch cả khung, chụp khung) chỉ áp màu của clip | Thêm lượt lớp (`activeAdjustmentLayerAdjustments(span.start + localT)`), bộ dựng chung `maincanvas~adjlayer`; `LAYER_FX_MAX` 4 -> 6 để không bỏ-dựng-lại context mỗi khung |
 
-**Chưa sửa (ghi lại để làm riêng):** keyframe trên CHÍNH lớp Điều chỉnh (cường độ LUT, eq) bị
-`normalizeAdjustLayerFields` bỏ; bake chuyển cảnh OVERLAY (`prepareExportLayer`) và ảnh có hoạt
-ảnh (`renderImageAnimationSequence`) chưa áp lớp; proxy LQ của overlay HDR khoá theo
-`source_path` (bản HDR gốc) nên preview LQ cháy màu trong khi bản xuất đúng; nguồn KHÔNG gắn nhãn
-màu bị FFmpeg giải bằng BT.601 trong khi Chromium giả định BT.709.
+**Đợt 3 (cùng ngày) đã sửa nốt:** keyframe của lớp, bake chuyển cảnh overlay / ảnh động, proxy
+LQ của overlay HDR — xem mục "Lớp Điều chỉnh: phạm vi, keyframe, bake, làm mới preview" bên dưới.
+Nguồn KHÔNG gắn nhãn màu: đã sửa ở đợt 4 (mục "Nguồn video không gắn nhãn màu" bên dưới).
 
 ### 3. PNG trong suốt hiện nền đen trên preview (LQ)
 
@@ -9380,3 +9378,63 @@ lại MỌI proxy video): đổi đuôi đã là đổi đường dẫn đích n
   ô nhập 30 -> 28px, khe hàng 6 -> 5px.
 - Lane: xem mục "CHIỀU CAO LANE" ở đầu file (đệm 6 -> 2, khe 8 -> 4, block giữ nguyên cao).
 
+## Lớp Điều chỉnh: phạm vi, keyframe, bake, làm mới preview (2026-09-25, đợt 3)
+
+- **PHẠM VI = CHỈ LANE NẰM DƯỚI** (người dùng báo: lớp ở V1 nhuộm cả video ở V2/V3 phía trên).
+  Thiết kế vốn ghi "mọi block NẰM DƯỚI nó" nhưng không nơi nào so vị trí lane. Nay một hàm
+  `adjustLayerAppliesTo(layer, target)`: `target` là item overlay -> chỉ áp khi
+  `trackOrderOf(layer) < trackOrderOf(target)` (order nhỏ = trên cao); `target` null / clip lane
+  chính (không có `track_id`) -> luôn áp (lane chính nằm dưới mọi lane hình). Truyền `target` ở
+  MỌI chỗ: `activeAdjustmentLayer(t, target)`, `activeAdjustmentLayerAdjustments(t, target)`,
+  `adjustLayerExportSpec(..., { target })` (overlay copy, miếng vá Retouch overlay),
+  `paintColorFxCanvas`, `retouchSpatialFx`, `itemOverlapsAnyAdjustLayer` (quyết định loại thẻ
+  preview canvas/video — overlay nằm TRÊN lớp nay giữ thẻ video thường).
+- **KEYFRAME CỦA LỚP vào bản xuất.** (1) `normalizeAdjustLayerFields` (server.js) trước chỉ giữ
+  `adj_filters`; nay đổi tên MỌI trường của `normalizeColorAdjustFields` sang `adj_layer_*`
+  (`_eq_{contrast,brightness,saturation}_expr`, `_filters_post`, `_lut_a_path/_lut_b_path/
+  _lut_mix_expr`). (2) Sidecar đọc các trường đó và dựng chuỗi lớp bằng `ColorAdjustChain` (tag
+  `adjl<idx>_` / `adjlo<id>_`), `IntervalIsTimeVarying`/`OverlayIsTimeVarying` tính cả chúng.
+  (3) Frontend: keyframe của lớp tính từ đầu LỚP nhưng chuỗi chạy theo LOCALT của BLOCK ->
+  `shiftKeyframeTimes(kf, layer.timeline_start - seqStart)`; lớp có giá trị tĩnh trung tính mà
+  có keyframe nay được coi là đang tác dụng (`adjustLayerIsActive`). Biểu thức có thể ra
+  `LOCALT--1.0000` — FFmpeg parse được (đã thử).
+- **Bake áp lớp:** `prepareExportLayer` (khung seam của chuyển cảnh overlay, nhánh A lùi 1ms vì
+  cửa sổ lớp nửa mở) và `renderImageAnimationSequence` (ảnh có hoạt ảnh — lớp chạm item thì
+  tính theo TỪNG khung, chữ ký nội dung gồm cả màu của lớp để vẫn gộp được khung giống nhau).
+  Cả hai đi `color_source` baked nên sidecar không áp lớp lần nữa.
+- **Proxy LQ của overlay HDR:** `assetProxyKey` trả `asset.path` (bản SDR) khi `sdr_active`.
+- **Bật/tắt lane không cập nhật preview khi đang dừng:** overlay đi đường canvas (có màu /
+  Retouch / dưới lớp) được DỰNG LẠI khi bật lane hoặc khi lớp phía trên bật/tắt; lượt
+  `paintColorFxCanvas` đầu tiên luôn hụt vì nguồn ẩn còn đang tải, và lúc dừng không có gì gọi
+  vẽ lại. Nguồn ẩn nay nghe `loadeddata/seeked/load` -> `requestPreviewOverlayRefresh()` (gom
+  một lượt `renderPreviewOverlays`, setTimeout 0).
+- Test: `test:export-color` thêm ca keyframe eq của lớp qua sidecar; đã kiểm đầu-cuối qua
+  `/api/export-video` (backend đổi tên trường): độ sáng 125 -> 214 đúng mốc keyframe.
+
+## Nguồn video không gắn nhãn màu (2026-09-25, đợt 4)
+
+**Hai bên tự đoán ma trận YUV -> RGB và đoán KHÁC nhau.** FFmpeg (bản xuất) luôn BT.601
+(swscale SWS_CS_DEFAULT). Chromium (preview) — ĐO trong chính app bằng video đỏ cam `0xD04828`
+không nhãn, vẽ lên canvas: **cao >= 720 -> BT.709 (221,84,38), cao < 720 -> BT.601 (208,72,41)**.
+960x720, 700x1000, 720x1280, 1280x720, 1920x1080, 1080x1920 ra 709; 960x718, 1280x540, 1024x576,
+640x480, 320x180 ra 601 — tức xét CHIỀU CAO (giả định ban đầu "Chromium luôn 709" là SAI).
+=> Chỉ nguồn HD thiếu nhãn là lệch (bản xuất ra màu 601 trong khi người dùng xem 709).
+
+- **Sidecar:** `MediaColorUntagged(path)` (ffprobe key=value, cache theo đường dẫn) = YUV giới hạn
+  (không phải yuvj/RGB/xám) + `color_space` trống/unknown + cao >= 720. Dò cho nguồn chính
+  (`settings.sourceColorUntagged`) và từng VIDEO overlay (`overlay.colorUntagged`); đúng thì
+  `UntaggedColorFix()` chèn `setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709`
+  ở đầu chuỗi (`[0:v]setparams…,trim…` / `[N:v]setparams…`). Nguồn SD giữ mặc định 601 (đã khớp
+  Chromium); nguồn ĐÃ có nhãn giữ nguyên.
+- **Backend (chuẩn hoá trước khi nối):** `untaggedPreviewMatrix()` cùng quy tắc; nguồn thiếu nhãn
+  được `setparams` + `-colorspace/-color_primaries/-color_trc/-color_range` gắn TƯỜNG MINH đúng ma
+  trận preview đã dùng — cần vì bước `fit` có thể đổi chiều cao (1280x540 -> khung bao 1920x1920)
+  làm Chromium đổi cách đoán. Tên bản chuẩn hoá có hậu tố `_m709`/`_m601` để bản cũ (không nhãn)
+  không bị dùng lại. `probeConcatStreamSignature` thêm `color_space,color_range`: bộ nguồn trộn có
+  nhãn / không nhãn nay được chuẩn hoá thay vì nối `-c copy` (sidecar chỉ dò nhãn MỘT lần cho cả
+  temp_input.mp4).
+- **Test:** `test:export-color` ca 4 — HD 1280x720 không nhãn xuất ra 219,82,36 (709 = 220,85,37),
+  SD 320x180 không nhãn xuất ra 204,71,37 (601 = 208,72,41), video overlay HD không nhãn ra 709.
+  Sai số cho phép 5/255 (màu bão hoà qua một vòng mã hoá lại lệch ~4).
+- `test:concat-cache` hỏng EPERM khi xoá `test_temp/concat_cache/temp_input.mp4` — CÓ SẴN (hỏng y
+  hệt với server.js gốc), không liên quan.
