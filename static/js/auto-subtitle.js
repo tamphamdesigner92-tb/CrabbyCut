@@ -1,5 +1,7 @@
-/* Nhóm "Auto Subtitle" của tab Âm thanh: bóc băng audio timeline bằng Whisper rồi
- * rải thành block phụ đề, kiểu CapCut.
+/* Nhóm "Auto Subtitle" của tab Văn bản (trước 2026-09-26 nằm ở tab Âm thanh): bóc băng
+ * audio timeline bằng Whisper rồi rải thành block phụ đề, kiểu CapCut. Nhóm anh em
+ * "Local Subtitle" (local-subtitle.js) nhập phụ đề từ tệp có sẵn và dùng lại buildSrt,
+ * injectStyle, clock của tệp này.
  *
  * ────────────────────────────────────────────────────────────────────────────
  * BA QUYẾT ĐỊNH GỐC, ĐỌC TRƯỚC KHI SỬA
@@ -304,6 +306,9 @@
                 created_at: new Date().toISOString(),
                 engine: meta?.engine || '',
                 source_scope: meta?.scope || state.scope,
+                // Tên hiện ở hàng "Đồng bộ các subtitle" của Thuộc tính khi dự án có nhiều bộ
+                // (bộ nhập từ tệp mang tên tệp — xem local-subtitle.js).
+                name: 'Auto Subtitle',
                 // Ngôn ngữ THẬT của bản bóc băng (với "Tự nhận diện" là thứ Whisper nghe
                 // ra). Giữ lại để panel nói được đang dùng font nào sau khi mở lại dự án.
                 language: meta?.language || '',
@@ -804,5 +809,8 @@
         cuesFromSegments,
         chunkSpansForScene,
         currentCues,
+        // Dùng chung với local-subtitle.js (cùng kiểu panel, cùng định dạng .srt xuất ra).
+        injectStyle,
+        clock,
     };
 }());

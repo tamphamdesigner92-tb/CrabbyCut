@@ -8545,7 +8545,7 @@ không gian NGUỒN của mặt nạ/landmark retouch sẽ dời từ khung nố
 
 ## Auto Subtitle — phụ đề tự động từ audio timeline (Windows, 2026-09-13)
 
-Nhóm **Âm thanh → Auto Subtitle**: bóc băng thứ đang nghe thấy trên timeline bằng chính
+Nhóm **Văn bản → Auto Subtitle** (trước 2026-09-26 nằm ở tab Âm thanh — xem mục "Local Subtitle"): bóc băng thứ đang nghe thấy trên timeline bằng chính
 Whisper của ứng dụng, rồi rải thành block phụ đề — kiểu Auto Captions của CapCut. Kèm
 thanh tiến trình thật và một tệp `.srt` ghi cạnh tệp `.crab`.
 
@@ -8879,6 +8879,110 @@ bằng mắt.
 **"Lưu thành" sang thư mục khác** đã đúng sẵn: `writeSrtFile` chạy SAU khi
 `currentProjectPath` đổi, nên `.srt` được ghi cạnh `.crab` MỚI. Bản `.srt` cũ ở thư mục cũ
 được giữ nguyên — đúng ngữ nghĩa "Lưu thành" là CHÉP, dự án cũ phải còn nguyên vẹn.
+
+## Local Subtitle — nhập tệp phụ đề có sẵn, nhiều bộ song song (2026-09-26)
+
+Hai việc theo yêu cầu người dùng: (1) **Auto Subtitle dời từ tab Âm thanh sang tab Văn bản**
+(thứ nó sinh ra là block văn bản); (2) subtab mới **Văn bản → Local Subtitle** nhập tệp phụ đề
+có sẵn và khớp lên timeline — kiểu "Import captions" của Premiere / "Local captions" của CapCut.
+Đọc hai mục Auto Subtitle phía trên trước.
+
+| Tệp | Vai trò |
+| --- | --- |
+| `static/js/subtitle-formats.js` | Hàm thuần: nhận diện định dạng, đọc cue, dọn cue chồng nhau, đoán bảng mã, đoán ngôn ngữ để chọn font |
+| `static/js/local-subtitle.js` | Panel + đặt block lên timeline (`applyImport`), xoá/xuất từng bộ |
+| `static/js/editing-runtime.js` | `subtitleImports` (sổ các bộ nhập), các hàm phụ đề nhận thêm `setId` |
+| `tests/scripts/subtitle_import.js` | `npm run test:subtitle-import` |
+
+### Định dạng hỗ trợ
+
+`.srt`, `.vtt`, `.ass/.ssa`, `.xml/.ttml/.dfxp` (Timed Text — đúng loại `.xml` mà Premiere xuất
+phụ đề), `.lrc`, `.sbv`. NỘI DUNG quyết định trước, đuôi tệp chỉ để phân xử (`.txt` chứa SRT hay
+`.srt` thực ra là WebVTT đều gặp). `.xml` dạng `xmeml`/`fcpxml` là XML DỰ ÁN của NLE, không phải
+phụ đề → báo lỗi có hướng dẫn thay vì im lặng ra 0 câu. TTML đọc bằng regex chứ không DOMParser:
+test chạy được bằng node trần, và XML lệch chuẩn nhẹ không làm cả lượt nhập chết.
+
+Bẫy từng định dạng (đều có test):
+- SRT `,5` là 500 ms (phần lẻ có bao nhiêu chữ số là bấy nhiêu phần của giây), không phải 5 ms.
+- ASS: trường Text đứng cuối và được chứa dấu phẩy → chỉ tách đúng (số trường − 1) dấu phẩy.
+  Khối `{\p1}…{\p0}` là lệnh vẽ vector, không phải chữ.
+- TTML: khung hình theo `ttp:frameRate` (+ `frameRateMultiplier`), tick theo `ttp:tickRate`;
+  xuống dòng thật trong mã nguồn XML là thụt lề, chỉ `<br/>` mới là xuống dòng.
+- LRC chỉ có mốc bắt đầu: câu kéo tới mốc câu sau; dòng rỗng có mốc = dấu hết câu;
+  `[offset:+500]` = hiện lời SỚM hơn 500 ms.
+
+Bảng mã: BOM → UTF-16 không BOM (byte 0 ở vị trí lẻ) → UTF-8 nghiêm → hạ xuống Windows-1258 và
+BÁO trong panel (tệp .srt tiếng Việt đời cũ).
+
+### Bốn quyết định
+
+**1. Mỗi tệp là MỘT BỘ riêng — nhiều bộ song song** (người dùng chọn, 2026-09-26, để làm được
+phụ đề song ngữ; giống mỗi tệp caption là một track riêng ở Premiere). Lựa chọn bị loại: "nhập
+thì thay bộ cũ" — ít việc hơn nhưng không làm được song ngữ.
+
+Cách lưu: bộ Auto Subtitle GIỮ khoá cũ `subtitleState`; các bộ nhập nằm ở khoá MỚI
+`subtitleImports` (mảng) trong `getHistoryState()`. Không dời `subtitleState` vào mảng vì ba thứ
+đã dựng trên giao ước "một bộ tự động ⇄ `<Tên dự án>.srt` cạnh `.crab`": lượt Lưu, Đóng gói
+(`electron/project-package.js` đọc thẳng `editingState.subtitleState`), và nhánh macOS mở cùng
+`.crab`. Nhờ vậy dự án cũ mở lên không phải di trú gì; bản ứng dụng cũ mở dự án mới chỉ mất SỔ
+của các bộ nhập (block vẫn còn, là text thường).
+
+Mọi hàm phụ đề của runtime (`subtitleCuesFromItems`, `removeSubtitleItems`,
+`subtitleStyleSyncEnabled`, `setSubtitleStyleSync`) nhận thêm `setId`: **bỏ trống = bộ Auto
+Subtitle** (nơi gọi cũ không phải sửa), truyền id = đúng bộ đó. `isSubtitleItem` /
+`subtitleSyncTargets` tra theo BỘ CHỨA block (`subtitleSetOfItem`).
+
+**2. "Đồng bộ các subtitle" theo TỪNG BỘ.** Kéo bộ tiếng Anh lên trên mà bộ tiếng Việt chạy theo
+là mất đúng thứ người dùng muốn. Hàng "Đồng bộ" ở Thuộc tính đọc/ghi cờ của bộ chứa block đang
+chọn và ghi rõ tên bộ.
+
+**3. Mốc trong tệp = mốc timeline, tính từ đầu timeline** — CapCut và Premiere (mặc định) cùng
+làm vậy nên không hỏi. Ô "Bắt đầu từ" thêm lựa chọn "Vị trí playhead" của Premiere (00:00 của tệp
+đặt tại playhead). KHÔNG quy đổi qua các điểm cắt của lane chính: tệp phụ đề chỉ biết mốc của MỘT
+video, không NLE nào đoán việc đó, đoán sai là lệch im lặng. Timecode phát sóng (câu đầu ≥
+01:00:00 và nằm sau cuối timeline) được trừ số giờ tròn và báo lại. Câu nằm HẲN ngoài timeline bị
+bỏ (để lọt thì `resolveNewItemPlacement` dồn chúng về sát mép cuối thành một đống); câu tràn qua
+cuối bị cắt ngắn — cả hai đều được đếm và báo.
+
+**4. Không có hai cue chồng nhau trong một bộ** (`tidyCues`; Premiere cũng cấm caption chồng
+nhau trên một track). `.srt` làm tròn ms chồng nhau vài chục ms ở mọi chỗ chuyển câu, mà block
+chồng mốc bị đẩy sang lane mới → timeline thành cái thang. Chồng một chút = cắt đuôi câu trước;
+bắt đầu cách nhau < 0,25 s = gộp thành một block nhiều dòng. Không câu chữ nào bị mất.
+
+### Những thứ khác
+
+- Kiểu chữ = kiểu phụ đề của Auto Subtitle (`subtitleTextStyle`), font chọn theo CHỮ VIẾT đoán
+  từ nội dung (có kana → Nhật, Hangul → Hàn, chỉ Hán tự → Trung). Định dạng riêng trong tệp (màu /
+  vị trí `.ass`, `<font>` của `.srt`) bị bỏ, giữ chữ + mốc.
+- Một cue = một block, KHÔNG cắt theo luật ≤ 2 dòng của Auto Subtitle, và GIỮ xuống dòng của tệp:
+  `addTextItem(..., { keepLineBreaks: true })` → `defaultTextPlacementFor` gói TỪNG DÒNG riêng
+  (magicWrap coi `\n` như dấu cách). Nơi gọi cũ không truyền cờ nên không đổi hành vi.
+- Nhập lại ĐÚNG tệp cùng tên (không phân biệt hoa/thường) → THAY bộ cũ, giữ id + vị trí + cờ đồng
+  bộ. Tệp khác tên → bộ mới.
+- Mỗi tệp nhập = một bước Ctrl+Z (`beginHistoryBatch`). Chọn nhiều tệp / kéo thả nhiều tệp một
+  lượt thì mỗi tệp một bộ.
+- "Xuất .srt" của một bộ luôn HỎI chỗ lưu (`saveSubtitleSrt('', …)`): `<Tên dự án>.srt` cạnh
+  `.crab` là chỗ của bộ Auto Subtitle, ghi bộ nhập vào đó là đè mất nó. Bộ nhập KHÔNG tự ghi `.srt`
+  khi Lưu dự án — tệp gốc của người dùng mới là nguồn.
+- Hai bộ cùng thời điểm đều neo đáy khung nên chồng hình lên nhau (Premiere cũng vậy); bật
+  "Đồng bộ" thì kéo một block là cả bộ đi theo.
+- Vòng đời: "Dự án mới" (`resetProjectState`) và "Mở dự án" (`setSubtitleImports([])` trong
+  index.html, cho `.crab` đời cũ không có `history`) dọn cả `subtitleImports`.
+
+### Đã kiểm trên giao diện thật (browser, TEMP riêng)
+
+| Kiểm | Kết quả |
+| --- | --- |
+| Kéo thả `demo.vi.srt` + `demo.en.vtt` một lượt | 2 bộ, mỗi bộ một lane (V1/V2), đúng mốc |
+| Câu chồng 20 ms + câu ở 00:25 trên timeline 20 s | cắt đuôi 1 câu, bỏ 1 câu, panel báo cả hai |
+| Cue 2 dòng | block giữ đúng 2 dòng của tệp |
+| Ctrl+Z / Ctrl+Y | mỗi tệp một bước, sổ `subtitleImports` đi theo |
+| `getHistoryState` → `restoreHistoryState` | bộ nhập còn nguyên (tên, số block, cờ đồng bộ) |
+
+```
+npm run test:subtitle-import  bộ đọc 6 định dạng + bảng mã + cue chồng nhau + đặt lên timeline
+                              + nhiều bộ song song (chạy THẬT khối hàm của editing-runtime.js)
+```
 
 ## Đóng gói dự án — bảng đoạn lane chính bị bỏ sót (2026-09-14)
 

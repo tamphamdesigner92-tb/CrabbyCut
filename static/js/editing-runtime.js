@@ -167,8 +167,8 @@
     let editPanelLibCategory = 'video';
     let editPanelTransitionCat = 'all'; // sub-tab đang chọn trong panel "Chuyển tiếp"
     let editPanelLutCat = 'soft';       // sub-tab đang chọn trong panel "LUT" (mặc định nhóm dịu)
-    let editPanelTextSub = 'import';    // sub-tab đang chọn trong panel "Văn bản" (Nhập | Mẫu văn bản)
-    let editPanelAudioSub = 'import';   // sub-tab của panel "Âm thanh" (Nhập | Auto Subtitle)
+    let editPanelTextSub = 'import';    // sub-tab đang chọn trong panel "Văn bản" (Nhập | Mẫu | Hiệu ứng | Auto/Local Subtitle)
+    let editPanelAudioSub = 'import';   // sub-tab của panel "Âm thanh" (hiện chỉ còn Nhập — Auto Subtitle đã sang tab Văn bản)
     let transitionBoundaryCache = [];   // điểm cắt đã render gần nhất (để hit-test khi kéo-thả)
     let selectedTransitionKey = null;   // node chuyển cảnh đang được chọn (key điểm cắt)
     let transitionDndSetup = false;     // đã gắn handler kéo-thả chưa
@@ -2360,14 +2360,22 @@
         return chunks.length ? chunks : [String(text == null ? '' : text)];
     }
 
-    function defaultTextPlacementFor(text, style) {
+    /* `keepLineBreaks` — GIỮ xuống dòng có sẵn trong `text`, chỉ gói thêm dòng nào quá rộng.
+       Tệp phụ đề nhập vào (Local Subtitle) ngắt dòng CÓ CHỦ Ý — song ngữ một dòng một thứ
+       tiếng, hai người nói mỗi người một dòng — mà magicWrap coi "\n" như dấu cách và gói
+       lại từ đầu. Bỏ trống = hành vi cũ (Auto Subtitle, Magic Fill). */
+    function defaultTextPlacementFor(text, style, keepLineBreaks = false) {
         const seq = payloadSequence();
         const seqH = Math.max(2, Math.round(Number(seq.height)) || 1080);
         const insets = defaultTextSafeInsets();
         const maxWidth = defaultTextWrapWidth();
         const fontSize = Math.max(8, Math.min(400, Number(style.font_size) || 64));
         const letterPx = textLetterSpacingPx(style, fontSize);
-        const wrapped = magicWrap(text, fontSize, style.font_family, style.font_weight, letterPx, maxWidth);
+        const wrapLine = (value) => magicWrap(value, fontSize, style.font_family, style.font_weight, letterPx, maxWidth);
+        const parts = keepLineBreaks ? String(text).split('\n').filter((line) => line.trim()) : [];
+        const wrapped = parts.length > 1
+            ? parts.map(wrapLine).reduce((acc, w) => ({ lines: acc.lines.concat(w.lines), width: Math.max(acc.width, w.width) }), { lines: [], width: 1 })
+            : wrapLine(text);
         const wrappedText = wrapped.lines.join('\n');
         const boxWidth = Math.ceil(wrapped.width);
         const height = measureTextItemBox({ text: wrappedText, style: { ...style, box_width: boxWidth } }).height;
@@ -2400,7 +2408,7 @@
         const transform = defaultTransform();
         let text = 'Text';
         if (autoText) {
-            const fit = defaultTextPlacementFor(autoText, style);
+            const fit = defaultTextPlacementFor(autoText, style, !!options.keepLineBreaks);
             style.box_width = fit.box_width;
             transform.position_y = fit.position_y;
             text = fit.text;
@@ -3621,8 +3629,24 @@
      * có kênh lưu thứ hai nào phải bảo trì.
      *   { id, created_at, engine, source_scope, cues: [{start,end,text}],
      *     item_ids: [...], srt_path }
+     *
+     * NHIỀU BỘ SONG SONG (2026-09-26, Văn bản → Local Subtitle). Mỗi tệp phụ đề người dùng
+     * nhập vào là MỘT BỘ riêng trong `subtitleImports` — giống mỗi tệp caption là một track
+     * riêng ở Premiere — nên đặt được phụ đề song ngữ (Việt + Anh cùng lúc). Bộ của Auto
+     * Subtitle vẫn nằm ở khoá `subtitleState` CŨ, không dời vào mảng, vì ba thứ đã dựng trên
+     * giao ước "một bộ tự động, ghi ra <Tên dự án>.srt cạnh .crab": lượt Lưu, Đóng gói dự án
+     * (electron/project-package.js đọc thẳng `editingState.subtitleState`) và nhánh macOS mở
+     * cùng tệp .crab. Dời khoá là phải di trú cả ba; để nguyên thì dự án cũ mở lên không có gì
+     * phải đổi, còn bản cũ của ứng dụng mở dự án mới chỉ mất các bộ nhập (vẫn còn là block
+     * text thường, không mất chữ).
+     *
+     * Mọi hàm nhận `setId` bên dưới: bỏ trống = bộ Auto Subtitle (hành vi cũ, nơi gọi cũ
+     * không phải sửa); truyền id = đúng bộ đó, dù là bộ tự động hay bộ nhập.
+     *   subtitleImports[i] = { id, created_at, engine:'file', name, source_name, format,
+     *                          language, sync_style, cues, item_ids }
      */
     let subtitleState = null;
+    let subtitleImports = [];
 
     function getSubtitleState() {
         return subtitleState ? deepClone(subtitleState) : null;
@@ -3633,10 +3657,39 @@
         return getSubtitleState();
     }
 
+    function getSubtitleImports() {
+        return deepClone(subtitleImports);
+    }
+
+    function setSubtitleImports(list) {
+        subtitleImports = Array.isArray(list)
+            ? deepClone(list.filter((set) => set && typeof set === 'object' && set.id))
+            : [];
+        return getSubtitleImports();
+    }
+
+    function allSubtitleSets() {
+        return subtitleState ? [subtitleState, ...subtitleImports] : subtitleImports;
+    }
+
+    function findSubtitleSet(setId) {
+        if (setId == null || setId === '') return subtitleState;
+        const id = String(setId);
+        return allSubtitleSets().find((set) => String(set.id) === id) || null;
+    }
+
+    /* Bộ chứa block này (hoặc null). Một block chỉ thuộc tối đa một bộ: mỗi bộ tự dựng block
+     * của riêng nó, và thay/xoá một bộ chỉ gỡ đúng block trong item_ids của bộ đó. */
+    function subtitleSetOfItem(item) {
+        if (!item) return null;
+        const id = String(item.id);
+        return allSubtitleSets().find((set) => (set.item_ids || []).some((x) => String(x) === id)) || null;
+    }
+
     /* Block phụ đề còn sống trên timeline. Lọc theo item_ids chứ không theo chữ: người dùng
      * sửa/xoá tay một block thì bộ phụ đề vẫn phải khớp thực tế. */
-    function subtitleItems() {
-        const ids = new Set((subtitleState?.item_ids || []).map(String));
+    function subtitleItems(setId) {
+        const ids = new Set((findSubtitleSet(setId)?.item_ids || []).map(String));
         return editingItems.filter((it) => ids.has(String(it.id)));
     }
 
@@ -3649,8 +3702,8 @@
      *
      * `item.text` đã là chữ ĐÃ GÓI DÒNG (addTextItem gói sẵn) nên xuống dòng trong .srt trùng
      * đúng xuống dòng đang hiện trên khung hình. */
-    function subtitleCuesFromItems() {
-        return subtitleItems()
+    function subtitleCuesFromItems(setId) {
+        return subtitleItems(setId)
             .map((it) => ({
                 start: Math.max(0, Number(it.timeline_start) || 0),
                 end: Math.max(0, Number(it.timeline_start) || 0) + Math.max(0, Number(it.duration) || 0),
@@ -3675,31 +3728,38 @@
      *
      * KHÔNG đồng bộ `item.text`, `timeline_start` và `duration`: đó là nội dung và mốc
      * tiếng của TỪNG câu — ghi đè cả nhóm bằng một giá trị là xoá dữ liệu chứ không phải
-     * "đồng bộ thuộc tính". Đây cũng đúng ranh giới mà patchTextStyle đã vạch sẵn. */
-    function subtitleStyleSyncEnabled() {
-        return !!subtitleState && subtitleState.sync_style !== false;
+     * "đồng bộ thuộc tính". Đây cũng đúng ranh giới mà patchTextStyle đã vạch sẵn.
+     *
+     * CỜ THEO TỪNG BỘ: đồng bộ chỉ lan TRONG một bộ. Phụ đề song ngữ là hai bộ, và kéo bộ
+     * tiếng Anh lên trên mà bộ tiếng Việt cũng chạy theo là mất đúng thứ người dùng muốn. */
+    function subtitleStyleSyncEnabled(setId) {
+        const set = findSubtitleSet(setId);
+        return !!set && set.sync_style !== false;
     }
 
-    function setSubtitleStyleSync(enabled) {
-        if (!subtitleState) return false;
-        subtitleState.sync_style = !!enabled;
-        return subtitleStyleSyncEnabled();
+    function setSubtitleStyleSync(enabled, setId) {
+        const set = findSubtitleSet(setId);
+        if (!set) return false;
+        set.sync_style = !!enabled;
+        return subtitleStyleSyncEnabled(setId);
     }
 
     function isSubtitleItem(item) {
-        if (!item || !subtitleState) return false;
-        return (subtitleState.item_ids || []).some((id) => String(id) === String(item.id));
+        return !!subtitleSetOfItem(item);
     }
 
     /* Bộ block sẽ nhận CÙNG một thay đổi. Rỗng = không đồng bộ (nơi gọi giữ luật cũ).
      * Lọc track khoá ở đây luôn: khoá lane là để chặn MỌI đường ghi, kể cả đường này. */
     function subtitleSyncTargets(item) {
-        if (!isSubtitleItem(item) || !subtitleStyleSyncEnabled()) return [];
-        return subtitleItems().filter((it) => !isTrackLocked(itemTrack(it)));
+        const set = subtitleSetOfItem(item);
+        if (!set || set.sync_style === false) return [];
+        return subtitleItems(set.id).filter((it) => !isTrackLocked(itemTrack(it)));
     }
 
-    function removeSubtitleItems() {
-        const ids = new Set((subtitleState?.item_ids || []).map(String));
+    /* Gỡ block của MỘT bộ (bỏ trống = bộ Auto Subtitle). Chỉ gỡ block, KHÔNG xoá sổ của bộ —
+     * nơi gọi tự quyết (chạy lại thì ghi sổ mới đè lên, "Xoá" thì bỏ sổ). */
+    function removeSubtitleItems(setId) {
+        const ids = new Set((findSubtitleSet(setId)?.item_ids || []).map(String));
         if (!ids.size) return 0;
         const before = editingItems.length;
         editingItems = editingItems.filter((it) => !ids.has(String(it.id)));
@@ -10478,16 +10538,19 @@
     function syncSubtitleSyncRow(item) {
         const section = document.getElementById('inspectorSubtitleSyncSection');
         if (!section) return;
-        const show = isSubtitleItem(item);
-        section.style.display = show ? '' : 'none';
-        if (!show) return;
+        // Cờ là của BỘ chứa block đang chọn (Auto Subtitle hay một tệp đã nhập) — xem
+        // subtitleStyleSyncEnabled.
+        const set = subtitleSetOfItem(item);
+        section.style.display = set ? '' : 'none';
+        if (!set) return;
         const box = document.getElementById('inspectorSubtitleSync');
         const hint = document.getElementById('inspectorSubtitleSyncHint');
-        const on = subtitleStyleSyncEnabled();
+        const on = subtitleStyleSyncEnabled(set.id);
         if (box) box.checked = on;
         if (hint) {
+            const who = set.name ? ` của bộ "${set.name}"` : '';
             hint.textContent = on
-                ? `Mọi thay đổi ở đây áp cho cả ${subtitleItems().length} phụ đề. Nội dung chữ và mốc thời gian của từng câu vẫn giữ riêng.`
+                ? `Mọi thay đổi ở đây áp cho cả ${subtitleItems(set.id).length} phụ đề${who}. Nội dung chữ và mốc thời gian của từng câu vẫn giữ riêng.`
                 : 'Mỗi phụ đề giữ kiểu chữ và thông số biến đổi riêng.';
         }
     }
@@ -15146,8 +15209,8 @@
         const body = document.getElementById('editPanelBody');
         if (!body || body.__importDndSetup) return;
         body.__importDndSetup = true;
-        // Nhóm "Auto Subtitle" của tab Âm thanh KHÔNG phải chỗ nhận tệp: thả file vào đó mà
-        // vẫn nhập như cũ thì người dùng tưởng mình vừa thả trượt.
+        // Chỉ nhóm "Nhập" của tab Âm thanh là chỗ nhận tệp phương tiện. (Tab Văn bản không nằm
+        // trong danh sách: nhóm Local Subtitle tự nhận tệp PHỤ ĐỀ bằng vùng thả của riêng nó.)
         const isImportTab = () => editPanelTab === 'media'
             || (editPanelTab === 'audio' && editPanelAudioSub === 'import');
         const hasFiles = (dt) => Array.from(dt?.types || []).includes('Files');
@@ -15306,14 +15369,16 @@
 
     const EDIT_PANEL_SUBTABS = {
         media: [{ id: 'import', label: 'Nhập' }],
-        audio: [
-            { id: 'import', label: 'Nhập' },
-            { id: 'subtitle', label: 'Auto Subtitle' },
-        ],
+        audio: [{ id: 'import', label: 'Nhập' }],
+        /* Auto Subtitle dời từ tab Âm thanh sang đây (2026-09-26, theo yêu cầu người dùng):
+           thứ nó SINH RA là block văn bản, nên nó đứng cạnh "Local Subtitle" — hai đường vào
+           cùng một loại kết quả. */
         text: [
             { id: 'import', label: 'Nhập' },
             { id: 'template', label: 'Mẫu văn bản' },
             { id: 'effect', label: 'Hiệu ứng chữ' },
+            { id: 'subtitle', label: 'Auto Subtitle' },
+            { id: 'local-subtitle', label: 'Local Subtitle' },
         ],
         shape: [{ id: 'shapes', label: 'Hình dạng' }],
         transition: [
@@ -16791,24 +16856,25 @@
         else if (editPanelTab === 'audio') activeSub = editPanelAudioSub;
         subEl.innerHTML = subs.map((s) => `<button class="edit-subtab ${s.id === activeSub ? 'is-active' : ''}" type="button" data-edit-subtab="${s.id}" role="tab" aria-selected="${s.id === activeSub}" aria-controls="editPanelBody">${s.label}</button>`).join('');
         if (editPanelTab === 'media') bodyEl.innerHTML = renderImportPaneHtml('media');
-        else if (editPanelTab === 'audio') {
-            if (editPanelAudioSub === 'subtitle') {
-                // Panel Auto Subtitle sống ở static/js/auto-subtitle.js — một tính năng độc
-                // lập, test riêng được mà không cần DOM thật.
-                if (window.AutoSubtitlePanel) {
-                    bodyEl.innerHTML = window.AutoSubtitlePanel.renderPaneHtml();
-                    window.AutoSubtitlePanel.bindPane(bodyEl);
-                } else {
-                    bodyEl.innerHTML = '<div class="edit-empty">Không nạp được auto-subtitle.js</div>';
-                }
-            } else {
-                bodyEl.innerHTML = renderImportPaneHtml('audio');
-            }
-        }
+        else if (editPanelTab === 'audio') bodyEl.innerHTML = renderImportPaneHtml('audio');
         else if (editPanelTab === 'script') { bodyEl.innerHTML = renderScriptPaneHtml(); bindScriptPane(bodyEl); }
         else if (editPanelTab === 'text') {
-            bodyEl.innerHTML = renderTextPaneHtml();
-            if (editPanelTextSub === 'template') initTextTemplateThumbs(bodyEl);
+            /* Hai panel phụ đề sống ở tệp riêng (auto-subtitle.js, local-subtitle.js) — tính
+               năng độc lập, test riêng được mà không cần DOM thật. */
+            const subtitlePanel = editPanelTextSub === 'subtitle' ? { mod: window.AutoSubtitlePanel, file: 'auto-subtitle.js' }
+                : editPanelTextSub === 'local-subtitle' ? { mod: window.LocalSubtitlePanel, file: 'local-subtitle.js' }
+                    : null;
+            if (subtitlePanel) {
+                if (subtitlePanel.mod) {
+                    bodyEl.innerHTML = subtitlePanel.mod.renderPaneHtml();
+                    subtitlePanel.mod.bindPane(bodyEl);
+                } else {
+                    bodyEl.innerHTML = `<div class="edit-empty">Không nạp được ${subtitlePanel.file}</div>`;
+                }
+            } else {
+                bodyEl.innerHTML = renderTextPaneHtml();
+                if (editPanelTextSub === 'template') initTextTemplateThumbs(bodyEl);
+            }
         }
         else if (editPanelTab === 'shape') bodyEl.innerHTML = renderShapePaneHtml();
         else if (editPanelTab === 'transition') { bodyEl.innerHTML = renderTransitionPaneHtml(); initTransitionThumbs(bodyEl); }
@@ -19227,6 +19293,8 @@
             // AUTO SUBTITLE: đi chung đường với mọi state khác -> .crab và undo/redo nhớ bộ
             // phụ đề mà không cần kênh lưu riêng (xem ghi chú ở subtitleState).
             subtitleState: subtitleState ? deepClone(subtitleState) : null,
+            // Các bộ nhập từ tệp (Local Subtitle) — khoá riêng, xem ghi chú ở subtitleState.
+            subtitleImports: deepClone(subtitleImports),
         };
     }
 
@@ -19265,6 +19333,8 @@
         subtitleState = (state.subtitleState && typeof state.subtitleState === 'object')
             ? deepClone(state.subtitleState)
             : null;
+        // Dự án lưu trước khi có Local Subtitle không có khoá này -> [] (cùng lý do như trên).
+        setSubtitleImports(state.subtitleImports);
         ensureDefaultTracks();
         /* MỞ LẠI DỰ ÁN: block đã có sẵn nên KHÔNG có lượt `ensureAssetProbed` nào chạy,
          * mà prewarm phía backend chỉ thấy asset lúc NHẬP. Không kick ở đây thì proxy LQ
@@ -19336,6 +19406,7 @@
          * Mở một dự án khác thì không dính vì restoreEditingHistoryState đặt lại khoá này;
          * chỉ đường "Dự án mới" là thiếu. */
         subtitleState = null;
+        subtitleImports = [];   // cùng lý do: bộ nhập của dự án cũ không được sống sang dự án mới
         selectedEditingItemId = '';
         selectedEditingItemIds.clear();
         selectedMainClipIndexes.clear();
@@ -21149,9 +21220,11 @@
         /* "Đồng bộ các subtitle" ở khối Biến đổi. KHÔNG recordHistory: bật/tắt nó không đổi
            một pixel nào trên khung hình, chỉ đổi cách các lượt chỉnh SAU đó lan ra — nhét
            vào undo/redo thì Ctrl+Z sau khi chỉnh cỡ chữ lại hoàn tác cái nút. `renderEditPanel`
-           để ô tích cùng tên ở panel Auto Subtitle bên trái không hiện ngược trạng thái. */
+           để ô tích cùng tên ở panel Auto Subtitle / Local Subtitle bên trái không hiện ngược
+           trạng thái. Cờ là của bộ chứa block đang chọn, không phải luôn luôn bộ Auto Subtitle. */
         document.getElementById('inspectorSubtitleSync')?.addEventListener('change', (event) => {
-            setSubtitleStyleSync(!!event.target.checked);
+            const set = subtitleSetOfItem(selectedEditingItem());
+            if (set) setSubtitleStyleSync(!!event.target.checked, set.id);
             syncSubtitleSyncRow(selectedEditingItem());
             renderEditPanel();
         });
@@ -23440,6 +23513,11 @@
         subtitleStyleSyncEnabled,
         setSubtitleStyleSync,
         isSubtitleItem,
+        // ----- LOCAL SUBTITLE (static/js/local-subtitle.js) -----
+        getSubtitleImports,
+        setSubtitleImports,
+        timelineDuration,
+        currentSequenceTime,
         subtitleTextStyle,
         subtitleFontForLanguage,
         addTextItem,

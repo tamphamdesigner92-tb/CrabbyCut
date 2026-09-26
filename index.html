@@ -33,7 +33,11 @@
     <!-- auto-grade.js đọc window.ColorAdjust lúc khởi tạo (UMD) -> phải nạp SAU color-adjust.js -->
     <script src="/static/js/auto-grade.js?v=autograde-p1"></script>
     <script src="/static/js/retouch.js?v=retouch-p1"></script>
-    <script src="/static/js/auto-subtitle.js?v=autosub-lumen-p1"></script>
+    <script src="/static/js/auto-subtitle.js?v=autosub-lumen-p2"></script>
+    <!-- Văn bản → Local Subtitle: bộ đọc tệp phụ đề (hàm thuần) + panel. Panel dùng lại buildSrt/
+         injectStyle của auto-subtitle.js nên nạp SAU nó. -->
+    <script src="/static/js/subtitle-formats.js?v=lsub-p1"></script>
+    <script src="/static/js/local-subtitle.js?v=lsub-p1"></script>
     <style>
         /* ===== UI Font (Inter, static theo độ dày từ thư mục Inter/) ===== */
         @font-face { font-family: "Inter"; src: url("/static/fonts/google/Inter/Inter_400Regular.ttf") format("truetype"); font-weight: 400; font-display: swap; }
@@ -12242,12 +12246,14 @@
         // Job + lựa chọn nguồn của panel Auto Subtitle nằm trong biến module: dự án cũ đóng
         // rồi mà không dọn thì dự án mới thừa hưởng cả thanh tiến trình lẫn danh sách phụ đề.
         window.AutoSubtitlePanel?.resetState?.();
+        window.LocalSubtitlePanel?.resetState?.();
         /* Sổ phụ đề của dự án VỪA ĐÓNG. Bình thường restoreHistoryState() ở cuối hàm đặt lại
          * khoá này (có phụ đề thì nạp, không có thì null), nhưng nó chỉ chạy `if (history)` —
          * một tệp .crab đời cũ KHÔNG có `history` thì sổ của dự án trước sống sót qua, và lượt
          * Lưu đầu tiên sẽ ghi phụ đề của dự án cũ ra .srt của dự án này. Dọn ở đây cho đường
          * mở dự án khớp với đường "Dự án mới" (xem resetProjectState ở editing-runtime.js). */
         window.EditingRuntime?.setSubtitleState?.(null);
+        window.EditingRuntime?.setSubtitleImports?.([]);   // bộ nhập từ tệp (Local Subtitle), cùng lý do
         undoStack = []; redoStack = []; updateUndoRedoButtons();
         stopPreviewProxyPolling();
         setPreviewModeActive(false);
@@ -12988,6 +12994,7 @@
         window.EditingRuntime?.resetRetouchCaches?.();
         window.EditingRuntime?.resetProjectState?.();
         window.AutoSubtitlePanel?.resetState?.();   // cùng lý do như openProjectFromResult
+        window.LocalSubtitlePanel?.resetState?.();
 
         undoStack = []; redoStack = []; updateUndoRedoButtons();
         setPreviewModeActive(false);
@@ -15887,7 +15894,7 @@
         performVideoExport();
     });
 </script>
-<script src="/static/js/editing-runtime.js?v=lumen-p4"></script>
+<script src="/static/js/editing-runtime.js?v=lumen-p5-lsub"></script>
 <script src="/static/js/perf-runtime.js"></script>
 <!-- Dụng cụ đo hiệu năng (Giai đoạn 0). Nạp SAU perf-runtime.js vì nó bọc chính những
      hàm toàn cục mà perf-runtime gán đè; nạp trước là bọc phải bản cũ. Lúc tắt nó chỉ

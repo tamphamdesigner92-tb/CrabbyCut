@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Tam Pham <tampham.designer92@gmail.com>
 
-/* Job model cho "Auto Subtitle" (tab Âm thanh) — trộn audio timeline rồi bóc băng.
+/* Job model cho "Auto Subtitle" (tab Văn bản) — trộn audio timeline rồi bóc băng.
  *
  * VÌ SAO LẠI LÀ JOB CHỨ KHÔNG PHẢI MỘT REQUEST ĐỒNG BỘ như /api/transcribe:
  * người dùng đòi THANH TIẾN TRÌNH. Kênh cũ (`progress.txt` + poll `/api/status`)

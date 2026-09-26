@@ -1,5 +1,5 @@
 /**
- * Smoke test cho Auto Subtitle (tab Âm thanh) — BẢN WINDOWS.
+ * Smoke test cho Auto Subtitle (tab Văn bản) — BẢN WINDOWS.
  *
  * Canh bốn chỗ dễ hỏng ÂM THẦM nhất của tính năng:
  *
