@@ -29,9 +29,12 @@
 (function () {
     'use strict';
 
+    const _t = (typeof globalThis !== 'undefined' && globalThis._t)
+        || ((k, p) => (p ? String(k).replace(/\{(\w+)\}/g, (m, n) => (n in p ? p[n] : m)) : k));
+
     const START_OPTIONS = [
-        { id: 'zero', label: 'Đầu timeline', hint: 'Mốc trong tệp tính từ 00:00 của timeline — đúng khi tệp phụ đề làm cho chính video trên lane chính.' },
-        { id: 'playhead', label: 'Vị trí playhead', hint: '00:00 của tệp đặt tại playhead — dùng khi phụ đề chỉ thuộc một đoạn giữa timeline.' },
+        { id: 'zero', label: _t('Đầu timeline'), hint: _t('Mốc trong tệp tính từ 00:00 của timeline — đúng khi tệp phụ đề làm cho chính video trên lane chính.') },
+        { id: 'playhead', label: _t('Vị trí playhead'), hint: _t('00:00 của tệp đặt tại playhead — dùng khi phụ đề chỉ thuộc một đoạn giữa timeline.') },
     ];
 
     /* Timecode kiểu phát sóng: nhiều tệp .srt/.xml xuất từ phần mềm dựng phim bắt đầu ở
@@ -64,7 +67,7 @@
         return AUTO()?.clock ? AUTO().clock(seconds) : String(Math.round(Number(seconds) || 0));
     }
 
-    const baseName = (fileName) => String(fileName || '').replace(/^.*[\\/]/, '').replace(/\.[^.]+$/, '') || 'Phụ đề';
+    const baseName = (fileName) => String(fileName || '').replace(/^.*[\\/]/, '').replace(/\.[^.]+$/, '') || _t('Phụ đề');
 
     // ── Đưa một tệp lên timeline ────────────────────────────────────────────
 
@@ -73,11 +76,10 @@
      * được câu nào. */
     function applyImport(parsed, meta) {
         const runtime = ER();
-        if (!runtime) throw new Error('Chưa nạp được editing-runtime.js.');
+        if (!runtime) throw new Error(_t('Chưa nạp được {file}.', { file: 'editing-runtime.js' }));
         const total = Number(runtime.timelineDuration?.()) || 0;
         if (!(total > 0)) {
-            throw new Error('Timeline chưa có video nào. Thêm video vào lane chính trước — '
-                + 'phụ đề được khớp theo mốc thời gian của timeline.');
+            throw new Error(_t('Timeline chưa có video nào. Thêm video vào lane chính trước — phụ đề được khớp theo mốc thời gian của timeline.'));
         }
         const offset = state.startAt === 'playhead' ? (Number(runtime.currentSequenceTime?.()) || 0) : 0;
         const firstStart = parsed.cues[0].start;
@@ -92,8 +94,8 @@
             .map((cue) => ({ ...cue, start: Math.max(0, cue.start) }));
         const skipped = moved.length - inside.length;
         if (!inside.length) {
-            throw new Error(`Mọi câu trong tệp đều nằm ngoài timeline (dài ${clock(total)}; câu đầu ở `
-                + `${clock(firstStart)}). Kiểm tra đúng tệp phụ đề của video này chưa, hoặc đổi "Bắt đầu từ".`);
+            throw new Error(_t('Mọi câu trong tệp đều nằm ngoài timeline (dài {total}; câu đầu ở {first}). Kiểm tra đúng tệp phụ đề của video này chưa, hoặc đổi "Bắt đầu từ".',
+                { total: clock(total), first: clock(firstStart) }));
         }
 
         const language = parsed.language || '';
@@ -158,7 +160,7 @@
     async function importFiles(files) {
         const list = Array.from(files || []).filter(Boolean);
         if (!list.length || state.busy) return;
-        if (!SF()) { toast('Chưa nạp được subtitle-formats.js.', 'error'); return; }
+        if (!SF()) { toast(_t('Chưa nạp được {file}.', { file: 'subtitle-formats.js' }), 'error'); return; }
         state.busy = true;
         state.lastError = '';
         state.notes = [];
@@ -175,15 +177,17 @@
                     lastSetId = result.set.id;
                     const notes = [];
                     if (decoded.fallback) {
-                        notes.push('tệp không phải UTF-8, đã đọc theo bảng mã Windows-1258 — chữ lỗi thì lưu lại tệp dạng UTF-8');
+                        notes.push(_t('tệp không phải UTF-8, đã đọc theo bảng mã Windows-1258 — chữ lỗi thì lưu lại tệp dạng UTF-8'));
                     }
-                    if (result.shiftedHours) notes.push(`timecode bắt đầu ở ${String(result.shiftedHours).padStart(2, '0')}:00:00 nên đã trừ ${result.shiftedHours} giờ`);
-                    if (parsed.merged) notes.push(`${parsed.merged} câu bắt đầu cùng lúc được gộp thành một block`);
-                    if (parsed.trimmed) notes.push(`${parsed.trimmed} câu chồng mốc lên câu sau được cắt đuôi`);
-                    if (result.skipped) notes.push(`${result.skipped} câu nằm ngoài timeline bị bỏ`);
-                    if (result.clamped) notes.push(`${result.clamped} câu bị cắt ngắn ở cuối timeline`);
+                    if (result.shiftedHours) notes.push(_t('timecode bắt đầu ở {tc} nên đã trừ {n} giờ', { tc: `${String(result.shiftedHours).padStart(2, '0')}:00:00`, n: result.shiftedHours }));
+                    if (parsed.merged) notes.push(_t('{n} câu bắt đầu cùng lúc được gộp thành một block', { n: parsed.merged }));
+                    if (parsed.trimmed) notes.push(_t('{n} câu chồng mốc lên câu sau được cắt đuôi', { n: parsed.trimmed }));
+                    if (result.skipped) notes.push(_t('{n} câu nằm ngoài timeline bị bỏ', { n: result.skipped }));
+                    if (result.clamped) notes.push(_t('{n} câu bị cắt ngắn ở cuối timeline', { n: result.clamped }));
                     if (notes.length) state.notes.push(`${name}: ${notes.join('; ')}.`);
-                    toast(`${result.replaced ? 'Đã thay' : 'Đã nhập'} ${result.count} phụ đề từ ${name}. Ctrl+Z hoàn tác.`, 'info');
+                    toast(result.replaced
+                        ? _t('Đã thay {n} phụ đề từ {name}. Ctrl+Z hoàn tác.', { n: result.count, name })
+                        : _t('Đã nhập {n} phụ đề từ {name}. Ctrl+Z hoàn tác.', { n: result.count, name }), 'info');
                 } catch (error) {
                     errors.push(`${name}: ${error?.message || error}`);
                 }
@@ -218,7 +222,7 @@
         } finally {
             endBatch();
         }
-        toast(`Đã xoá ${removed} block phụ đề của "${set.name}". Ctrl+Z hoàn tác.`, 'info');
+        toast(_t('Đã xoá {n} block phụ đề của "{name}". Ctrl+Z hoàn tác.', { n: removed, name: set.name }), 'info');
         repaint();
     }
 
@@ -229,16 +233,16 @@
     async function exportSet(setId) {
         const set = findSet(setId);
         const cues = set ? (ER()?.subtitleCuesFromItems?.(set.id) || []) : [];
-        if (!cues.length) { toast('Bộ phụ đề này không còn block nào trên timeline.', 'warning'); return; }
+        if (!cues.length) { toast(_t('Bộ phụ đề này không còn block nào trên timeline.'), 'warning'); return; }
         const text = AUTO()?.buildSrt ? AUTO().buildSrt(cues) : '';
-        if (!text) { toast('Chưa nạp được auto-subtitle.js (bộ dựng .srt).', 'error'); return; }
+        if (!text) { toast(_t('Chưa nạp được {file} (bộ dựng .srt).', { file: 'auto-subtitle.js' }), 'error'); return; }
         const fileName = `${set.name} (CrabbyCut).srt`;
         const save = window.desktopEnv?.saveSubtitleSrt;
         if (typeof save === 'function') {
             const result = await save('', text, fileName, false);
             if (!result || result.canceled || result.skipped) return;
-            if (result.error) { toast(`Lưu .srt thất bại: ${result.detail || result.error}`, 'error'); return; }
-            toast(`Đã lưu phụ đề: ${result.path}`, 'info');
+            if (result.error) { toast(_t('Lưu .srt thất bại: {error}', { error: result.detail || result.error }), 'error'); return; }
+            toast(_t('Đã lưu phụ đề: {path}', { path: result.path }), 'info');
             return;
         }
         // Bản web: tải xuống.
@@ -291,18 +295,18 @@
             <div class="edit-lsub-set" data-lsub-set="${esc(set.id)}">
                 <div class="edit-lsub-head">
                     <span class="edit-lsub-name" title="${esc(set.source_name)}">${esc(set.name)}</span>
-                    <span class="edit-lsub-meta">${cues.length} câu</span>
+                    <span class="edit-lsub-meta">${esc(_t('{n} câu', { n: cues.length }))}</span>
                 </div>
                 <div class="edit-sub-hint">${esc(label)}${font ? ` · ${esc(font)}` : ''}</div>
                 <label class="edit-sub-check">
                     <input type="checkbox" data-lsub-sync="${esc(set.id)}"${sync ? ' checked' : ''}>
-                    <span>Đồng bộ các subtitle</span>
+                    <span>${_t('Đồng bộ các phụ đề')}</span>
                 </label>
                 <div class="edit-sub-actions">
-                    <button class="btn btn-secondary" type="button" data-lsub-export="${esc(set.id)}"${cues.length ? '' : ' disabled'}>Xuất .srt</button>
-                    <button class="btn btn-secondary" type="button" data-lsub-remove="${esc(set.id)}">Xoá</button>
+                    <button class="btn btn-secondary" type="button" data-lsub-export="${esc(set.id)}"${cues.length ? '' : ' disabled'}>${_t('Xuất .srt')}</button>
+                    <button class="btn btn-secondary" type="button" data-lsub-remove="${esc(set.id)}">${_t('Xoá')}</button>
                 </div>
-                ${cues.length ? `<button type="button" class="edit-lsub-toggle" data-lsub-open="${esc(set.id)}">${open ? '▾ Ẩn danh sách câu' : '▸ Xem danh sách câu'}</button>` : ''}
+                ${cues.length ? `<button type="button" class="edit-lsub-toggle" data-lsub-open="${esc(set.id)}">${open ? `▾ ${_t('Ẩn danh sách câu')}` : `▸ ${_t('Xem danh sách câu')}`}</button>` : ''}
                 ${open && rows ? `<div class="edit-sub-list">${rows}</div>` : ''}
             </div>`;
     }
@@ -315,12 +319,11 @@
         return `
             <div class="edit-sub-pane" data-lsub-zone>
                 <div class="edit-sub-block">
-                    <div class="edit-sub-hint">Nhập tệp phụ đề có sẵn — mỗi câu thành một block văn bản đúng mốc
-                        thời gian trong tệp. Mỗi tệp là một bộ riêng, nên đặt được phụ đề hai thứ tiếng cùng lúc.</div>
+                    <div class="edit-sub-hint">${_t('Nhập tệp phụ đề có sẵn — mỗi câu thành một block văn bản đúng mốc thời gian trong tệp. Mỗi tệp là một bộ riêng, nên đặt được phụ đề hai thứ tiếng cùng lúc.')}</div>
                 </div>
 
                 <div class="edit-sub-block">
-                    <label class="edit-sub-label" for="lsubStart">Bắt đầu từ</label>
+                    <label class="edit-sub-label" for="lsubStart">${_t('Bắt đầu từ')}</label>
                     <select id="lsubStart" class="edit-sub-input" ${state.busy ? 'disabled' : ''}>
                         ${START_OPTIONS.map((o) => `<option value="${o.id}"${o.id === state.startAt ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}
                     </select>
@@ -329,8 +332,8 @@
 
                 <button class="edit-import-drop edit-lsub-drop" type="button" data-lsub-pick ${state.busy ? 'disabled' : ''}>
                     <span class="edit-import-drop-ico"><svg class="btn-ico"><use href="#ic-plus"/></svg></span>
-                    <span class="edit-import-drop-title">${state.busy ? 'Đang nhập…' : 'Nhập tệp phụ đề'}</span>
-                    <span class="edit-import-drop-sub">.srt .vtt .ass .xml .lrc .sbv — bấm hoặc kéo thả vào đây</span>
+                    <span class="edit-import-drop-title">${state.busy ? _t('Đang nhập…') : _t('Nhập tệp phụ đề')}</span>
+                    <span class="edit-import-drop-sub">${_t('.srt .vtt .ass .xml .lrc .sbv — bấm hoặc kéo thả vào đây')}</span>
                 </button>
                 <input type="file" id="lsubFileInput" accept="${esc(accept)}" multiple hidden>
 
@@ -339,7 +342,7 @@
 
                 ${sets.length ? `
                     <div class="edit-sub-block">
-                        <div class="edit-sub-label">${sets.length} bộ phụ đề đã nhập</div>
+                        <div class="edit-sub-label">${_t('{n} bộ phụ đề đã nhập', { n: sets.length })}</div>
                         ${sets.map(renderSetHtml).join('')}
                     </div>` : ''}
             </div>`;

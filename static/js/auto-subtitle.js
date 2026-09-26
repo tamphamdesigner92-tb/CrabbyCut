@@ -33,13 +33,16 @@
 (function () {
     'use strict';
 
+    const _t = (typeof globalThis !== 'undefined' && globalThis._t)
+        || ((k, p) => (p ? String(k).replace(/\{(\w+)\}/g, (m, n) => (n in p ? p[n] : m)) : k));
+
     const API = (typeof API_BASE === 'string' && API_BASE) ? API_BASE : '/api';
     const POLL_MS = 700;
 
     const SCOPES = [
-        { id: 'all', label: 'Toàn bộ timeline', hint: 'Lane chính + mọi block âm thanh đang bật tiếng' },
-        { id: 'main', label: 'Chỉ lane chính', hint: 'Tiếng thu trực tiếp trong video' },
-        { id: 'overlay', label: 'Chỉ lane âm thanh', hint: 'Tệp lồng tiếng / thu ngoài đặt ở lane dưới' },
+        { id: 'all', label: _t('Toàn bộ timeline'), hint: _t('Lane chính + mọi block âm thanh đang bật tiếng') },
+        { id: 'main', label: _t('Chỉ lane chính'), hint: _t('Tiếng thu trực tiếp trong video') },
+        { id: 'overlay', label: _t('Chỉ lane âm thanh'), hint: _t('Tệp lồng tiếng / thu ngoài đặt ở lane dưới') },
     ];
 
     /* NGÔN NGỮ BÓC BĂNG.
@@ -62,12 +65,12 @@
      * Giữ ĐỒNG BỘ với SUBTITLE_LANGUAGES ở backend/server.js và SUPPORTED_LANGUAGES ở
      * asr/windows_faster_whisper_sidecar.py. */
     const LANGUAGES = [
-        { id: 'vi', label: 'Tiếng Việt', font: 'Nunito' },
-        { id: 'en', label: 'English', font: 'Nunito' },
-        { id: 'zh', label: '中文 — Trung (giản thể)', font: 'Noto Sans SC' },
-        { id: 'ja', label: '日本語 — Nhật', font: 'Noto Sans JP' },
-        { id: 'ko', label: '한국어 — Hàn', font: 'Noto Sans KR' },
-        { id: 'auto', label: 'Tự nhận diện', font: '' },
+        { id: 'vi', label: _t('Tiếng Việt'), font: 'Nunito' },
+        { id: 'en', label: _t('English'), font: 'Nunito' },
+        { id: 'zh', label: _t('中文 — Trung (giản thể)'), font: 'Noto Sans SC' },
+        { id: 'ja', label: _t('日本語 — Nhật'), font: 'Noto Sans JP' },
+        { id: 'ko', label: _t('한국어 — Hàn'), font: 'Noto Sans KR' },
+        { id: 'auto', label: _t('Tự nhận diện'), font: '' },
     ];
 
     const state = {
@@ -229,7 +232,7 @@
         // luật cùng chạy là hai kiểu ngắt phụ đề khác nhau cho cùng một thứ người dùng nhìn thấy.
         const split = window.AiVideoPanel?.chunkSpansForScene || chunkSpansForScene;
         if (!runtime) {
-            throw new Error('Chưa nạp được editing-runtime.js — không chia được phụ đề.');
+            throw new Error(_t('Chưa nạp được {file} — không chia được phụ đề.', { file: 'editing-runtime.js' }));
         }
         const cues = [];
         (Array.isArray(segments) ? segments : []).forEach((seg) => {
@@ -267,7 +270,7 @@
 
     function applyCuesToTimeline(cues, meta) {
         const runtime = ER();
-        if (!runtime) throw new Error('Chưa nạp được editing-runtime.js.');
+        if (!runtime) throw new Error(_t('Chưa nạp được {file}.', { file: 'editing-runtime.js' }));
         /* Truyền style vào addTextItem NGAY lúc tạo chứ không gán sau: bề rộng gói dòng và
            toạ độ Y được ĐO trên chính style này, gán sau thì block đã bị gói theo font cũ.
            Cùng một hàm với lúc chia mảnh (xem subtitleStyleFor) để hai phép đo không lệch. */
@@ -376,23 +379,23 @@
         const sub = runtime?.getSubtitleState?.();
         const cues = sub ? currentCues() : [];
         if (!sub || !cues.length) {
-            if (!silent) toast('Chưa có phụ đề nào để lưu .srt.', 'warning');
+            if (!silent) toast(_t('Chưa có phụ đề nào để lưu .srt.'), 'warning');
             return null;
         }
         const save = window.desktopEnv?.saveSubtitleSrt;
         if (typeof save !== 'function') {
-            if (!silent) toast('Lưu .srt chỉ khả dụng trên bản desktop.', 'warning');
+            if (!silent) toast(_t('Lưu .srt chỉ khả dụng trên bản desktop.'), 'warning');
             return null;
         }
         const result = await save(projectPath(), buildSrt(cues), suggestedSrtName(), silent);
         if (!result || result.canceled || result.skipped) return null;
         if (result.error) {
-            if (!silent) toast(`Lưu .srt thất bại: ${result.detail || result.error}`, 'error');
+            if (!silent) toast(_t('Lưu .srt thất bại: {error}', { error: result.detail || result.error }), 'error');
             return null;
         }
         // Nhớ chỗ đã ghi để panel nói được "đã lưu ở đâu" sau khi mở lại dự án.
         runtime.setSubtitleState({ ...sub, srt_path: result.path });
-        if (!silent) toast(`Đã lưu phụ đề: ${result.path}`, 'info');
+        if (!silent) toast(_t('Đã lưu phụ đề: {path}', { path: result.path }), 'info');
         return result.path;
     }
 
@@ -412,7 +415,7 @@
         try {
             const resp = await fetch(`${API}/subtitles/jobs/${encodeURIComponent(state.jobId)}`);
             const data = await resp.json();
-            if (!resp.ok) throw new Error(data?.detail || data?.error || `Lỗi ${resp.status}`);
+            if (!resp.ok) throw new Error(data?.detail || data?.error || _t('Lỗi {status}', { status: resp.status }));
             state.job = data;
             if (data.state === 'running' || data.state === 'queued') {
                 repaint();
@@ -423,7 +426,7 @@
             state.busy = false;
             if (data.state === 'complete') await finishJob(data);
             else if (data.state === 'failed') {
-                state.lastError = data.error || data.message || 'Tạo phụ đề thất bại.';
+                state.lastError = data.error || data.message || _t('Tạo phụ đề thất bại.');
                 toast(state.lastError, 'error');
             }
             repaint();
@@ -439,7 +442,7 @@
         const segments = job?.result?.segments || [];
         (job.warnings || []).forEach((w) => toast(w, 'warning'));
         if (!segments.length) {
-            state.lastError = 'Không nghe thấy lời thoại nào trong audio của timeline.';
+            state.lastError = _t('Không nghe thấy lời thoại nào trong audio của timeline.');
             return;
         }
         /* Font phụ đề bám theo ngôn ngữ BACKEND BÁO VỀ, không theo ô đang chọn trong menu:
@@ -452,34 +455,33 @@
         const style = subtitleStyleFor(language);
         const cues = cuesFromSegments(segments, style);
         if (!cues.length) {
-            state.lastError = 'Bóc băng xong nhưng không dựng được câu phụ đề nào.';
+            state.lastError = _t('Bóc băng xong nhưng không dựng được câu phụ đề nào.');
             return;
         }
         const applied = applyCuesToTimeline(cues, { engine: job.result?.engine, scope: state.scope, language });
         // Ghi .srt NGAY (im lặng nếu dự án chưa Lưu — lúc Lưu sẽ tự ghi, xem saveProject).
         await writeSrtFile({ silent: true });
         state.lastError = '';
-        let msg = `Đã tạo ${applied.count} phụ đề`;
-        if (job.result?.cache_hit) msg += ' (dùng lại cache bóc băng)';
-        toast(`${msg}. Ctrl+Z hoàn tác toàn bộ.`, 'info');
+        toast(job.result?.cache_hit
+            ? _t('Đã tạo {n} phụ đề (dùng lại cache bóc băng). Ctrl+Z hoàn tác toàn bộ.', { n: applied.count })
+            : _t('Đã tạo {n} phụ đề. Ctrl+Z hoàn tác toàn bộ.', { n: applied.count }), 'info');
         if (applied.clamped) {
-            toast(`${applied.clamped} phụ đề bị cắt ngắn vì lane chính hết trước lời thoại. `
-                + 'Kéo dài lane chính rồi tạo lại nếu cần.', 'warning');
+            toast(_t('{n} phụ đề bị cắt ngắn vì lane chính hết trước lời thoại. Kéo dài lane chính rồi tạo lại nếu cần.',
+                { n: applied.clamped }), 'warning');
         }
     }
 
     async function createJob() {
         const runtime = ER();
-        if (!runtime) { toast('Chưa nạp được editing-runtime.js.', 'error'); return; }
+        if (!runtime) { toast(_t('Chưa nạp được {file}.', { file: 'editing-runtime.js' }), 'error'); return; }
         const entries = runtime.collectAudibleTimelineSpans(state.scope);
         if (!entries.length) {
-            toast('Không có đoạn audio nào đang bật tiếng theo lựa chọn này. '
-                + 'Kiểm tra lane chính / block âm thanh và nút tắt tiếng.', 'warning');
+            toast(_t('Không có đoạn audio nào đang bật tiếng theo lựa chọn này. Kiểm tra lane chính / block âm thanh và nút tắt tiếng.'), 'warning');
             return;
         }
         state.busy = true;
         state.lastError = '';
-        state.job = { state: 'queued', progress: 0, message: 'Đang gửi yêu cầu…' };
+        state.job = { state: 'queued', progress: 0, message: _t('Đang gửi yêu cầu…') };
         repaint();
         try {
             const resp = await fetch(`${API}/subtitles/transcribe`, {
@@ -508,7 +510,7 @@
                 }),
             });
             const data = await resp.json();
-            if (!resp.ok) throw new Error(data?.detail || data?.error || `Lỗi ${resp.status}`);
+            if (!resp.ok) throw new Error(data?.detail || data?.error || _t('Lỗi {status}', { status: resp.status }));
             state.jobId = data.job_id;
             state.job = data;
             repaint();
@@ -530,7 +532,7 @@
             await fetch(`${API}/subtitles/jobs/${encodeURIComponent(state.jobId)}/cancel`, { method: 'POST' });
         } catch (_) { /* job đã chết thì thôi */ }
         state.busy = false;
-        state.job = { state: 'cancelled', progress: 0, message: 'Đã huỷ' };
+        state.job = { state: 'cancelled', progress: 0, message: _t('Đã huỷ') };
         repaint();
     }
 
@@ -547,7 +549,7 @@
         } finally {
             endBatch();
         }
-        toast(`Đã xoá ${removed} block phụ đề. Ctrl+Z hoàn tác.`, 'info');
+        toast(_t('Đã xoá {n} block phụ đề. Ctrl+Z hoàn tác.', { n: removed }), 'info');
         repaint();
     }
 
@@ -636,11 +638,12 @@
         const lang = languageById(state.language);
         if (!lang) return '';
         if (lang.id === 'auto') {
-            return 'Whisper tự nghe ra ngôn ngữ, rồi phụ đề lấy font khớp với ngôn ngữ đó. '
-                + 'Chọn thẳng ngôn ngữ vẫn chắc hơn khi video có lẫn nhiều thứ tiếng.';
+            return _t('Whisper tự nghe ra ngôn ngữ, rồi phụ đề lấy font khớp với ngôn ngữ đó. Chọn thẳng ngôn ngữ vẫn chắc hơn khi video có lẫn nhiều thứ tiếng.');
         }
-        const zh = lang.id === 'zh' ? ' Whisper chỉ có một mã cho tiếng Trung — bản giản thể được neo bằng gợi ý ngữ cảnh.' : '';
-        return `Phụ đề dùng font ${lang.font}, hỗ trợ đầy đủ chữ của ngôn ngữ này.${zh}`;
+        const base = _t('Phụ đề dùng font {font}, hỗ trợ đầy đủ chữ của ngôn ngữ này.', { font: lang.font });
+        return lang.id === 'zh'
+            ? `${base} ${_t('Whisper chỉ có một mã cho tiếng Trung — bản giản thể được neo bằng gợi ý ngữ cảnh.')}`
+            : base;
     }
 
     /* Nút "Đồng bộ các subtitle". Cờ sống trong subtitleState (đi theo .crab + undo/redo) —
@@ -653,12 +656,11 @@
         return `
             <label class="edit-sub-check">
                 <input type="checkbox" id="subSyncStyle"${on ? ' checked' : ''}>
-                <span>Đồng bộ các subtitle</span>
+                <span>${_t('Đồng bộ các phụ đề')}</span>
             </label>
             <div class="edit-sub-hint">${on
-                ? 'Chỉnh kiểu chữ hoặc thông số ở subtab "Biến đổi" của MỘT phụ đề là cả bộ đổi theo. '
-                    + 'Nội dung chữ và mốc thời gian của từng câu vẫn giữ riêng.'
-                : 'Mỗi phụ đề giữ kiểu chữ và thông số biến đổi riêng.'}</div>`;
+                ? _t('Chỉnh kiểu chữ hoặc thông số ở subtab "Biến đổi" của MỘT phụ đề là cả bộ đổi theo. Nội dung chữ và mốc thời gian của từng câu vẫn giữ riêng.')
+                : _t('Mỗi phụ đề giữ kiểu chữ và thông số biến đổi riêng.')}</div>`;
     }
 
     function renderResultHtml() {
@@ -675,15 +677,15 @@
         const lang = languageById(sub.language);
         return `
             <div class="edit-sub-block">
-                <div class="edit-sub-label">${cues.length} phụ đề trên timeline${lang && lang.font ? ` · ${esc(lang.font)}` : ''}</div>
+                <div class="edit-sub-label">${_t('{n} phụ đề trên timeline', { n: cues.length })}${lang && lang.font ? ` · ${esc(lang.font)}` : ''}</div>
                 ${renderSyncHtml()}
                 <div class="edit-sub-actions">
-                    <button class="btn btn-secondary" type="button" id="subSaveSrt">Lưu .srt</button>
-                    <button class="btn btn-secondary" type="button" id="subClear">Xoá phụ đề</button>
+                    <button class="btn btn-secondary" type="button" id="subSaveSrt">${_t('Lưu .srt')}</button>
+                    <button class="btn btn-secondary" type="button" id="subClear">${_t('Xoá phụ đề')}</button>
                 </div>
                 <div class="edit-sub-hint">${sub.srt_path
-                    ? `Tệp phụ đề: <code>${esc(sub.srt_path)}</code>`
-                    : 'Tệp .srt được ghi cạnh tệp .crab ngay khi bạn Lưu dự án.'}</div>
+                    ? _t('Tệp phụ đề: <code>{path}</code>', { path: esc(sub.srt_path) })
+                    : _t('Tệp .srt được ghi cạnh tệp .crab ngay khi bạn Lưu dự án.')}</div>
                 <div class="edit-sub-list">${rows}</div>
             </div>`;
     }
@@ -695,21 +697,19 @@
         return `
             <div class="edit-sub-pane" data-sub-zone>
                 <div class="edit-sub-block">
-                    <div class="edit-sub-hint">Bóc băng âm thanh đang có trên timeline bằng Whisper (chạy trên máy)
-                        rồi rải thành block phụ đề — cùng kiểu chữ với phụ đề của "Tạo video AI",
-                        tối đa 2 dòng mỗi câu. Sửa từng câu như mọi block văn bản khác.</div>
+                    <div class="edit-sub-hint">${_t('Bóc băng âm thanh đang có trên timeline bằng Whisper (chạy trên máy) rồi rải thành block phụ đề — cùng kiểu chữ với phụ đề của "Tạo video AI", tối đa 2 dòng mỗi câu. Sửa từng câu như mọi block văn bản khác.')}</div>
                 </div>
 
                 <div class="edit-sub-block">
-                    <label class="edit-sub-label" for="subScope">Nguồn âm thanh</label>
+                    <label class="edit-sub-label" for="subScope">${_t('Nguồn âm thanh')}</label>
                     <select id="subScope" class="edit-sub-input" ${running ? 'disabled' : ''}>
                         ${SCOPES.map((s) => `<option value="${s.id}"${s.id === state.scope ? ' selected' : ''}>${esc(s.label)}</option>`).join('')}
                     </select>
-                    <div class="edit-sub-hint">${esc(scope.hint)}. Block/lane đang tắt tiếng thì không được bóc băng.</div>
+                    <div class="edit-sub-hint">${esc(scope.hint)}. ${_t('Block/lane đang tắt tiếng thì không được bóc băng.')}</div>
                 </div>
 
                 <div class="edit-sub-block">
-                    <label class="edit-sub-label" for="subLang">Ngôn ngữ lời thoại</label>
+                    <label class="edit-sub-label" for="subLang">${_t('Ngôn ngữ lời thoại')}</label>
                     <select id="subLang" class="edit-sub-input" ${running ? 'disabled' : ''}>
                         ${LANGUAGES.map((l) => `<option value="${l.id}"${l.id === state.language ? ' selected' : ''}>${esc(l.label)}</option>`).join('')}
                     </select>
@@ -718,9 +718,9 @@
 
                 <div class="edit-sub-actions">
                     <button class="btn btn-primary" type="button" id="subCreate" ${running ? 'disabled' : ''}>
-                        ${ER()?.getSubtitleState?.() ? 'Tạo lại phụ đề' : 'Tạo phụ đề'}
+                        ${ER()?.getSubtitleState?.() ? _t('Tạo lại phụ đề') : _t('Tạo phụ đề')}
                     </button>
-                    ${running ? '<button class="btn btn-danger" type="button" id="subCancel">Huỷ</button>' : ''}
+                    ${running ? `<button class="btn btn-danger" type="button" id="subCancel">${_t('Huỷ')}</button>` : ''}
                 </div>
 
                 ${renderProgressHtml()}

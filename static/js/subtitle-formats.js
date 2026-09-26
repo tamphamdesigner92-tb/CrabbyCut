@@ -29,6 +29,9 @@
 }(typeof window !== 'undefined' ? window : null, function () {
     'use strict';
 
+    const _t = (typeof globalThis !== 'undefined' && globalThis._t)
+        || ((k, p) => (p ? String(k).replace(/\{(\w+)\}/g, (m, n) => (n in p ? p[n] : m)) : k));
+
     const EXTENSIONS = ['srt', 'vtt', 'ass', 'ssa', 'xml', 'ttml', 'dfxp', 'lrc', 'sbv'];
     const ACCEPT = EXTENSIONS.map((ext) => `.${ext}`).join(',');
 
@@ -369,7 +372,7 @@
         vtt: 'WebVTT (.vtt)',
         ass: 'Advanced SubStation (.ass/.ssa)',
         ttml: 'Timed Text (.xml/.ttml/.dfxp)',
-        lrc: 'Lời bài hát (.lrc)',
+        lrc: _t('Lời bài hát (.lrc)'),
         sbv: 'YouTube SubViewer (.sbv)',
     };
 
@@ -456,15 +459,14 @@
     function parseSubtitleText(text, fileName) {
         const format = detectFormat(text, fileName);
         if (format === 'nle_xml') {
-            throw new Error('Đây là tệp XML dự án (Premiere/Final Cut), không phải tệp phụ đề. '
-                + 'Hãy xuất phụ đề ra .srt hoặc .xml dạng DFXP/TTML rồi nhập lại.');
+            throw new Error(_t('Đây là tệp XML dự án (Premiere/Final Cut), không phải tệp phụ đề. Hãy xuất phụ đề ra .srt hoặc .xml dạng DFXP/TTML rồi nhập lại.'));
         }
         if (!format) {
-            throw new Error('Không nhận ra định dạng phụ đề. Hỗ trợ: .srt, .vtt, .ass/.ssa, .xml/.ttml/.dfxp, .lrc, .sbv.');
+            throw new Error(_t('Không nhận ra định dạng phụ đề. Hỗ trợ: .srt, .vtt, .ass/.ssa, .xml/.ttml/.dfxp, .lrc, .sbv.'));
         }
         const tidy = tidyCues(PARSERS[format](text));
         if (!tidy.cues.length) {
-            throw new Error(`Tệp ${FORMAT_LABELS[format]} không có câu phụ đề nào đọc được.`);
+            throw new Error(_t('Tệp {format} không có câu phụ đề nào đọc được.', { format: FORMAT_LABELS[format] }));
         }
         return {
             format,

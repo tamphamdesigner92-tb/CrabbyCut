@@ -31,6 +31,8 @@
         root.Animations = root.TextAnimations;
     }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+    const _t = (typeof globalThis !== 'undefined' && globalThis._t)
+        || ((k, p) => (p ? String(k).replace(/\{(\w+)\}/g, (m, n) => (n in p ? p[n] : m)) : k));
     const DUR_MIN = 0.2;
     const DUR_MAX = 2.0;
     const DUR_FLOOR = 0.1; // sàn khi phải co cửa sổ cho item quá ngắn
@@ -39,30 +41,30 @@
     // vì Out chạy easing đảo chiều của cùng effect (xem animationStateAt). 'typewriter'
     // chỉ có nghĩa với text (caller lọc theo loại đối tượng nếu cần).
     const EFFECT_OPTIONS = [
-        { value: 'none', label: 'Không' },
-        { value: 'fade', label: 'Mờ dần' },
-        { value: 'slide_up', label: 'Trượt lên' },
-        { value: 'slide_down', label: 'Trượt xuống' },
-        { value: 'slide_left', label: 'Trượt trái' },
-        { value: 'slide_right', label: 'Trượt phải' },
-        { value: 'scale', label: 'Thu phóng vào' },
-        { value: 'zoom_out', label: 'Thu phóng ra' },
-        { value: 'pop', label: 'Pop' },
-        { value: 'rotate', label: 'Xoay nhẹ' },
-        { value: 'spin', label: 'Xoay tròn' },
-        { value: 'flip', label: 'Lật' },
-        { value: 'drift', label: 'Trôi nhẹ' },
-        { value: 'typewriter', label: 'Đánh máy' },
+        { value: 'none', label: _t('Không có') },
+        { value: 'fade', label: _t('Mờ dần') },
+        { value: 'slide_up', label: _t('Trượt lên') },
+        { value: 'slide_down', label: _t('Trượt xuống') },
+        { value: 'slide_left', label: _t('Trượt trái') },
+        { value: 'slide_right', label: _t('Trượt phải') },
+        { value: 'scale', label: _t('Thu phóng vào') },
+        { value: 'zoom_out', label: _t('Thu phóng ra') },
+        { value: 'pop', label: _t('Bật lên') },
+        { value: 'rotate', label: _t('Xoay nhẹ') },
+        { value: 'spin', label: _t('Xoay tròn') },
+        { value: 'flip', label: _t('Lật') },
+        { value: 'drift', label: _t('Trôi nhẹ') },
+        { value: 'typewriter', label: _t('Đánh máy') },
     ];
 
     const EASING_OPTIONS = [
-        { value: 'linear', label: 'Tuyến tính' },
-        { value: 'ease-in', label: 'Vào chậm' },
-        { value: 'ease-out', label: 'Ra chậm' },
-        { value: 'ease-in-out', label: 'Mượt' },
-        { value: 'back', label: 'Bật lại' },
-        { value: 'spring', label: 'Đàn hồi' },
-        { value: 'bounce', label: 'Nảy' },
+        { value: 'linear', label: _t('Tuyến tính') },
+        { value: 'ease-in', label: _t('Vào chậm') },
+        { value: 'ease-out', label: _t('Ra chậm') },
+        { value: 'ease-in-out', label: _t('Mượt') },
+        { value: 'back', label: _t('Bật lại') },
+        { value: 'spring', label: _t('Đàn hồi') },
+        { value: 'bounce', label: _t('Nảy') },
     ];
 
     const EFFECT_VALUES = new Set(EFFECT_OPTIONS.map((o) => o.value));
@@ -628,17 +630,17 @@
      * Mỗi combo khai báo effect+easing cho từng phía. applyCombo() chia thời lượng
      * tổng theo tỉ lệ (ratio = phần dành cho In) rồi kẹp về [DUR_MIN, DUR_MAX]. */
     const COMBO_OPTIONS = [
-        { value: 'fade', label: 'Mờ vào-ra', in: { type: 'fade', easing: 'ease-in-out' }, out: { type: 'fade', easing: 'ease-in-out' } },
-        { value: 'pop_fade', label: 'Pop & mờ', in: { type: 'pop', easing: 'spring' }, out: { type: 'fade', easing: 'ease-in-out' } },
-        { value: 'zoom', label: 'Phóng vào-ra', in: { type: 'scale', easing: 'back' }, out: { type: 'zoom_out', easing: 'ease-in-out' } },
-        { value: 'rise_fall', label: 'Lên & xuống', in: { type: 'slide_up', easing: 'ease-out' }, out: { type: 'slide_down', easing: 'ease-in' } },
-        { value: 'slide_lr', label: 'Trượt trái-phải', in: { type: 'slide_left', easing: 'ease-out' }, out: { type: 'slide_right', easing: 'ease-in' } },
-        { value: 'spin', label: 'Xoay tròn', in: { type: 'spin', easing: 'ease-out' }, out: { type: 'spin', easing: 'ease-in' } },
-        { value: 'flip', label: 'Lật', in: { type: 'flip', easing: 'back' }, out: { type: 'flip', easing: 'ease-in-out' } },
-        { value: 'rotate', label: 'Nghiêng', in: { type: 'rotate', easing: 'back' }, out: { type: 'rotate', easing: 'ease-in-out' } },
-        { value: 'drift', label: 'Trôi nhẹ', in: { type: 'drift', easing: 'ease-out' }, out: { type: 'drift', easing: 'ease-in-out' } },
-        { value: 'bounce', label: 'Nảy vào', in: { type: 'pop', easing: 'bounce' }, out: { type: 'scale', easing: 'ease-in-out' } },
-        { value: 'zoom_spin', label: 'Phóng & xoay', in: { type: 'scale', easing: 'back' }, out: { type: 'spin', easing: 'ease-in' } },
+        { value: 'fade', label: _t('Mờ vào-ra'), in: { type: 'fade', easing: 'ease-in-out' }, out: { type: 'fade', easing: 'ease-in-out' } },
+        { value: 'pop_fade', label: _t('Bật lên & mờ'), in: { type: 'pop', easing: 'spring' }, out: { type: 'fade', easing: 'ease-in-out' } },
+        { value: 'zoom', label: _t('Phóng vào-ra'), in: { type: 'scale', easing: 'back' }, out: { type: 'zoom_out', easing: 'ease-in-out' } },
+        { value: 'rise_fall', label: _t('Lên & xuống'), in: { type: 'slide_up', easing: 'ease-out' }, out: { type: 'slide_down', easing: 'ease-in' } },
+        { value: 'slide_lr', label: _t('Trượt trái-phải'), in: { type: 'slide_left', easing: 'ease-out' }, out: { type: 'slide_right', easing: 'ease-in' } },
+        { value: 'spin', label: _t('Xoay tròn'), in: { type: 'spin', easing: 'ease-out' }, out: { type: 'spin', easing: 'ease-in' } },
+        { value: 'flip', label: _t('Lật'), in: { type: 'flip', easing: 'back' }, out: { type: 'flip', easing: 'ease-in-out' } },
+        { value: 'rotate', label: _t('Nghiêng'), in: { type: 'rotate', easing: 'back' }, out: { type: 'rotate', easing: 'ease-in-out' } },
+        { value: 'drift', label: _t('Trôi nhẹ'), in: { type: 'drift', easing: 'ease-out' }, out: { type: 'drift', easing: 'ease-in-out' } },
+        { value: 'bounce', label: _t('Nảy vào'), in: { type: 'pop', easing: 'bounce' }, out: { type: 'scale', easing: 'ease-in-out' } },
+        { value: 'zoom_spin', label: _t('Phóng & xoay'), in: { type: 'scale', easing: 'back' }, out: { type: 'spin', easing: 'ease-in' } },
     ];
     const COMBO_BY_VALUE = new Map(COMBO_OPTIONS.map((c) => [c.value, c]));
 

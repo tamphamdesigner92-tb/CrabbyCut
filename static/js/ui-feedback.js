@@ -117,7 +117,7 @@
         el.innerHTML =
             `<svg class="toast-ico" aria-hidden="true"><use href="#${ICON[type]}"/></svg>`
             + `<div class="toast-body">${title}<div class="toast-msg"></div></div>`
-            + '<button type="button" class="toast-close" aria-label="Đóng thông báo">'
+            + `<button type="button" class="toast-close" aria-label="${_t('Đóng thông báo')}">`
             + '<svg class="btn-ico" aria-hidden="true"><use href="#ic-x"/></svg></button>';
         // textContent chứ không innerHTML: thông báo hay chứa tên tệp / message lỗi của
         // người dùng, nhét thẳng vào HTML là mở đường cho markup rác.

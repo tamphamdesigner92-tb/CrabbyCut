@@ -46,6 +46,9 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
     'use strict';
 
+    const _t = (typeof globalThis !== 'undefined' && globalThis._t)
+        || ((k, p) => (p ? String(k).replace(/\{(\w+)\}/g, (m, n) => (n in p ? p[n] : m)) : k));
+
     // ---------------------------------------------------------------------
     // 1. DATA MODEL
     // ---------------------------------------------------------------------
@@ -54,26 +57,26 @@
     // hue = tâm dải (độ). Trọng số của 1 pixel được nội suy giữa 2 tâm KỀ NHAU nên
     // tổng trọng số luôn = 1 -> không có dải nào bị "hụt" hay cộng dồn quá tay.
     const HSL_BANDS = [
-        { key: 'red', label: 'Đỏ', hue: 0, swatch: '#ff3b30' },
-        { key: 'orange', label: 'Cam', hue: 30, swatch: '#ff9500' },
-        { key: 'yellow', label: 'Vàng', hue: 60, swatch: '#ffcc00' },
-        { key: 'green', label: 'Lục', hue: 120, swatch: '#34c759' },
-        { key: 'aqua', label: 'Lam ngọc', hue: 180, swatch: '#32ade6' },
-        { key: 'blue', label: 'Lam', hue: 240, swatch: '#007aff' },
-        { key: 'purple', label: 'Tím', hue: 280, swatch: '#af52de' },
-        { key: 'magenta', label: 'Hồng sen', hue: 320, swatch: '#ff2d92' },
+        { key: 'red', label: _t('Đỏ'), hue: 0, swatch: '#ff3b30' },
+        { key: 'orange', label: _t('Cam'), hue: 30, swatch: '#ff9500' },
+        { key: 'yellow', label: _t('Vàng'), hue: 60, swatch: '#ffcc00' },
+        { key: 'green', label: _t('Lục'), hue: 120, swatch: '#34c759' },
+        { key: 'aqua', label: _t('Lam ngọc'), hue: 180, swatch: '#32ade6' },
+        { key: 'blue', label: _t('Lam'), hue: 240, swatch: '#007aff' },
+        { key: 'purple', label: _t('Tím'), hue: 280, swatch: '#af52de' },
+        { key: 'magenta', label: _t('Hồng sen'), hue: 320, swatch: '#ff2d92' },
     ];
 
     const WHEEL_KEYS = ['lift', 'gamma', 'gain'];
-    const WHEEL_LABELS = { lift: 'Vùng tối (Lift)', gamma: 'Trung tính (Gamma)', gain: 'Vùng sáng (Gain)' };
+    const WHEEL_LABELS = { lift: _t('Vùng tối (Lift)'), gamma: _t('Trung tính (Gamma)'), gain: _t('Vùng sáng (Gain)') };
     // Nhãn nhóm Độ sáng — dùng cho nhãn keyframe (UI dựng nhãn riêng ở ADJUST_TONE_FIELDS,
     // hai bên phải giống nhau về ý nghĩa).
     const TONE_LABELS = {
-        highlights: 'Vùng sáng', shadows: 'Bóng', whites: 'Vùng sáng nhất',
-        blacks: 'Vùng tối nhất', glow: 'Độ chói',
+        highlights: _t('Vùng sáng'), shadows: _t('Bóng'), whites: _t('Vùng sáng nhất'),
+        blacks: _t('Vùng tối nhất'), glow: _t('Độ chói'),
     };
     const CURVE_CHANNELS = ['all', 'r', 'g', 'b'];
-    const CURVE_LABELS = { all: 'RGB', r: 'Đỏ', g: 'Lục', b: 'Lam' };
+    const CURVE_LABELS = { all: 'RGB', r: _t('Đỏ'), g: _t('Lục'), b: _t('Lam') };
 
     // Đường cong mặc định = đường chéo (không đổi gì). LUÔN có điểm ở x=0 và x=1 để
     // không rơi vào nhánh "tự chèn điểm biên" của vf_curves (nhánh đó kẹp phẳng).
@@ -96,12 +99,12 @@
      * và mặt nạ CẮT BLOCK (tab Video, kiểu CapCut). Hai tính năng khác nhau ở chỗ GHÉP
      * (trộn màu vs nhân alpha) chứ hình học thì y hệt, nên khai một chỗ. */
     const MASK_TYPES = [
-        { key: 'split', label: 'Tách' },
-        { key: 'filmstrip', label: 'Cuộn phim' },
-        { key: 'circle', label: 'Hình tròn' },
-        { key: 'rect', label: 'Hình chữ nhật' },
-        { key: 'star', label: 'Ngôi sao' },
-        { key: 'heart', label: 'Tim' },
+        { key: 'split', label: _t('Tách') },
+        { key: 'filmstrip', label: _t('Cuộn phim') },
+        { key: 'circle', label: _t('Hình tròn') },
+        { key: 'rect', label: _t('Hình chữ nhật') },
+        { key: 'star', label: _t('Ngôi sao') },
+        { key: 'heart', label: _t('Tim') },
     ];
     // Hình KHÔNG có kích thước (nửa mặt phẳng) / chỉ có chiều cao — UI ẩn ô tương ứng.
     const MASK_TYPES_NO_SIZE = new Set(['split']);
@@ -701,11 +704,11 @@
     //   'eq'      -> biểu thức trong filter `eq` (mượt, rẻ, không sinh file)
     //   'sendcmd' -> file lệnh gửi vào `colorbalance` theo mốc thời gian
     const KEYFRAME_PARAMS = [
-        { path: 'basic.exposure', label: 'Phơi sáng', via: 'eq' },
-        { path: 'basic.contrast', label: 'Tương phản', via: 'eq' },
-        { path: 'basic.saturation', label: 'Bão hoà', via: 'eq' },
-        { path: 'basic.temperature', label: 'Nhiệt độ màu', via: 'sendcmd' },
-        { path: 'basic.tint', label: 'Tông màu', via: 'sendcmd' },
+        { path: 'basic.exposure', label: _t('Phơi sáng'), via: 'eq' },
+        { path: 'basic.contrast', label: _t('Tương phản'), via: 'eq' },
+        { path: 'basic.saturation', label: _t('Bão hoà'), via: 'eq' },
+        { path: 'basic.temperature', label: _t('Nhiệt độ màu'), via: 'sendcmd' },
+        { path: 'basic.tint', label: _t('Sắc thái'), via: 'sendcmd' },
         ...['lift', 'gamma', 'gain'].flatMap((wheel) => ['r', 'g', 'b'].map((ch) => ({
             path: `wheels.${wheel}.${ch}`,
             label: `${WHEEL_LABELS[wheel]} ${ch.toUpperCase()}`,
@@ -723,15 +726,15 @@
         // CƯỜNG ĐỘ LUT: `lut3d` không có tham số trộn và không đổi được file lúc chạy, nên
         // đường duy nhất là tách dòng thành 2 nhánh rồi `blend=all_expr` pha theo T —
         // sidecar dựng đoạn graph đó (xem ColorAdjustLutBlend trong core_process.cpp).
-        { path: 'lut.intensity', label: 'Cường độ LUT', via: 'lutmix' },
+        { path: 'lut.intensity', label: _t('Cường độ LUT'), via: 'lutmix' },
         // NHÓM HIỆU ỨNG — chỉ 2/5 thông số keyframe được, và đây là RÀNG BUỘC CỦA FFMPEG.
         // Đã đo cờ runtime của từng filter (`ffmpeg -h filter=...`, cột cờ có chữ `T`):
         //   avgblur  sizeX/sizeY/planes  CÓ `T`  -> "Làm mờ" đổi được bằng sendcmd
         //   vignette angle là BIỂU THỨC + có `eval=frame` -> "Viền mờ dần" đổi được theo `t`
         //   unsharp  KHÔNG có `T`, KHÔNG nhận biểu thức -> Làm sắc nét / Độ rõ nét: KHÔNG
         //   noise    KHÔNG có `T`, KHÔNG nhận biểu thức -> Hạt nhỏ: KHÔNG
-        { path: 'effects.blur', label: 'Làm mờ', via: 'blur' },
-        { path: 'effects.vignette', label: 'Viền mờ dần', via: 'vignette' },
+        { path: 'effects.blur', label: _t('Làm mờ'), via: 'blur' },
+        { path: 'effects.vignette', label: _t('Viền mờ dần'), via: 'vignette' },
     ];
     const KEYFRAME_PATHS = new Set(KEYFRAME_PARAMS.map((p) => p.path));
     const KEYFRAME_PREFIX = 'adj.';
@@ -1566,7 +1569,7 @@
             if (!line || line.startsWith('#')) continue;
             const upper = line.toUpperCase();
             if (upper.startsWith('LUT_3D_SIZE')) { size = parseInt(line.split(/\s+/)[1], 10); continue; }
-            if (upper.startsWith('LUT_1D_SIZE')) throw new Error('LUT 1D chưa được hỗ trợ, cần .cube 3D');
+            if (upper.startsWith('LUT_1D_SIZE')) throw new Error(_t('LUT 1D chưa được hỗ trợ, cần .cube 3D'));
             if (upper.startsWith('TITLE')) continue;
             if (upper.startsWith('DOMAIN_MIN')) { domainMin = line.split(/\s+/).slice(1, 4).map(Number); continue; }
             if (upper.startsWith('DOMAIN_MAX')) { domainMax = line.split(/\s+/).slice(1, 4).map(Number); continue; }
@@ -1576,9 +1579,9 @@
             if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) continue;
             values.push(r, g, b);
         }
-        if (!Number.isFinite(size) || size < 2 || size > 129) throw new Error('LUT_3D_SIZE không hợp lệ');
+        if (!Number.isFinite(size) || size < 2 || size > 129) throw new Error(_t('LUT_3D_SIZE không hợp lệ'));
         if (values.length !== size * size * size * 3) {
-            throw new Error(`Số dòng dữ liệu LUT sai: cần ${size ** 3}, có ${values.length / 3}`);
+            throw new Error(_t('Số dòng dữ liệu LUT sai: cần {need}, có {have}', { need: size ** 3, have: values.length / 3 }));
         }
         return { size, data: Float32Array.from(values), domainMin, domainMax };
     }

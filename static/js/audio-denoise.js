@@ -29,6 +29,9 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
     'use strict';
 
+    const _t = (typeof globalThis !== 'undefined' && globalThis._t)
+        || ((k, p) => (p ? String(k).replace(/\{(\w+)\}/g, (m, n) => (n in p ? p[n] : m)) : k));
+
     /* BẢNG KIỂU. Ba kiểu khác nhau ở BA chỗ, không hơn — thêm chỗ thứ tư là hai đường
      * preview/export bắt đầu khó giữ khớp:
      *   highpass : cắt ầm ì (rung bàn, gió, điều hoà) — thứ mà trừ phổ làm rất tệ.
@@ -46,8 +49,8 @@
     const PROFILES = {
         voice: {
             key: 'voice',
-            label: 'Giọng nói',
-            hint: 'Mặc định cho tiếng nói thu bằng mic — cắt ầm ì, giữ nguyên độ ấm.',
+            label: _t('Giọng nói'),
+            hint: _t('Mặc định cho tiếng nói thu bằng mic — cắt ầm ì, giữ nguyên độ ấm.'),
             highpass: 90,
             nrMin: 8,
             nrMax: 24,
@@ -55,8 +58,8 @@
         },
         room: {
             key: 'room',
-            label: 'Tiếng ồn nền',
-            hint: 'Ồn đều và liên tục: điều hoà, quạt, tiếng máy, tiếng phòng.',
+            label: _t('Tiếng ồn nền'),
+            hint: _t('Ồn đều và liên tục: điều hoà, quạt, tiếng máy, tiếng phòng.'),
             highpass: 60,
             nrMin: 10,
             nrMax: 30,
@@ -64,8 +67,8 @@
         },
         strong: {
             key: 'strong',
-            label: 'Mạnh',
-            hint: 'Nhiễu nặng (ngoài trời, gió, xì băng). Có thể làm giọng hơi mỏng.',
+            label: _t('Mạnh'),
+            hint: _t('Nhiễu nặng (ngoài trời, gió, xì băng). Có thể làm giọng hơi mỏng.'),
             highpass: 110,
             nrMin: 14,
             nrMax: 40,

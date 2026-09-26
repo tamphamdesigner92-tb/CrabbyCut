@@ -297,6 +297,26 @@ try {
   console.error('[backend] Cannot load native addon:', error.message);
 }
 
+/* ĐA NGÔN NGỮ: nạp TRƯỚC mọi module static/js khác — các module đó dịch hằng số cấp module
+ * bằng `globalThis._t` ngay lúc require. Ngôn ngữ chốt từ file cài đặt (đọc THÔ, vì
+ * AppSettings chưa nạp) + ngôn ngữ hệ điều hành do Electron truyền qua CRAB_SYSTEM_LOCALE.
+ * Đổi ngôn ngữ trong Cài đặt thì setServerLocale() chạy lại (xem POST /api/settings); hằng
+ * số cấp module đã dịch lúc nạp thì đợi lần mở app sau. */
+const I18n = require(path.join(STATIC_DIR, 'js', 'i18n.js'));
+const I18N_DIR = path.join(STATIC_DIR, 'i18n');
+const SYSTEM_LOCALE = process.env.CRAB_SYSTEM_LOCALE
+  || (() => { try { return Intl.DateTimeFormat().resolvedOptions().locale; } catch (_) { return ''; } })();
+I18n.SUPPORTED.filter((loc) => loc !== 'vi').forEach((loc) => {
+  try { I18n.register(loc, JSON.parse(fs.readFileSync(path.join(I18N_DIR, `${loc}.json`), 'utf8'))); } catch (_) { /* thiếu từ điển -> hiện tiếng Việt */ }
+});
+function setServerLocale(language) {
+  I18n.setLocale(I18n.resolve(language, SYSTEM_LOCALE));
+}
+setServerLocale((() => {
+  try { return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'))?.general?.language || 'vi'; } catch (_) { return 'auto'; }
+})());
+const _t = I18n.t;
+
 /* KHỬ TIẾNG ỒN: backend dựng chuỗi filter FFmpeg từ CHÍNH module mà preview dùng, nên
  * hai bên không thể lệch bảng quy đổi. Cố ý KHÔNG cho frontend gửi thẳng chuỗi filter
  * (khác với color_adjust, nơi chuỗi buộc phải sinh ở frontend vì phụ thuộc LUT/keyframe):
@@ -460,9 +480,31 @@ function humanBytes(bytes) {
 /* ---- CÀI ĐẶT ỨNG DỤNG: đọc/ghi settings/app_settings.json ----
  * File hỏng/thiếu/không đọc được đều rơi về mặc định thay vì ném lỗi: cấu hình là thứ phụ,
  * không được phép làm app không mở lên được. */
+/* Chốt ngôn ngữ cho index.html NGAY lúc phục vụ trang: renderer cần biết ngôn ngữ ĐỒNG BỘ,
+ * trước khi bất kỳ module nào dựng chuỗi — chờ fetch /api/settings là quá muộn. Chèn cấu
+ * hình vào chỗ `<!--CRAB_I18N_BOOT-->` (trước i18n.js) và từ điển của đúng MỘT ngôn ngữ vào
+ * `<!--CRAB_I18N_DICT-->` (ngay sau i18n.js). Tiếng Việt không có từ điển. */
+function injectI18n(html) {
+  const language = readAppSettings().general.language;
+  const locale = I18n.resolve(language, SYSTEM_LOCALE);
+  const boot = JSON.stringify({ language, systemLocale: SYSTEM_LOCALE }).replace(/</g, '\\u003c');
+  const dict = locale === 'vi' ? ''
+    : `<script src="/static/i18n/${locale}.js"></script>`;
+  return html
+    .replace(/<html lang="[^"]*">/, `<html lang="${locale === 'zh' ? 'zh-CN' : locale}">`)
+    .replace('<!--CRAB_I18N_BOOT-->', `<script>window.__CRAB_I18N__=${boot};</script>`)
+    .replace('<!--CRAB_I18N_DICT-->', dict);
+}
+
 function readAppSettings() {
   try {
-    return AppSettings.normalize(JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')));
+    const raw = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+    /* File có từ TRƯỚC khi có mục Ngôn ngữ = người dùng cũ, vốn chỉ thấy giao diện tiếng
+     * Việt -> giữ 'vi'. Chỉ cài mới (chưa có file) mới theo ngôn ngữ hệ điều hành ('auto'). */
+    if (raw && typeof raw === 'object' && !(raw.general && raw.general.language)) {
+      raw.general = { ...(raw.general || {}), language: 'vi' };
+    }
+    return AppSettings.normalize(raw);
   } catch (_) {
     return AppSettings.defaults();
   }
@@ -2184,8 +2226,8 @@ async function normalizeVideoForConcat(file, index, { withAudio = true, force = 
     return { name: path.basename(output), path: output, original_path: file.path, reused: true };
   }
   setStatus(isHdr
-    ? `Nguồn ${index + 1} là HDR — đang hạ về SDR để màu hiển thị đúng...`
-    : `Đang chuẩn hóa video nguồn ${index + 1} để dựng timeline...`);
+    ? _t('Nguồn {n} là HDR — đang hạ về SDR để màu hiển thị đúng...', { n: index + 1 })
+    : _t('Đang chuẩn hoá video nguồn {n} để dựng timeline...', { n: index + 1 }));
   // Clip KHÔNG có tiếng phải được cấp một rãnh tiếng CÂM, nếu không bản chuẩn hoá vẫn lệch
   // số luồng với clip có tiếng và concat lại hỏng đúng như cũ. `-shortest` cắt rãnh câm
   // theo độ dài hình.
@@ -2238,7 +2280,7 @@ async function normalizeVideoForConcat(file, index, { withAudio = true, force = 
     await runProcess('ffmpeg', buildArgs(''));
     return { name: path.basename(output), path: output, original_path: file.path, reused: false };
   }
-  await runTonemapWithFallback(buildArgs, () => setStatus(`Nguồn ${index + 1}: tonemap GPU lỗi, đang làm lại bằng CPU...`));
+  await runTonemapWithFallback(buildArgs, () => setStatus(_t('Nguồn {n}: tonemap GPU lỗi, đang làm lại bằng CPU...', { n: index + 1 })));
   return { name: path.basename(output), path: output, original_path: file.path, reused: false };
 }
 
@@ -2317,7 +2359,7 @@ const sdrAssetInflight = new Map();
 
 async function buildSdrAsset(resolved, output, label) {
   const name = label || path.basename(resolved);
-  setStatus(`Asset "${name}" là HDR — đang hạ về SDR để màu hiển thị đúng...`);
+  setStatus(_t('Asset "{name}" là HDR — đang hạ về SDR để màu hiển thị đúng...', { name }));
   const hasAudio = mediaHasAudio(resolved);
   const buildArgs = (tonemapChain) => {
     const args = ['-y', '-hide_banner', '-v', 'error'];
@@ -2340,7 +2382,7 @@ async function buildSdrAsset(resolved, output, label) {
     return args;
   };
   try {
-    await runTonemapWithFallback(buildArgs, () => setStatus(`Asset "${name}": tonemap GPU lỗi, đang làm lại bằng CPU...`));
+    await runTonemapWithFallback(buildArgs, () => setStatus(_t('Asset "{name}": tonemap GPU lỗi, đang làm lại bằng CPU...', { name })));
   } catch (error) {
     await fsp.rm(output, { force: true }).catch(() => {});
     recordProjectError('sdr_asset', error, { path: resolved });
@@ -2389,7 +2431,7 @@ async function normalizeSourcesForConcat(savedFiles, force = false) {
     const signatures = savedFiles.map((file) => concatStreamSignature(file.path));
     needsNormalize = signatures.some((sig) => sig !== signatures[0]);
     if (needsNormalize) {
-      setStatus('Video nguồn khác định dạng nhau — đang chuẩn hoá trước khi nối...');
+      setStatus(_t('Video nguồn khác định dạng nhau — đang chuẩn hoá trước khi nối...'));
     }
   }
   if (!needsNormalize) return savedFiles;
@@ -2593,7 +2635,7 @@ function pruneConcatCache() {
  * Người gọi cần nó để đo BẢNG ĐOẠN (xem concatSegmentTable): đo trên file gốc là sai vài ms
  * với mọi nguồn phải chuẩn hoá, mà lệch một chút ở đoạn đầu là mọi mốc phía sau trôi theo. */
 async function concatVideos(savedFiles) {
-  if (!savedFiles.length) throw new Error('Không có video hợp lệ để nối.');
+  if (!savedFiles.length) throw new Error(_t('Không có video hợp lệ để nối.'));
   const outputPath = path.join(TEMP_DIR, 'temp_input.mp4');
   /* Gỡ bản cũ trước cho sạch (sidecar ghi đè cũng được). KHÔNG để lỗi ở đây làm hỏng cả
    * lượt nối: trên Windows, job sóng âm/proxy đang đọc temp_input.mp4 là rm ném EPERM. */
@@ -2792,13 +2834,13 @@ function tryAdoptPreviewProxy(descriptor, concatPath) {
 
     const current = previewProxyIdentityFor(concatPath);
     if (!previewProxyIdentityMatches(descriptor?.identity, current)) {
-      setStatus('Bản proxy lưu kèm dự án không khớp video nguồn — đang dựng lại.');
+      setStatus(_t('Bản proxy lưu kèm dự án không khớp video nguồn — đang dựng lại.'));
       return null;
     }
     // Cửa 3: dung lượng phải khớp TỪNG BYTE con số đã ghi lúc lưu (xem khối chú thích trên).
     const expectedSize = Number(descriptor?.size_bytes);
     if (!Number.isFinite(expectedSize) || expectedSize <= 0 || stat.size !== expectedSize) {
-      setStatus('Bản proxy lưu kèm dự án không còn nguyên vẹn — đang dựng lại.');
+      setStatus(_t('Bản proxy lưu kèm dự án không còn nguyên vẹn — đang dựng lại.'));
       return null;
     }
     const proxyDuration = mediaDurationSeconds(resolved);
@@ -2821,7 +2863,7 @@ function tryAdoptPreviewProxy(descriptor, concatPath) {
     previewProxyState.duration_ms = 0;     // không encode -> không có thời gian encode
     previewProxyState.ready_at = isoNow();
     previewProxyState.identity = current;
-    setStatus('Đã dùng lại bản proxy lưu kèm dự án — không phải dựng lại.');
+    setStatus(_t('Đã dùng lại bản proxy lưu kèm dự án — không phải dựng lại.'));
     return previewProxyPublicState();
   } catch (error) {
     recordProjectError('preview_proxy_adopt', error, { command: 'preview-proxy-adopt' });
@@ -2840,7 +2882,7 @@ function queuePreviewProxy(videoPath) {
     try {
       const proxy = await createPreviewProxy(videoPath, generation);
       if (generation !== previewProxyGeneration) return;   // lượt này đã lỗi thời -> bỏ im lặng
-      if (!proxy) throw new Error('Không tạo được preview proxy.');
+      if (!proxy) throw new Error(_t('Không tạo được bản proxy xem trước.'));
       // Danh tính của file nối mà proxy này vừa được dựng ra từ đó — renderer lưu nó vào
       // .crab để lượt mở sau chứng minh được proxy còn dùng được (xem tryAdoptPreviewProxy).
       previewProxyState.identity = previewProxyIdentityFor(videoPath);
@@ -3723,7 +3765,7 @@ async function runWindowsWhisperCpp(videoPath, transcribeMode) {
   const wavPath = path.join(TEMP_DIR, 'whisper_input.wav');
   await runSidecar(['preprocess-audio', videoPath, wavPath, transcribeMode || 'vi_smart']);
   const modelPath = process.env.WHISPER_CPP_MODEL;
-  if (!modelPath) throw new Error('WHISPER_CPP_MODEL is not set.');
+  if (!modelPath) throw new Error(_t('Chưa đặt biến môi trường WHISPER_CPP_MODEL (đường dẫn mô hình whisper.cpp).'));
   const outputPath = path.join(TEMP_DIR, 'whispercpp_output.json');
   await runSidecar(['transcribe-whispercpp', wavPath, modelPath, outputPath]);
   return normalizeWhisperCppOutput(JSON.parse(await fsp.readFile(outputPath, 'utf8')));
@@ -3750,7 +3792,7 @@ async function runWindowsFasterWhisper(videoPath, referenceScript, transcribeMod
  * whisper.cpp (đường rollback của Windows) KHÔNG nối: nó chạy qua binary riêng, không đi
  * qua runPythonSidecar. Thiếu thì UI mất phần TRĂM chứ vẫn chạy và vẫn báo bằng chữ. */
 async function transcribeVideo(videoPath, referenceScript, transcribeMode, asrEngine, asrModel, options = {}) {
-  setStatus('Bắt đầu xử lý âm thanh... Đang khởi tạo mô hình ASR');
+  setStatus(_t('Bắt đầu xử lý âm thanh... Đang khởi tạo mô hình ASR'));
   if (process.platform === 'win32') {
     if (asrEngine === WINDOWS_ASR_ROLLBACK_ENGINE || windowsWhisperCppRollbackEnabled()) {
       return runWindowsWhisperCpp(videoPath, transcribeMode);
@@ -3805,7 +3847,7 @@ async function extractMagicFillAudio(sourceVideoPath, intervals, outputPath) {
     outputPath,
   ]);
   if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size <= 0) {
-    throw new Error('Không tách được audio timeline cho Magic Fill.');
+    throw new Error(_t('Không tách được audio timeline cho Magic Fill.'));
   }
   return outputPath;
 }
@@ -3848,19 +3890,19 @@ async function transcribeMagicFillTimeline({ sourceVideoPath, intervals, referen
   let asrResult = await readAsrCache(cacheInfo.key);
   const cacheHit = !!asrResult;
   if (!asrResult) {
-    setStatus('Magic Fill: đang tách audio theo timeline đã chỉnh sửa...');
+    setStatus(_t('Magic Fill: đang tách audio theo timeline đã chỉnh sửa...'));
     const audioPath = path.join(TEMP_DIR, 'magic_fill_audio.wav');
     await extractMagicFillAudio(sourceVideoPath, intervals, audioPath);
-    setStatus('Magic Fill: đang bóc băng lại audio timeline (word-level)...');
+    setStatus(_t('Magic Fill: đang bóc băng lại audio timeline (mốc từng từ)...'));
     asrResult = await transcribeVideo(audioPath, referenceScript, transcribeMode, asrRequest.requestedEngine, asrRequest.asrModel);
     try {
       await writeAsrCache(cacheInfo.key, cacheInfo.payload, asrResult);
     } catch (_) { /* cache hỏng không được chặn kết quả */ }
   } else {
-    setStatus('Magic Fill: dùng lại cache bóc băng timeline...');
+    setStatus(_t('Magic Fill: dùng lại cache bóc băng timeline...'));
   }
   const segments = normalizeSegmentsForSession(asrResult.segments);
-  setStatus('Magic Fill: đã có dữ liệu word-level mới.');
+  setStatus(_t('Magic Fill: đã có dữ liệu mốc từng từ mới.'));
   return {
     segments: jsonSafe(segments),
     intervals,
@@ -3949,7 +3991,7 @@ async function transcribeSubtitleMix(audioPath, {
   });
   const cached = await readAsrCache(cacheInfo.key);
   if (cached) {
-    setStatus('Auto Subtitle: dùng lại cache bóc băng.');
+    setStatus(_t('Auto Subtitle: dùng lại cache bóc băng.'));
     return { ...cached, cache_hit: true };
   }
   const result = await transcribeVideo(
@@ -4038,12 +4080,12 @@ async function runMatchingPipeline({ referenceScript, transcriptText, sessionPat
  * 0/27 mục có). Nay backend tự lấy mốc từng từ từ bản bóc băng cả video, nên renderer không
  * còn đường nào bơm dữ liệu hỏng vào bộ so khớp. */
 function normalizeReorderBlocks(raw) {
-  if (!Array.isArray(raw)) throw new Error('Danh sách block sắp xếp không hợp lệ.');
+  if (!Array.isArray(raw)) throw new Error(_t('Danh sách block sắp xếp không hợp lệ.'));
   return raw.map((item, position) => {
     const start = finiteNumber(item?.start, NaN);
     const end = finiteNumber(item?.end, NaN);
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
-      throw new Error(`Block #${position + 1} thiếu start/end hợp lệ.`);
+      throw new Error(_t('Block #{n} thiếu start/end hợp lệ.', { n: position + 1 }));
     }
     return {
       index: Number.isInteger(item?.index) ? item.index : position,
@@ -4167,14 +4209,13 @@ async function resolveTimelineWords({ blocks, referenceScript, transcribeMode, a
     }
   }
   if (sessionWordsCoverBlocks(sessionWords, blocks)) {
-    setStatus('Dùng lại mốc từng từ của bản bóc băng hiện có.');
+    setStatus(_t('Dùng lại mốc từng từ của bản bóc băng hiện có.'));
     return { blocks: sliceWordsByBlocks(sessionWords, blocks), source: 'session', wordCount: sessionWords.length };
   }
 
   const sourceVideoPath = path.join(TEMP_DIR, 'temp_input.mp4');
   if (!fs.existsSync(sourceVideoPath)) {
-    throw new Error('Không có mốc từng từ cho timeline này và cũng không tìm thấy video nguồn.'
-      + ' Hãy chạy lại bước Bóc băng (hoặc mở lại dự án rồi ingest nguồn) trước khi sắp xếp.');
+    throw new Error(_t('Không có mốc từng từ cho timeline này và cũng không tìm thấy video nguồn. Hãy chạy lại bước Bóc băng (hoặc mở lại dự án rồi nạp lại nguồn) trước khi sắp xếp.'));
   }
   const asrRequest = await resolveAsrRequest(asrEngine, asrModel);
   const cacheInfo = buildTimelineWordsCacheKey({
@@ -4187,9 +4228,9 @@ async function resolveTimelineWords({ blocks, referenceScript, transcribeMode, a
   });
   let asrResult = await readAsrCache(cacheInfo.key);
   if (asrResult) {
-    setStatus('Dùng lại cache bóc băng cả video để lấy mốc từng từ.');
+    setStatus(_t('Dùng lại cache bóc băng cả video để lấy mốc từng từ.'));
   } else {
-    setStatus('Đang bóc băng lại CẢ video để lấy mốc từng từ chính xác...');
+    setStatus(_t('Đang bóc băng lại CẢ video để lấy mốc từng từ chính xác...'));
     // CẢ video, không phải các khoảng đã nối — xem ghi chú đầu mục.
     asrResult = await transcribeVideo(sourceVideoPath, referenceScript, transcribeMode || 'vi_smart',
       asrRequest.requestedEngine, asrRequest.asrModel);
@@ -4202,7 +4243,7 @@ async function resolveTimelineWords({ blocks, referenceScript, transcribeMode, a
     await fsp.writeFile(sessionPath, JSON.stringify(jsonSafe(segments)), 'utf8');
   } catch (_) { /* không ghi được session thì vẫn dùng được kết quả trong lượt này */ }
   const words = flattenSessionWords(segments);
-  if (!words.length) throw new Error('Bóc băng lại không ra từ nào có mốc thời gian.');
+  if (!words.length) throw new Error(_t('Bóc băng lại không ra từ nào có mốc thời gian.'));
   return { blocks: sliceWordsByBlocks(words, blocks), source: 'retranscribed', wordCount: words.length };
 }
 
@@ -4221,13 +4262,13 @@ async function runScriptReorder({ referenceScript, blocks }) {
 
 function normalizeAutoReframeClips(timeline) {
   if (!Array.isArray(timeline)) {
-    throw new Error('Dữ liệu timeline Auto-Reframe không hợp lệ.');
+    throw new Error(_t('Dữ liệu timeline Auto-Reframe không hợp lệ.'));
   }
   return timeline.map((item, index) => {
     const start = Number(item?.start);
     const end = Number(item?.end);
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
-      throw new Error(`Auto-Reframe clip #${index + 1} thiếu start/end hợp lệ.`);
+      throw new Error(_t('Auto-Reframe clip #{n} thiếu start/end hợp lệ.', { n: index + 1 }));
     }
     // Renderer có thể gửi kèm index gốc trong latestTimeline (khi chỉ gửi một phần clip).
     const providedIndex = Number(item?.index);
@@ -4373,7 +4414,7 @@ function normalizeExportSettings(body = {}) {
     try {
       raw = JSON.parse(body.export_settings);
     } catch (_) {
-      throw new Error('export_settings không phải JSON hợp lệ.');
+      throw new Error(_t('Cài đặt xuất video (export_settings) không phải JSON hợp lệ.'));
     }
   } else if (body.export_settings && typeof body.export_settings === 'object') {
     raw = body.export_settings;
@@ -4390,7 +4431,7 @@ function normalizeExportSettings(body = {}) {
     width = evenDimension(raw.custom_width ?? raw.width, null);
     height = evenDimension(raw.custom_height ?? raw.height, null);
     if (!width || !height) {
-      throw new Error('Kích thước custom không hợp lệ. Width/height phải từ 16 đến 7680 và là số chẵn.');
+      throw new Error(_t('Kích thước tuỳ chỉnh không hợp lệ. Chiều rộng/chiều cao phải từ 16 đến 7680 và là số chẵn.'));
     }
   } else {
     width = EXPORT_RESOLUTIONS[resolution].width;
@@ -4493,13 +4534,13 @@ function validateCubeText(text) {
     if (!line || line.startsWith('#')) continue;
     const upper = line.toUpperCase();
     if (upper.startsWith('LUT_3D_SIZE')) { size = parseInt(line.split(/\s+/)[1], 10); continue; }
-    if (upper.startsWith('LUT_1D_SIZE')) return { ok: false, error: 'đây là LUT 1D, cần LUT 3D' };
+    if (upper.startsWith('LUT_1D_SIZE')) return { ok: false, error: _t('đây là LUT 1D, cần LUT 3D') };
     if (upper.startsWith('TITLE') || upper.startsWith('DOMAIN_')) continue;
     const parts = line.split(/\s+/);
     if (parts.length >= 3 && parts.slice(0, 3).every((p) => Number.isFinite(Number(p)))) rows += 1;
   }
-  if (!Number.isFinite(size) || size < 2 || size > 129) return { ok: false, error: 'thiếu hoặc sai LUT_3D_SIZE' };
-  if (rows !== size ** 3) return { ok: false, error: `cần ${size ** 3} dòng dữ liệu, có ${rows}` };
+  if (!Number.isFinite(size) || size < 2 || size > 129) return { ok: false, error: _t('thiếu hoặc sai LUT_3D_SIZE') };
+  if (rows !== size ** 3) return { ok: false, error: _t('cần {need} dòng dữ liệu, có {rows}', { need: size ** 3, rows }) };
   return { ok: true, size };
 }
 
@@ -4513,7 +4554,8 @@ function listColorLuts() {
     .filter((p) => fs.existsSync(path.join(LUT_DIR, p.file)))
     // `cat` = nhóm hiển thị ở tab LUT bên trái (soft/bright/cine/mono). Preset cũ
     // chưa có trường này thì rơi về 'cine' để không bị rớt khỏi mọi nhóm.
-    .map((p) => ({ id: p.id, name: p.name, cat: p.cat || 'cine', url: `/library/luts/${p.file}`, builtin: true }));
+    // Tên preset là khoá tiếng Việt -> dịch lúc trả (scripts/i18n_check.js cũng đọc presets.json).
+    .map((p) => ({ id: p.id, name: _t(p.name), cat: p.cat || 'cine', url: `/library/luts/${p.file}`, builtin: true }));
   let files = [];
   try { files = fs.readdirSync(LUT_DIR); } catch (_) { files = []; }
   files
@@ -4531,7 +4573,7 @@ function listColorLuts() {
 // export sau cũng không sinh rác mới.
 function materializeColorLutCube(text) {
   const check = validateCubeText(text);
-  if (!check.ok) throw new Error(`LUT bake không hợp lệ: ${check.error}`);
+  if (!check.ok) throw new Error(_t('LUT dựng cho block không hợp lệ: {error}', { error: check.error }));
   fs.mkdirSync(COLOR_LUT_BAKE_DIR, { recursive: true });
   fs.mkdirSync(COLOR_MASK_DIR, { recursive: true });
   const hash = crypto.createHash('sha1').update(text).digest('hex').slice(0, 16);
@@ -4776,7 +4818,7 @@ function normalizeVideoMaskFields(raw) {
   try {
     return { video_mask_path: materializeColorMaskPng(String(raw)) };
   } catch (error) {
-    throw new Error(`Không ghi được mặt nạ cắt hình của block: ${error.message}`);
+    throw new Error(_t('Không ghi được mặt nạ cắt hình của block: {error}', { error: error.message }));
   }
 }
 
@@ -4862,7 +4904,7 @@ function normalizeClipContentRect(raw) {
 
 function normalizeExportIntervals(timeline, sequenceSettings = null) {
   if (!Array.isArray(timeline)) {
-    throw new Error('Dữ liệu timeline không hợp lệ.');
+    throw new Error(_t('Dữ liệu timeline không hợp lệ.'));
   }
   const seqW = Number(sequenceSettings?.width) || 0;
   const seqH = Number(sequenceSettings?.height) || 0;
@@ -4870,10 +4912,10 @@ function normalizeExportIntervals(timeline, sequenceSettings = null) {
     const start = Number(item?.start);
     const end = Number(item?.end);
     if (!Number.isFinite(start) || !Number.isFinite(end)) {
-      throw new Error(`Timeline item #${index + 1} thiếu start/end hợp lệ.`);
+      throw new Error(_t('Mục timeline #{n} thiếu start/end hợp lệ.', { n: index + 1 }));
     }
     if (end <= start || (end - start) < 0.05) {
-      throw new Error(`Timeline item #${index + 1} có thời lượng quá ngắn hoặc end <= start.`);
+      throw new Error(_t('Mục timeline #{n} có thời lượng quá ngắn hoặc end <= start.', { n: index + 1 }));
     }
     const transform = normalizeClipTransform(item?.transform);
     /* HỆ SỐ VỪA KHUNG — "scale 100% = thấy TRỌN ảnh" (theo CapCut), giống hệt preview.
@@ -5385,7 +5427,7 @@ async function handleTranscribeFromSavedFiles({ savedFiles, referenceScript, scr
     script_metadata: scriptMetadata ? jsonSafe(scriptMetadata) : null,
     _started_at_ms: clientStartedAt,
   };
-  setStatus('Đang nối các file video lại với nhau...');
+  setStatus(_t('Đang nối các file video lại với nhau...'));
   const concatStartedAt = Date.now();
   const concat = await concatVideos(savedFiles);
   const concatPath = concat.path;
@@ -5410,7 +5452,7 @@ async function handleTranscribeFromSavedFiles({ savedFiles, referenceScript, scr
   let cacheWriteMs = null;
   let cacheWriteError = null;
   if (asrCacheHit) {
-    setStatus('Đã tìm thấy cache bóc băng, đang dùng lại kết quả ASR...');
+    setStatus(_t('Đã tìm thấy cache bóc băng, đang dùng lại kết quả ASR...'));
   } else {
     asrResult = await transcribeVideo(concatPath, referenceScript, transcribeMode, requestedEngine, asrRequest.asrModel);
     const cacheWriteStartedAt = Date.now();
@@ -5430,7 +5472,7 @@ async function handleTranscribeFromSavedFiles({ savedFiles, referenceScript, scr
   // (2026-07-27) BỎ bước sinh 3000-peak ở đây: sóng âm timeline giờ đọc file .pk
   // (750 peak/giây) đã prewarm SONG SONG với ASR ngay sau concat -> có sớm hơn, chính
   // xác hơn, và bỏ được một lần giải mã toàn bộ audio vốn chạy SAU ASR.
-  setStatus('Hoàn tất bóc băng! Đang chuẩn bị dữ liệu trả về...');
+  setStatus(_t('Hoàn tất bóc băng! Đang chuẩn bị dữ liệu trả về...'));
   const stat = fs.statSync(concatPath);
   const engineUsed = asrResult.engine || requestedEngine;
   const modeUsed = asrResult.transcribe_mode_used || transcribeMode || 'vi_smart';
@@ -5526,8 +5568,8 @@ async function resetProject() {
   }
   ensureDirs();
   setStatus(leftovers.length
-    ? `Đã dọn dữ liệu tạm, còn ${leftovers.length} mục đang bị chương trình khác giữ.`
-    : 'Đã dọn dẹp dữ liệu tạm. Sẵn sàng cho dự án mới.');
+    ? _t('Đã dọn dữ liệu tạm, còn {n} mục đang bị chương trình khác giữ.', { n: leftovers.length })
+    : _t('Đã dọn dẹp dữ liệu tạm. Sẵn sàng cho dự án mới.'));
   return leftovers;
 }
 
@@ -5536,6 +5578,19 @@ function createApp() {
   const app = express();
   app.use(express.json({ limit: '100mb' }));
   app.use('/temp_uploads', express.static(TEMP_DIR));
+  /* Từ điển nằm ở dạng JSON (dễ so khớp / sinh bằng script, Electron main require thẳng
+   * được); trình duyệt thì cần một <script> ĐỒNG BỘ nên bọc JSON thành lệnh register. */
+  app.get('/static/i18n/:locale.js', async (req, res) => {
+    const locale = String(req.params.locale || '');
+    if (!I18n.SUPPORTED.includes(locale) || locale === 'vi') return res.status(404).end();
+    try {
+      const json = await fsp.readFile(path.join(I18N_DIR, `${locale}.json`), 'utf8');
+      res.set('Cache-Control', 'no-store').type('application/javascript')
+        .send(`I18n.register(${JSON.stringify(locale)}, ${json});`);
+    } catch (_) {
+      res.type('application/javascript').send('/* thiếu từ điển */');
+    }
+  });
   app.use('/static', express.static(STATIC_DIR));
   // Trang kiểm chạy tay (tests/manual/*.html) + dữ liệu mẫu. Chỉ đọc, và chỉ hữu ích
   // khi chạy backend ở máy dev — xem tests/manual/retouch_shader_parity.html.
@@ -5551,9 +5606,10 @@ function createApp() {
 
   app.get('/', async (_req, res) => {
     try {
-      res.type('html').send(await fsp.readFile(path.join(PROJECT_ROOT, 'index.html'), 'utf8'));
+      const html = await fsp.readFile(path.join(PROJECT_ROOT, 'index.html'), 'utf8');
+      res.set('Cache-Control', 'no-store').type('html').send(injectI18n(html));
     } catch (_) {
-      res.status(404).type('html').send('<h1>Không tìm thấy file index.html</h1>');
+      res.status(404).type('html').send(`<h1>${_t('Không tìm thấy file index.html')}</h1>`);
     }
   });
 
@@ -5570,7 +5626,7 @@ function createApp() {
     try {
       res.json({ ...sig, message: fs.readFileSync(PROGRESS_FILE, 'utf8') });
     } catch (_) {
-      res.json({ ...sig, message: 'Hệ thống đang chuẩn bị...' });
+      res.json({ ...sig, message: _t('Hệ thống đang chuẩn bị...') });
     }
   });
 
@@ -5589,7 +5645,7 @@ function createApp() {
   app.post('/api/asr-models/setup', async (req, res) => {
     try {
       if (process.platform !== 'win32' && !process.env.WINDOWS_ASR_MODEL_DIR) {
-        return httpError(res, 400, 'Windows ASR model setup chỉ dành cho môi trường Windows.');
+        return httpError(res, 400, _t('Cài đặt mô hình ASR cho Windows chỉ dành cho môi trường Windows.'));
       }
       const model = normalizeWindowsAsrModel(req.body?.model || req.body?.asr_model || WINDOWS_ASR_DEFAULT_MODEL);
       const setupResult = await runWindowsAsrSidecar({
@@ -5624,7 +5680,7 @@ function createApp() {
         ? path.join(TEMP_DIR, 'temp_input.mp4')
         : (req.query.path || req.query.url || '');
       const job = queueAudioPeaks(requested);
-      if (!job) return httpError(res, 404, 'Không tìm thấy nguồn âm thanh hợp lệ.');
+      if (!job) return httpError(res, 404, _t('Không tìm thấy nguồn âm thanh hợp lệ.'));
       if (job.status === 'ready' && fs.existsSync(job.path)) {
         res.set('Content-Type', 'application/octet-stream');
         res.set('Cache-Control', 'public, max-age=31536000, immutable');
@@ -5699,7 +5755,7 @@ function createApp() {
     try {
       ensureDirs();
       const sourcePaths = Array.isArray(req.body?.source_paths) ? req.body.source_paths : [];
-      if (!sourcePaths.length) return httpError(res, 400, 'Không có nguồn video để nạp lại.');
+      if (!sourcePaths.length) return httpError(res, 400, _t('Không có nguồn video để nạp lại.'));
       const sessionSegments = Array.isArray(req.body?.session_segments) ? req.body.session_segments : null;
       const preserveOrder = req.body?.preserve_order === true;
       resetPreviewProxyState('idle');
@@ -5715,13 +5771,13 @@ function createApp() {
       let concatPath;
       let segments;
       if (cached) {
-        setStatus('Dùng lại bản đã nối của lần trước...');
+        setStatus(_t('Dùng lại bản đã nối của lần trước...'));
         concatPath = materializeConcatFromCache(cached.video, path.join(TEMP_DIR, 'temp_input.mp4'));
         segments = cached.segments;
       } else {
-        setStatus('Đang nạp lại dự án: sao chép video nguồn...');
+        setStatus(_t('Đang nạp lại dự án: sao chép video nguồn...'));
         const savedFiles = await copyLocalSourcesToTemp(resolvedSources);
-        setStatus('Đang nối các file video lại với nhau...');
+        setStatus(_t('Đang nối các file video lại với nhau...'));
         const concat = await concatVideos(savedFiles);
         concatPath = concat.path;
         segments = concatSegmentTable(concat.inputs, resolvedSources.map((s) => String(s)), concatPath);
@@ -5740,7 +5796,7 @@ function createApp() {
       const previewProxy = tryAdoptPreviewProxy(req.body?.preview_proxy, concatPath)
         || queuePreviewProxy(concatPath);
       const frameInfo = mediaVideoInfo(concatPath);
-      setStatus('Đã nạp lại dự án. Sẵn sàng tiếp tục chỉnh sửa.');
+      setStatus(_t('Đã nạp lại dự án. Sẵn sàng tiếp tục chỉnh sửa.'));
       res.json({
         status: 'success',
         video_version: Math.trunc(stat.mtimeMs),
@@ -5757,7 +5813,7 @@ function createApp() {
         },
       });
     } catch (error) {
-      setStatus('Lỗi khi nạp lại dự án!');
+      setStatus(_t('Lỗi khi nạp lại dự án!'));
       recordProjectError('project_reingest', error, { endpoint: '/api/project/reingest' });
       httpError(res, 500, error);
     }
@@ -5773,7 +5829,7 @@ function createApp() {
   app.post('/api/video-sources/scan', async (req, res) => {
     try {
       const sourcePaths = req.body?.source_paths || [];
-      if (!sourcePaths.length) return httpError(res, 400, 'Không có nguồn video đầu vào.');
+      if (!sourcePaths.length) return httpError(res, 400, _t('Không có nguồn video đầu vào.'));
       for (const raw of sourcePaths) registerSourceAccess(raw);
       const entries = collectMediaTreeFromSourcePaths(sourcePaths);
       const videos = entries.map((entry) => {
@@ -5802,8 +5858,8 @@ function createApp() {
   app.post('/api/media-probe', (req, res) => {
     try {
       const filePath = path.resolve(String(req.body?.path || ''));
-      if (!isSourceAccessAllowed(filePath)) return httpError(res, 403, 'Đường dẫn chưa được đăng ký.');
-      if (!isSupportedEditingAssetFile(filePath)) return httpError(res, 404, 'Không tìm thấy file phương tiện.');
+      if (!isSourceAccessAllowed(filePath)) return httpError(res, 403, _t('Đường dẫn chưa được đăng ký.'));
+      if (!isSupportedEditingAssetFile(filePath)) return httpError(res, 404, _t('Không tìm thấy tệp phương tiện.'));
       const kind = editingAssetKindForPath(filePath);
       const info = kind === 'audio' ? { width: null, height: null, fps: '', fps_value: null } : mediaVideoInfo(filePath);
       res.json({
@@ -5834,8 +5890,8 @@ function createApp() {
        * chính dự án đang mở nên cho qua là an toàn. */
       const relToTemp = path.relative(TEMP_DIR, filePath);
       const insideTemp = !!relToTemp && !relToTemp.startsWith('..') && !path.isAbsolute(relToTemp);
-      if (!insideTemp && !isSourceAccessAllowed(filePath)) return httpError(res, 403, 'Đường dẫn chưa được đăng ký.');
-      if (!isSupportedEditingAssetFile(filePath)) return httpError(res, 404, 'Không tìm thấy file phương tiện.');
+      if (!insideTemp && !isSourceAccessAllowed(filePath)) return httpError(res, 403, _t('Đường dẫn chưa được đăng ký.'));
+      if (!isSupportedEditingAssetFile(filePath)) return httpError(res, 404, _t('Không tìm thấy tệp phương tiện.'));
       if (editingAssetKindForPath(filePath) !== 'media_video') {
         return res.json({ status: 'success', path: filePath, url: '', tonemapped: false });
       }
@@ -5859,18 +5915,18 @@ function createApp() {
   app.get('/api/source-thumb', async (req, res) => {
     try {
       const filePath = path.resolve(String(req.query.path || ''));
-      if (!isSourceAccessAllowed(filePath)) return httpError(res, 403, 'Đường dẫn chưa được đăng ký.');
-      if (!isSupportedEditingAssetFile(filePath)) return httpError(res, 404, 'Không tìm thấy file phương tiện.');
+      if (!isSourceAccessAllowed(filePath)) return httpError(res, 403, _t('Đường dẫn chưa được đăng ký.'));
+      if (!isSupportedEditingAssetFile(filePath)) return httpError(res, 404, _t('Không tìm thấy tệp phương tiện.'));
       const assetKind = editingAssetKindForPath(filePath);
       const isRasterImage = assetKind === 'media_image'
         && RASTER_IMAGE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
       if (assetKind !== 'media_video' && !isRasterImage) {
-        return httpError(res, 400, 'Chỉ video và ảnh raster mới trích được thumbnail.');
+        return httpError(res, 400, _t('Chỉ video và ảnh raster mới trích được ảnh thu nhỏ.'));
       }
       const url = isRasterImage
         ? await createOrGetImageThumbnail(filePath)
         : await createOrGetThumbnail(filePath);
-      if (!url) return httpError(res, 404, 'Không trích được thumbnail.');
+      if (!url) return httpError(res, 404, _t('Không trích được ảnh thu nhỏ.'));
       res.redirect(302, url);
     } catch (error) {
       recordProjectError('source_thumb', error, { endpoint: '/api/source-thumb' });
@@ -5882,8 +5938,8 @@ function createApp() {
   app.get('/api/source-file', (req, res) => {
     try {
       const filePath = path.resolve(String(req.query.path || ''));
-      if (!isSourceAccessAllowed(filePath)) return httpError(res, 403, 'Đường dẫn chưa được đăng ký.');
-      if (!isSupportedEditingAssetFile(filePath)) return httpError(res, 404, 'Không tìm thấy file phương tiện.');
+      if (!isSourceAccessAllowed(filePath)) return httpError(res, 403, _t('Đường dẫn chưa được đăng ký.'));
+      if (!isSupportedEditingAssetFile(filePath)) return httpError(res, 404, _t('Không tìm thấy tệp phương tiện.'));
       res.sendFile(filePath);
     } catch (error) {
       httpError(res, 500, error);
@@ -5897,7 +5953,7 @@ function createApp() {
   app.get('/api/editing-assets/main-source', async (_req, res) => {
     try {
       const filePath = path.join(TEMP_DIR, 'temp_input.mp4');
-      if (!fs.existsSync(filePath)) return httpError(res, 404, 'Chưa có nguồn lane chính.');
+      if (!fs.existsSync(filePath)) return httpError(res, 404, _t('Chưa có nguồn lane chính.'));
       const asset = await editingAssetPayload(filePath, 'media');
       res.json({ status: 'success', asset: { ...asset, source: 'main' } });
     } catch (error) {
@@ -5928,7 +5984,7 @@ function createApp() {
         await fsp.copyFile(source, dest);
         assets.push({ ...(await editingAssetPayload(dest, preferredKind)), source_path: source });
       }
-      if (!assets.length) return httpError(res, 400, 'Không có asset Editing hợp lệ.');
+      if (!assets.length) return httpError(res, 400, _t('Không có tệp phương tiện hợp lệ cho Editing.'));
       prewarmAudioPeaksForAssets(assets); // sóng âm thật: sinh trước khi người dùng kéo xuống timeline
       prewarmAssetProxiesForAssets(assets); // proxy LQ: sinh trước, xem khối "PROXY LQ CHO ASSET OVERLAY"
       projectMetrics.activity = true;
@@ -5952,7 +6008,7 @@ function createApp() {
     try {
       const preferredKind = cleanInlineText(req.body?.kind || '', 40);
       const paths = Array.isArray(req.body?.paths) ? req.body.paths : [];
-      if (!paths.length) return httpError(res, 400, 'Không có đường dẫn nào.');
+      if (!paths.length) return httpError(res, 400, _t('Không có đường dẫn nào.'));
       for (const raw of paths) registerSourceAccess(raw);
       const accept = preferredKind === 'audio'
         ? (p) => isSupportedEditingAssetFile(p) && editingAssetKindForPath(p) === 'audio'
@@ -5969,7 +6025,7 @@ function createApp() {
           source_path: entry.path,
         });
       }
-      if (!assets.length) return httpError(res, 400, 'Không tìm thấy tệp phương tiện hợp lệ.');
+      if (!assets.length) return httpError(res, 400, _t('Không tìm thấy tệp phương tiện hợp lệ.'));
       // Proxy LQ: sinh trước cho những file ĐẦU danh sách (có trần, xem
       // PROXY_PREWARM_MAX_PER_BATCH — link có thể là cả cây thư mục hàng trăm file).
       prewarmAssetProxiesForAssets(assets);
@@ -6011,7 +6067,7 @@ function createApp() {
         if (usable.tonemapped) await fsp.rm(dest, { force: true }).catch(() => {});
         assets.push(await editingAssetPayload(usable.path, preferredKind, { groupPath: group }));
       }
-      if (!assets.length) return httpError(res, 400, 'Không có asset Editing hợp lệ.');
+      if (!assets.length) return httpError(res, 400, _t('Không có tệp phương tiện hợp lệ cho Editing.'));
       prewarmAudioPeaksForAssets(assets); // sóng âm thật: sinh trước khi người dùng kéo xuống timeline
       prewarmAssetProxiesForAssets(assets); // proxy LQ: sinh trước, xem khối "PROXY LQ CHO ASSET OVERLAY"
       projectMetrics.activity = true;
@@ -6039,7 +6095,7 @@ function createApp() {
     try {
       ensureDirs();
       const file = req.file;
-      if (!file) return httpError(res, 400, 'Thiếu ảnh raster của file vector.');
+      if (!file) return httpError(res, 400, _t('Thiếu ảnh raster của tệp vector.'));
       const displayName = cleanInlineText(req.body?.display_name || '', 255)
         || path.basename(file.originalname || 'vector.png');
       const name = safeAssetName(`${path.parse(displayName).name || 'vector'}.png`, new Set());
@@ -6101,7 +6157,9 @@ function createApp() {
 
   app.post('/api/settings', async (req, res) => {
     try {
-      res.json(writeAppSettings(req.body));
+      const saved = writeAppSettings(req.body);
+      setServerLocale(saved.general.language);
+      res.json(saved);
     } catch (error) {
       recordProjectError('settings_write', error, { endpoint: '/api/settings' });
       httpError(res, 500, error);
@@ -6113,12 +6171,13 @@ function createApp() {
    * Editing, ASR đọc lại từ nguồn). `temp_uploads` cố tình CHỈ ĐỌC — nó là dữ liệu làm việc
    * của dự án ĐANG MỞ (nguồn đã nhập, proxy, ảnh bake); dọn tay là giết dự án đang mở, và
    * đã có `/api/reset-project` lo việc đó đúng lúc. */
+  // `label` là HÀM: dịch lúc dựng phản hồi, vì người dùng đổi ngôn ngữ lúc app đang chạy.
   const CACHE_TARGETS = {
-    peaks: { dir: PEAKS_CACHE_DIR, label: 'Sóng âm (.pk)', clearable: true },
-    proxy: { dir: PROXY_CACHE_DIR, label: 'Proxy LQ xem trước', clearable: true },
-    asr: { dir: ASR_CACHE_DIR, label: 'Kết quả bóc băng', clearable: true },
-    concat: { dir: CONCAT_CACHE_DIR, label: 'Bản đã nối của dự án', clearable: true },
-    temp: { dir: TEMP_DIR, label: 'Dữ liệu dự án đang mở', clearable: false },
+    peaks: { dir: PEAKS_CACHE_DIR, label: () => _t('Sóng âm (.pk)'), clearable: true },
+    proxy: { dir: PROXY_CACHE_DIR, label: () => _t('Proxy LQ xem trước'), clearable: true },
+    asr: { dir: ASR_CACHE_DIR, label: () => _t('Kết quả bóc băng'), clearable: true },
+    concat: { dir: CONCAT_CACHE_DIR, label: () => _t('Bản đã nối của dự án'), clearable: true },
+    temp: { dir: TEMP_DIR, label: () => _t('Dữ liệu dự án đang mở'), clearable: false },
   };
 
   app.get('/api/cache/usage', async (_req, res) => {
@@ -6127,7 +6186,7 @@ function createApp() {
         status: 'success',
         items: Object.entries(CACHE_TARGETS).map(([id, t]) => {
           const usage = dirUsage(t.dir);
-          return { id, label: t.label, clearable: t.clearable, ...usage };
+          return { id, label: t.label(), clearable: t.clearable, ...usage };
         }),
       });
     } catch (error) {
@@ -6140,8 +6199,8 @@ function createApp() {
     try {
       const id = String(req.body?.id || '');
       const target = CACHE_TARGETS[id];
-      if (!target) return httpError(res, 400, 'Bộ nhớ đệm không hợp lệ.');
-      if (!target.clearable) return httpError(res, 400, `Không dọn được "${target.label}" — đây là dữ liệu của dự án đang mở.`);
+      if (!target) return httpError(res, 400, _t('Bộ nhớ đệm không hợp lệ.'));
+      if (!target.clearable) return httpError(res, 400, _t('Không dọn được "{label}" — đây là dữ liệu của dự án đang mở.', { label: target.label() }));
       let removed = 0;
       let names = [];
       try { names = fs.readdirSync(target.dir); } catch (_) { names = []; }
@@ -6161,9 +6220,17 @@ function createApp() {
    * mất hẳn. Người muốn dọn thư viện đã có nút xoá trên từng thẻ hiệu ứng. */
   app.post('/api/settings/reset', async (_req, res) => {
     try {
-      const kept = readAppSettings().textEffects || [];
-      try { fs.unlinkSync(SETTINGS_FILE); } catch (_) {}
-      res.json(kept.length ? writeAppSettings({ ...AppSettings.defaults(), textEffects: kept }) : AppSettings.defaults());
+      /* Ngôn ngữ giao diện cũng được GIỮ: "Khôi phục mặc định" mà bật sang tiếng Anh (mặc
+       * định 'auto') thì người dùng không đọc được chính cái họ vừa bấm. Vì luôn còn ngôn
+       * ngữ để giữ nên luôn GHI file — xoá file đi thì lần đọc sau sẽ hiểu nhầm là cài mới. */
+      const current = readAppSettings();
+      const kept = current.textEffects || [];
+      const base = AppSettings.defaults();
+      res.json(writeAppSettings({
+        ...base,
+        general: { ...base.general, language: current.general.language },
+        textEffects: kept,
+      }));
     } catch (error) {
       recordProjectError('settings_reset', error, { endpoint: '/api/settings/reset' });
       httpError(res, 500, error);
@@ -6175,7 +6242,7 @@ function createApp() {
       ensureDirs();
       const category = String(req.query.category || '').toLowerCase();
       const dir = libraryCategoryDir(category);
-      if (!dir) return httpError(res, 400, 'Category thư viện không hợp lệ.');
+      if (!dir) return httpError(res, 400, _t('Nhóm thư viện không hợp lệ.'));
       let names = [];
       try { names = await fsp.readdir(dir); } catch (_) { names = []; }
       const items = names
@@ -6215,23 +6282,23 @@ function createApp() {
       ensureDirs();
       const category = String(req.query.category || '').toLowerCase();
       const dir = libraryCategoryDir(category);
-      if (!dir) return httpError(res, 400, 'Category thư viện không hợp lệ.');
+      if (!dir) return httpError(res, 400, _t('Nhóm thư viện không hợp lệ.'));
       // basename: chặn ../ leo ra ngoài thư mục category (cùng cách /api/library/add làm)
       const name = path.basename(String(req.query.name || ''));
       const filePath = path.join(dir, name);
       if (!name || !fs.existsSync(filePath) || !isSupportedEditingAssetFile(filePath)) {
-        return httpError(res, 404, 'Không tìm thấy asset thư viện.');
+        return httpError(res, 404, _t('Không tìm thấy mục thư viện.'));
       }
       const assetKind = editingAssetKindForPath(filePath);
       const isRasterImage = assetKind === 'media_image'
         && RASTER_IMAGE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
       if (assetKind !== 'media_video' && !isRasterImage) {
-        return httpError(res, 400, 'Chỉ video và ảnh raster mới trích được thumbnail.');
+        return httpError(res, 400, _t('Chỉ video và ảnh raster mới trích được ảnh thu nhỏ.'));
       }
       const url = isRasterImage
         ? await createOrGetImageThumbnail(filePath)
         : await createOrGetThumbnail(filePath);
-      if (!url) return httpError(res, 404, 'Không trích được thumbnail.');
+      if (!url) return httpError(res, 404, _t('Không trích được ảnh thu nhỏ.'));
       res.redirect(302, url);
     } catch (error) {
       recordProjectError('library_thumb', error, { endpoint: API_PREFIX_LIBRARY_THUMB });
@@ -6274,14 +6341,14 @@ function createApp() {
     const uploaded = Array.isArray(req.files) ? req.files : [];
     try {
       ensureDirs();
-      if (!uploaded.length) return httpError(res, 400, 'Chưa chọn file .cube nào.');
+      if (!uploaded.length) return httpError(res, 400, _t('Chưa chọn tệp .cube nào.'));
       const file = uploaded[0];
       if (path.extname(file.originalname).toLowerCase() !== '.cube') {
-        return httpError(res, 400, 'Chỉ nhận file .cube (LUT 3D).');
+        return httpError(res, 400, _t('Chỉ nhận tệp .cube (LUT 3D).'));
       }
       const text = fs.readFileSync(file.path, 'utf8');
       const check = validateCubeText(text);
-      if (!check.ok) return httpError(res, 400, `File .cube không hợp lệ: ${check.error}`);
+      if (!check.ok) return httpError(res, 400, _t('Tệp .cube không hợp lệ: {error}', { error: check.error }));
 
       const base = sanitizeLutId(path.basename(file.originalname, '.cube')) || 'lut';
       let id = base;
@@ -6318,7 +6385,7 @@ function createApp() {
           if (!filePath || !fs.existsSync(filePath) || !isSupportedEditingAssetFile(filePath)) continue;
           assets.push(await libraryAssetPayload(filePath, libraryCategoryForPath(filePath)));
         }
-        if (!assets.length) return httpError(res, 404, 'Không tìm thấy asset thư viện.');
+        if (!assets.length) return httpError(res, 404, _t('Không tìm thấy mục thư viện.'));
         prewarmAudioPeaksForAssets(assets);
         prewarmAssetProxiesForAssets(assets);
         projectMetrics.activity = true;
@@ -6326,11 +6393,11 @@ function createApp() {
       }
       const category = String(req.body?.category || '').toLowerCase();
       const dir = libraryCategoryDir(category);
-      if (!dir) return httpError(res, 400, 'Category thư viện không hợp lệ.');
+      if (!dir) return httpError(res, 400, _t('Nhóm thư viện không hợp lệ.'));
       const name = path.basename(String(req.body?.name || ''));
       const filePath = path.join(dir, name);
       if (!name || !fs.existsSync(filePath) || !isSupportedEditingAssetFile(filePath)) {
-        return httpError(res, 404, 'Không tìm thấy asset thư viện.');
+        return httpError(res, 404, _t('Không tìm thấy mục thư viện.'));
       }
       const asset = await libraryAssetPayload(filePath, category);
       prewarmAudioPeaksForAssets([asset]); // sóng âm thật cho asset thư viện
@@ -6347,8 +6414,8 @@ function createApp() {
     const requestedEngine = normalizeAsrEngine(req.body?.asr_engine || 'mlx_whisper');
     try {
       const files = (req.files || []).map((file) => ({ name: file.filename, path: file.path }));
-      if (!files.length) return httpError(res, 400, 'Không có nguồn video đầu vào.');
-      setStatus('Đang tiếp nhận file video từ trình duyệt...');
+      if (!files.length) return httpError(res, 400, _t('Không có nguồn video đầu vào.'));
+      setStatus(_t('Đang tiếp nhận file video từ trình duyệt...'));
       res.json(await handleTranscribeFromSavedFiles({
         savedFiles: files,
         referenceScript: req.body.reference_script || '',
@@ -6360,7 +6427,7 @@ function createApp() {
       }));
     } catch (error) {
       recordProjectError('transcribe', error, { endpoint: '/api/transcribe', engine: requestedEngine });
-      setStatus('Lỗi hệ thống!');
+      setStatus(_t('Lỗi hệ thống!'));
       httpError(res, 500, error);
     }
   });
@@ -6369,10 +6436,10 @@ function createApp() {
     const requestedEngine = normalizeAsrEngine(req.body?.asr_engine || 'mlx_whisper');
     try {
       const sourcePaths = req.body?.source_paths || [];
-      if (!sourcePaths.length) return httpError(res, 400, 'Không có nguồn video đầu vào.');
-      setStatus('Đang tiếp nhận file video từ desktop...');
+      if (!sourcePaths.length) return httpError(res, 400, _t('Không có nguồn video đầu vào.'));
+      setStatus(_t('Đang tiếp nhận file video từ desktop...'));
       const resolvedSources = collectVideosFromSourcePaths(sourcePaths);
-      if (!resolvedSources.length) return httpError(res, 400, 'Không tìm thấy video hợp lệ.');
+      if (!resolvedSources.length) return httpError(res, 400, _t('Không tìm thấy video hợp lệ.'));
       const savedFiles = await copyLocalSourcesToTemp(resolvedSources);
       res.json(await handleTranscribeFromSavedFiles({
         savedFiles,
@@ -6386,14 +6453,14 @@ function createApp() {
       }));
     } catch (error) {
       recordProjectError('transcribe', error, { endpoint: '/api/transcribe-local', engine: requestedEngine });
-      setStatus('Lỗi hệ thống!');
+      setStatus(_t('Lỗi hệ thống!'));
       httpError(res, 500, error);
     }
   });
 
   app.post('/api/filter', upload.none(), async (req, res) => {
     try {
-      setStatus('Đang chạy pipeline lọc transcript: tiền xử lý, so khớp mờ và chọn take cuối...');
+      setStatus(_t('Đang chạy pipeline lọc transcript: tiền xử lý, so khớp mờ và chọn take cuối...'));
       const sessionPath = path.join(TEMP_DIR, 'session_segments.json');
       const result = await runMatchingPipeline({
         referenceScript: req.body.reference_script || '',
@@ -6409,12 +6476,12 @@ function createApp() {
           script_metadata: summarizeScriptMetadata(scriptMetadata),
         };
       }
-      setStatus('Đã hoàn tất lọc kịch bản và tạo timeline EDL/XML.');
+      setStatus(_t('Đã hoàn tất lọc kịch bản và tạo timeline EDL/XML.'));
       projectMetrics.activity = true;
       res.json({ status: 'success', ...result });
     } catch (error) {
       recordProjectError('filter', error, { endpoint: '/api/filter' });
-      setStatus('Lỗi khi chạy pipeline lọc transcript!');
+      setStatus(_t('Lỗi khi chạy pipeline lọc transcript!'));
       httpError(res, 500, error);
     }
   });
@@ -6425,7 +6492,7 @@ function createApp() {
   app.post('/api/reorder-by-script', async (req, res) => {
     try {
       const referenceScript = String(req.body?.reference_script || '');
-      if (!referenceScript.trim()) return httpError(res, 400, 'Chưa có kịch bản chuẩn để sắp xếp theo!');
+      if (!referenceScript.trim()) return httpError(res, 400, _t('Chưa có kịch bản chuẩn để sắp xếp theo!'));
       let blocks;
       try {
         // Lỗi hình dạng payload là lỗi PHÍA GỌI -> 400, không trộn vào 500 của sidecar.
@@ -6433,7 +6500,7 @@ function createApp() {
       } catch (error) {
         return httpError(res, 400, error);
       }
-      if (!blocks.length) return httpError(res, 400, 'Không có block nào để sắp xếp!');
+      if (!blocks.length) return httpError(res, 400, _t('Không có block nào để sắp xếp!'));
       const sourced = await resolveTimelineWords({
         blocks,
         referenceScript,
@@ -6441,9 +6508,9 @@ function createApp() {
         asrEngine: normalizeAsrEngine(req.body?.asr_engine || 'mlx_whisper'),
         asrModel: req.body?.asr_model,
       });
-      setStatus(`Đang so khớp ${blocks.length} block với kịch bản chuẩn...`);
+      setStatus(_t('Đang so khớp {n} block với kịch bản chuẩn...', { n: blocks.length }));
       const result = await runScriptReorder({ referenceScript, blocks: sourced.blocks });
-      setStatus('Đã tính xong thứ tự theo kịch bản.');
+      setStatus(_t('Đã tính xong thứ tự theo kịch bản.'));
       projectMetrics.activity = true;
       res.json({
         status: 'success',
@@ -6453,7 +6520,7 @@ function createApp() {
       });
     } catch (error) {
       recordProjectError('reorder-by-script', error, { endpoint: '/api/reorder-by-script' });
-      setStatus('Lỗi khi so khớp thứ tự theo kịch bản!');
+      setStatus(_t('Lỗi khi so khớp thứ tự theo kịch bản!'));
       httpError(res, 500, error);
     }
   });
@@ -6461,7 +6528,7 @@ function createApp() {
   app.post('/api/finalize-timeline', async (req, res) => {
     try {
       const chunks = req.body?.selected_chunks || [];
-      if (!chunks.length) return httpError(res, 400, 'Không có đoạn nào được chọn!');
+      if (!chunks.length) return httpError(res, 400, _t('Không có đoạn nào được chọn!'));
       const result = ensureCore().finalizeTimeline({ selected_chunks: chunks });
       projectMetrics.activity = true;
       res.json({ status: 'success', ...result });
@@ -6475,21 +6542,21 @@ function createApp() {
     try {
       const sourceVideoPath = path.join(TEMP_DIR, 'temp_input.mp4');
       if (!fs.existsSync(sourceVideoPath)) {
-        return httpError(res, 400, 'Không tìm thấy video nguồn. Hãy chạy bước bóc băng trước.');
+        return httpError(res, 400, _t('Không tìm thấy video nguồn. Hãy chạy bước bóc băng trước.'));
       }
       const rawTimeline = Array.isArray(req.body?.timeline)
         ? req.body.timeline
         : JSON.parse(req.body?.timeline_json || '[]');
       const clips = normalizeAutoReframeClips(rawTimeline);
-      if (!clips.length) return httpError(res, 400, 'Timeline rỗng. Không có clip để Auto-Reframe.');
-      setStatus('Đang nhận diện người/khuôn mặt cho Auto-Reframe Timeline...');
+      if (!clips.length) return httpError(res, 400, _t('Timeline rỗng. Không có clip để Auto-Reframe.'));
+      setStatus(_t('Đang nhận diện người/khuôn mặt cho Auto-Reframe Timeline...'));
       const result = await runAutoReframeAnalysis({ videoPath: sourceVideoPath, clips });
-      setStatus('Đã hoàn tất Auto-Reframe Timeline.');
+      setStatus(_t('Đã hoàn tất Auto-Reframe Timeline.'));
       projectMetrics.activity = true;
       res.json({ status: 'success', ...result });
     } catch (error) {
       recordProjectError('auto_reframe', error, { endpoint: '/api/auto-reframe/analyze' });
-      setStatus('Lỗi khi chạy Auto-Reframe Timeline!');
+      setStatus(_t('Lỗi khi chạy Auto-Reframe Timeline!'));
       httpError(res, 500, error);
     }
   });
@@ -6499,26 +6566,26 @@ function createApp() {
     try {
       const sourceVideoPath = path.join(TEMP_DIR, 'temp_input.mp4');
       if (!fs.existsSync(sourceVideoPath)) {
-        return httpError(res, 400, 'Không tìm thấy video nguồn. Hãy chạy bước bóc băng trước.');
+        return httpError(res, 400, _t('Không tìm thấy video nguồn. Hãy chạy bước bóc băng trước.'));
       }
       const rawTimeline = Array.isArray(req.body?.timeline)
         ? req.body.timeline
         : JSON.parse(req.body?.timeline_json || '[]');
       const clips = normalizeAutoReframeClips(rawTimeline);
-      if (!clips.length) return httpError(res, 400, 'Timeline rỗng. Không có block để dò góc máy.');
-      setStatus('Đang dò điểm đổi góc máy trong các block Timeline...');
+      if (!clips.length) return httpError(res, 400, _t('Timeline rỗng. Không có block để dò góc máy.'));
+      setStatus(_t('Đang dò điểm đổi góc máy trong các block Timeline...'));
       const result = await runAutoReframeAnalysis({
         videoPath: sourceVideoPath,
         clips,
         mode: 'detect_cuts',
         options: (req.body?.options && typeof req.body.options === 'object') ? req.body.options : undefined,
       });
-      setStatus('Đã dò xong điểm đổi góc máy.');
+      setStatus(_t('Đã dò xong điểm đổi góc máy.'));
       projectMetrics.activity = true;
       res.json({ status: 'success', ...result });
     } catch (error) {
       recordProjectError('auto_reframe_detect_cuts', error, { endpoint: '/api/auto-reframe/detect-cuts' });
-      setStatus('Lỗi khi dò điểm đổi góc máy!');
+      setStatus(_t('Lỗi khi dò điểm đổi góc máy!'));
       httpError(res, 500, error);
     }
   });
@@ -6544,16 +6611,16 @@ function createApp() {
       // tuỳ ý trên máy. Chỉ cho TEMP_DIR (asset đã nhập) và LIBRARY_DIR (thư viện).
       const sourceVideoPath = resolveRetouchSource(req.body?.source_path);
       if (!sourceVideoPath) {
-        return httpError(res, 400, 'Nguồn cho Retouch không hợp lệ hoặc nằm ngoài thư mục dự án.');
+        return httpError(res, 400, _t('Nguồn cho Retouch không hợp lệ hoặc nằm ngoài thư mục dự án.'));
       }
       if (!fs.existsSync(sourceVideoPath)) {
-        return httpError(res, 400, 'Không tìm thấy nguồn cho Retouch. Hãy chạy bước bóc băng trước.');
+        return httpError(res, 400, _t('Không tìm thấy nguồn cho Retouch. Hãy chạy bước bóc băng trước.'));
       }
       const rawTimeline = Array.isArray(req.body?.timeline)
         ? req.body.timeline
         : JSON.parse(req.body?.timeline_json || '[]');
       const clips = normalizeAutoReframeClips(rawTimeline);
-      if (!clips.length) return httpError(res, 400, 'Không có block để bám khuôn mặt.');
+      if (!clips.length) return httpError(res, 400, _t('Không có block để bám khuôn mặt.'));
       const options = (req.body && typeof req.body.options === 'object') ? req.body.options : {};
 
       const cachePath = retouchCachePath(sourceVideoPath, clips, options);
@@ -6561,7 +6628,7 @@ function createApp() {
         // Trúng cache -> trả thẳng, KHÔNG chạm vào sidecar.
         return res.json({ status: 'success', cached: true, ...JSON.parse(fs.readFileSync(cachePath, 'utf8')) });
       }
-      setStatus('Đang bám khuôn mặt cho Retouch...');
+      setStatus(_t('Đang bám khuôn mặt cho Retouch...'));
       const result = await runAutoReframeAnalysis({
         videoPath: sourceVideoPath,
         clips,
@@ -6575,12 +6642,12 @@ function createApp() {
         // Ghi cache hỏng thì vẫn trả kết quả — chỉ mất phần tăng tốc lần sau.
         logStatus(`[retouch] không ghi được cache: ${error.message}`);
       }
-      setStatus('Đã bám xong khuôn mặt cho Retouch.');
+      setStatus(_t('Đã bám xong khuôn mặt cho Retouch.'));
       projectMetrics.activity = true;
       res.json({ status: 'success', cached: false, ...result });
     } catch (error) {
       recordProjectError('retouch_track', error, { endpoint: '/api/retouch/track' });
-      setStatus('Lỗi khi bám khuôn mặt cho Retouch!');
+      setStatus(_t('Lỗi khi bám khuôn mặt cho Retouch!'));
       httpError(res, 500, error);
     }
   });
@@ -6589,26 +6656,26 @@ function createApp() {
     try {
       const sourceVideoPath = path.join(TEMP_DIR, 'temp_input.mp4');
       if (!fs.existsSync(sourceVideoPath)) {
-        return httpError(res, 400, 'Không tìm thấy video nguồn. Hãy chạy bước bóc băng trước.');
+        return httpError(res, 400, _t('Không tìm thấy video nguồn. Hãy chạy bước bóc băng trước.'));
       }
       const rawTimeline = Array.isArray(req.body?.timeline)
         ? req.body.timeline
         : JSON.parse(req.body?.timeline_json || '[]');
       const clips = normalizeAutoReframeClips(rawTimeline);
-      if (!clips.length) return httpError(res, 400, 'Không có block để dựng skeleton.');
-      setStatus('Đang dựng skeleton (nhận diện người) cho Editing...');
+      if (!clips.length) return httpError(res, 400, _t('Không có block để dựng Skeleton.'));
+      setStatus(_t('Đang dựng skeleton (nhận diện người) cho Editing...'));
       const result = await runAutoReframeAnalysis({
         videoPath: sourceVideoPath,
         clips,
         mode: 'pose_track',
         options: (req.body?.options && typeof req.body.options === 'object') ? req.body.options : undefined,
       });
-      setStatus('Đã dựng xong skeleton.');
+      setStatus(_t('Đã dựng xong skeleton.'));
       projectMetrics.activity = true;
       res.json({ status: 'success', ...result });
     } catch (error) {
       recordProjectError('pose_track', error, { endpoint: '/api/pose/track' });
-      setStatus('Lỗi khi dựng skeleton!');
+      setStatus(_t('Lỗi khi dựng skeleton!'));
       httpError(res, 500, error);
     }
   });
@@ -6617,10 +6684,10 @@ function createApp() {
     try {
       const sourceVideoPath = path.join(TEMP_DIR, 'temp_input.mp4');
       if (!fs.existsSync(sourceVideoPath)) {
-        return httpError(res, 400, 'Không tìm thấy video nguồn. Hãy chạy bước bóc băng trước.');
+        return httpError(res, 400, _t('Không tìm thấy video nguồn. Hãy chạy bước bóc băng trước.'));
       }
       const intervals = normalizeMagicFillIntervals(req.body?.intervals);
-      if (!intervals.length) return httpError(res, 400, 'Timeline rỗng. Không có khoảng audio để bóc băng lại.');
+      if (!intervals.length) return httpError(res, 400, _t('Timeline rỗng. Không có khoảng audio để bóc băng lại.'));
       const result = await transcribeMagicFillTimeline({
         sourceVideoPath,
         intervals,
@@ -6633,7 +6700,7 @@ function createApp() {
       res.json({ status: 'success', ...result });
     } catch (error) {
       recordProjectError('magic_fill_asr', error, { endpoint: '/api/magic-fill/transcribe-range' });
-      setStatus('Lỗi khi bóc băng lại audio cho Magic Fill!');
+      setStatus(_t('Lỗi khi bóc băng lại audio cho Magic Fill!'));
       httpError(res, 500, error);
     }
   });
@@ -6645,7 +6712,7 @@ function createApp() {
   app.post('/api/subtitles/transcribe', async (req, res) => {
     try {
       const entries = Array.isArray(req.body?.entries) ? req.body.entries : [];
-      if (!entries.length) return httpError(res, 400, 'Timeline chưa có đoạn audio nào để tạo phụ đề.');
+      if (!entries.length) return httpError(res, 400, _t('Timeline chưa có đoạn audio nào để tạo phụ đề.'));
       const job = await subtitleJobs.create({
         entries,
         reference_script: req.body?.reference_script || '',
@@ -6671,13 +6738,13 @@ function createApp() {
 
   app.get('/api/subtitles/jobs/:id', (req, res) => {
     const job = subtitleJobs.get(req.params.id);
-    if (!job) return httpError(res, 404, 'Không tìm thấy job tạo phụ đề.');
+    if (!job) return httpError(res, 404, _t('Không tìm thấy lượt tạo phụ đề.'));
     res.json({ status: 'success', ...subtitleJobs.publicJob(job) });
   });
 
   app.post('/api/subtitles/jobs/:id/cancel', (req, res) => {
     const job = subtitleJobs.cancel(req.params.id);
-    if (!job) return httpError(res, 404, 'Không tìm thấy job tạo phụ đề.');
+    if (!job) return httpError(res, 404, _t('Không tìm thấy lượt tạo phụ đề.'));
     res.json({ status: 'success', ...subtitleJobs.publicJob(job) });
   });
 
@@ -6689,7 +6756,7 @@ function createApp() {
     // Frontend đã có cờ chống bấm 2 lần, nhưng chốt ở đây mới chặn được mọi nguồn (2 cửa sổ,
     // gọi lại API, người dùng bấm khi bake đang chạy...).
     if (exportInFlight) {
-      return httpError(res, 409, 'Đang xuất một video khác. Hãy đợi lượt hiện tại xong rồi thử lại.');
+      return httpError(res, 409, _t('Đang xuất một video khác. Hãy đợi lượt hiện tại xong rồi thử lại.'));
     }
     exportInFlight = true;
     // NHẢ KHOÁ khi RESPONSE ĐÓNG, không phải khi handler chạy xong: res.download() chỉ BẮT
@@ -6710,10 +6777,10 @@ function createApp() {
       (Array.isArray(req.files) ? req.files : []).map((file) => [String(file.originalname || ''), file.path]),
     );
     try {
-      setStatus('Đang chuẩn bị cắt video theo timeline đã lọc...');
+      setStatus(_t('Đang chuẩn bị cắt video theo timeline đã lọc...'));
       const sourceVideoPath = path.join(TEMP_DIR, 'temp_input.mp4');
       if (!fs.existsSync(sourceVideoPath)) {
-        return httpError(res, 400, 'Không tìm thấy video nguồn. Hãy chạy bước bóc băng trước.');
+        return httpError(res, 400, _t('Không tìm thấy video nguồn. Hãy chạy bước bóc băng trước.'));
       }
       const timeline = JSON.parse(req.body.timeline_json || '[]');
       const exportSettings = normalizeExportSettings(req.body);
@@ -6726,7 +6793,7 @@ function createApp() {
        * trong payload gửi cho sidecar. Trước đây timeline được chuẩn hoá trước nên không có
        * đường nào biết khổ sequence. */
       const exportIntervals = normalizeExportIntervals(timeline, sequenceSettings);
-      if (!exportIntervals.length) return httpError(res, 400, 'Timeline rỗng. Không có đoạn nào để xuất video.');
+      if (!exportIntervals.length) return httpError(res, 400, _t('Timeline rỗng. Không có đoạn nào để xuất video.'));
       exportSettings.width = sequenceSettings.width;
       exportSettings.height = sequenceSettings.height;
       exportSettings.resolution = 'sequence';
@@ -6800,9 +6867,8 @@ function createApp() {
       if (Number.isFinite(actualDuration) && expectedDuration > 0
         && actualDuration < expectedDuration - allowedShortfall) {
         throw new Error(
-          `Video xuất ra bị thiếu: chỉ dài ${actualDuration.toFixed(2)}s trong khi timeline là `
-          + `${expectedDuration.toFixed(2)}s. Nhiều khả năng các video nguồn khác thông số nhau `
-          + 'nên bản nối bị đứt giữa chừng — hãy thử "Dự án mới" rồi thêm lại video, hoặc báo lỗi kèm tệp .crab.',
+          _t('Video xuất ra bị thiếu: chỉ dài {actual}s trong khi timeline là {expected}s. Nhiều khả năng các video nguồn khác thông số nhau nên bản nối bị đứt giữa chừng — hãy thử "Dự án mới" rồi thêm lại video, hoặc báo lỗi kèm tệp .crab.',
+          { actual: actualDuration.toFixed(2), expected: expectedDuration.toFixed(2) }),
         );
       }
       const encoderEvent = sidecarEvents.find((evt) => String(evt?.message || '').startsWith('Export encoder:'));
@@ -6819,12 +6885,12 @@ function createApp() {
       };
       projectMetrics.activity = true;
       const reportPath = await writeProjectReport('export_success');
-      setStatus('Đã hoàn tất cắt dựng video.');
+      setStatus(_t('Đã hoàn tất cắt dựng video.'));
       res.setHeader('X-Project-Report-Path', reportPath);
       res.download(outputPath, outputName);
     } catch (error) {
       recordProjectError('export', error, { endpoint: '/api/export-video', exportSettings: exportSettingsForError });
-      setStatus('Lỗi khi xuất video hoàn chỉnh!');
+      setStatus(_t('Lỗi khi xuất video hoàn chỉnh!'));
       httpError(res, 500, error);
     } finally {
       // Khung đã materialize thì đã được RENAME đi; đây là dọn phần còn sót (chuỗi bị bỏ).
@@ -6844,7 +6910,7 @@ function start() {
   const server = http.createServer(app);
   httpServer = server;
   server.listen(PORT, HOST, () => {
-    setStatus('Hệ thống đang chuẩn bị...');
+    setStatus(_t('Hệ thống đang chuẩn bị...'));
     console.log(`[backend] listening on http://${HOST}:${PORT}`);
   });
   return server;
@@ -6871,7 +6937,7 @@ function killActiveChildren(signal = 'SIGTERM') {
 async function shutdown(signal = 'SIGTERM') {
   if (shuttingDown) return;
   shuttingDown = true;
-  setStatus('Đang tắt backend và dọn tiến trình nền...');
+  setStatus(_t('Đang tắt backend và dọn tiến trình nền...'));
   cleanGeneratedTextAssets(); // dọn PNG sequence hoạt ảnh của phiên hiện tại
   killActiveChildren('SIGTERM');
   const closeServer = httpServer

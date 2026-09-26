@@ -40,6 +40,10 @@ if (app.isPackaged) {
   process.env.CRAB_USER_DATA_DIR = RuntimePaths.userDataRoot();
 }
 
+// Nạp SAU khi đặt CRAB_USER_DATA_DIR: nó đọc file cài đặt ngay lúc require để chốt ngôn ngữ.
+const I18nMain = require('./i18n-main');
+const { _t } = I18nMain;
+
 // GPU: NGUYÊN NHÂN GỐC của crash "GPU process isn't usable. Goodbye." (SIGTRAP) trên macOS là
 // chữ ký ad-hoc của Electron trong node_modules bị HỎNG -> macOS Library Validation từ chối nạp
 // libEGL/libGLESv2 ("library load denied by system policy") -> GPU process chết (exit_code=9).
@@ -135,6 +139,8 @@ function startBackendSidecar() {
     ...process.env,
     BACKEND_HOST,
     BACKEND_PORT: String(BACKEND_PORT),
+    // Ngôn ngữ hệ điều hành cho cài đặt 'auto' — Node của backend không đọc được nó chắc chắn.
+    CRAB_SYSTEM_LOCALE: I18nMain.systemLocale(),
   };
 
   if (!process.env.BACKEND_NODE) {
@@ -169,7 +175,7 @@ async function ensureBackendReady() {
   const startedAt = Date.now();
   while (Date.now() - startedAt < HEALTH_TIMEOUT_MS) {
     if (backendProcess && backendProcess.exitCode !== null) {
-      throw new Error(`Backend sidecar exited early with code ${backendProcess.exitCode}`);
+      throw new Error(_t('Backend dừng đột ngột (mã {code}).', { code: backendProcess.exitCode }));
     }
 
     if (await checkBackendHealth()) {
@@ -179,7 +185,7 @@ async function ensureBackendReady() {
     await sleep(POLL_INTERVAL_MS);
   }
 
-  throw new Error('Backend health-check timed out.');
+  throw new Error(_t('Hết thời gian chờ backend phản hồi.'));
 }
 
 async function stopBackendSidecar() {
@@ -230,6 +236,8 @@ function createWindow() {
   mainWindowLoaded = false;
   mainWindow.webContents.on('did-finish-load', () => {
     mainWindowLoaded = true;
+    // Trang vừa nạp (lần đầu hoặc tải lại sau khi đổi ngôn ngữ) -> hộp thoại gốc theo cùng ngôn ngữ.
+    I18nMain.refresh();
     if (pendingOpenPath) {
       const filePath = pendingOpenPath;
       pendingOpenPath = null;
@@ -276,12 +284,12 @@ function createWindow() {
       if (!dirty) { forceClose = true; quitAfterWindowClose = true; mainWindow.close(); return; }
       const { response } = await dialog.showMessageBox(mainWindow, {
         type: 'warning',
-        buttons: ['Lưu', 'Không lưu', 'Huỷ'],
+        buttons: [_t('Lưu'), _t('Không lưu'), _t('Huỷ')],
         defaultId: 0,
         cancelId: 2,
-        title: 'Còn thay đổi chưa lưu',
-        message: 'Dự án còn thay đổi chưa lưu.',
-        detail: 'Lưu lại trước khi đóng CrabbyCut?',
+        title: _t('Còn thay đổi chưa lưu'),
+        message: _t('Dự án còn thay đổi chưa lưu.'),
+        detail: _t('Lưu lại trước khi đóng CrabbyCut?'),
       });
       if (response === 2) return;                    // Huỷ -> cửa sổ ở nguyên
       if (response === 0) {
@@ -309,7 +317,7 @@ async function reopenMainWindow() {
     if (!(await checkBackendHealth())) await ensureBackendReady();
     createWindow();
   } catch (error) {
-    dialog.showErrorBox('Không thể khởi động backend', String(error?.message || error));
+    dialog.showErrorBox(_t('Không thể khởi động backend'), String(error?.message || error));
   }
 }
 
@@ -330,9 +338,9 @@ ipcMain.handle('project-save', async (_event, { payloadJson, targetPath, suggest
     let finalPath = targetPath;
     if (!finalPath) {
       const result = await dialog.showSaveDialog(mainWindow, {
-        title: 'Lưu dự án CrabbyCut',
+        title: _t('Lưu dự án CrabbyCut'),
         defaultPath: suggestedName || 'Untitled.crab',
-        filters: [{ name: 'CrabbyCut Project', extensions: ['crab'] }],
+        filters: [{ name: _t('Dự án CrabbyCut'), extensions: ['crab'] }],
       });
       if (result.canceled || !result.filePath) return { canceled: true };
       finalPath = result.filePath;
@@ -541,9 +549,9 @@ ipcMain.handle('open-project-link', async (_event, key) => {
 ipcMain.handle('save-frame-image', async (_event, { dataBase64, suggestedName }) => {
   try {
     const result = await dialog.showSaveDialog(mainWindow, {
-      title: 'Lưu khung hình',
+      title: _t('Lưu khung hình'),
       defaultPath: suggestedName || 'frame.png',
-      filters: [{ name: 'PNG Image', extensions: ['png'] }],
+      filters: [{ name: _t('Ảnh PNG'), extensions: ['png'] }],
     });
     if (result.canceled || !result.filePath) return { canceled: true };
     let finalPath = result.filePath;
@@ -579,9 +587,9 @@ ipcMain.handle('subtitle-save-srt', async (_event, { projectPath, content, sugge
       // bật hộp thoại giữa chừng một thao tác người dùng không hề yêu cầu.
       if (silent) return { skipped: 'no_project_path' };
       const result = await dialog.showSaveDialog(mainWindow, {
-        title: 'Lưu phụ đề (.srt)',
+        title: _t('Lưu phụ đề (.srt)'),
         defaultPath: suggestedName || 'subtitle.srt',
-        filters: [{ name: 'SubRip Subtitle', extensions: ['srt'] }],
+        filters: [{ name: _t('Phụ đề SubRip'), extensions: ['srt'] }],
       });
       if (result.canceled || !result.filePath) return { canceled: true };
       finalPath = result.filePath;
@@ -617,9 +625,9 @@ function readCrabResolved(filePath) {
 
 ipcMain.handle('project-open-dialog', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: 'Mở dự án CrabbyCut',
+    title: _t('Mở dự án CrabbyCut'),
     properties: ['openFile'],
-    filters: [{ name: 'CrabbyCut Project', extensions: ['crab'] }],
+    filters: [{ name: _t('Dự án CrabbyCut'), extensions: ['crab'] }],
   });
   if (result.canceled || !result.filePaths?.length) return { canceled: true };
   return readCrabResolved(result.filePaths[0]);
@@ -667,9 +675,9 @@ ipcMain.handle('project-save-proxy', async (_event, { projectPath, proxyPath }) 
 ipcMain.handle('project-package', async (_event, { payloadJson, projectName, subtitleSrt, previewProxyPath }) => {
   try {
     const picked = await dialog.showOpenDialog(mainWindow, {
-      title: 'Chọn nơi đặt thư mục dự án đã đóng gói',
+      title: _t('Chọn nơi đặt thư mục dự án đã đóng gói'),
       properties: ['openDirectory', 'createDirectory'],
-      buttonLabel: 'Đóng gói vào đây',
+      buttonLabel: _t('Đóng gói vào đây'),
     });
     if (picked.canceled || !picked.filePaths?.length) return { canceled: true };
     const result = packageProject({
@@ -749,11 +757,11 @@ const SCRIPT_TEXT_EXTENSIONS = new Set(['txt', 'md', 'markdown']);
 
 ipcMain.handle('pick-script-file', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: 'Chọn tệp kịch bản',
+    title: _t('Chọn tệp kịch bản'),
     properties: ['openFile'],
     filters: [
-      { name: 'Kịch bản', extensions: ['md', 'markdown', 'txt', 'docx', 'doc'] },
-      { name: 'All Files', extensions: ['*'] },
+      { name: _t('Kịch bản'), extensions: ['md', 'markdown', 'txt', 'docx', 'doc'] },
+      { name: _t('Tất cả tệp'), extensions: ['*'] },
     ],
   });
   if (result.canceled || !result.filePaths?.length) return { canceled: true };
@@ -774,7 +782,7 @@ ipcMain.handle('pick-script-file', async () => {
 ipcMain.handle('pick-relink-file', async (_event, meta) => {
   const name = String(meta?.name || '');
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: name ? `Tìm lại file: ${name}` : 'Tìm lại file media',
+    title: name ? _t('Tìm lại tệp: {name}', { name }) : _t('Tìm lại tệp phương tiện'),
     properties: ['openFile'],
   });
   if (result.canceled || !result.filePaths?.length) return null;
@@ -823,27 +831,28 @@ if (argvCrabPath) pendingOpenPath = argvCrabPath;
 
 ipcMain.handle('pick-video-sources', async () => {
   const result = await dialog.showOpenDialog({
-    title: 'Chọn video hoặc thư mục video',
+    title: _t('Chọn video hoặc thư mục video'),
     properties: ['openFile', 'openDirectory', 'multiSelections'],
     filters: [
-      { name: 'Video', extensions: ['mp4', 'mov', 'm4v', 'webm'] },
-      { name: 'All Files', extensions: ['*'] },
+      { name: _t('Video'), extensions: ['mp4', 'mov', 'm4v', 'webm'] },
+      { name: _t('Tất cả tệp'), extensions: ['*'] },
     ],
   });
   if (result.canceled) return [];
   return result.filePaths || [];
 });
 
-const EDITING_ASSET_FILTERS = {
-  media: [
-    { name: 'Media', extensions: ['mp4', 'mov', 'm4v', 'webm', 'png', 'jpg', 'jpeg', 'webp', 'svg'] },
-    { name: 'All Files', extensions: ['*'] },
-  ],
-  audio: [
-    { name: 'Audio', extensions: ['mp3', 'wav', 'm4a', 'aac'] },
-    { name: 'All Files', extensions: ['*'] },
-  ],
-};
+// Hàm chứ không hằng: tên bộ lọc dịch LÚC MỞ hộp thoại, ngôn ngữ đổi được khi app đang chạy.
+function editingAssetFilters(kind) {
+  const all = { name: _t('Tất cả tệp'), extensions: ['*'] };
+  if (kind === 'audio') {
+    return [{ name: _t('Âm thanh'), extensions: ['mp3', 'wav', 'm4a', 'aac'] }, all];
+  }
+  return [
+    { name: _t('Tệp phương tiện'), extensions: ['mp4', 'mov', 'm4v', 'webm', 'png', 'jpg', 'jpeg', 'webp', 'svg'] },
+    all,
+  ];
+}
 
 /* MỘT nút "Nhập" duy nhất (kiểu CapCut): hộp thoại cho chọn LẪN LỘN tệp và thư mục.
  * Chỉ macOS làm được — NSOpenPanel bật cả hai cờ cùng lúc. Windows/Linux thì
@@ -853,10 +862,10 @@ ipcMain.handle('pick-editing-assets-any', async (_event, kind) => {
   if (process.platform !== 'darwin') return null;
   const normalized = String(kind || '').toLowerCase();
   const result = await dialog.showOpenDialog({
-    title: 'Nhập tệp hoặc thư mục',
-    buttonLabel: 'Nhập',
+    title: _t('Nhập tệp hoặc thư mục'),
+    buttonLabel: _t('Nhập'),
     properties: ['openFile', 'openDirectory', 'multiSelections'],
-    filters: EDITING_ASSET_FILTERS[normalized] || EDITING_ASSET_FILTERS.media,
+    filters: editingAssetFilters(normalized),
   });
   if (result.canceled) return [];
   return result.filePaths || [];
@@ -864,11 +873,10 @@ ipcMain.handle('pick-editing-assets-any', async (_event, kind) => {
 
 ipcMain.handle('pick-editing-assets', async (_event, kind) => {
   const normalized = String(kind || '').toLowerCase();
-  const filtersByKind = EDITING_ASSET_FILTERS;
   const result = await dialog.showOpenDialog({
-    title: 'Chọn asset Editing',
+    title: _t('Chọn tài nguyên cho Editing'),
     properties: ['openFile', 'multiSelections'],
-    filters: filtersByKind[normalized] || filtersByKind.media,
+    filters: editingAssetFilters(normalized),
   });
   if (result.canceled) return [];
   return result.filePaths || [];
@@ -879,7 +887,7 @@ ipcMain.handle('pick-editing-assets', async (_event, kind) => {
 // một trong hai thuộc tính bị bỏ qua, và người dùng Windows sẽ không chọn được thư mục.
 ipcMain.handle('pick-editing-asset-folders', async () => {
   const result = await dialog.showOpenDialog({
-    title: 'Chọn thư mục phương tiện',
+    title: _t('Chọn thư mục phương tiện'),
     properties: ['openDirectory', 'multiSelections'],
   });
   if (result.canceled) return [];
@@ -958,12 +966,12 @@ async function ensureRuntimeReady() {
    * địch. Chỉ cảnh báo để họ biết vì sao nút bóc băng sẽ báo lỗi. */
   const choice = await dialog.showMessageBox({
     type: 'warning',
-    title: 'Môi trường chưa được cài đủ',
-    message: 'CrabbyCut chưa cài xong các thành phần xử lý AI.',
-    detail: 'Bạn vẫn có thể dựng và xuất video như bình thường, nhưng Bóc băng (ASR), '
-      + 'Auto-Reframe và Retouch sẽ báo lỗi cho tới khi cài xong.\n\n'
-      + `Thư mục môi trường: ${RuntimePaths.runtimeRoot()}`,
-    buttons: ['Mở app luôn', 'Cài lại bây giờ', 'Thoát'],
+    title: _t('Môi trường chưa được cài đủ'),
+    message: _t('CrabbyCut chưa cài xong các thành phần xử lý AI.'),
+    detail: _t('Bạn vẫn có thể dựng và xuất video như bình thường, nhưng Bóc băng (ASR), Auto-Reframe và Làm đẹp (Retouch) sẽ báo lỗi cho tới khi cài xong.')
+      + '\n\n'
+      + _t('Thư mục môi trường: {path}', { path: RuntimePaths.runtimeRoot() }),
+    buttons: [_t('Mở ứng dụng luôn'), _t('Cài lại bây giờ'), _t('Thoát')],
     defaultId: 1,
     cancelId: 0,
   });
@@ -989,7 +997,7 @@ app.whenReady().then(async () => {
     await ensureBackendReady();
     createWindow();
   } catch (error) {
-    dialog.showErrorBox('Không thể khởi động backend', String(error?.message || error));
+    dialog.showErrorBox(_t('Không thể khởi động backend'), String(error?.message || error));
     await stopBackendSidecar();
     app.quit();
   }

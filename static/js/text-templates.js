@@ -85,6 +85,14 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
     'use strict';
 
+    const _t = (typeof globalThis !== 'undefined' && globalThis._t)
+        || ((k, p) => (p ? String(k).replace(/\{(\w+)\}/g, (m, n) => (n in p ? p[n] : m)) : k));
+    /* CHỮ MẪU mặc định dịch theo ngôn ngữ giao diện (khoá = câu tiếng Việt). Chạy ngoài app
+       (Node/test, không có i18n) thì trả lại CHỮ THIẾT KẾ gốc — đúng chữ đã đo từng pixel
+       trên video mẫu, để các phép đo bố cục trong tests/scripts/text_templates.js vẫn đúng. */
+    const HAS_I18N = typeof globalThis !== 'undefined' && typeof globalThis._t === 'function';
+    const designText = (translated, design) => (HAS_I18N ? translated : design);
+
     /* Cạnh ngắn tham chiếu — TRÙNG với TEXT_STYLE_REFERENCE_SHORT_SIDE của
        editing-runtime.js. Mọi px trong file này là px ở lớp này. */
     const REF_SHORT_SIDE = 1080;
@@ -108,8 +116,8 @@
                danh sách này (không hard-code tên khoá ở phía UI), nên thêm một hình
                trang trí mới là tự có ô màu — không phải sửa Inspector. */
             colorKeys: [
-                { key: 'disc', label: 'Nền', fallback: '#84cd00' },
-                { key: 'mark', label: 'Dấu', fallback: '#ffffff' },
+                { key: 'disc', label: _t('Nền'), fallback: '#84cd00' },
+                { key: 'mark', label: _t('Dấu'), fallback: '#ffffff' },
             ],
             draw(ctx, r, colors) {
                 ctx.beginPath();
@@ -151,9 +159,9 @@
         'check-disc-long-shadow': {
             aspect: 1,
             colorKeys: [
-                { key: 'disc', label: 'Nền', fallback: '#84cd00' },
-                { key: 'mark', label: 'Dấu', fallback: '#ffffff' },
-                { key: 'shadow', label: 'Bóng', fallback: '#72bb00' },
+                { key: 'disc', label: _t('Nền'), fallback: '#84cd00' },
+                { key: 'mark', label: _t('Dấu'), fallback: '#ffffff' },
+                { key: 'shadow', label: _t('Bóng'), fallback: '#72bb00' },
             ],
             draw(ctx, r, colors) {
                 const P = [[-0.460, -0.005], [-0.178, 0.332], [0.450, -0.371]];
@@ -217,10 +225,10 @@
          * Hai cách nhìn giống nhau ở giữa chừng nhưng khác hẳn ở hai đầu. */
         'cross-ring': {
             aspect: 1,
-            label: 'Vòng báo sai',
+            label: _t('Vòng báo sai'),
             colorKeys: [
-                { key: 'ring', label: 'Vành', fallback: '#ff0000' },
-                { key: 'mark', label: 'Dấu X', fallback: '#ff0000' },
+                { key: 'ring', label: _t('Vành'), fallback: '#ff0000' },
+                { key: 'mark', label: _t('Dấu X'), fallback: '#ff0000' },
             ],
             draw(ctx, r, colors, reveal) {
                 ctx.beginPath();
@@ -253,10 +261,10 @@
          * nền trong khoảng 10px -> bóng đen ~45%, nhoè ~0.10r, lệch xuống ~0.04r. */
         'cross-disc': {
             aspect: 1,
-            label: 'Đĩa báo sai',
+            label: _t('Đĩa báo sai'),
             colorKeys: [
-                { key: 'disc', label: 'Nền', fallback: '#ff0000' },
-                { key: 'mark', label: 'Dấu X', fallback: '#ffffff' },
+                { key: 'disc', label: _t('Nền'), fallback: '#ff0000' },
+                { key: 'mark', label: _t('Dấu X'), fallback: '#ffffff' },
             ],
             draw(ctx, r, colors, reveal) {
                 ctx.beginPath();
@@ -298,9 +306,9 @@
          * và tỉ lệ bán kính trong — phóng to/thu nhỏ không làm méo cái đuôi. */
         'quote-marks': {
             aspect: 1.196,
-            label: 'Dấu nháy',
+            label: _t('Dấu nháy'),
             colorKeys: [
-                { key: 'mark', label: 'Dấu nháy', fallback: '#fdee00' },
+                { key: 'mark', label: _t('Dấu nháy'), fallback: '#fdee00' },
             ],
             draw(ctx, r, colors) {
                 const halfW = 1.196 * r;     // nửa bề rộng hộp = aspect·r (91.5 ở cỡ gốc)
@@ -346,9 +354,9 @@
          * ngoài mà thò ra khỏi hộp là bị xén ở mép canvas. */
         'emphasis-lines': {
             aspect: 168 / 119,
-            label: 'Nét nhấn',
+            label: _t('Nét nhấn'),
             colorKeys: [
-                { key: 'mark', label: 'Nét nhấn', fallback: '#ffffff' },
+                { key: 'mark', label: _t('Nét nhấn'), fallback: '#ffffff' },
             ],
             draw(ctx, r, colors, reveal) {
                 const u = r / 59.5;      // r = nửa CHIỀU CAO hộp (59.5 ở cỡ gốc)
@@ -376,13 +384,13 @@
          * Số đo viết trong hộp 82×110, gốc ở TÂM: x ∈ [−41,41], y ∈ [−55,55]. */
         'baby-bottle': {
             aspect: 82 / 110,
-            label: 'Bình sữa',
+            label: _t('Bình sữa'),
             colorKeys: [
-                { key: 'milk', label: 'Sữa', fallback: '#b7e778' },
-                { key: 'bottle', label: 'Thân bình', fallback: '#ffffff' },
-                { key: 'cap', label: 'Nắp & núm', fallback: '#8ede3a' },
-                { key: 'line', label: 'Nét viền', fallback: '#304227' },
-                { key: 'cheek', label: 'Má hồng', fallback: '#f79db1' },
+                { key: 'milk', label: _t('Sữa'), fallback: '#b7e778' },
+                { key: 'bottle', label: _t('Thân bình'), fallback: '#ffffff' },
+                { key: 'cap', label: _t('Nắp & núm'), fallback: '#8ede3a' },
+                { key: 'line', label: _t('Nét viền'), fallback: '#304227' },
+                { key: 'cheek', label: _t('Má hồng'), fallback: '#f79db1' },
             ],
             draw(ctx, r, colors) {
                 const u = r / 55;                 // r = nửa CHIỀU CAO hộp (55 ở cỡ gốc)
@@ -486,12 +494,12 @@
          * như bị nhân bản máy móc. */
         'two-flowers': {
             aspect: 140 / 166,
-            label: 'Hoa',
+            label: _t('Hoa'),
             colorKeys: [
-                { key: 'petalA', label: 'Cánh bông lớn', fallback: '#febdbd' },
-                { key: 'coreA', label: 'Nhuỵ bông lớn', fallback: '#fef9f2' },
-                { key: 'petalB', label: 'Cánh bông nhỏ', fallback: '#fef9f2' },
-                { key: 'coreB', label: 'Nhuỵ bông nhỏ', fallback: '#febdbd' },
+                { key: 'petalA', label: _t('Cánh bông lớn'), fallback: '#febdbd' },
+                { key: 'coreA', label: _t('Nhuỵ bông lớn'), fallback: '#fef9f2' },
+                { key: 'petalB', label: _t('Cánh bông nhỏ'), fallback: '#fef9f2' },
+                { key: 'coreB', label: _t('Nhuỵ bông nhỏ'), fallback: '#febdbd' },
             ],
             draw(ctx, r, colors) {
                 const daisy = (cx, cy, R, rot, petal, core, coreR) => {
@@ -527,9 +535,9 @@
          * Hộp: x 892..1020, y 979..1146 (129×168), mọi toạ độ quy về r = 84. */
         'curl-arrow': {
             aspect: 129 / 168,
-            label: 'Mũi tên',
+            label: _t('Mũi tên'),
             colorKeys: [
-                { key: 'mark', label: 'Mũi tên', fallback: '#ffffff' },
+                { key: 'mark', label: _t('Mũi tên'), fallback: '#ffffff' },
             ],
             draw(ctx, r, colors) {
                 ctx.strokeStyle = colors.mark || '#ffffff';
@@ -548,9 +556,9 @@
 
         'spark-wedges': {
             aspect: 76 / 88,
-            label: 'Vệt nhấn',
+            label: _t('Vệt nhấn'),
             colorKeys: [
-                { key: 'mark', label: 'Vệt nhấn', fallback: '#ffffff' },
+                { key: 'mark', label: _t('Vệt nhấn'), fallback: '#ffffff' },
             ],
             draw(ctx, r, colors) {
                 const u = r / 44;                 // r = nửa CHIỀU CAO hộp (44 ở cỡ gốc)
@@ -576,9 +584,9 @@
          * KHÔNG khai `fit` (khi ấy nó là một ô vuông cạnh `layer.size`). */
         card: {
             aspect: 1,
-            label: 'Thẻ màu',
+            label: _t('Thẻ màu'),
             colorKeys: [
-                { key: 'fill', label: 'Màu', fallback: '#ffd744' },
+                { key: 'fill', label: _t('Màu'), fallback: '#ffd744' },
             ],
             draw(ctx, r, colors, reveal, box) {
                 const w = (box && Number(box.w) > 0) ? box.w : 2 * r;
@@ -1823,7 +1831,7 @@
                 const slot = (tpl.slots || []).find((s) => s.id === layer.slot);
                 return {
                     index, key, kind: 'text',
-                    label: layer.label || (slot && slot.label) || `Chữ ${index + 1}`,
+                    label: layer.label || (slot && slot.label) || _t('Chữ {n}', { n: index + 1 }),
                     slot: layer.slot,
                     style: layerTextStyle(layer),
                 };
@@ -1835,7 +1843,7 @@
                 const v = imageVariantOf(layer);
                 return {
                     index, key, kind: 'image',
-                    label: layer.label || 'Hình',
+                    label: layer.label || _t('Hình'),
                     variant: v.key,
                     variants: Object.keys(layer.variants || {}).map((vk) => ({
                         key: vk,
@@ -1856,7 +1864,7 @@
             const def = GLYPHS[layer.glyph] || {};
             return {
                 index, key, kind: 'glyph',
-                label: layer.label || def.label || 'Biểu tượng',
+                label: layer.label || def.label || _t('Biểu tượng'),
                 colorKeys: (def.colorKeys || []).map((c) => ({ key: c.key, label: c.label })),
                 colors: layerGlyphColors(layer),
             };
@@ -2237,10 +2245,10 @@
          * ------------------------------------------------------------------ */
         {
             id: 'approved',
-            name: 'Approved',
+            name: _t('Đã duyệt'),
             duration: 3.0,
             rowGap: 0,
-            slots: [{ id: 'title', label: 'Nội dung', default: 'APPROVED' }],
+            slots: [{ id: 'title', label: _t('Nội dung'), default: designText(_t('ĐÃ DUYỆT'), 'APPROVED') }],
             layers: [
                 {
                     kind: 'text',
@@ -2266,7 +2274,7 @@
                 {
                     kind: 'glyph',
                     key: 'check',
-                    label: 'Dấu tích',
+                    label: _t('Dấu tích'),
                     glyph: 'check-disc',
                     size: 150,
                     colors: { disc: '#84cd00', mark: '#ffffff' },
@@ -2332,10 +2340,10 @@
          * ------------------------------------------------------------------ */
         {
             id: 'correct-1',
-            name: 'Correct 1',
+            name: _t('Chính xác 1'),
             duration: 3.0,
             rowGap: 0,
-            slots: [{ id: 'title', label: 'Nội dung', default: 'Correct' }],
+            slots: [{ id: 'title', label: _t('Nội dung'), default: designText(_t('Chính xác'), 'Correct') }],
             layers: [
                 {
                     kind: 'text',
@@ -2362,7 +2370,7 @@
                 {
                     kind: 'glyph',
                     key: 'check',
-                    label: 'Dấu tích',
+                    label: _t('Dấu tích'),
                     glyph: 'check-disc-long-shadow',
                     size: 202,
                     colors: { disc: '#84cd00', mark: '#ffffff', shadow: '#72bb00' },
@@ -2417,10 +2425,10 @@
          * ------------------------------------------------------------------ */
         {
             id: 'incorrect',
-            name: 'Incorrect',
+            name: _t('Sai'),
             duration: 3.0,
             rowGap: 0,
-            slots: [{ id: 'title', label: 'Nội dung', default: 'Incorrect' }],
+            slots: [{ id: 'title', label: _t('Nội dung'), default: designText(_t('Sai rồi'), 'Incorrect') }],
             /* Hình trang trí khai TRƯỚC lớp chữ = vẽ TRƯỚC, tức chữ nằm ĐÈ lên nó. Video
                cho thấy đúng vậy: mép cắt nằm 7px bên trong vành, nét chữ phủ lên chỗ đó.
                Thứ tự khai KHÔNG ảnh hưởng phép xếp chỗ — hộp chữ vẫn do lớp place:'flow'
@@ -2429,7 +2437,7 @@
                 {
                     kind: 'glyph',
                     key: 'icon',
-                    label: 'Vòng báo sai',
+                    label: _t('Vòng báo sai'),
                     glyph: 'cross-ring',
                     size: 171,
                     colors: { ring: '#ff0000', mark: '#ff0000' },
@@ -2506,15 +2514,15 @@
          * ------------------------------------------------------------------ */
         {
             id: 'incorrect-2',
-            name: 'Incorrect 2',
+            name: _t('Sai 2'),
             duration: 3.0,
             rowGap: 0,
-            slots: [{ id: 'title', label: 'Nội dung', default: 'INCORRECT' }],
+            slots: [{ id: 'title', label: _t('Nội dung'), default: designText(_t('SAI RỒI'), 'INCORRECT') }],
             layers: [
                 {
                     kind: 'glyph',
                     key: 'icon',
-                    label: 'Đĩa báo sai',
+                    label: _t('Đĩa báo sai'),
                     glyph: 'cross-disc',
                     size: 161,
                     colors: { disc: '#ff0000', mark: '#ffffff' },
@@ -2611,18 +2619,18 @@
          * ------------------------------------------------------------------ */
         {
             id: 'quote',
-            name: 'Quote',
+            name: _t('Trích dẫn'),
             duration: 3.0,
             rowGap: 14,          // khe giữa hai hộp nền (y 953..966)
             slots: [
-                { id: 'line1', label: 'Dòng 1', default: 'All That Glitters' },
-                { id: 'line2', label: 'Dòng 2', default: 'Is Not Gold' },
+                { id: 'line1', label: _t('Dòng 1'), default: designText(_t('Chẳng phải thứ gì lấp lánh'), 'All That Glitters') },
+                { id: 'line2', label: _t('Dòng 2'), default: designText(_t('Cũng là vàng'), 'Is Not Gold') },
             ],
             layers: [
                 {
                     kind: 'glyph',
                     key: 'quote',
-                    label: 'Dấu nháy',
+                    label: _t('Dấu nháy'),
                     glyph: 'quote-marks',
                     size: 153,
                     colors: { mark: '#fdee00' },
@@ -2709,9 +2717,9 @@
          * ------------------------------------------------------------------ */
         {
             id: 'folgen-sie',
-            name: 'Folgen Sie',
+            name: _t('Theo dõi'),
             duration: 3.0,
-            slots: [{ id: 'title', label: 'Nội dung', default: 'Folgen Sie' }],
+            slots: [{ id: 'title', label: _t('Nội dung'), default: designText(_t('Theo dõi nhé'), 'Folgen Sie') }],
             layers: [
                 {
                     kind: 'text',
@@ -2735,7 +2743,7 @@
                 {
                     kind: 'glyph',
                     key: 'spark',
-                    label: 'Nét nhấn',
+                    label: _t('Nét nhấn'),
                     glyph: 'emphasis-lines',
                     size: 119,               // = CHIỀU CAO hộp nhóm (hợp hai trạng thái)
                     colors: { mark: '#ffffff' },
@@ -2796,12 +2804,12 @@
          * ------------------------------------------------------------------ */
         {
             id: 'zoom-title',
-            name: 'Zoom Title',
+            name: _t('Tiêu đề phóng to'),
             duration: 3.0,
             rowGap: 17,
             slots: [
-                { id: 'title', label: 'Tiêu đề', default: 'BADMINTON' },
-                { id: 'subtitle', label: 'Dòng phụ', default: 'Tournament Summer Season' },
+                { id: 'title', label: _t('Tiêu đề'), default: designText(_t('CẦU LÔNG'), 'BADMINTON') },
+                { id: 'subtitle', label: _t('Dòng phụ'), default: designText(_t('Giải đấu mùa hè'), 'Tournament Summer Season') },
             ],
             layers: [
                 {
@@ -2911,7 +2919,7 @@
             // trong `font.lineStep` của lớp đó (xem matchaTextLayer).
             rowGap: 0,
             slots: [
-                { id: 'text', label: 'Nội dung', default: 'Mood\nMatcha' },
+                { id: 'text', label: _t('Nội dung'), default: 'Mood\nMatcha' },
             ],
             // Dự án CŨ lưu hai ô ['Mood', 'Matcha'] — nối lại thành một ô hai dòng thay vì
             // cắt mất dòng 2 (xem normalizeTexts).
@@ -2921,7 +2929,7 @@
                 {
                     kind: 'glyph',
                     key: 'bottle',
-                    label: 'Bình sữa',
+                    label: _t('Bình sữa'),
                     glyph: 'baby-bottle',
                     size: 110,               // = CHIỀU CAO hộp
                     colors: { milk: '#b7e778', bottle: '#ffffff', cap: '#8ede3a', line: '#304227', cheek: '#f79db1' },
@@ -2941,7 +2949,7 @@
                 {
                     kind: 'glyph',
                     key: 'spark',
-                    label: 'Vệt nhấn',
+                    label: _t('Vệt nhấn'),
                     glyph: 'spark-wedges',
                     size: 88,
                     colors: { mark: '#ffffff' },
@@ -3002,7 +3010,7 @@
          * ------------------------------------------------------------------ */
         {
             id: 'custom',
-            name: 'Custom',
+            name: _t('Tuỳ chỉnh'),
             duration: 3.0,
             rowGap: 0,
             /* TỰ CO CHO VỪA KHỔ (xem `fitWidth` ở layout). 880px = ~82% bề ngang khung
@@ -3013,8 +3021,9 @@
             fitWidth: 880,
             slots: [{
                 id: 'text',
-                label: 'Nội dung',
-                default: 'During routine testing.\nThe affected components include.',
+                label: _t('Nội dung'),
+                default: designText(_t('Trong lần kiểm tra định kỳ.\nCác bộ phận bị ảnh hưởng gồm.'),
+                    'During routine testing.\nThe affected components include.'),
             }],
             layers: [
                 {
@@ -3064,7 +3073,7 @@
                 {
                     kind: 'image',
                     key: 'art',
-                    label: 'Hình',
+                    label: _t('Hình'),
                     variant: 'icon',
                     /* `prefix` = tiền tố TÊN TỆP trong library/Elements mà kiểu này nhận.
                        Panel Thuộc tính lọc thư viện bằng đúng chuỗi này, nên "đang là Icon
@@ -3078,8 +3087,8 @@
                                  đặt mốc ở 70% bề rộng hình, tức mép phải hình thò qua mép trái
                                  hộp đúng 0.3·Y. */
                     variants: {
-                        icon: { label: 'Icon', prefix: '[Icon]', sizeRel: 1.0, place: { fx: 0, fy: 0, lx: 0.5, ly: 0.5 } },
-                        illus: { label: 'Illus', prefix: '[Illus]', sizeRel: 1.41, place: { fx: 0, fy: 0.5, lx: 0.7, ly: 0.5 } },
+                        icon: { label: _t('Biểu tượng'), prefix: '[Icon]', sizeRel: 1.0, place: { fx: 0, fy: 0, lx: 0.5, ly: 0.5 } },
+                        illus: { label: _t('Minh hoạ'), prefix: '[Illus]', sizeRel: 1.41, place: { fx: 0, fy: 0.5, lx: 0.7, ly: 0.5 } },
                     },
                     /* Rỗng = "chưa chọn" -> caller (editing-runtime) đưa hình đầu tiên hợp
                        kiểu trong thư viện. KHÔNG chốt sẵn một tên tệp ở đây: library/ là
@@ -3148,11 +3157,11 @@
          * ------------------------------------------------------------------ */
         {
             id: 'vlog-tag',
-            name: 'Vlog Tag',
+            name: _t('Nhãn vlog'),
             duration: 3.0,
             rowGap: 0,
             slots: [
-                { id: 'text', label: 'Nội dung', default: 'Butterflies taste\nwith their feet\namazingly' },
+                { id: 'text', label: _t('Nội dung'), default: designText(_t('Loài bướm nếm vị\nbằng đôi chân\nthật kỳ diệu'), 'Butterflies taste\nwith their feet\namazingly') },
             ],
             /* Hai thẻ khai TRƯỚC lớp chữ = vẽ trước, tức NẰM SAU hộp trắng — đúng thứ làm
                nên cả mẫu này: phần thẻ bị hộp trắng che đi là lý do ta chỉ thấy hai dải chữ L
@@ -3162,7 +3171,7 @@
                 {
                     kind: 'glyph',
                     key: 'cardBack',
-                    label: 'Thẻ lớn',
+                    label: _t('Thẻ lớn'),
                     glyph: 'card',
                     colors: { fill: '#ffd744' },
                     // Cạnh theo hộp chữ: rộng bằng hộp + 6, cao 0.781 hộp (285/365).
@@ -3174,7 +3183,7 @@
                 {
                     kind: 'glyph',
                     key: 'cardFront',
-                    label: 'Thẻ nhỏ',
+                    label: _t('Thẻ nhỏ'),
                     glyph: 'card',
                     colors: { fill: '#ffd744' },
                     fit: { fw: 0.1825, fh: 0.3452 },
@@ -3234,11 +3243,11 @@
          * ------------------------------------------------------------------ */
         {
             id: 'welcome',
-            name: 'Welcome',
+            name: _t('Chào mừng'),
             duration: 3.0,
             rowGap: 0,
             slots: [
-                { id: 'text', label: 'Nội dung', default: 'Welcome' },
+                { id: 'text', label: _t('Nội dung'), default: designText(_t('Chào mừng'), 'Welcome') },
             ],
             /* Hoa và mũi tên khai TRƯỚC lớp chữ = vẽ trước. Hai hình này không chạm vào chữ
                ở chuỗi mẫu, nhưng gõ chuỗi dài hơn thì mép chữ sẽ lấn tới — lúc đó chữ đè lên
@@ -3247,7 +3256,7 @@
                 {
                     kind: 'glyph',
                     key: 'flowers',
-                    label: 'Hoa',
+                    label: _t('Hoa'),
                     glyph: 'two-flowers',
                     size: 166,                 // = CHIỀU CAO hộp (140×166 đo trên video)
                     colors: { petalA: '#febdbd', coreA: '#fef9f2', petalB: '#fef9f2', coreB: '#febdbd' },
@@ -3258,7 +3267,7 @@
                 {
                     kind: 'glyph',
                     key: 'arrow',
-                    label: 'Mũi tên',
+                    label: _t('Mũi tên'),
                     glyph: 'curl-arrow',
                     size: 168,                 // = CHIỀU CAO hộp (129×168)
                     colors: { mark: '#ffffff' },

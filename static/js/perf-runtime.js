@@ -1109,7 +1109,7 @@
 
         const meta = document.createElement('div');
         meta.className = 'paragraph-meta';
-        meta.innerHTML = `<span>⏱️ ${item.start.toFixed(2)}s - ${item.end.toFixed(2)}s</span> <span>Đoạn #${index + 1}</span>`;
+        meta.innerHTML = `<span>⏱️ ${item.start.toFixed(2)}s - ${item.end.toFixed(2)}s</span> <span>${_t('Đoạn #{n}', { n: index + 1 })}</span>`;
         pDiv.appendChild(meta);
 
         const wrap = document.createElement('div');

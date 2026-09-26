@@ -25,6 +25,9 @@
         root.AppSettings = factory();
     }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+    const _t = (typeof globalThis !== 'undefined' && globalThis._t)
+        || ((k, p) => (p ? String(k).replace(/\{(\w+)\}/g, (m, n) => (n in p ? p[n] : m)) : k));
+
     const SCHEMA_VERSION = 1;
 
     // Khoảng hợp lệ của các con số trong mục "Số liệu" của bảng Cài đặt.
@@ -54,52 +57,52 @@
      *                   auto_sfx.txt ghi ".mp3" còn trên đĩa là ".MP3") */
     const DEFAULT_AUTO_SFX = {
         animGroups: [
-            { id: 'a1', name: 'Nhóm 1 — Trượt / Xoay / Trôi', effects: ['slide_up', 'slide_down', 'slide_left', 'slide_right', 'drift', 'rotate', 'spin'] },
-            { id: 'a2', name: 'Nhóm 2 — Pop / Thu phóng vào', effects: ['pop', 'scale'] },
-            { id: 'a3', name: 'Nhóm 3 — Lật', effects: ['flip'] },
-            { id: 'a4', name: 'Nhóm 4 — Đánh máy (chữ)', effects: ['typewriter'] },
+            { id: 'a1', name: _t('Nhóm 1 — Trượt / Xoay / Trôi'), effects: ['slide_up', 'slide_down', 'slide_left', 'slide_right', 'drift', 'rotate', 'spin'] },
+            { id: 'a2', name: _t('Nhóm 2 — Pop / Thu phóng vào'), effects: ['pop', 'scale'] },
+            { id: 'a3', name: _t('Nhóm 3 — Lật'), effects: ['flip'] },
+            { id: 'a4', name: _t('Nhóm 4 — Đánh máy (chữ)'), effects: ['typewriter'] },
         ],
         transGroups: [
-            { id: 't1', name: 'Nhóm 1 — Trượt / Quét', transitions: ['slideup', 'slidedown', 'slideleft', 'slideright', 'wipeleft', 'wiperight'] },
-            { id: 't2', name: 'Nhóm 2 — Vòng tròn / Toả / Xoắn', transitions: ['circleopen', 'circleclose', 'radial', 'swirl'] },
+            { id: 't1', name: _t('Nhóm 1 — Trượt / Quét'), transitions: ['slideup', 'slidedown', 'slideleft', 'slideright', 'wipeleft', 'wiperight'] },
+            { id: 't2', name: _t('Nhóm 2 — Vòng tròn / Toả / Xoắn'), transitions: ['circleopen', 'circleclose', 'radial', 'swirl'] },
         ],
         // Thứ tự khoá ở đây khớp thứ tự normalizeAutoSfx() dựng ra, để file trên đĩa và
         // bản chuẩn hoá giống nhau tới từng ký tự (dễ so sánh khi gỡ lỗi).
         sfxGroups: [
             {
-                id: 'g1', name: 'Nhóm 1 — Whoosh nhanh',
+                id: 'g1', name: _t('Nhóm 1 — Whoosh nhanh'),
                 files: ['SFXs/[SFXs] Short-Whoosh-4.mp3', 'SFXs/[SFXs] Swish-1.mp3', 'SFXs/[SFXs] Fast-Whoosh-10.mp3', 'SFXs/[SFXs] Fast-Whoosh-E14.mp3'],
                 align: 'peak', fit: 'full',
             },
             {
-                id: 'g2', name: 'Nhóm 2 — Whoosh dài',
+                id: 'g2', name: _t('Nhóm 2 — Whoosh dài'),
                 files: ['SFXs/[SFXs] Woosh-Wind-4.mp3', 'SFXs/[SFXs] Deep-woosh-1.mp3'],
                 align: 'peak', fit: 'full',
             },
             {
-                id: 'g3', name: 'Nhóm 3 — Pop',
+                id: 'g3', name: _t('Nhóm 3 — Pop'),
                 files: ['SFXs/[SFXs] Pop-lower-sound.mp3', 'SFXs/[SFXs] Pop-Sound-to-Open.mp3'],
                 align: 'peak', fit: 'full',
             },
             {
-                id: 'g4', name: 'Nhóm 4 — Trả lời đúng',
+                id: 'g4', name: _t('Nhóm 4 — Trả lời đúng'),
                 files: ['SFXs/[SFXs] Correct-Answer-1.mp3', 'SFXs/[SFXs] Correct-answer-Piropyrone.mp3', 'SFXs/[SFXs] Ding-the-answer-is-Correct.mp3'],
                 align: 'peak', fit: 'full',
             },
             {
-                id: 'g5', name: 'Nhóm 5 — Trả lời sai',
+                id: 'g5', name: _t('Nhóm 5 — Trả lời sai'),
                 files: ['SFXs/[SFXs] Drip-drip-the-wrong-answer.mp3', 'SFXs/[SFXs] Wrong-answer.mp3'],
                 align: 'peak', fit: 'full',
             },
             // Nhóm 6 là ĐẶC LỆ của auto_sfx.txt: tiếng gõ phím chạy SUỐT hiệu ứng đánh máy
             // chứ không phải một cú nhấn tại một mốc -> canh đầu block + cắt theo hiệu ứng.
             {
-                id: 'g6', name: 'Nhóm 6 — Gõ phím',
+                id: 'g6', name: _t('Nhóm 6 — Gõ phím'),
                 files: ['SFXs/[SFXs] Typing-1.mp3'],
                 align: 'start', fit: 'toEffect',
             },
             {
-                id: 'g7', name: 'Nhóm 7 — Lật thẻ',
+                id: 'g7', name: _t('Nhóm 7 — Lật thẻ'),
                 files: ['SFXs/[SFXs] Turn-Card.mp3'],
                 align: 'peak', fit: 'full',
             },
@@ -128,7 +131,11 @@
     // Auto save GHI BẢN SAO, không đụng file .crab của người dùng — sửa hỏng vẫn quay lại
     // được. Xem mục "Auto Save" trong APP_INTERNALS.md.
     const DEFAULT_AUTO_SAVE = { enabled: true, intervalMin: 5, keepVersions: 10, warnOnExit: true };
-    const DEFAULT_GENERAL = { undoSteps: 20, devMode: false, snapDefault: true };
+    /* language: 'auto' = theo ngôn ngữ hệ điều hành — chỉ là mặc định của CÀI MỚI. Người dùng
+     * đã có file cài đặt từ trước khi có mục này được backend gán 'vi' lúc đọc (xem
+     * readAppSettings) để giao diện không tự đổi sang tiếng Anh sau khi cập nhật. */
+    const LANGUAGES = ['auto', 'vi', 'en', 'zh'];
+    const DEFAULT_GENERAL = { undoSteps: 20, devMode: false, snapDefault: true, language: 'auto' };
     // transitionQuality 'auto' = 2 mức (CSS px khi phát, ×dpr khi dừng); 'sharp' = luôn ×dpr,
     // nét hơn khi phát nhưng hiệu ứng Xoắn sẽ giật (xem transitionRenderScale).
     const DEFAULT_PREVIEW = { defaultQuality: 'proxy', frameStep: 1, transitionQuality: 'auto' };
@@ -405,7 +412,7 @@
             seen.add(id);
             out.push({
                 id: id.slice(0, 64),
-                name: cleanText(item.name, 'Hiệu ứng của tôi').slice(0, TEXT_EFFECT_NAME_MAX),
+                name: cleanText(item.name, _t('Hiệu ứng của tôi')).slice(0, TEXT_EFFECT_NAME_MAX),
                 patch,
                 ratios,
             });
@@ -420,6 +427,7 @@
             undoSteps: Math.round(clampNumber(s.undoSteps, LIMITS.undoSteps.min, LIMITS.undoSteps.max, D.undoSteps)),
             devMode: typeof s.devMode === 'boolean' ? s.devMode : D.devMode,
             snapDefault: typeof s.snapDefault === 'boolean' ? s.snapDefault : D.snapDefault,
+            language: LANGUAGES.includes(s.language) ? s.language : D.language,
         };
     }
 
@@ -497,13 +505,13 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
         })
-            .then((r) => (r.ok ? r.json() : Promise.reject(new Error('Không lưu được cài đặt'))))
+            .then((r) => (r.ok ? r.json() : Promise.reject(new Error(_t('Không lưu được cài đặt')))))
             .then((data) => { cached = normalize(data); emit(); return cached; });
     }
 
     function reset() {
         return fetch(`${API_BASE}/settings/reset`, { method: 'POST' })
-            .then((r) => (r.ok ? r.json() : Promise.reject(new Error('Không khôi phục được cài đặt'))))
+            .then((r) => (r.ok ? r.json() : Promise.reject(new Error(_t('Không khôi phục được cài đặt')))))
             .then((data) => { cached = normalize(data); emit(); return cached; });
     }
 
@@ -518,6 +526,7 @@
         FIT_VALUES,
         PREVIEW_QUALITY,
         TRANSITION_QUALITY,
+        LANGUAGES,
         DEFAULTS,
         defaults,
         normalize,

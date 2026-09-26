@@ -42,6 +42,13 @@ const fsp = require('fs/promises');
 const path = require('path');
 const { spawn } = require('child_process');
 
+/* Dịch LÚC GỌI (không chốt lúc nạp module): server.js nạp i18n.js và đặt globalThis._t,
+ * người dùng đổi ngôn ngữ lúc app đang chạy thì lượt job sau nói ngôn ngữ mới. Test
+ * require module này không có i18n -> trả nguyên câu tiếng Việt. */
+const _t = (k, p) => ((typeof globalThis._t === 'function')
+  ? globalThis._t(k, p)
+  : (p ? String(k).replace(/\{(\w+)\}/g, (m, n) => (n in p ? p[n] : m)) : k));
+
 const jobs = new Map();
 let activeJobId = null;
 
@@ -124,7 +131,7 @@ function newJob(params) {
     state: 'queued',
     stage: 'queued',
     progress: 0,
-    message: 'Đang xếp hàng',
+    message: _t('Đang xếp hàng'),
     error: null,
     warnings: [],
     result: null,
@@ -289,8 +296,9 @@ function runFfmpeg(job, args, { totalSeconds = 0, onProgress } = {}) {
       ctx.untrackChild(child);
       job.child = null;
       if (code === 0) { resolve(); return; }
-      if (job.cancelled) { reject(new Error('Đã huỷ')); return; }
-      reject(new Error(`ffmpeg trộn audio thất bại (mã ${code}): ${errorLines.join('').trim().split('\n').pop()}`));
+      if (job.cancelled) { reject(new Error(_t('Đã huỷ'))); return; }
+      reject(new Error(_t('ffmpeg trộn audio thất bại (mã {code}): {detail}',
+        { code, detail: errorLines.join('').trim().split('\n').pop() })));
     });
   });
 }
@@ -322,7 +330,7 @@ async function mixTimelineAudio(job, entries, outputPath) {
   await rmQuiet(filterPath);
 
   if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size <= 1024) {
-    throw new Error('Không trộn được audio của timeline (bản trộn rỗng).');
+    throw new Error(_t('Không trộn được audio của timeline (bản trộn rỗng).'));
   }
   return { path: outputPath, duration: totalSeconds };
 }
@@ -333,22 +341,21 @@ async function mixTimelineAudio(job, entries, outputPath) {
 
 async function runJob(job) {
   job.state = 'running';
-  setPhase(job, 'plan', 1, 'đang dựng kế hoạch trộn audio');
+  setPhase(job, 'plan', 1, _t('đang dựng kế hoạch trộn audio'));
 
   const mainAudioPath = path.join(ctx.tempDir, 'temp_input.mp4');
   const entries = normalizeEntries(job.params.entries, mainAudioPath);
   if (!entries.length) {
-    throw new Error('Không tìm thấy đoạn audio nào trên timeline để bóc băng. '
-      + 'Hãy đưa video lên lane chính hoặc thêm một tệp âm thanh rồi thử lại.');
+    throw new Error(_t('Không tìm thấy đoạn audio nào trên timeline để bóc băng. Hãy đưa video lên lane chính hoặc thêm một tệp âm thanh rồi thử lại.'));
   }
-  if (job.cancelled) throw new Error('Đã huỷ');
+  if (job.cancelled) throw new Error(_t('Đã huỷ'));
 
   const audioPath = path.join(ctx.tempDir, `subtitle_mix_${job.id}.wav`);
-  setPhase(job, 'mix', 4, `đang trộn ${entries.length} đoạn audio theo trục timeline`);
+  setPhase(job, 'mix', 4, _t('đang trộn {n} đoạn audio theo trục timeline', { n: entries.length }));
   const mixed = await mixTimelineAudio(job, entries, audioPath);
-  if (job.cancelled) throw new Error('Đã huỷ');
+  if (job.cancelled) throw new Error(_t('Đã huỷ'));
 
-  setPhase(job, 'asr', 22, 'đang bóc băng bằng Whisper');
+  setPhase(job, 'asr', 22, _t('đang bóc băng bằng Whisper'));
   const asr = await ctx.transcribe(mixed.path, {
     referenceScript: String(job.params.reference_script || ''),
     transcribeMode: String(job.params.transcribe_mode || 'vi_smart'),
@@ -368,9 +375,9 @@ async function runJob(job) {
     },
     onChild: (child) => { job.child = child; },
   });
-  if (job.cancelled) throw new Error('Đã huỷ');
+  if (job.cancelled) throw new Error(_t('Đã huỷ'));
 
-  setPhase(job, 'finalize', 96, 'đang dựng phụ đề từ dữ liệu bóc băng');
+  setPhase(job, 'finalize', 96, _t('đang dựng phụ đề từ dữ liệu bóc băng'));
   const segments = (Array.isArray(asr?.segments) ? asr.segments : [])
     .map((seg) => ({
       start: Number(seg.start) || 0,
@@ -402,7 +409,7 @@ async function runJob(job) {
     entry_count: entries.length,
   };
   if (!segments.length) {
-    job.warnings.push('Không nghe thấy lời thoại nào trong audio của timeline.');
+    job.warnings.push(_t('Không nghe thấy lời thoại nào trong audio của timeline.'));
   }
 }
 
@@ -410,15 +417,15 @@ function startRun(job) {
   job.finishedAt = null;
   runJob(job)
     .then(() => {
-      if (job.cancelled) { job.state = 'cancelled'; job.message = 'Đã huỷ'; return; }
+      if (job.cancelled) { job.state = 'cancelled'; job.message = _t('Đã huỷ'); return; }
       job.state = 'complete';
       job.progress = 100;
       job.message = job.result?.segments?.length
-        ? `Xong — ${job.result.segments.length} câu`
-        : 'Xong — không có lời thoại';
+        ? _t('Xong — {n} câu', { n: job.result.segments.length })
+        : _t('Xong — không có lời thoại');
     })
     .catch((err) => {
-      if (job.cancelled) { job.state = 'cancelled'; job.message = 'Đã huỷ'; return; }
+      if (job.cancelled) { job.state = 'cancelled'; job.message = _t('Đã huỷ'); return; }
       job.state = 'failed';
       job.error = String(err?.message || err);
       job.message = job.error;
@@ -432,7 +439,7 @@ function startRun(job) {
 async function create(params) {
   pruneJobs();
   if (activeJobId && jobs.get(activeJobId)?.state === 'running') {
-    const err = new Error('Đang có một lượt tạo phụ đề chạy. Chờ nó xong hoặc huỷ trước.');
+    const err = new Error(_t('Đang có một lượt tạo phụ đề chạy. Chờ nó xong hoặc huỷ trước.'));
     err.statusCode = 409;
     throw err;
   }
@@ -450,7 +457,7 @@ function cancel(id) {
   job.cancelled = true;
   if (job.child) killProcessTree(job.child);
   job.state = 'cancelled';
-  job.message = 'Đã huỷ';
+  job.message = _t('Đã huỷ');
   job.finishedAt = Date.now();
   if (activeJobId === id) activeJobId = null;
   return job;

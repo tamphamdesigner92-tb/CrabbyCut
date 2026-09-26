@@ -2,8 +2,11 @@
 <html lang="vi">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self' file: 'unsafe-inline';">
 <title>Thiết lập CrabbyCut</title>
+<!-- Lõi dịch dùng chung (renderer/backend/main). Tệp nằm trong bản đóng gói: build.files gồm
+     static/**, asar tắt. Nạp hỏng thì trang vẫn chạy bằng tiếng Việt (_t dự phòng bên dưới). -->
+<script src="../static/js/i18n.js"></script>
 <style>
   :root {
     --bg: #08090c;
@@ -111,16 +114,30 @@
 
 <script>
 (() => {
+  /* ĐA NGÔN NGỮ: từ điển do setup-window.js gửi qua preload (window.crabSetup.i18n) — không
+   * có backend nên không có injectI18n. Dịch markup tĩnh MỘT lần ngay đây, trước mọi chữ JS. */
+  const I18n = window.I18n;
+  const boot = (window.crabSetup && window.crabSetup.i18n) || { locale: 'vi', dict: {} };
+  if (I18n) {
+    I18n.setLocale(boot.locale);
+    I18n.register(boot.locale, boot.dict || {});
+    I18n.translateDom(document.body);
+    document.documentElement.lang = I18n.tag();
+  }
+  const _t = I18n ? I18n.t
+    : ((k, p) => (p ? String(k).replace(/\{(\w+)\}/g, (m, n) => (n in p ? p[n] : m)) : k));
+  document.title = _t('Thiết lập CrabbyCut');
+
   /* Phải KHỚP STAGE_WEIGHTS ở scripts/setup_runtime.js.
    * Không còn bước "tải thư viện AI" ở đây: chúng được tải ở lần đầu người dùng dùng đúng
    * tính năng cần chúng, không phải lúc cài đặt. */
   const STAGES = [
-    ['detect',   'Kiểm tra cấu hình máy'],
-    ['vcredist', 'Thư viện hệ thống Visual C++'],
-    ['python',   'Cài đặt Python'],
-    ['pip',      'Chuẩn bị trình cài gói'],
-    ['ffmpeg',   'Cài đặt FFmpeg'],
-    ['verify',   'Kiểm tra lại'],
+    ['detect',   _t('Kiểm tra cấu hình máy')],
+    ['vcredist', _t('Thư viện hệ thống Visual C++')],
+    ['python',   _t('Cài đặt Python')],
+    ['pip',      _t('Chuẩn bị trình cài gói')],
+    ['ffmpeg',   _t('Cài đặt FFmpeg')],
+    ['verify',   _t('Kiểm tra lại')],
   ];
 
   const $ = (id) => document.getElementById(id);
@@ -163,9 +180,8 @@
 
   window.crabSetup.onInit((payload) => {
     $('sub').textContent = payload.reason === 'incomplete'
-      ? 'Lần thiết lập trước chưa hoàn tất. Ứng dụng sẽ tiếp tục từ chỗ còn dở.'
-      : 'CrabbyCut đang cài môi trường cơ bản để mở được ứng dụng. '
-        + 'Thư viện AI (bóc băng, Auto-Reframe) sẽ tải sau, ở lần đầu bạn dùng tính năng đó.';
+      ? _t('Lần thiết lập trước chưa hoàn tất. Ứng dụng sẽ tiếp tục từ chỗ còn dở.')
+      : _t('CrabbyCut đang cài môi trường cơ bản để mở được ứng dụng. Thư viện AI (bóc băng, Auto-Reframe) sẽ tải sau, ở lần đầu bạn dùng tính năng đó.');
     if (payload.autoStart) window.crabSetup.start();
   });
 
@@ -186,18 +202,19 @@
       const m = event.machine;
       $('machine').style.display = 'grid';
       $('m-os').textContent = m.os + ' (' + m.arch + ')';
-      $('m-cpu').textContent = m.cpu + (m.cpu_count ? ' — ' + m.cpu_count + ' luồng' : '');
+      $('m-cpu').textContent = m.cpu + (m.cpu_count ? ' — ' + _t('{n} luồng', { n: m.cpu_count }) : '');
       $('m-gpu').textContent = m.nvidia.available
         ? m.nvidia.gpus.map((g) => g.name + (g.vram_mb ? ' (' + Math.round(g.vram_mb / 1024) + ' GB)' : '')).join(', ')
-        : 'Không có GPU NVIDIA — sẽ dùng CPU để bóc băng';
-      $('m-ffmpeg').textContent = m.ffmpeg ? 'Đã có trên máy — dùng lại' : 'Chưa có — sẽ tải về';
-      $('m-disk').textContent = humanBytes(m.disk.free_bytes) + ' trống trên ' + m.disk.path;
+        : _t('Không có GPU NVIDIA — sẽ dùng CPU để bóc băng');
+      $('m-ffmpeg').textContent = m.ffmpeg ? _t('Đã có trên máy — dùng lại') : _t('Chưa có — sẽ tải về');
+      $('m-disk').textContent = _t('{size} trống trên {path}', { size: humanBytes(m.disk.free_bytes), path: m.disk.path });
       return;
     }
 
     if (event.type === 'progress') {
       markStages(event.stage);
-      $('stage-label').textContent = event.stage_label;
+      // Nhãn bước do scripts/setup_runtime.js gửi (tiếng Việt, trùng nhãn ở STAGES) -> dịch ở đây.
+      $('stage-label').textContent = _t(event.stage_label);
       const pct = Math.round(event.ratio * 100);
       $('percent').textContent = pct + '%';
       $('bar').style.width = pct + '%';
@@ -212,11 +229,10 @@
 
       if (!event.ok) {
         $('bar').className = 'bar failed';
-        $('stage-label').textContent = 'Thiết lập chưa xong';
+        $('stage-label').textContent = _t('Thiết lập chưa xong');
         $('detail').textContent = '';
-        setMessage('error', 'Không hoàn tất được: ' + (event.error || 'lỗi không rõ')
-          + '\n\nThường gặp nhất là mất mạng giữa chừng. Kiểm tra kết nối rồi bấm "Thử lại" — '
-          + 'những phần đã tải xong sẽ không phải tải lại.');
+        setMessage('error', _t('Không hoàn tất được: {error}', { error: event.error || _t('lỗi không rõ') })
+          + '\n\n' + _t('Thường gặp nhất là mất mạng giữa chừng. Kiểm tra kết nối rồi bấm "Thử lại" — những phần đã tải xong sẽ không phải tải lại.'));
         $('btn-retry').classList.remove('hidden');
         return;
       }
@@ -228,16 +244,16 @@
 
       if (event.complete) {
         $('bar').className = 'bar done';
-        $('stage-label').textContent = 'Đã sẵn sàng';
+        $('stage-label').textContent = _t('Đã sẵn sàng');
         $('detail').textContent = '';
-        setMessage('ok', 'Môi trường đã cài đầy đủ. CrabbyCut sẵn sàng sử dụng.');
+        setMessage('ok', _t('Môi trường đã cài đầy đủ. CrabbyCut sẵn sàng sử dụng.'));
         /* TỰ ĐÓNG KHI THÀNH CÔNG. Cửa sổ này được BỘ CÀI gọi và chờ (ExecWait), nên bắt
          * buộc phải bấm nút mới đóng là khoá luôn bộ cài nếu người dùng bỏ đi giữa chừng —
          * bước cài kéo dài hàng chục phút thì đó là chuyện thường. Chỉ tự đóng ở nhánh
          * THÀNH CÔNG; nhánh lỗi và nhánh thiếu thành phần vẫn phải chờ người đọc. */
         let left = 5;
         const tick = () => {
-          $('btn-finish').textContent = 'Xong (' + left + ')';
+          $('btn-finish').textContent = _t('Xong ({n})', { n: left });
           if (left <= 0) { window.crabSetup.finish(); return; }
           left -= 1;
           setTimeout(tick, 1000);
@@ -245,14 +261,14 @@
         tick();
       } else {
         $('bar').className = 'bar failed';
-        $('stage-label').textContent = 'Xong, nhưng thiếu một vài thành phần';
+        $('stage-label').textContent = _t('Xong, nhưng thiếu một vài thành phần');
         const verify = (event.manifest && event.manifest.verify) || {};
         const lines = [];
-        if (verify.python_ok === false) lines.push('• Python không chạy được.');
-        if (verify.ffmpeg_ok === false) lines.push('• FFmpeg không chạy được.');
-        if (!lines.length) lines.push('• Có thành phần chưa đạt — xem nhật ký để biết chi tiết.');
-        setMessage('warn', 'Các phần sau chưa dùng được, những phần còn lại vẫn hoạt động bình thường:\n'
-          + lines.join('\n') + '\n\nBấm "Thử lại" để cài tiếp, hoặc "Xong" để dùng trước.');
+        if (verify.python_ok === false) lines.push('• ' + _t('Python không chạy được.'));
+        if (verify.ffmpeg_ok === false) lines.push('• ' + _t('FFmpeg không chạy được.'));
+        if (!lines.length) lines.push('• ' + _t('Có thành phần chưa đạt — xem nhật ký để biết chi tiết.'));
+        setMessage('warn', _t('Các phần sau chưa dùng được, những phần còn lại vẫn hoạt động bình thường:') + '\n'
+          + lines.join('\n') + '\n\n' + _t('Bấm "Thử lại" để cài tiếp, hoặc "Xong" để dùng trước.'));
         $('btn-retry').classList.remove('hidden');
       }
       $('btn-finish').classList.remove('hidden');

@@ -25,6 +25,9 @@
         root.Shortcuts = factory();
     }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+    const _t = (typeof globalThis !== 'undefined' && globalThis._t)
+        || ((k, p) => (p ? String(k).replace(/\{(\w+)\}/g, (m, n) => (n in p ? p[n] : m)) : k));
+
     /* ---- Bổ trợ ----
      * 'Cmd' gộp cả metaKey (macOS) lẫn ctrlKey (Windows/Linux) vì toàn bộ mã hiện tại đang
      * so `e.ctrlKey || e.metaKey`. Giữ nguyên quy ước đó: một tổ hợp 'Cmd+KeyS' chạy được
@@ -35,53 +38,53 @@
 
     // Nhóm hiển thị trong bảng Cài đặt.
     const GROUPS = [
-        { id: 'file', label: 'Tệp' },
-        { id: 'edit', label: 'Chỉnh sửa' },
-        { id: 'tool', label: 'Công cụ' },
-        { id: 'playback', label: 'Phát lại' },
-        { id: 'select', label: 'Chọn' },
+        { id: 'file', label: _t('Tệp') },
+        { id: 'edit', label: _t('Chỉnh sửa') },
+        { id: 'tool', label: _t('Công cụ') },
+        { id: 'playback', label: _t('Phát lại') },
+        { id: 'select', label: _t('Chọn') },
     ];
 
     /* `allowInInput: true` = phím vẫn chạy KHI ĐANG GÕ trong textarea/input. Đúng hành vi
      * sẵn có của ⌘S/⌘O (chúng cố ý đặt TRƯỚC guard gõ chữ ở index.html) — đang gõ kịch bản
      * mà ⌘S không lưu được thì rất khó chịu. */
     const COMMANDS = [
-        { id: 'project.save', group: 'file', label: 'Lưu dự án', combo: 'Cmd+KeyS', allowInInput: true },
-        { id: 'project.saveAs', group: 'file', label: 'Lưu thành…', combo: 'Cmd+Shift+KeyS', allowInInput: true },
-        { id: 'project.open', group: 'file', label: 'Mở dự án…', combo: 'Cmd+KeyO', allowInInput: true },
-        { id: 'app.settings', group: 'file', label: 'Mở Cài đặt', combo: 'Cmd+Comma', allowInInput: true },
+        { id: 'project.save', group: 'file', label: _t('Lưu dự án'), combo: 'Cmd+KeyS', allowInInput: true },
+        { id: 'project.saveAs', group: 'file', label: _t('Lưu thành…'), combo: 'Cmd+Shift+KeyS', allowInInput: true },
+        { id: 'project.open', group: 'file', label: _t('Mở dự án…'), combo: 'Cmd+KeyO', allowInInput: true },
+        { id: 'app.settings', group: 'file', label: _t('Mở Cài đặt'), combo: 'Cmd+Comma', allowInInput: true },
 
-        { id: 'edit.undo', group: 'edit', label: 'Hoàn tác', combo: 'Cmd+KeyZ' },
-        { id: 'edit.redo', group: 'edit', label: 'Làm lại', combo: 'Cmd+Shift+KeyZ' },
-        { id: 'edit.delete', group: 'edit', label: 'Xoá block / clip đang chọn', combo: 'Delete' },
+        { id: 'edit.undo', group: 'edit', label: _t('Hoàn tác'), combo: 'Cmd+KeyZ' },
+        { id: 'edit.redo', group: 'edit', label: _t('Làm lại'), combo: 'Cmd+Shift+KeyZ' },
+        { id: 'edit.delete', group: 'edit', label: _t('Xoá block / clip đang chọn'), combo: 'Delete' },
 
-        { id: 'tool.razor', group: 'tool', label: 'Dao cắt (bật/tắt)', combo: 'Cmd+KeyK' },
+        { id: 'tool.razor', group: 'tool', label: _t('Dao cắt (bật/tắt)'), combo: 'Cmd+KeyK' },
 
-        { id: 'playback.togglePlay', group: 'playback', label: 'Phát / Tạm dừng', combo: 'Space' },
-        { id: 'playback.prevFrame', group: 'playback', label: 'Lùi một khung hình', combo: 'ArrowLeft' },
-        { id: 'playback.nextFrame', group: 'playback', label: 'Tiến một khung hình', combo: 'ArrowRight' },
+        { id: 'playback.togglePlay', group: 'playback', label: _t('Phát / Tạm dừng'), combo: 'Space' },
+        { id: 'playback.prevFrame', group: 'playback', label: _t('Lùi một khung hình'), combo: 'ArrowLeft' },
+        { id: 'playback.nextFrame', group: 'playback', label: _t('Tiến một khung hình'), combo: 'ArrowRight' },
 
-        { id: 'select.blocksLeft', group: 'select', label: 'Chọn các block bên trái', combo: 'Alt+BracketLeft' },
-        { id: 'select.blocksRight', group: 'select', label: 'Chọn các block bên phải', combo: 'Alt+BracketRight' },
+        { id: 'select.blocksLeft', group: 'select', label: _t('Chọn các block bên trái'), combo: 'Alt+BracketLeft' },
+        { id: 'select.blocksRight', group: 'select', label: _t('Chọn các block bên phải'), combo: 'Alt+BracketRight' },
     ];
 
     /* Phím NGỮ CẢNH — chỉ để liệt kê, KHÔNG đổi được. `combo` ở đây là chuỗi hiển thị sẵn
      * chứ không phải tổ hợp chuẩn hoá, vì nhiều dòng là "Delete hoặc Backspace". */
     const CONTEXT_KEYS = [
-        { display: 'Esc', label: 'Đóng hộp thoại đang mở (Cài đặt · Xuất video · Chụp khung hình · Menu)' },
-        { display: 'Esc', label: 'Đóng lớp xem trước tệp ở panel trái' },
-        { display: 'Esc', label: 'Huỷ ống hút màu / cân bằng trắng' },
-        { display: 'Esc', label: 'Kết thúc sửa text trên preview (không lưu thay đổi)' },
-        { display: 'Enter', label: 'Chốt giá trị ô nhập ở bảng thông số' },
-        { display: 'Esc', label: 'Huỷ sửa ô nhập, trả về giá trị cũ' },
-        { display: 'Enter / Esc', label: 'Trả lời popup "tách block tại điểm đổi góc máy?"' },
-        { display: '⌘ / Ctrl + bấm', label: 'Chọn thêm / bỏ chọn từng block trên timeline' },
-        { display: 'Kéo quét vùng trống', label: 'Chọn mọi block trong khung quét (giữ ⌘/Ctrl để cộng dồn)' },
-        { display: 'Bấm vùng trống', label: 'Bỏ chọn tất cả' },
-        { display: 'Alt + kéo block', label: 'Nhân bản block' },
-        { display: 'Alt + lăn chuột', label: 'Phóng to/thu nhỏ timeline' },
-        { display: 'Shift + lăn chuột', label: 'Hít playhead vào mốc block' },
-        { display: 'Shift / Alt + kéo số', label: 'Tinh chỉnh ×0.1 / tăng nhanh ×10 ở bảng thông số' },
+        { display: 'Esc', label: _t('Đóng hộp thoại đang mở (Cài đặt · Xuất video · Chụp khung hình · Menu)') },
+        { display: 'Esc', label: _t('Đóng lớp xem trước tệp ở panel trái') },
+        { display: 'Esc', label: _t('Huỷ ống hút màu / cân bằng trắng') },
+        { display: 'Esc', label: _t('Kết thúc sửa chữ trên khung xem trước (không lưu thay đổi)') },
+        { display: 'Enter', label: _t('Chốt giá trị ô nhập ở bảng thông số') },
+        { display: 'Esc', label: _t('Huỷ sửa ô nhập, trả về giá trị cũ') },
+        { display: 'Enter / Esc', label: _t('Trả lời hộp hỏi "tách block tại điểm đổi góc máy?"') },
+        { display: _t('⌘ / Ctrl + bấm'), label: _t('Chọn thêm / bỏ chọn từng block trên timeline') },
+        { display: _t('Kéo quét vùng trống'), label: _t('Chọn mọi block trong khung quét (giữ ⌘/Ctrl để cộng dồn)') },
+        { display: _t('Bấm vùng trống'), label: _t('Bỏ chọn tất cả') },
+        { display: _t('Alt + kéo block'), label: _t('Nhân bản block') },
+        { display: _t('Alt + lăn chuột'), label: _t('Phóng to/thu nhỏ timeline') },
+        { display: _t('Shift + lăn chuột'), label: _t('Hít playhead vào mốc block') },
+        { display: _t('Shift / Alt + kéo số'), label: _t('Tinh chỉnh ×0.1 / tăng nhanh ×10 ở bảng thông số') },
     ];
 
     const COMMAND_BY_ID = COMMANDS.reduce((m, c) => { m[c.id] = c; return m; }, {});
@@ -267,7 +270,9 @@
                 el.textContent = text;
                 return;
             }
-            const base = el.getAttribute('data-shortcut-title') || '';
+            // Thuộc tính tuỳ biến -> translateDom() không dịch, nên dịch ở đây.
+            const rawBase = el.getAttribute('data-shortcut-title') || '';
+            const base = rawBase ? _t(rawBase) : '';
             el.title = text ? `${base} (${text})` : base;
         });
         return nodes.length;

@@ -27,7 +27,14 @@
         const label = versionLabel(info?.version);
         if (!label) return;
         (root || document).querySelectorAll('[data-app-version]').forEach((el) => {
-            el.textContent = `${el.dataset.appVersionPrefix || ''}${label}`;
+            // Thuộc tính tuỳ biến -> translateDom() không dịch; dịch phần chữ (bỏ khoảng trắng
+            // cuối khỏi khoá rồi gắn lại).
+            const raw = el.dataset.appVersionPrefix || '';
+            const core = raw.trim();
+            const prefix = core && typeof window._t === 'function'
+                ? window._t(core) + raw.slice(raw.trimEnd().length)
+                : raw;
+            el.textContent = `${prefix}${label}`;
             el.hidden = false;
         });
     }

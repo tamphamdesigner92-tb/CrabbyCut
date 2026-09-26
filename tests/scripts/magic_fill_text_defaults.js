@@ -486,7 +486,7 @@ const linesOf = (text) => S.magicWrap(text, 58, 'Nunito', 700, 0, FAKE_MAX_WIDTH
     assert.ok(/const MAGIC_FILL_TEXT_EFFECT_ID = 'fx7';/.test(source),
         'phải chốt id hiệu ứng chữ mặc định của Magic Fill');
     const fx7 = source.slice(source.indexOf("id: 'fx7'"), source.indexOf("id: 'fx8'"));
-    assert.ok(/name: 'Hồng kẹo'/.test(fx7), 'fx7 phải đúng là hiệu ứng "Hồng kẹo"');
+    assert.ok(/name: (?:_t\()?'Hồng kẹo'/.test(fx7), 'fx7 phải đúng là hiệu ứng "Hồng kẹo"');
 
     /* Font/độ đậm dùng để ĐO phải ĐÚNG BẰNG font sẽ VẼ, nếu không chữ gói theo một phép đo
        rồi vẽ bằng font rộng hơn -> box lòi khỏi lưới an toàn.

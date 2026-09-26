@@ -90,7 +90,7 @@ async function checkAppInfo() {
 /* ---------- 4. Cài đặt → Về CrabbyCut ---------- */
 {
     const panel = read('static', 'js', 'settings-panel.js');
-    assert.ok(/\{ id: 'about', label: 'Về CrabbyCut', ready: true \}/.test(panel), 'phải có mục "Về CrabbyCut"');
+    assert.ok(/\{ id: 'about', label: (?:_t\('Về CrabbyCut'\)|'Về CrabbyCut'), ready: true \}/.test(panel), 'phải có mục "Về CrabbyCut"');
     assert.ok(/about: aboutPaneHtml/.test(panel), 'mục phải có nội dung');
     const pane = panel.slice(panel.indexOf('function aboutPaneHtml'), panel.indexOf('function render()'));
     assert.ok(!pane.includes(pkg.version) && !/Tam Pham|GPL-3/.test(pane),
