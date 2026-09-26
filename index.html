@@ -46,6 +46,11 @@
          injectStyle của auto-subtitle.js nên nạp SAU nó. -->
     <script src="/static/js/subtitle-formats.js?v=lsub-p1"></script>
     <script src="/static/js/local-subtitle.js?v=lsub-p1"></script>
+    <!-- Âm thanh → Lồng tiếng (TTS theo mốc phụ đề). Dùng SubtitleFormats + injectStyle của
+         auto-subtitle.js nên nạp SAU hai tệp đó. -->
+    <script src="/static/js/dubbing.js?v=dub-p1"></script>
+    <!-- Thanh trạng thái: tiến trình tải model AI lần đầu (góc trái). -->
+    <script src="/static/js/model-download-status.js?v=mdl-p1"></script>
     <style>
         /* ===== UI Font (Inter, static theo độ dày từ thư mục Inter/) ===== */
         @font-face { font-family: "Inter"; src: url("/static/fonts/google/Inter/Inter_400Regular.ttf") format("truetype"); font-weight: 400; font-display: swap; }
@@ -4347,6 +4352,13 @@
 <footer class="app-statusbar">
     <div class="app-statusbar-left">
         <span class="app-statusbar-dot" aria-hidden="true"></span>
+        <!-- Tải model AI lần đầu (Whisper, F5-TTS, VieNeu…): nhãn + thanh tiến trình. Ẩn khi
+             không có lượt tải nào — static/js/model-download-status.js điền và bật/tắt. -->
+        <div id="modelDownloadStatus" class="app-model-download" role="status" aria-live="polite" hidden>
+            <span class="app-model-download-label" data-mdl-label></span>
+            <span class="app-model-download-bar" aria-hidden="true"><span class="app-model-download-fill" data-mdl-fill></span></span>
+            <span class="app-model-download-meta" data-mdl-meta></span>
+        </div>
         <div id="statusText" role="status" aria-live="polite" aria-atomic="true">Sẵn sàng</div>
     </div>
     <div class="app-statusbar-right" aria-hidden="true">
@@ -7267,6 +7279,8 @@
             btn.innerText = _t('Đang cài…');
         }
         startStatusPolling();
+        // Tải model Whisper lần đầu -> thanh tiến trình ở góc trái thanh trạng thái.
+        window.ModelDownloadStatus?.kick();
         try {
             const response = await fetch(`${API_BASE}/asr-models/setup`, {
                 method: 'POST',
@@ -12278,6 +12292,7 @@
         // rồi mà không dọn thì dự án mới thừa hưởng cả thanh tiến trình lẫn danh sách phụ đề.
         window.AutoSubtitlePanel?.resetState?.();
         window.LocalSubtitlePanel?.resetState?.();
+        window.DubbingPanel?.resetState?.();
         /* Sổ phụ đề của dự án VỪA ĐÓNG. Bình thường restoreHistoryState() ở cuối hàm đặt lại
          * khoá này (có phụ đề thì nạp, không có thì null), nhưng nó chỉ chạy `if (history)` —
          * một tệp .crab đời cũ KHÔNG có `history` thì sổ của dự án trước sống sót qua, và lượt
@@ -13052,6 +13067,7 @@
         window.EditingRuntime?.resetProjectState?.();
         window.AutoSubtitlePanel?.resetState?.();   // cùng lý do như openProjectFromResult
         window.LocalSubtitlePanel?.resetState?.();
+        window.DubbingPanel?.resetState?.();
 
         undoStack = []; redoStack = []; updateUndoRedoButtons();
         setPreviewModeActive(false);

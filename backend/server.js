@@ -338,6 +338,9 @@ const ColorAdjust = require(path.join(STATIC_DIR, 'js', 'color-adjust.js'));
  * export) phải dùng ĐÚNG MỘT phép tính, lệch một pixel là bản xuất ra sai im lặng. */
 const MainLane = require(path.join(STATIC_DIR, 'js', 'main-lane.js'));
 const subtitleJobs = require('./subtitle-jobs.js');
+/* LỒNG TIẾNG (tab Âm thanh) + SỔ TẢI MODEL AI cho thanh trạng thái — xem đầu hai tệp. */
+const ttsService = require('./tts-service.js');
+const modelDownloads = require('./model-downloads.js');
 /* PYTHON SIDECAR: cùng lý do — phép chọn interpreter và env UTF-8 nằm ở MỘT chỗ
  * (scripts/python_command.js), dùng chung với npm script lẫn test. Trước đây mỗi
  * chỗ tự chép một bản và mỗi bản thiếu một mảnh khác nhau. */
@@ -397,6 +400,15 @@ subtitleJobs.init({
   untrackChild: (child) => activeChildProcesses.delete(child),
   resolveSourcePath: (raw) => resolveSubtitleSourcePath(raw),
   transcribe: (audioPath, opts) => transcribeSubtitleMix(audioPath, opts),
+});
+
+ttsService.init({
+  tempDir: TEMP_DIR,
+  setStatus,
+  trackChild: (child) => activeChildProcesses.add(child),
+  untrackChild: (child) => activeChildProcesses.delete(child),
+  publicTempUrl: (filePath) => publicTempUrl(filePath),
+  modelDownloads,
 });
 
 function ensureDirs() {
@@ -3464,6 +3476,24 @@ async function runPythonSidecar(scriptPath, inputPath, outputPath, options = {})
   return spawnPythonSidecar(scriptPath, inputPath, outputPath, options);
 }
 
+/* Đọc thanh tqdm đo theo BYTE: " 45%|████▌     | 1.30G/2.88G [00:30<00:40, 42.1MiB/s]".
+ * Lấy lần cập nhật CUỐI trong cụm (tqdm ghi đè dòng bằng \r). Trả { downloaded, total } byte
+ * hoặc null nếu cụm không có thanh byte nào (thanh "frames/s" của whisper KHÔNG khớp). */
+function parseTqdmBytes(text) {
+  const re = /\|\s*([\d.]+)\s*([kKMGT]?)(i?)B?\s*\/\s*([\d.]+)\s*([kKMGT]?)(i?)B?\s*\[[^\]]*?[kKMGT]?i?B\/s/g;
+  const hits = [...String(text || '').matchAll(re)];
+  if (!hits.length) return null;
+  const m = hits[hits.length - 1];
+  const scale = (unit, binary) => {
+    const base = binary ? 1024 : 1000;
+    return { '': 1, k: base, K: base, M: base ** 2, G: base ** 3, T: base ** 4 }[unit] || 1;
+  };
+  const downloaded = Number(m[1]) * scale(m[2], m[3] === 'i' || /iB\/s/.test(m[0]));
+  const total = Number(m[4]) * scale(m[5], m[6] === 'i' || /iB\/s/.test(m[0]));
+  if (!Number.isFinite(downloaded) || !(total > 0)) return null;
+  return { downloaded: Math.round(downloaded), total: Math.round(total) };
+}
+
 function spawnPythonSidecar(scriptPath, inputPath, outputPath, options = {}) {
   const command = [pythonCommand(), scriptPath, inputPath, outputPath].join(' ');
   const wantProgress = typeof options.onProgress === 'function';
@@ -3482,11 +3512,27 @@ function spawnPythonSidecar(scriptPath, inputPath, outputPath, options = {}) {
     activeChildProcesses.add(child);
     if (typeof options.onChild === 'function') options.onChild(child);
     const stderr = [];
+    const downloadIds = new Set();
+    // Tiến trình chết giữa lúc tải (bị huỷ, lỗi mạng không báo) thì lượt tải trên thanh trạng
+    // thái phải khép lại, không treo ở "Đang tải…" mãi.
+    child.on('exit', (code) => {
+      for (const id of downloadIds) {
+        const entry = modelDownloads.list().find((e) => e.id === id);
+        if (entry && entry.state === 'downloading') modelDownloads.end(id, code === 0 ? {} : { error: _t('Tiến trình dừng giữa chừng (mã {code}).', { code }) });
+      }
+    });
     child.stdout.on('data', (chunk) => {
       const text = chunk.toString('utf8');
       for (const line of text.split(/\r?\n/)) {
         if (!line.trim()) continue;
         const evt = parseNdjsonLine(line);
+        if (evt?.type === 'download' && evt.id) {
+          // Tải model có số byte thật (sidecar ASR) -> thanh trạng thái. Không đụng progress.txt.
+          downloadIds.add(evt.id);
+          if (evt.state === 'done' || evt.state === 'error') modelDownloads.end(evt.id, { error: evt.state === 'error' ? (evt.error || 'error') : '' });
+          else modelDownloads.update(evt.id, evt);
+          continue;
+        }
         if (wantProgress && evt && Number.isFinite(Number(evt.ratio))) {
           options.onProgress(Math.max(0, Math.min(1, Number(evt.ratio))));
         }
@@ -3496,6 +3542,15 @@ function spawnPythonSidecar(scriptPath, inputPath, outputPath, options = {}) {
     });
     child.stderr.on('data', (chunk) => {
       const text = chunk.toString('utf8');
+      /* Model tải NGẦM bởi thư viện (openai-whisper ở core_logic.py, mlx_whisper trên macOS)
+         chỉ để lại thanh tqdm trên stderr. Nhận ra thanh theo BYTE (đuôi "B/s]") để thanh trạng
+         thái vẫn có tiến trình thay vì app đứng im cả chục phút ở lượt đầu. */
+      const bytes = parseTqdmBytes(text);
+      if (bytes) {
+        const id = `python:${path.basename(scriptPath)}`;
+        downloadIds.add(id);
+        modelDownloads.update(id, { label: options.downloadLabel || _t('Mô hình Whisper'), ...bytes });
+      }
       if (wantProgress) {
         // tqdm ghi đè một dòng bằng \r nên một cụm chứa nhiều lần cập nhật: lấy cái CUỐI.
         const hits = [...text.matchAll(/(\d+)\/(\d+)\s*\[[^\]]*frames\/s/g)];
@@ -3669,7 +3724,7 @@ async function runMacAsr(videoPath, referenceScript, transcribeMode, asrEngine, 
     transcribe_mode: transcribeMode,
     asr_engine: normalizeAsrEngine(asrEngine),
   }), 'utf8');
-  return runPythonSidecar(path.join(PROJECT_ROOT, 'asr', 'mac_mlx_sidecar.py'), inputPath, outputPath, { ...options, feature: 'asr_mac' });
+  return runPythonSidecar(path.join(PROJECT_ROOT, 'asr', 'mac_mlx_sidecar.py'), inputPath, outputPath, { ...options, feature: 'asr_mac', downloadLabel: 'Whisper large-v3-turbo (MLX)' });
 }
 
 function secondsFromWhisperTimestamp(value) {
@@ -4057,7 +4112,7 @@ async function runPythonReferenceFilter({ referenceScript, transcriptText, sessi
     session_file: sessionPath,
     pinned_takes: pinnedTakes || {},
   })), 'utf8');
-  const result = await runPythonSidecar(path.join(PROJECT_ROOT, 'asr', 'python_filter_sidecar.py'), inputPath, outputPath, { feature: 'script' });
+  const result = await runPythonSidecar(path.join(PROJECT_ROOT, 'asr', 'python_filter_sidecar.py'), inputPath, outputPath, { feature: 'script', downloadLabel: 'Whisper large' });
   const { status: _status, ...payload } = result;
   return payload;
 }
@@ -4255,7 +4310,7 @@ async function runScriptReorder({ referenceScript, blocks }) {
     reference_script: referenceScript,
     blocks,
   })), 'utf8');
-  const result = await runPythonSidecar(path.join(PROJECT_ROOT, 'asr', 'python_reorder_sidecar.py'), inputPath, outputPath, { feature: 'script' });
+  const result = await runPythonSidecar(path.join(PROJECT_ROOT, 'asr', 'python_reorder_sidecar.py'), inputPath, outputPath, { feature: 'script', downloadLabel: 'Whisper large' });
   const { status: _status, ...payload } = result;
   return payload;
 }
@@ -6177,6 +6232,9 @@ function createApp() {
     proxy: { dir: PROXY_CACHE_DIR, label: () => _t('Proxy LQ xem trước'), clearable: true },
     asr: { dir: ASR_CACHE_DIR, label: () => _t('Kết quả bóc băng'), clearable: true },
     concat: { dir: CONCAT_CACHE_DIR, label: () => _t('Bản đã nối của dự án'), clearable: true },
+    /* Model lồng tiếng (F5 ~1,4 GB, VieNeu ~0,9 GB): dọn được — lượt lồng tiếng sau tự tải lại
+     * (có thanh tiến trình). Tệp đang được server TTS nạp dở thì Windows không cho xoá, bỏ qua. */
+    tts_models: { dir: ttsService.modelDir(), label: () => _t('Mô hình lồng tiếng'), clearable: true },
     temp: { dir: TEMP_DIR, label: () => _t('Dữ liệu dự án đang mở'), clearable: false },
   };
 
@@ -6748,6 +6806,76 @@ function createApp() {
     res.json({ status: 'success', ...subtitleJobs.publicJob(job) });
   });
 
+  /* ===== TẢI MODEL AI (thanh trạng thái, góc trái) =====
+   * Giao diện poll route này (static/js/model-download-status.js). Server TTS báo tiến trình
+   * theo kiểu ảnh chụp nên chép vào sổ ngay tại lượt hỏi — không cần đồng hồ riêng. */
+  app.get('/api/model-downloads', async (_req, res) => {
+    try { await ttsService.syncDownloads(); } catch (_) { /* server TTS không chạy: bỏ qua */ }
+    res.json({ status: 'success', items: modelDownloads.list() });
+  });
+
+  /* ===== LỒNG TIẾNG (tab Âm thanh → Lồng tiếng) =====
+   * Cùng kiểu job nền như Auto Subtitle: tạo job trả id ngay, panel poll để vẽ tiến trình. */
+  app.get('/api/tts/status', async (_req, res) => {
+    try {
+      res.json({ status: 'success', ...(await ttsService.status()) });
+    } catch (error) {
+      httpError(res, 500, error);
+    }
+  });
+
+  app.post('/api/tts/setup', (_req, res) => {
+    try {
+      res.json({ status: 'success', ...ttsService.startSetup() });
+    } catch (error) {
+      httpError(res, 500, error);
+    }
+  });
+
+  app.post('/api/tts/models/ensure', async (req, res) => {
+    try {
+      res.json({ status: 'success', ...(await ttsService.ensureModels(String(req.body?.engine || ''))) });
+    } catch (error) {
+      httpError(res, error?.status || 500, error);
+    }
+  });
+
+  app.post('/api/dubbing/jobs', async (req, res) => {
+    try {
+      const body = req.body || {};
+      if (body.ref_audio) {
+        const resolved = path.resolve(String(body.ref_audio));
+        if (!fs.existsSync(resolved)) return httpError(res, 400, _t('Không tìm thấy tệp giọng mẫu: {path}', { path: resolved }));
+        body.ref_audio = resolved;
+      }
+      if (!body.preview && !(Array.isArray(body.cues) && body.cues.length)) {
+        return httpError(res, 400, _t('Chưa có câu phụ đề nào để lồng tiếng.'));
+      }
+      const job = await ttsService.createJob(body);
+      projectMetrics.activity = true;
+      res.json({ status: 'success', ...job });
+    } catch (error) {
+      if (error?.code !== 'TTS_ENV_MISSING') recordProjectError('dubbing', error, { endpoint: '/api/dubbing/jobs' });
+      httpError(res, error?.status || 500, error);
+    }
+  });
+
+  app.get('/api/dubbing/jobs/:id', async (req, res) => {
+    try {
+      res.json({ status: 'success', ...(await ttsService.getJob(req.params.id)) });
+    } catch (error) {
+      httpError(res, error?.status || 500, error);
+    }
+  });
+
+  app.post('/api/dubbing/jobs/:id/cancel', async (req, res) => {
+    try {
+      res.json({ status: 'success', ...(await ttsService.cancelJob(req.params.id)) });
+    } catch (error) {
+      httpError(res, error?.status || 500, error);
+    }
+  });
+
   app.post('/api/export-video', transitionFrameUpload.array('transition_frames', TRANSITION_FRAME_LIMIT), async (req, res) => {
     // KHOÁ MỘT LƯỢT XUẤT: mọi lượt xuất đều ghi vào CÙNG một đường dẫn
     // (TEMP_DIR/final_cut.mp4). Hai lượt chạy song song sẽ ghi đè nhau giữa lúc đang viết ->
@@ -6980,4 +7108,6 @@ module.exports = {
   // "lấy theo điểm giữa của từ" phải trùng buildSplitTimelineItems ở renderer, còn cổng
   // sessionWordsCoverBlocks là thứ quyết định có bóc băng lại hay không.
   flattenSessionWords, sliceWordsByBlocks, sessionWordsCoverBlocks,
+  // Thanh trạng thái "Đang tải model": test khoá phép đọc thanh tqdm theo byte.
+  parseTqdmBytes,
 };

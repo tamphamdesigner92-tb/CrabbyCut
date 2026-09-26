@@ -17,6 +17,11 @@ from typing import Any, Dict, List, Optional, Tuple
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TEMP_DIR = PROJECT_ROOT / "temp_uploads"
 
+# Tải model qua HTTP thường thay vì hf_xet: xet gom mảnh vào cache riêng rồi mới ghép tệp, nên
+# thanh tiến trình tải (đo theo dung lượng thư mục đích, xem setup_model) đứng im hàng chục giây
+# rồi nhảy vọt. Đặt trước mọi import huggingface_hub — hub đọc cờ lúc import.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
 
 def _ensure_cuda_dll_path() -> List[str]:
     """WINDOWS: ctranslate2 KHÔNG mang theo cuBLAS, và nó nạp DLL bằng `LoadLibrary` — tức
@@ -439,6 +444,49 @@ def build_probe_payload(model_root: Path, selected_model: str = DEFAULT_MODEL_ID
     }
 
 
+def emit_download(model_id: str, state: str, downloaded: int = 0, total: int = 0, error: str = "") -> None:
+    """Tiến trình TẢI model theo byte -> backend/model-downloads.js -> thanh trạng thái.
+
+    Kênh riêng (type "download") chứ không ghép vào "progress": dòng "progress" có "message" bị
+    backend đẩy vào progress.txt, còn dòng này đổi hai lần mỗi giây."""
+    label = MODEL_CONFIGS.get(model_id, {}).get("label", model_id)
+    print(json.dumps({
+        "type": "download", "id": f"asr:{model_id}", "label": f"Whisper {label}",
+        "state": state, "downloaded": int(downloaded), "total": int(total), "error": error,
+    }, ensure_ascii=False), flush=True)
+
+
+def _dir_bytes(folder: Path) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(folder):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return total
+
+
+def _expected_download_bytes(faster_name: str) -> int:
+    """Tổng byte faster_whisper.download_model sẽ tải (cùng allow_patterns với nó). 0 = không rõ
+    (mất mạng lúc hỏi…) -> thanh chạy vô định, việc tải vẫn tiếp tục."""
+    try:
+        import fnmatch
+        from faster_whisper.utils import _MODELS
+        from huggingface_hub import HfApi
+
+        repo = faster_name if "/" in faster_name else _MODELS.get(faster_name, faster_name)
+        patterns = ["config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*"]
+        total = 0
+        for entry in HfApi().list_repo_tree(repo):
+            size = getattr(entry, "size", None)
+            if size and any(fnmatch.fnmatch(entry.path, p) for p in patterns):
+                total += int(size)
+        return total
+    except Exception:
+        return 0
+
+
 def setup_model(model_root: Path, model_id: str, force: bool = False) -> dict:
     probe = build_probe_payload(model_root, model_id)
     model_info = next(item for item in probe["models"] if item["id"] == model_id)
@@ -456,7 +504,31 @@ def setup_model(model_root: Path, model_id: str, force: bool = False) -> dict:
     faster_name = MODEL_CONFIGS[model_id]["faster_whisper_name"]
     emit_progress(f"Đang setup model ASR Windows: {model_id}...")
     started = perf_counter()
-    downloaded_path = download_model(faster_name, output_dir=str(target), local_files_only=False)
+    # download_model tắt hẳn thanh tqdm của hub (tqdm_class=disabled_tqdm) nên tiến trình được
+    # đo bằng dung lượng thư mục đích — xem tts/model_store.py để biết vì sao cách này đúng với
+    # cả đường tải hf_xet lẫn HTTP.
+    import threading
+    total_bytes = _expected_download_bytes(faster_name)
+    emit_download(model_id, "downloading", _dir_bytes(target), total_bytes)
+    stop_watch = threading.Event()
+
+    def _watch() -> None:
+        while not stop_watch.wait(0.5):
+            current = _dir_bytes(target)
+            emit_download(model_id, "downloading", min(current, total_bytes) if total_bytes else current, total_bytes)
+
+    watcher = threading.Thread(target=_watch, daemon=True)
+    watcher.start()
+    try:
+        downloaded_path = download_model(faster_name, output_dir=str(target), local_files_only=False)
+    except Exception as exc:
+        stop_watch.set()
+        watcher.join(timeout=2)
+        emit_download(model_id, "error", _dir_bytes(target), total_bytes, str(exc)[-300:])
+        raise
+    stop_watch.set()
+    watcher.join(timeout=2)
+    emit_download(model_id, "done", total_bytes or _dir_bytes(target), total_bytes or _dir_bytes(target))
     duration_ms = int((perf_counter() - started) * 1000)
     marker = {
         "model": model_id,

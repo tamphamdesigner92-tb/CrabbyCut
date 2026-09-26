@@ -15405,7 +15405,12 @@
 
     const EDIT_PANEL_SUBTABS = {
         media: [{ id: 'import', label: _t('Nhập') }],
-        audio: [{ id: 'import', label: _t('Nhập') }],
+        /* "Lồng tiếng" (2026-09-27): đọc tệp phụ đề thành giọng nói đúng mốc thời gian — panel ở
+           static/js/dubbing.js. Kết quả là block AUDIO nên đứng ở tab Âm thanh. */
+        audio: [
+            { id: 'import', label: _t('Nhập') },
+            { id: 'dubbing', label: _t('Lồng tiếng') },
+        ],
         /* Auto Subtitle dời từ tab Âm thanh sang đây (2026-09-26, theo yêu cầu người dùng):
            thứ nó SINH RA là block văn bản, nên nó đứng cạnh "Local Subtitle" — hai đường vào
            cùng một loại kết quả. */
@@ -16889,7 +16894,16 @@
         else if (editPanelTab === 'audio') activeSub = editPanelAudioSub;
         subEl.innerHTML = subs.map((s) => `<button class="edit-subtab ${s.id === activeSub ? 'is-active' : ''}" type="button" data-edit-subtab="${s.id}" role="tab" aria-selected="${s.id === activeSub}" aria-controls="editPanelBody">${s.label}</button>`).join('');
         if (editPanelTab === 'media') bodyEl.innerHTML = renderImportPaneHtml('media');
-        else if (editPanelTab === 'audio') bodyEl.innerHTML = renderImportPaneHtml('audio');
+        else if (editPanelTab === 'audio') {
+            if (editPanelAudioSub === 'dubbing') {
+                if (window.DubbingPanel) {
+                    bodyEl.innerHTML = window.DubbingPanel.renderPaneHtml();
+                    window.DubbingPanel.bindPane(bodyEl);
+                } else {
+                    bodyEl.innerHTML = `<div class="edit-empty">${_t('Không nạp được {file}', { file: 'dubbing.js' })}</div>`;
+                }
+            } else bodyEl.innerHTML = renderImportPaneHtml('audio');
+        }
         else if (editPanelTab === 'script') { bodyEl.innerHTML = renderScriptPaneHtml(); bindScriptPane(bodyEl); }
         else if (editPanelTab === 'text') {
             /* Hai panel phụ đề sống ở tệp riêng (auto-subtitle.js, local-subtitle.js) — tính
@@ -23151,6 +23165,89 @@
         return track;
     }
 
+    /* ===== LỒNG TIẾNG (tab Âm thanh → Lồng tiếng, static/js/dubbing.js) =====
+     *
+     * Đặt audio do server TTS sinh ra lên timeline: một clip ghép cả bài, hoặc mỗi câu một clip
+     * (`split`) để người dùng kéo chỉnh từng câu. Lane riêng tên "Lồng tiếng" — cùng lý do như lane
+     * Auto SFX: dễ nhận ra, và lượt lồng lại xoá ĐÚNG phần của mình (`dubbing_source`) mà không đụng
+     * audio người dùng tự thêm.
+     *
+     * Tệp đi qua /editing-assets/import-local như tệp nhập tay (chép vào editing_assets): đó là
+     * đường mà đóng gói dự án (.crab) đã biết mang theo. Asset "link" thì trỏ ra ngoài, không hợp
+     * với tệp sinh trong temp_uploads — "Dự án mới" xoá temp là clip mất tiếng.
+     *
+     * KẸP VÀO TIMELINE như mọi block (resolveNewItemPlacement): phần nằm sau cuối lane chính bị
+     * cắt, câu bắt đầu sau cuối thì bỏ — và báo lại số liệu cho panel nói ra. */
+    async function addDubbingAudio(entries, options = {}) {
+        const list = (entries || []).filter((e) => e && e.path && Number(e.duration) > 0);
+        if (!list.length) return { placed: 0, skipped: 0, clamped: 0, removed: 0 };
+        const total = timelineDuration();
+        if (!(total > 0)) throw new Error(_t('Timeline chưa có video nào. Thêm video vào lane chính trước — lồng tiếng được đặt theo mốc thời gian của timeline.'));
+        const response = await fetch(`${API_BASE}/editing-assets/import-local`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ kind: 'audio', paths: list.map((e) => e.path) }),
+        });
+        if (!response.ok) {
+            const detail = await response.json().catch(() => ({}));
+            throw new Error(detail.detail || _t('Nhập tệp thất bại ({status})', { status: response.status }));
+        }
+        const data = await response.json();
+        const pathKey = (p) => String(p || '').replace(/[\\/]+/g, '/').toLowerCase();
+        const bySource = new Map((data.assets || []).map((raw) => [pathKey(raw.source_path), raw]));
+        const trackName = _t('Lồng tiếng');
+        const source = String(options.sourceKey || '');
+        const endBatch = beginHistoryBatch();
+        let placed = 0;
+        let skipped = 0;
+        let clamped = 0;
+        let removed = 0;
+        try {
+            if (source && options.replace) {
+                const before = editingItems.length;
+                for (let i = editingItems.length - 1; i >= 0; i -= 1) {
+                    if (editingItems[i].dubbing_source === source) editingItems.splice(i, 1);
+                }
+                removed = before - editingItems.length;
+            }
+            list.forEach((entry) => {
+                const raw = bySource.get(pathKey(entry.path));
+                if (!raw) { skipped += 1; return; }
+                const asset = editingAssets.find((a) => a.id === raw.id) || addAssetRecord(raw) || editingAssets.find((a) => a.id === raw.id);
+                if (!asset) { skipped += 1; return; }
+                const start = Math.max(0, Number(entry.start) || 0);
+                if (start >= total - 0.05) { skipped += 1; return; }
+                const want = Number(entry.duration);
+                const duration = Math.max(0.05, Math.min(want, total - start));
+                if (want - duration > 0.05) clamped += 1;
+                const track = autoSfxTrackForRange(trackName, start, duration);
+                editingItems.push({
+                    id: nextId('item_audio'),
+                    type: 'audio',
+                    track_id: track.id,
+                    timeline_start: start,
+                    duration,
+                    asset_id: asset.id,
+                    source_start: 0,
+                    muted: false,
+                    volume: 100,
+                    transform: defaultTransform(),
+                    text: '',
+                    style: defaultTextStyle(),
+                    dubbing: true,
+                    dubbing_source: source,
+                });
+                placed += 1;
+            });
+        } finally {
+            endBatch();
+        }
+        sortTracks();
+        renderAll();
+        renderEditPanel();
+        return { placed, skipped, clamped, removed };
+    }
+
     // Chờ .pk sẵn sàng rồi tìm ĐỈNH SÓNG. Backend sinh peak bất đồng bộ (POST /library/add
     // đã prewarm), nên ở đây chỉ poll trạng thái của store.
     async function autoSfxPeakOffset(asset) {
@@ -23555,6 +23652,8 @@
         addTextItem,
         beginHistoryBatch,
         splitTextToMaxLines,
+        // ----- LỒNG TIẾNG (static/js/dubbing.js) -----
+        addDubbingAudio,
         renderAll,
         renderEditPanel,
         getState: () => ({
