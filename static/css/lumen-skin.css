@@ -75,6 +75,19 @@ input[type="checkbox"]:checked { background-color: var(--primary); border-color:
     z-index: calc(var(--z-home) + 5);
 }
 .header-bar .app-logo { height: 17px; }
+/* Số phiên bản cạnh logo — chỉ ở Trang chủ (trong dự án nó nằm ở thanh trạng thái). */
+.app-version-badge {
+    display: none;
+    margin-left: var(--sp-4);
+    padding: 1px 6px;
+    border-radius: var(--r-xs);
+    background: var(--surface-3);
+    border: 1px solid var(--border-color);
+    color: var(--text-3);
+    font: var(--fw-medium) var(--fs-2xs)/1.4 var(--font-mono);
+    white-space: nowrap;
+}
+body.home-active .app-version-badge:not([hidden]) { display: inline-block; }
 
 .titlebar-home {
     background: transparent;
@@ -169,7 +182,22 @@ input[type="checkbox"]:checked { background-color: var(--primary); border-color:
     text-align: center;
     opacity: 1;
 }
-@media (max-width: 1100px) { .app-statusbar-right { display: none; } }
+/* Dồn khối phím tắt + số phiên bản sang phải (thanh có 3 con, space-between sẽ đặt khối
+   phím tắt vào GIỮA). */
+.app-statusbar-left { margin-right: auto; }
+.app-statusbar-version {
+    flex-shrink: 0;
+    padding-left: var(--sp-7);
+    border-left: 1px solid var(--border-color);
+    color: var(--text-3);
+    font: var(--fw-medium) var(--fs-2xs)/1.4 var(--font-mono);
+    white-space: nowrap;
+}
+body.home-active .app-statusbar-version { display: none; }
+@media (max-width: 1100px) {
+    .app-statusbar-right { display: none; }
+    .app-statusbar-version { padding-left: 0; border-left: 0; }
+}
 
 /* Resizer: vùng bắt 6px giữ nguyên, chỉ vẽ một đường 1px ở giữa. */
 .resizer-x,

@@ -504,6 +504,40 @@ ipcMain.handle('check-for-updates', async () => {
   return { version: app.getVersion() };
 });
 
+/* SỐ PHIÊN BẢN hiện ở Trang chủ, thanh trạng thái và Cài đặt → "Về CrabbyCut".
+ * app.getVersion() đọc "version" của package.json — CHÍNH con số electron-builder đặt vào tên
+ * bộ cài và updater đem so với GitHub Releases. Lấy từ đây (không ghi cứng trong HTML) nên chữ
+ * trên giao diện không bao giờ lệch với bản đang chạy: nâng version trong package.json là đủ. */
+const PKG = require('../package.json');
+ipcMain.handle('app-info', () => ({
+  version: app.getVersion(),
+  // Tác giả / giấy phép / trang dự án cũng lấy từ package.json — mục "Về CrabbyCut" không ghi
+  // cứng thông tin nào có thể đổi. Bỏ email khỏi tên tác giả: hộp thoại chỉ cần tên.
+  author: String(PKG.author || '').replace(/\s*<[^>]*>\s*$/, ''),
+  license: PKG.license || '',
+  homepage: PKG.homepage || '',
+  electron: process.versions.electron,
+  chrome: process.versions.chrome,
+  node: process.versions.node,
+  arch: process.arch,
+}));
+
+/* Liên kết của mục "Về CrabbyCut". Renderer chỉ gửi KHOÁ, không gửi URL: một IPC mở URL tuỳ ý
+ * bằng shell.openExternal là cửa để trang (hoặc nội dung lạ lọt vào trang) chạy bất cứ thứ gì
+ * trình duyệt/hệ điều hành nhận. URL dựng từ homepage/bugs của package.json. */
+const PROJECT_LINKS = {
+  home: PKG.homepage,
+  issues: PKG.bugs?.url,
+  releases: PKG.homepage ? `${PKG.homepage}/releases` : '',
+  license: PKG.homepage ? `${PKG.homepage}/blob/main/LICENSE` : '',
+};
+ipcMain.handle('open-project-link', async (_event, key) => {
+  const url = PROJECT_LINKS[String(key || '')];
+  if (!url || !/^https:\/\//.test(url)) return false;
+  await shell.openExternal(url);
+  return true;
+});
+
 ipcMain.handle('save-frame-image', async (_event, { dataBase64, suggestedName }) => {
   try {
     const result = await dialog.showSaveDialog(mainWindow, {

@@ -25,7 +25,9 @@
     <script src="/static/js/shortcuts.js?v=keys-p1"></script>
     <script src="/static/js/app-settings.js?v=settings-p2"></script>
     <script src="/static/js/auto-sfx-assets.js?v=ase-p1"></script>
-    <script src="/static/js/settings-panel.js?v=settings-p2"></script>
+    <!-- Số phiên bản (Trang chủ, thanh trạng thái, Cài đặt → Về CrabbyCut) — nạp TRƯỚC settings-panel.js. -->
+    <script src="/static/js/app-info.js?v=appinfo-p1"></script>
+    <script src="/static/js/settings-panel.js?v=settings-p3"></script>
     <script src="/static/js/audio-waveform.js?v=waveform-strip-p4"></script>
     <script src="/static/js/audio-denoise.js?v=denoise-p1"></script>
     <script src="/static/js/clip-speed.js?v=speed-p2"></script>
@@ -3044,6 +3046,15 @@
         .set-unit { width: 22px; color: var(--text-muted); }
         .set-empty { font-size: var(--fs-2xs); color: var(--text-muted); font-style: italic; }
         .set-note { font-size: var(--fs-2xs); color: var(--text-muted); line-height: 1.5; margin: 10px 0 0; }
+        /* Cài đặt → Về CrabbyCut */
+        .set-about-head { display: flex; align-items: center; gap: 10px; margin: 2px 0 var(--sp-3); }
+        .set-about-head .app-logo { height: 24px; }
+        .set-about-ver { font: var(--fw-medium) var(--fs-xs)/1.4 var(--font-mono); color: var(--text-muted); }
+        .set-kv { display: grid; grid-template-columns: 96px 1fr; gap: 6px 12px; margin: 0; font-size: var(--fs-xs); }
+        .set-kv dt { color: var(--text-muted); }
+        .set-kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+        .set-kv-sub { color: var(--text-muted); }
+        .set-about-actions { display: flex; flex-wrap: wrap; gap: 6px; }
         .set-check { display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); cursor: pointer; }
         .set-check input { width: auto; margin: 0; }
         .set-cache-size { font-size: var(--fs-2xs); color: var(--text-muted); flex-shrink: 0; margin-right: 4px; }
@@ -3630,7 +3641,7 @@
     </style>
     <!-- Lớp giao diện Lumen (mẫu Figma). PHẢI là phần tử cuối trong <head>: editing-runtime.js
          và auto-subtitle.js chèn <style> của chúng NGAY TRƯỚC #lumenSkin để lớp này thắng. -->
-    <link id="lumenSkin" rel="stylesheet" href="/static/css/lumen-skin.css?v=2">
+    <link id="lumenSkin" rel="stylesheet" href="/static/css/lumen-skin.css?v=3">
 </head>
 <!-- home-active ghi thẳng vào markup, đúng cơ chế #step0 dùng: JS không phải gọi gì lúc
      khởi động, và không có nháy hình giữa "giao diện dựng" và "Home". -->
@@ -3724,7 +3735,10 @@
 </svg>
 
 <div class="header-bar">
-    <div style="flex-shrink: 0; z-index: 2;"><svg class="app-logo" viewBox="0 0 876.8 229.5" role="img" aria-label="CrabbyCut"><use href="#logo-crabbycut"/></svg></div>
+    <div style="flex-shrink: 0; z-index: 2;"><svg class="app-logo" viewBox="0 0 876.8 229.5" role="img" aria-label="CrabbyCut"><use href="#logo-crabbycut"/></svg>
+        <!-- Số phiên bản cạnh logo, CHỈ hiện ở Trang chủ (vào dự án thì nó ở góc phải thanh trạng
+             thái). app-info.js điền số thật từ package.json rồi mới bỏ `hidden`. -->
+        <span class="app-version-badge" data-app-version title="Phiên bản CrabbyCut" hidden></span></div>
     <!-- .breadcrumb-container là position:absolute căn giữa nên thanh này không tranh chỗ. -->
     <div id="projectTitleBar" class="project-titlebar">
         <button id="btnHomeScreen" type="button" class="titlebar-home" title="Về màn hình chính"><svg class="btn-ico"><use href="#ic-folder"/></svg>Trang chủ</button>
@@ -4334,6 +4348,9 @@
         <span><kbd class="app-menu-shortcut" data-shortcut-cmd="tool.razor">⌘K</kbd> Cắt</span>
         <span><kbd class="app-menu-shortcut" data-shortcut-cmd="edit.undo">⌘Z</kbd> Hoàn tác</span>
     </div>
+    <!-- NGOÀI .app-statusbar-right: khối đó ẩn dưới 1100px và aria-hidden (nó chỉ nhắc phím),
+         còn số phiên bản thì luôn phải đọc được. Ẩn ở Trang chủ — ở đó số nằm cạnh logo. -->
+    <div class="app-statusbar-version" data-app-version data-app-version-prefix="Phiên bản: " hidden></div>
 </footer>
 
 <script>

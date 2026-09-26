@@ -6067,6 +6067,25 @@ function createApp() {
     }
   });
 
+  /* ---- PHIÊN BẢN ỨNG DỤNG ----
+   * Đường DỰ PHÒNG cho bản web (mở index.html thẳng từ backend, không có Electron). Bản desktop
+   * hỏi main process (`app-info` → app.getVersion()); cả hai cùng đọc "version" của
+   * package.json nên không thể ra hai con số khác nhau. Đọc mỗi lần gọi (tệp nhỏ) để chạy
+   * backend:dev mà sửa version thì không phải khởi động lại. */
+  app.get('/api/app-info', (_req, res) => {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'package.json'), 'utf8'));
+      res.json({
+        version: String(pkg.version || ''),
+        author: String(pkg.author || '').replace(/\s*<[^>]*>\s*$/, ''),
+        license: String(pkg.license || ''),
+        homepage: String(pkg.homepage || ''),
+      });
+    } catch (error) {
+      httpError(res, 500, error);
+    }
+  });
+
   /* ---- CÀI ĐẶT ỨNG DỤNG ----
    * Ba route mỏng: đọc / ghi / khôi phục. Toàn bộ phần "hiểu" cấu hình nằm ở
    * AppSettings.normalize() dùng chung với frontend, nên ở đây không có luật nghiệp vụ

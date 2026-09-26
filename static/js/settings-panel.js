@@ -24,6 +24,7 @@
         { id: PANE_ASE, label: 'Auto Sound Effects', ready: true },
         { id: 'cache', label: 'Bộ nhớ đệm', ready: true },
         { id: 'export', label: 'Xuất video', ready: false },
+        { id: 'about', label: 'Về CrabbyCut', ready: true },
     ];
 
     let draft = null;          // bản nháp đang sửa
@@ -487,6 +488,45 @@
         </section>`;
     }
 
+    /* ================= VỀ CRABBYCUT ================= */
+    /* Mọi con số / tên ở đây đến từ package.json qua window.AppInfo (xem static/js/app-info.js):
+     * nâng version hay đổi giấy phép ở package.json là mục này tự đúng, không có chỗ ghi cứng
+     * thứ hai để quên sửa. Chỉ câu về ngoại lệ NVIDIA là chữ cố định — nó là nội dung của
+     * LICENSE-EXCEPTION.md, package.json không có trường nào mang nó. */
+    function aboutPaneHtml() {
+        const info = window.AppInfo?.get?.();
+        if (!info) {
+            window.AppInfo?.load?.().then(() => { if (activeSection === 'about') render(); });
+            return '<p class="set-intro">Đang đọc thông tin phiên bản…</p>';
+        }
+        const version = window.AppInfo.versionLabel(info.version);
+        const site = String(info.homepage || '').replace(/^https?:\/\//, '');
+        const row = (label, value) => (value ? `<dt>${esc(label)}</dt><dd>${value}</dd>` : '');
+        const runtime = info.electron
+            ? `Electron ${esc(info.electron)} · Chromium ${esc(String(info.chrome || '').split('.')[0])} · ${esc(info.arch || '')}`
+            : '';
+        const canUpdate = typeof window.desktopEnv?.checkForUpdates === 'function';
+        return `<div class="set-about-head">
+            <svg class="app-logo" viewBox="0 0 876.8 229.5" role="img" aria-label="CrabbyCut"><use href="#logo-crabbycut"/></svg>
+            <span class="set-about-ver">${esc(version)}</span>
+        </div>
+        <p class="set-intro">Ứng dụng dựng video tự động theo kịch bản.</p>
+        <section class="set-sec"><div class="set-card"><dl class="set-kv">
+            ${row('Phiên bản', esc(version))}
+            ${row('Tác giả', esc(info.author))}
+            ${row('Giấy phép', info.license ? `${esc(info.license)} <span class="set-kv-sub">· kèm ngoại lệ cho thư viện NVIDIA CUDA</span>` : '')}
+            ${row('Mã nguồn', esc(site))}
+            ${row('Nền tảng', runtime)}
+        </dl></div></section>
+        <div class="set-about-actions">
+            ${canUpdate ? '<button type="button" class="set-btn" data-set-act="about-update">Kiểm tra bản mới</button>' : ''}
+            <button type="button" class="set-btn" data-set-act="about-link" data-link="home">Trang dự án</button>
+            <button type="button" class="set-btn" data-set-act="about-link" data-link="issues">Báo lỗi</button>
+            <button type="button" class="set-btn" data-set-act="about-link" data-link="license">Giấy phép</button>
+        </div>
+        <p class="set-note">Phần mềm tự do, cung cấp nguyên trạng và không kèm bảo hành. Danh sách thành phần bên thứ ba ở tệp THIRD-PARTY-NOTICES.md đi kèm mã nguồn.</p>`;
+    }
+
     function render() {
         const host = root();
         if (!host || !draft) return;
@@ -501,6 +541,7 @@
             autosave: autosavePaneHtml,
             preview: previewPaneHtml,
             cache: cachePaneHtml,
+            about: aboutPaneHtml,
             [PANE_ASE]: asePaneHtml,
         };
         const pane = PANES[activeSection]
@@ -638,6 +679,25 @@
             fetch(`${API_BASE}/cache/clear`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }),
             }).then(() => loadCacheUsage()).catch((err) => alert(err.message || String(err)));
+            return false;
+        },
+
+        /* ---- Về CrabbyCut ---- */
+        'about-update': () => {
+            window.desktopEnv?.checkForUpdates?.().catch((err) => alert(err.message || String(err)));
+            return false;
+        },
+        /* Desktop: gửi KHOÁ cho main (main tự dựng URL — xem `open-project-link` ở main.js).
+           Bản web: mở tab mới từ homepage của package.json. */
+        'about-link': (el) => {
+            const key = el.dataset.link;
+            if (window.desktopEnv?.openProjectLink) {
+                window.desktopEnv.openProjectLink(key);
+                return false;
+            }
+            const home = String(window.AppInfo?.get?.()?.homepage || '');
+            const url = { home, issues: home && `${home}/issues`, license: home && `${home}/blob/main/LICENSE` }[key];
+            if (url && /^https:\/\//.test(url)) window.open(url, '_blank', 'noopener');
             return false;
         },
     };
