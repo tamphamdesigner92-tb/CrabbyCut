@@ -26,6 +26,7 @@ trình dựng phim bình thường: lane phủ, chữ, hiệu ứng chuyển, ch
 - [Kiến trúc](#kiến-trúc)
 - [Dữ liệu của bạn nằm ở đâu](#dữ-liệu-của-bạn-nằm-ở-đâu)
 - [Kiểm thử](#kiểm-thử)
+- [Ủng hộ dự án](#ủng-hộ-dự-án)
 - [Giấy phép](#giấy-phép)
 
 ---
@@ -443,6 +444,21 @@ npm run test:export         # đường xuất video
 
 Các bài cần bộ ca thật **tự bỏ qua** phần đó và vẫn báo đạt, vì bản clone công khai không có
 fixtures. Không bài nào ném traceback vì thiếu dữ liệu.
+
+---
+
+## Ủng hộ dự án
+
+CrabbyCut miễn phí và mã nguồn mở. Nếu nó giúp bạn tiết kiệm thời gian dựng video, bạn có
+thể mời mình một ly cà phê — quét mã QR hoặc bấm vào ảnh:
+
+<p align="center">
+  <a href="https://buymeacoffee.com/tampham.92">
+    <img src="docs/images/buy-me-a-coffee.jpg" alt="Buy Me A Coffee — buymeacoffee.com/tampham.92" width="360">
+  </a>
+</p>
+
+Hoặc dùng nút **Sponsor** ở đầu trang repo trên GitHub.
 
 ---
 
