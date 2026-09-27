@@ -19,7 +19,9 @@ const fs = require('fs');
 
 /* Bump khi bố cục thư mục runtime hoặc danh sách gói đổi theo cách bản cũ không dùng được
  * nữa. `verifyRuntimeQuick()` so số này với manifest và coi bản cũ là "chưa thiết lập",
- * nên người dùng được dựng lại thay vì chạy tiếp trên một môi trường lệch. */
+ * nên người dùng được dựng lại thay vì chạy tiếp trên một môi trường lệch.
+ * Đổi bản ffmpeg ghim thì KHÔNG bump số này: bump là coi cả thư viện AI đã cài là lệch.
+ * `verifyRuntimeQuick()` so riêng `pin_id` (xem scripts/ffmpeg_pin.js). */
 const RUNTIME_SCHEMA = 1;
 
 /* GỐC DỮ LIỆU CỦA ỨNG DỤNG TRÊN MÁY NGƯỜI DÙNG — %LOCALAPPDATA%\CrabbyCut và tương đương.
@@ -143,6 +145,20 @@ function verifyRuntimeQuick() {
    * thư mục nào của ta để kiểm, và việc nó còn sống hay không thuộc về phép kiểm sâu. */
   if (manifest.ffmpeg?.source === 'bundled' && !fs.existsSync(ffmpegBinary('ffmpeg'))) {
     return { ok: false, reason: 'ffmpeg_missing', manifest };
+  }
+  /* FFMPEG PHẢI LÀ ĐÚNG BẢN GHIM (scripts/ffmpeg_pin.js). Manifest đời cũ không có `pin_id`
+   * — chúng là máy đã nhận BtbN `latest` hoặc ffmpeg ngẫu nhiên của máy, đúng hai nguồn đã
+   * làm hỏng export — nên cũng rơi vào đây và được cài lại MỘT lần.
+   * Ngoại lệ `pin_fallback`: lần thiết lập trước không tải được bản ghim (mất mạng) và đã
+   * lùi về ffmpeg dùng được của máy. Không mở lại cửa sổ thiết lập ở mọi lần khởi động vì
+   * chuyện đó; lần đổi bản ghim sau sẽ thử lại.
+   * CHỈ TRÊN WINDOWS: bản ghim là gói win64; macOS chưa có bước tải ffmpeg (xem Bước M của
+   * docs/KE_HOACH_TOI_UU_EXPORT_WIN.md), kiểm ở đó là mở cửa sổ thiết lập mãi không dứt. */
+  if (process.platform === 'win32') {
+    const { FFMPEG_PIN } = require('./ffmpeg_pin.js');
+    const pinned = manifest.ffmpeg?.pin_id === FFMPEG_PIN.id;
+    const fellBack = manifest.ffmpeg?.pin_fallback === FFMPEG_PIN.id;
+    if (!pinned && !fellBack) return { ok: false, reason: 'ffmpeg_outdated', manifest };
   }
   return { ok: true, manifest };
 }

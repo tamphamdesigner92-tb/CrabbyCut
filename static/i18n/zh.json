@@ -508,6 +508,7 @@
   "Đã chuyển về văn bản thường.": "已转换为普通文本。",
   "Đã có {n} block do Auto Sound Effects tạo. OK — Điền lại từ đầu (xoá các block ASE cũ). Cancel — Giữ nguyên, chỉ bù những vị trí chưa có tiếng.": "已有 {n} 个由 Auto Sound Effects 创建的区块。\n\n确定 — 从头重新填充（删除旧的 ASE 区块）。\n取消 — 保持不变，仅补充尚无音效的位置。",
   "Đã có trên máy — dùng lại": "已安装 — 将直接使用",
+  "Dùng bản riêng đã kiểm chứng của ứng dụng": "使用应用自带的已验证版本",
   "Đã dò xong điểm đổi góc máy.": "机位切换点检测完成。",
   "Đã dọn dẹp dữ liệu tạm. Sẵn sàng cho dự án mới.": "临时数据已清理。可以开始新项目了。",
   "Đã dọn dữ liệu tạm, còn {n} mục đang bị chương trình khác giữ.": "已清理临时数据，仍有 {n} 项被其他程序占用。",

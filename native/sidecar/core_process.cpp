@@ -2961,7 +2961,19 @@ void AppendOverlayInputArgs(
         "-i", assetPath
       });
     } else {
-      cmd.insert(cmd.end(), {"-i", assetPath});
+      /* `-reinit_filter:v 0` — CÙNG LÝ DO với input lane chính (xem ExportBatch), và ở đây
+       * thiếu nó thì không chỉ chớp đen mà TREO VĨNH VIỄN.
+       * Video mà luồng hình của chính nó đổi pix_fmt/color_range/colorspace giữa chừng (bản
+       * nối `-c copy` nhiều nguồn: `yuv420p/tv/bt709` -> `yuvj420p/pc/bt470bg` tại chỗ nối)
+       * làm fftools dựng lại CẢ filtergraph ngay giữa lượt. Lane chính `concat` từ 3 clip trở
+       * lên + lớp phủ vắt qua chỗ đổi đó = ffmpeg đứng im, 0% CPU, không lỗi, không thoát.
+       * Tái hiện 2026-09-27 trên BtbN N-123955, Gyan 8.1.1 và BtbN master; có cờ thì xong
+       * trong vài giây. Màu đoạn sau chỗ đổi vẫn đúng: `scale`/bộ chuyển định dạng tự đọc
+       * thuộc tính màu của TỪNG khung.
+       * Chỉ luồng HÌNH (`:v`): với tiếng, buffersrc từ chối hẳn khung đổi thông số (EINVAL)
+       * khi không được dựng lại, nên tiếng giữ hành vi cũ.
+       * Test: tests/scripts/export_concat_video_overlay.js. */
+      cmd.insert(cmd.end(), {"-reinit_filter:v", "0", "-i", assetPath});
     }
   }
 }
@@ -2969,9 +2981,14 @@ void AppendOverlayInputArgs(
 /* Map luồng theo chế độ. `-vn`/`-an` là BẮT BUỘC chứ không thừa: ở chế độ VideoOnly
  * filtergraph không có nhãn [a] nào, mà ffmpeg vẫn TỰ NHẶT rãnh tiếng của input 0 nếu không
  * cấm — bản xuất ra có tiếng CHƯA qua bộ lọc (sai âm lượng, chưa khử ồn, thiếu tiếng của
- * lớp phủ). Hỏng kiểu đó phải nghe mới biết, nhìn không thấy. */
+ * lớp phủ). Hỏng kiểu đó phải nghe mới biết, nhìn không thấy.
+ *
+ * `-/filter_complex <file>` (có từ FFmpeg 7.0), KHÔNG dùng `-filter_complex_script`: FFmpeg
+ * master đã XOÁ hẳn tùy chọn đó (commit 07407fff61, có trong 9.0). Bộ cài cũ tải BtbN
+ * `latest` nên máy cài mới nhận đúng bản đã xoá và mọi lượt export chết với "Unrecognized
+ * option". Tiền tố `/` đọc giá trị từ file qua avio nên đường dẫn Unicode vẫn an toàn. */
 void AppendStreamMapArgs(std::vector<std::string>& cmd, const fs::path& scriptPath, FilterScriptMode mode) {
-  cmd.insert(cmd.end(), {"-filter_complex_script", scriptPath.string()});
+  cmd.insert(cmd.end(), {"-/filter_complex", scriptPath.string()});
   if (mode != FilterScriptMode::AudioOnly) cmd.insert(cmd.end(), {"-map", "[v]"});
   else cmd.push_back("-vn");
   if (mode != FilterScriptMode::VideoOnly) cmd.insert(cmd.end(), {"-map", "[a]"});

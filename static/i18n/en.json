@@ -676,6 +676,7 @@
     "other": "There are already {n} blocks created by Auto Sound Effects.\n\nOK — Refill from scratch (delete the old ASE blocks).\nCancel — Keep them, only fill spots that have no sound yet."
   },
   "Đã có trên máy — dùng lại": "Already installed — will reuse",
+  "Dùng bản riêng đã kiểm chứng của ứng dụng": "Uses the app's own verified build",
   "Đã dò xong điểm đổi góc máy.": "Camera angle change detection complete.",
   "Đã dọn dẹp dữ liệu tạm. Sẵn sàng cho dự án mới.": "Temporary data cleared. Ready for a new project.",
   "Đã dọn dữ liệu tạm, còn {n} mục đang bị chương trình khác giữ.": {

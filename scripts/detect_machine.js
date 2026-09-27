@@ -5,7 +5,7 @@
  * đặt thật ở scripts/setup_runtime.js — không dò cho vui:
  *   - GPU NVIDIA  -> có cài `nvidia-cublas-cu12` hay không (~400 MB, và thiếu nó thì
  *                    ctranslate2 chết GIỮA phiên bóc băng với "cublas64_12.dll is not found").
- *   - ffmpeg máy  -> dùng lại bản có sẵn hay tải bản riêng (~100 MB).
+ *   - ffmpeg máy  -> CHỈ là đường lùi khi không tải được bản ghim (scripts/ffmpeg_pin.js).
  *   - VC++ runtime-> mediapipe/opencv nạp msvcp140.dll lúc import; thiếu là ImportError.
  *   - đĩa trống   -> báo TRƯỚC thay vì chết giữa chừng lúc pip đã tải 1,5 GB.
  *

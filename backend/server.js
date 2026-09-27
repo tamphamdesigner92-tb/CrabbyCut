@@ -3881,7 +3881,8 @@ function normalizeMagicFillIntervals(raw) {
 
 async function extractMagicFillAudio(sourceVideoPath, intervals, outputPath) {
   // atrim từng khoảng rồi concat. Filter dài (timeline nhiều clip) nên ghi ra
-  // file và dùng -filter_complex_script để không vượt giới hạn độ dài đối số.
+  // file và dùng -/filter_complex <file> để không vượt giới hạn độ dài đối số
+  // (-filter_complex_script đã bị xoá khỏi FFmpeg master/9.0).
   const parts = intervals.map((iv, idx) => (
     `[0:a]atrim=start=${iv.start.toFixed(3)}:end=${iv.end.toFixed(3)},asetpts=PTS-STARTPTS[a${idx}]`
   ));
@@ -3894,7 +3895,7 @@ async function extractMagicFillAudio(sourceVideoPath, intervals, outputPath) {
     '-hide_banner',
     '-v', 'error',
     '-i', sourceVideoPath,
-    '-filter_complex_script', filterPath,
+    '-/filter_complex', filterPath,
     '-map', '[out]',
     '-ac', '1',
     '-ar', '16000',

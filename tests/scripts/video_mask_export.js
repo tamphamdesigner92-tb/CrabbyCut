@@ -19,7 +19,10 @@ const path = require('path');
 const { execFileSync, spawnSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const SIDECAR = path.join(ROOT, 'native', 'sidecar', 'build', 'core_process');
+// Trên Windows phải có đuôi .exe: thiếu nó thì fs.existsSync luôn false và test dừng ở
+// "chưa build sidecar" dù đã build — phần render chưa từng chạy trên Windows.
+const SIDECAR = path.join(ROOT, 'native', 'sidecar', 'build',
+    process.platform === 'win32' ? 'core_process.exe' : 'core_process');
 const ColorAdjust = require(path.join(ROOT, 'static', 'js', 'color-adjust.js'));
 
 function maskPngFromEngine(mask, W, H, workDir, name) {

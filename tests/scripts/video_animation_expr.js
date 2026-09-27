@@ -30,7 +30,10 @@ process.env.CRAB_TEMP_DIR = process.env.CRAB_TEMP_DIR
     || path.join(ROOT, 'test_temp', 'video_anim');
 fs.mkdirSync(process.env.CRAB_TEMP_DIR, { recursive: true });
 const TA = require(path.join(ROOT, 'static', 'js', 'text-animations.js'));
-const SIDECAR = path.join(ROOT, 'native', 'sidecar', 'build', 'core_process');
+// Trên Windows phải có đuôi .exe: thiếu nó thì fs.existsSync luôn false và test dừng ở
+// "chưa build sidecar" dù đã build — phần render chưa từng chạy trên Windows.
+const SIDECAR = path.join(ROOT, 'native', 'sidecar', 'build',
+    process.platform === 'win32' ? 'core_process.exe' : 'core_process');
 
 /* Nội suy biểu thức FFmpeg. Bộ hàm dưới đây là ĐÚNG ngữ nghĩa ffmpeg eval, và chỉ phủ
  * những hàm mà ffEase/videoAnimationExpr thực sự dùng — thêm hàm mới vào biểu thức mà

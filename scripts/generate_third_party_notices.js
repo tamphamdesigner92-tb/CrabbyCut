@@ -20,6 +20,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { FFMPEG_PIN } = require('./ffmpeg_pin.js');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const OUT_PATH = path.join(PROJECT_ROOT, 'THIRD-PARTY-NOTICES.md');
@@ -151,12 +152,13 @@ CrabbyCut **không liên kết** thư viện FFmpeg. Nó chạy \`ffmpeg\` và \
 trình riêng** qua dòng lệnh (xem \`native/sidecar/core_process.cpp\` — chỉ \`#include\`
 header chuẩn của C++ và \`<windows.h>\`, không có \`libavcodec\`/\`libavformat\`).
 
-Nếu máy người dùng chưa có bản FFmpeg đủ filter, bước thiết lập tải build sau về:
+Bước thiết lập tải về một build FFmpeg **ghim phiên bản** (kiểm SHA-256, xem
+\`scripts/ffmpeg_pin.js\`):
 
-- **Bản dựng:** \`ffmpeg-master-latest-win64-gpl\` của BtbN
-- **Trang phát hành:** https://github.com/BtbN/FFmpeg-Builds/releases
-- **Mã nguồn bộ dựng:** https://github.com/BtbN/FFmpeg-Builds
-- **Mã nguồn FFmpeg:** https://github.com/FFmpeg/FFmpeg
+- **Bản dựng:** \`${FFMPEG_PIN.fileName}\` của gyan.dev (FFmpeg ${FFMPEG_PIN.versionPrefix.replace('ffmpeg version ', '')})
+- **Tải từ:** ${FFMPEG_PIN.url}
+- **Trang bản dựng:** https://www.gyan.dev/ffmpeg/builds/
+- **Mã nguồn FFmpeg:** https://github.com/FFmpeg/FFmpeg (commit ghi trong \`README.txt\` đi kèm gói)
 - **Giấy phép:** GPL-3.0-or-later (build này bật \`--enable-gpl --enable-version3\`)
 
 Electron cũng kèm \`ffmpeg.dll\` bản LGPL của riêng nó; xem \`LICENSE.electron.txt\` và

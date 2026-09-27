@@ -493,6 +493,6 @@ nguyên bạn tự nạp vào `library/` thuộc giấy phép của chính nó.
 ### FFmpeg
 
 CrabbyCut **không liên kết** thư viện FFmpeg. Nó chạy `ffmpeg` và `ffprobe` như **tiến
-trình riêng** qua dòng lệnh. Bản dựng mà bộ cài tải về khi máy chưa có FFmpeg đủ filter:
-[BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) (GPL-3.0-or-later), mã nguồn
-FFmpeg tại [FFmpeg/FFmpeg](https://github.com/FFmpeg/FFmpeg).
+trình riêng** qua dòng lệnh. Bộ cài tải về một bản dựng **ghim phiên bản** (kiểm SHA-256):
+FFmpeg 8.1.1 `full_build-shared` của [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)
+(GPL-3.0-or-later), mã nguồn FFmpeg tại [FFmpeg/FFmpeg](https://github.com/FFmpeg/FFmpeg).

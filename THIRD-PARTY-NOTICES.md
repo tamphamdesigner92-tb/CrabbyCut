@@ -17,12 +17,13 @@ CrabbyCut **không liên kết** thư viện FFmpeg. Nó chạy `ffmpeg` và `ff
 trình riêng** qua dòng lệnh (xem `native/sidecar/core_process.cpp` — chỉ `#include`
 header chuẩn của C++ và `<windows.h>`, không có `libavcodec`/`libavformat`).
 
-Nếu máy người dùng chưa có bản FFmpeg đủ filter, bước thiết lập tải build sau về:
+Bước thiết lập tải về một build FFmpeg **ghim phiên bản** (kiểm SHA-256, xem
+`scripts/ffmpeg_pin.js`):
 
-- **Bản dựng:** `ffmpeg-master-latest-win64-gpl` của BtbN
-- **Trang phát hành:** https://github.com/BtbN/FFmpeg-Builds/releases
-- **Mã nguồn bộ dựng:** https://github.com/BtbN/FFmpeg-Builds
-- **Mã nguồn FFmpeg:** https://github.com/FFmpeg/FFmpeg
+- **Bản dựng:** `ffmpeg-8.1.1-full_build-shared.zip` của gyan.dev (FFmpeg 8.1.1-full_build-www.gyan.dev)
+- **Tải từ:** https://github.com/GyanD/codexffmpeg/releases/download/8.1.1/ffmpeg-8.1.1-full_build-shared.zip
+- **Trang bản dựng:** https://www.gyan.dev/ffmpeg/builds/
+- **Mã nguồn FFmpeg:** https://github.com/FFmpeg/FFmpeg (commit ghi trong `README.txt` đi kèm gói)
 - **Giấy phép:** GPL-3.0-or-later (build này bật `--enable-gpl --enable-version3`)
 
 Electron cũng kèm `ffmpeg.dll` bản LGPL của riêng nó; xem `LICENSE.electron.txt` và
