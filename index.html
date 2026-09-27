@@ -4496,7 +4496,7 @@
            (không tài nào bắt dính nổi vào playhead). */
         const MATCH_TRIM_SNAP_PX = 10;
         function matchTrimSnapSeconds() {
-            return MATCH_TRIM_SNAP_PX / Math.max(1, Number(zoomScale) || 100);
+            return MATCH_TRIM_SNAP_PX / Math.max(0.01, Number(zoomScale) || 100);
         }
         window.matchTrimSnapSeconds = matchTrimSnapSeconds;
         const MIN_TRANSCRIPT_CLIP_SECONDS = 0.1;
@@ -9824,7 +9824,7 @@
 
     function snapTimelineTimeToBlocks(timelineTime, active = true) {
         if (!active || !isSnappingEnabled) return timelineTime;
-        const threshold = 10 / Math.max(1, Number(zoomScale) || 100);
+        const threshold = 10 / Math.max(0.01, Number(zoomScale) || 100);
         let bestTime = timelineTime;
         let bestDelta = threshold;
         getTimelineBlockSnapTimes().forEach((candidate) => {
@@ -10776,37 +10776,90 @@
     syncPlayPauseButton();
 
     // --- ZOOMIING TIMELINE CONTROLLER ---
+    /* ===== THU PHÓNG TIMELINE (viết lại 2026-09-27) =====
+     * zoomScale = số px cho 1 giây. Ba lỗi của bản cũ, người dùng báo với phim 39 phút:
+     *  1. `zoomScale = parseInt(slider.value)`: mức vừa khung của phim dài là số LẺ < 1
+     *     (1546 px / 2365 s = 0,65) -> parseInt ra 0 -> mọi block dồn về một điểm khi bấm
+     *     "Thu phóng vừa khung".
+     *  2. Thanh kéo TUYẾN TÍNH từ 0,65 tới 600 px/s: cả dải hay dùng (0,65-30) nằm gọn trong
+     *     ~5% đầu thanh, nhích một pixel là zoom nhảy vọt -> "khó kiểm soát".
+     *  3. Mức vừa khung chỉ tính MỘT LẦN lúc nạp video, theo bề rộng lúc đó và thời lượng
+     *     NGUỒN chứ không phải thời lượng timeline.
+     * Nay thanh kéo là vị trí LOG 0..ZOOM_SLIDER_STEPS: mỗi đoạn kéo bằng nhau = nhân/chia
+     * zoom cùng một hệ số, như Premiere. Mức vừa khung tính LẠI mỗi lần cần, từ bề rộng đang
+     * thấy (trừ cột nhãn lane ở Editing), thời lượng timeline và vị trí playhead (xem
+     * timelineZoomRange). Số đọc = vị trí trên thanh (0-100%). */
+    const ZOOM_SLIDER_STEPS = 1000;
+    const ZOOM_MAX_PX_PER_SEC = 600;
     const zoomSlider = document.getElementById('zoomSlider');
+    zoomSlider.min = '0';
+    zoomSlider.max = String(ZOOM_SLIDER_STEPS);
+    zoomSlider.step = '1';
+
+    /* Playhead GHIM GIỮA khung nhìn, nên "thấy trọn timeline" nghĩa là [0, playhead] vừa nửa
+       TRÁI (trừ cột nhãn lane) và [playhead, cuối] vừa nửa PHẢI. `fit` = mức đó ở playhead
+       hiện tại (nút "Thu phóng vừa khung"); `min` = mức đó ở trường hợp xấu nhất (playhead ở
+       cuối timeline), để thanh kéo luôn với tới được mức thấy trọn dù playhead ở đâu. */
+    const ZOOM_FIT_EDGE_PX = 16;
+    function timelineZoomRange() {
+        const outer = document.getElementById('timelineTrackOuter');
+        const rail = (currentMode === 'FINAL' && currentStepId === 'step4') ? TL_LANE_RAIL_W : 0;
+        const half = Math.max(1, (outer?.clientWidth || 0) / 2);
+        const leftRoom = Math.max(1, half - rail - ZOOM_FIT_EDGE_PX);
+        const rightRoom = Math.max(1, half - ZOOM_FIT_EDGE_PX);
+        const duration = Math.max(1, Number(getTimelineDuration()) || Number(videoDuration) || 1);
+        const t = Math.max(0, Math.min(duration, Number(getCurrentTimelineTime()) || 0));
+        const min = Math.max(0.01, Math.min(leftRoom, rightRoom) / duration);
+        const fit = Math.max(min, Math.min(t > 0 ? leftRoom / t : Infinity, duration - t > 0 ? rightRoom / (duration - t) : Infinity));
+        return { fit: Number.isFinite(fit) ? fit : min, min, max: Math.max(ZOOM_MAX_PX_PER_SEC, min * 5) };
+    }
+    function zoomToSliderPos(zoom, range = timelineZoomRange()) {
+        const span = Math.log(range.max / range.min);
+        if (!(span > 0)) return 0;
+        const pos = (Math.log(Math.max(range.min, Math.min(range.max, zoom)) / range.min) / span) * ZOOM_SLIDER_STEPS;
+        return Math.round(pos);
+    }
+    function sliderPosToZoom(pos, range = timelineZoomRange()) {
+        const t = Math.max(0, Math.min(1, Number(pos) / ZOOM_SLIDER_STEPS));
+        return range.min * Math.pow(range.max / range.min, t);
+    }
+    /* Đồng bộ VỊ TRÍ thanh + số đọc theo zoomScale, KHÔNG đổi zoom. Gọi cả khi bề rộng hay
+       thời lượng timeline đổi (updateTimelineLayout): cùng một zoomScale nhưng mức vừa khung
+       đã khác thì thanh phải nằm chỗ khác. */
+    function syncZoomReadout() {
+        const range = timelineZoomRange();
+        const pos = String(zoomToSliderPos(zoomScale, range));
+        if (zoomSlider.value !== pos) zoomSlider.value = pos;
+        const readout = document.getElementById('zoomReadout');
+        // Số đọc = VỊ TRÍ trên thanh (0% thu nhỏ hết cỡ, 100% phóng to hết cỡ). Tỉ số so với
+        // một mức mốc thì vô nghĩa ở thang log: phim 39 phút ở 10 px/s đã là "4015%".
+        if (readout) readout.textContent = `${Math.round((Number(pos) / ZOOM_SLIDER_STEPS) * 100)}%`;
+    }
+    /* Đường ghi zoom DUY NHẤT của nút −/+/Fit và thanh kéo. Phát 'input' để các listener
+       phụ (thước DOM của Editing) chạy như khi người dùng kéo thanh. */
+    function setTimelineZoom(next) {
+        const range = timelineZoomRange();
+        const clamped = Math.max(range.min, Math.min(range.max, Number(next) || range.fit));
+        if (Math.abs(clamped - zoomScale) < 1e-6) { syncZoomReadout(); return; }
+        zoomScale = clamped;
+        syncZoomReadout();
+        updateTimelineLayout();
+        zoomSlider.dispatchEvent(new CustomEvent('input', { bubbles: true, detail: { fromCode: true } }));
+    }
     zoomSlider.addEventListener('input', (e) => {
-        zoomScale = parseInt(e.target.value);
+        if (e.detail?.fromCode) return;   // setTimelineZoom đã đặt zoomScale
+        zoomScale = sliderPosToZoom(e.target.value);
+        syncZoomReadout();
         updateTimelineLayout();
     });
-
-    /* Nút −/+/Fit và số đọc được cho cụm Thu phóng (Đợt UI/UX Pro).
-       CHỈ ghi zoomSlider.value rồi phát 'input' -> đi qua ĐÚNG handler ở trên, không nhân
-       bản một đường tính zoom thứ hai. 'Fit' = về min, và min chính là mức vừa-khung mà
-       app tự đặt lại mỗi lần 'loadedmetadata' (min = bề rộng viewport / thời lượng). */
-    function setZoomSliderValue(next) {
-        const min = Number(zoomSlider.min) || 20;
-        const max = Number(zoomSlider.max) || 600;
-        const clamped = Math.min(max, Math.max(min, Math.round(next)));
-        if (String(clamped) === String(zoomSlider.value)) return;
-        zoomSlider.value = String(clamped);
-        zoomSlider.dispatchEvent(new Event('input', { bubbles: true }));
-    }
     function nudgeZoom(factor) {
-        setZoomSliderValue((Number(zoomSlider.value) || 100) * factor);
-    }
-    function syncZoomReadout() {
-        const readout = document.getElementById('zoomReadout');
-        if (readout) readout.textContent = `${Math.round(Number(zoomSlider.value) || 100)}%`;
+        setTimelineZoom(zoomScale * factor);
     }
     document.getElementById('btnZoomIn')?.addEventListener('click', () => nudgeZoom(1.5));
     document.getElementById('btnZoomOut')?.addEventListener('click', () => nudgeZoom(1 / 1.5));
     document.getElementById('btnZoomFit')?.addEventListener('click', () => {
-        setZoomSliderValue(Number(zoomSlider.min) || 20);
+        setTimelineZoom(timelineZoomRange().fit);
     });
-    zoomSlider.addEventListener('input', syncZoomReadout);
     syncZoomReadout();
 
     function updateTimelineLayout() {
@@ -10815,6 +10868,8 @@
         const timelineDuration = getTimelineDuration();
         const sidePadding = getTimelineSidePaddingPx();
         trackContainer.style.width = `${Math.max(1, (timelineDuration * zoomScale) + (sidePadding * 2))}px`;
+        // Thời lượng hay bề rộng khung nhìn đổi thì mức vừa khung đổi -> thanh zoom phải dời.
+        syncZoomReadout();
 
         if (timelineRenderer) {
             const viewportWidth = timelineOuter ? timelineOuter.clientWidth : trackContainer.clientWidth;
@@ -10828,7 +10883,11 @@
             drawTimelineSegments(globalRawSegments, 'RAW');
         } else if (currentMode === 'MAPPED') {
             drawTimelineSegments(globalMappedChunks, 'MAPPED');
-        } else if (currentMode === 'FINAL') {
+        } else if (currentMode === 'FINAL' && currentStepId !== 'step4') {
+            /* Ở Editing (step4) KHÔNG vẽ: renderEditingTimeline (chạy ngay sau hàm này qua bản
+               vá của editing-runtime) tự dựng #segmentsTrack. Vẽ ở đây là xoá sạch
+               `innerHTML` — mất luôn block mà lượt dựng Editing định tái dùng — rồi dựng một
+               lớp block kiểu cũ chỉ để bị xoá lại ngay. */
             drawTimelineSegments(latestTimeline, 'FINAL');
         }
         updatePlayhead();
@@ -10893,14 +10952,12 @@
 	        // Tự động fit video vào màn hình — CHỈ khi nạp nguồn mới, không phải mỗi lần
 	        // đổi LQ/HQ (đổi chất lượng mà nhảy mức zoom timeline là mất chỗ đang làm).
 	        if (!isSwitchingPreviewProxy) {
-	            const outerWidth = document.getElementById('timelineTrackOuter').clientWidth;
-	            zoomScale = Math.max(10, outerWidth / (videoDuration || 1));
-
-	            const slider = document.getElementById('zoomSlider');
-	            slider.min = (outerWidth / (videoDuration || 1)).toFixed(2);
-	            slider.max = Math.max(600, zoomScale * 5);
-	            slider.value = zoomScale;
-	            syncZoomReadout();   // chỉ đồng bộ NHÃN, không đổi zoom
+	            // Mức khởi đầu giữ như cũ: vừa khung, nhưng không dưới 10 px/s (phim dài mà
+	            // vừa khung thì block chỉ còn vài pixel). Dải của thanh zoom tự tính theo
+	            // timelineZoomRange() nên không ghi min/max ở đây nữa.
+	            const range = timelineZoomRange();
+	            zoomScale = Math.min(range.max, Math.max(10, range.fit));
+	            syncZoomReadout();   // chỉ đồng bộ thanh + nhãn, không đổi zoom
 	        }
 
 	        updateTimelineLayout();
@@ -11172,10 +11229,9 @@
                     const centerPx = timelineOuter.scrollLeft + (timelineOuter.clientWidth / 2);
                     const centerTime = Math.max(0, Math.min(getTimelineDuration(), pxToTimelineTime(centerPx)));
                     
-                    const slider = document.getElementById('zoomSlider');
-                    zoomScale = Math.max(parseFloat(slider.min), Math.min(parseFloat(slider.max), newZoom));
-                    slider.value = zoomScale;
-                    syncZoomReadout();   // chỉ đồng bộ NHÃN, không đổi zoom
+                    const range = timelineZoomRange();
+                    zoomScale = Math.max(range.min, Math.min(range.max, newZoom));
+                    syncZoomReadout();   // chỉ đồng bộ thanh + nhãn, không đổi zoom
 
                     updateTimelineLayout();
 
@@ -11373,7 +11429,7 @@
         const centerTime = pxToTimelineTime(timelineOuter.scrollLeft + halfView);
         const factor = (!force && e.altKey) ? FINE_SCRUB_FACTOR : 1;
         const rawTime = Math.max(0, Math.min(total,
-            centerTime + ((pointerXInOuter - halfView) * factor) / Math.max(1, Number(zoomScale) || 100)));
+            centerTime + ((pointerXInOuter - halfView) * factor) / Math.max(0.01, Number(zoomScale) || 100)));
         /* THỨ TỰ: BẮT DÍNH TRƯỚC, LƯỚI KHUNG SAU.
            Mốc bắt dính (mép clip, keyframe) là số thực bất kỳ, không nhất thiết rơi đúng
            mép khung; làm tròn nó sẽ đẩy ra khỏi mép clip tới nửa khung -> bấm đúng chỗ cắt

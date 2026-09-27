@@ -8771,7 +8771,61 @@ khung) thoát sớm khi không block nào mang `transition`, khỏi gom + sắp 
 > ~5 ms tỉ lệ với số block (cây accessibility bật), trong Electron chỉ 0,1 ms. Đo hiệu năng
 > renderer phải trong Electron: chạy backend thử ở cổng riêng, `BACKEND_PORT=<cổng>
 > electron . --remote-debugging-port=9333` (Electron coi đó là backend ngoài), rồi điều khiển
-> bằng CDP (`Runtime.evaluate`, `Profiler.start/stop`).
+> bằng CDP (`Runtime.evaluate`, `Profiler.start/stop`). Người dùng đang mở CrabbyCut thì
+> khoá một-phiên-bản chặn bản thử: thêm `--user-data-dir=<thư mục riêng>` (tách luôn autosave
+> + dự án gần đây khỏi dữ liệu thật). Cửa sổ bị che/màn hình tắt thì rAF = 0 khung; thêm
+> `--disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows
+> --disable-renderer-backgrounding` để đo được mà không phải ghim cửa sổ lên trên.
+> Trace (`Tracing.start`, category `devtools.timeline`) mới thấy Layout/Paint/Layerize —
+> CPU profile gộp hết vào "(program)".
+
+### Cuộn / zoom timeline với nhiều block + nút "Thu phóng vừa khung" (2026-09-27, đợt 2)
+
+Người dùng báo: cuộn và zoom timeline giật khi có nhiều phụ đề, thanh zoom "khó kiểm soát",
+bấm "Thu phóng vừa khung" thì timeline co hẳn về một điểm. Đo trên dự án thử giống thật
+(phim 39 phút, 1.117 block phụ đề song ngữ).
+
+**"Vừa khung" co về một điểm = `parseInt`.** Handler thanh zoom ghi
+`zoomScale = parseInt(slider.value)`; mức vừa khung của phim dài là số lẻ < 1
+(1546 px / 2365 s = 0,65) nên ra **0**. Phim ngắn (vừa khung ≥ 1 px/s) không bao giờ gặp.
+Kèm theo: thanh kéo TUYẾN TÍNH 0,65 → 600 px/s (dải hay dùng nằm trong ~5% đầu thanh), và mức
+vừa khung chỉ tính một lần lúc nạp video. Nay (index.html, khối "THU PHÓNG TIMELINE"):
+- thanh là vị trí **log** 0..1000 (`sliderPosToZoom` / `zoomToSliderPos`);
+- `timelineZoomRange()` tính lại mỗi lần cần. Playhead ghim giữa khung nên "thấy trọn" =
+  [0, playhead] vừa nửa trái (trừ cột nhãn lane) và [playhead, cuối] vừa nửa phải;
+  `min` = trường hợp xấu nhất (playhead ở cuối);
+- `setTimelineZoom()` là đường ghi duy nhất của nút −/+/Fit; số đọc = vị trí trên thanh;
+- 9 chỗ `Math.max(1, zoomScale)` (kéo block, snap, keyframe, thước) hạ sàn xuống 0,01 —
+  trước đây zoom < 1 không tồn tại nên không ai thấy chúng sai.
+
+**Ảo hoá block** (`computeTimelineRenderWindow`, editing-runtime.js): chỉ dựng block overlay
+trong khung nhìn ± ½ bề rộng khung (block đang chọn/đang kéo luôn dựng); cuộn ra ngoài vùng
+đã dựng thì `scheduleTimelineWindowCheck` dựng lại. Zoom rất nhỏ thì block tự nó hẹp hơn
+8 px (mức tối thiểu) mà bắt đầu bên trong block vừa vẽ trên cùng lane bị bỏ. Nút chuyển
+cảnh / ô thả lọc theo cùng khung nhìn (phụ đề nối liền nhau = hàng trăm điểm cắt).
+
+**Tái dùng block giữa các lượt dựng** (`timelineBlockSignature`): trùng chữ ký (loại, nhãn,
+trạng thái lane, magic fill) và cùng object item thì chỉ đổi left/top/width/height. 393 block:
+dựng mới 74 ms → tái dùng 24 ms. Không tái dùng block đang chọn/kéo và block media (dải
+thumbnail chia ô theo bề rộng). `updateTimelineLayout` gốc bỏ `drawTimelineSegments` ở step4 —
+nó `innerHTML = ''` đúng cái track mà lượt dựng Editing định tái dùng.
+
+**Bớt layout bị ép / phần tử thừa:** thước dùng khung nhìn và lề đã chốt của lượt dựng
+(không đọc lại `scrollLeft`/`clientWidth` sau khi DOM vừa đổi), lượt vẽ thước đã lên lịch
+bỏ qua nếu thước vừa được vẽ; block hẹp < 24 px không có nhãn chữ; tay cầm resize ẩn bằng
+`visibility` thay vì `opacity: 0` (opacity < 1 = thêm nút hiệu ứng + paint chunk mỗi block —
+long task khi kéo zoom giảm ~một nửa).
+
+| 1.117 block, 3 lượt | Trước | Sau |
+| --- | --- | --- |
+| Kéo thanh zoom 2 s (60 sự kiện) | xử lý 5 sự kiện, khung p95 433 ms | 35–40 sự kiện, p95 83–100 ms |
+| Cuộn bánh xe 2 s | p50 33 ms, 11–24 long task | p50/p95 16,7/16,8 ms, 0 long task |
+| Phát 5 s × 3 mốc | (đợt 1) 60 fps | 60 fps, 0/120 khung rớt, 0 long task |
+| Một lượt `renderEditingTimeline` | 321 ms | 24–26 ms (~400 block trong khung) |
+
+Kéo zoom vẫn còn long task ~70–100 ms ở mức zoom thấp (~200 block trong khung đổi bề rộng
+cùng lúc → style + layout + paint). Hướng tiếp nếu cần: trong lúc đang kéo thì scaleX bằng
+transform rồi mới dựng thật khi thả.
 
 ## Auto Subtitle đa ngôn ngữ — menu ngôn ngữ, font CJK, đồng bộ phụ đề (2026-09-14)
 

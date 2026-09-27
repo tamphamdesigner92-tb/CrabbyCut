@@ -4078,7 +4078,7 @@
     }
 
     function editingMoveSnapThresholdSeconds() {
-        return 10 / Math.max(1, Number(zoomScale) || 100);
+        return 10 / Math.max(0.01, Number(zoomScale) || 100);
     }
 
     // Snap candidates gồm playhead + cạnh start/end của item ở MỌI lane (snap chéo lane).
@@ -4756,17 +4756,83 @@
         label.appendChild(controls);
     }
 
+    /* ===== ẢO HOÁ BLOCK TIMELINE (2026-09-27) =====
+     * Chỉ dựng block overlay nằm trong khung nhìn ± TIMELINE_RENDER_MARGIN bề rộng khung,
+     * cùng cách thước DOM và canvas sóng âm đã làm. Đo trong Electron, dự án phụ đề song ngữ
+     * 1.117 block (phim 39 phút):
+     *   - một lượt dựng đủ 1.117 block ~320 ms, mà lượt dựng chạy ở MỖI nấc kéo thanh zoom
+     *     và MỖI mousemove khi kéo block -> 2 giây kéo zoom chỉ xử lý được 5 sự kiện;
+     *   - khi cuộn / phát, thước và sóng âm vẽ lại mỗi khung, và mỗi lượt vẽ lại trình
+     *     duyệt phải chia lớp compositing ("Layerize") cho MỌI block trong DOM: ~7 ms/khung
+     *     dù chỉ vài chục block đang thấy.
+     * Block ĐANG CHỌN / ĐANG KÉO luôn được dựng dù ở ngoài khung (kéo tay cầm, keyframe
+     * marker, viền chọn cần phần tử thật). Cuộn ra khỏi vùng đã dựng thì handler 'scroll'
+     * (scheduleTimelineWindowCheck) dựng lại — với lề một bề rộng khung, cuộn/phát liên tục
+     * chỉ tốn một lượt dựng nhỏ sau mỗi ~một bề rộng khung.
+     * Mọi chỗ khác đọc block từ DOM đều chịu được: tô viền chọn chỉ tô block đang có (block
+     * mới dựng tự mang class đúng), hit-test luôn nhắm block dưới con trỏ, khung quét chọn
+     * và mốc snap tính từ DỮ LIỆU chứ không từ DOM. */
+    const TIMELINE_RENDER_MARGIN = 0.5;        // số bề rộng khung dựng thêm mỗi bên
+    /* Nhãn chữ đặt ở left 7px, đệm 6px mỗi bên (CSS .editing-block-label) -> block hẹp hơn
+       mức này không còn chỗ cho một ký tự nào, nhưng trình duyệt vẫn dàn cả câu phụ đề. */
+    const TIMELINE_LABEL_MIN_W = 24;
+    let timelineRenderWindow = null;           // { x0, x1 } toạ độ nội dung px; null = dựng hết
+    let timelineRenderStats = { rendered: 0, total: 0 };
+
+    function computeTimelineRenderWindow() {
+        const outer = document.getElementById('timelineTrackOuter');
+        const width = outer?.clientWidth || 0;
+        if (!outer || width <= 0) return null;   // chưa có khung nhìn thật -> dựng hết cho chắc
+        const margin = width * TIMELINE_RENDER_MARGIN;
+        return { x0: outer.scrollLeft - margin, x1: outer.scrollLeft + width + margin, scrollLeft: outer.scrollLeft, width };
+    }
+
+    /* Chữ ký của một block overlay: mọi thứ quyết định NỘI DUNG phần tử, trừ vị trí và bề
+       rộng. Trùng chữ ký (và cùng object item — listener mousedown đóng gói item) thì lượt
+       dựng sau chỉ đổi left/top/width/height của phần tử cũ. null = không bao giờ tái dùng:
+         - block đang chọn/đang kéo: mang keyframe marker, viền chọn, trạng thái kéo;
+         - block media: dải thumbnail chia ô THEO BỀ RỘNG block nên đổi zoom là phải dựng lại. */
+    function timelineBlockSignature(item, track, pinned, width) {
+        if (pinned || item.type === 'media') return null;
+        return [item.type, width >= TIMELINE_LABEL_MIN_W ? blockLabelForItem(item) : '', isTrackVisible(track) ? 1 : 0,
+            isTrackLocked(track) ? 1 : 0, item.magic_fill_review ? 1 : 0].join('\u0001');
+    }
+
+    function timelineItemPinned(item) {
+        if (selectedEditingItemIds.has(item.id)) return true;
+        if (!editingDrag) return false;
+        return editingDrag.item === item || !!editingDrag.group?.some((entry) => entry.item === item);
+    }
+
     function renderEditingTimeline() {
         if (currentMode !== 'FINAL' || currentStepId !== 'step4') return;
         // Chốt lề một lần cho cả lượt dựng (xem timelineXPadLock). Chỉ chốt khi hàm của
         // index.html có mặt — không có thì timelineX vốn không đọc DOM.
         const lockPad = timelineXPadLock === null && typeof getTimelineSidePaddingPx === 'function';
         if (lockPad) timelineXPadLock = getTimelineSidePaddingPx();
+        // Đọc khung nhìn TRƯỚC khi đụng vào DOM: đọc sau khi đã xoá/append block là ép layout.
+        timelineRenderWindow = computeTimelineRenderWindow();
         try {
             renderEditingTimelineBody();
         } finally {
             if (lockPad) timelineXPadLock = null;
         }
+    }
+
+    /* Cuộn ra ngoài vùng đã dựng -> dựng lại (gộp về một lượt mỗi khung). */
+    let timelineWindowCheckPending = false;
+    function scheduleTimelineWindowCheck() {
+        if (timelineWindowCheckPending) return;
+        timelineWindowCheckPending = true;
+        requestAnimationFrame(() => {
+            timelineWindowCheckPending = false;
+            if (currentMode !== 'FINAL' || currentStepId !== 'step4' || !timelineRenderWindow) return;
+            const outer = document.getElementById('timelineTrackOuter');
+            if (!outer) return;
+            const left = outer.scrollLeft;
+            const right = left + outer.clientWidth;
+            if (left < timelineRenderWindow.x0 || right > timelineRenderWindow.x1) renderEditingTimeline();
+        });
     }
 
     function renderEditingTimelineBody() {
@@ -4786,7 +4852,14 @@
         const rows = visibleRows();
         const height = editingTimelineHeight(rows);
         container.style.height = `${height}px`;
-        track.innerHTML = '';
+        /* GIỮ LẠI block overlay có thể tái dùng (xem timelineBlockSignature), dọn mọi thứ khác.
+           Xoá sạch rồi dựng lại là mỗi nấc zoom tạo mới ~200-400 block × 4 phần tử: đo được
+           74 ms/lượt với 393 block, trong khi chỉ đổi left/width trên phần tử có sẵn là 15 ms. */
+        const reusableBlocks = new Map();
+        Array.from(track.children).forEach((child) => {
+            if (child.__blockSig && child.classList.contains('editing-item-block')) reusableBlocks.set(child.dataset.itemId, child);
+            else child.remove();
+        });
         track.classList.add('editing-lanes');
         const mainTrack = rows.find((row) => row.type === 'main');
 
@@ -4901,13 +4974,52 @@
             track.appendChild(block);
         });
 
+        /* Chuẩn hoá dữ liệu cho MỌI item (fixItemTrack/clampItemTiming có thể sửa item), rồi
+           mới lọc những block cần dựng (xem khối "ẢO HOÁ BLOCK TIMELINE"). */
+        const win = timelineRenderWindow;
+        const drawList = [];
         editingItems.forEach((item) => {
             fixItemTrack(item);
             clampItemTiming(item);
-            const itemTrackRef = itemTrack(item);
             const rowIndex = rows.findIndex((row) => row.id === item.track_id);
             if (rowIndex < 0) return;
+            const x = timelineX(item.timeline_start);
+            const naturalW = item.duration * zoomScale;
+            const w = Math.max(8, naturalW);
+            const pinned = timelineItemPinned(item);
+            if (win && !pinned && (x + w < win.x0 || x > win.x1)) return;
+            drawList.push({ item, rowIndex, x, w, naturalW, pinned });
+        });
+        /* Zoom rất nhỏ (phim dài ở mức vừa khung: 0,65 px/s) thì block phụ đề 2 giây chỉ còn
+           ~1 px nhưng vẫn vẽ tối thiểu 8 px, nên hàng chục block chồng lên cùng một chỗ. Block
+           bắt đầu BÊN TRONG block vừa vẽ trên cùng lane và tự nó hẹp hơn mức tối thiểu thì
+           không nhìn thấy gì khác — bỏ qua. Duyệt theo thời gian để phép so "block trước"
+           đúng nghĩa; block trên cùng lane vốn không chồng nhau nên thứ tự DOM không đổi gì. */
+        drawList.sort((a, b) => a.x - b.x);
+        const laneRight = new Map();
+        timelineRenderStats = { rendered: 0, total: editingItems.length };
+        drawList.forEach(({ item, rowIndex, x, w, naturalW, pinned }) => {
+            const right = laneRight.get(item.track_id);
+            if (!pinned && naturalW < 8 && right !== undefined && x < right) return;
+            laneRight.set(item.track_id, Math.max(right ?? -Infinity, x + w));
+            timelineRenderStats.rendered += 1;
+            const itemTrackRef = itemTrack(item);
+            const sig = timelineBlockSignature(item, itemTrackRef, pinned, w);
+            const old = reusableBlocks.get(String(item.id));
+            if (sig && old && old.__blockSig === sig && old.__blockItem === item) {
+                reusableBlocks.delete(String(item.id));
+                // Block không chọn/không kéo (nếu có thì đã không tái dùng) -> gỡ class tạm
+                // mà refreshSelectionClasses / lượt kéo có thể còn để lại.
+                old.classList.remove('is-selected', 'is-secondary-selection', 'is-dragging');
+                old.style.left = `${x}px`;
+                old.style.top = `${laneBlockTop(laneRowTop(rowIndex, rows))}px`;
+                old.style.width = `${w}px`;
+                old.style.height = `${laneBlockHeight(item.type)}px`;
+                return;
+            }
             const block = document.createElement('div');
+            block.__blockSig = sig;
+            block.__blockItem = item;   // listener mousedown bên dưới đóng gói ĐÚNG object này
             block.className = `editing-block editing-item-block editing-item-${item.type} ${item.type === 'media' ? 'editing-media-block' : ''}`;
             block.classList.toggle('is-selected', selectedEditingItemIds.has(item.id));
             block.classList.toggle('is-secondary-selection', selectedEditingItemIds.has(item.id) && item.id !== selectedEditingItemId);
@@ -4915,11 +5027,11 @@
             block.classList.toggle('is-locked-by-track', isTrackLocked(itemTrackRef));
             block.classList.toggle('is-magic-fill-review', !!item.magic_fill_review);
             block.dataset.itemId = item.id;
-            block.style.left = `${timelineX(item.timeline_start)}px`;
+            block.style.left = `${x}px`;
             block.style.top = `${laneBlockTop(laneRowTop(rowIndex, rows))}px`;
-            block.style.width = `${Math.max(8, item.duration * zoomScale)}px`;
+            block.style.width = `${w}px`;
             block.style.height = `${laneBlockHeight(item.type)}px`;
-            block.appendChild(createBlockLabel(blockLabelForItem(item)));
+            if (pinned || w >= TIMELINE_LABEL_MIN_W) block.appendChild(createBlockLabel(blockLabelForItem(item)));
             const asset = findAsset(item.asset_id);
             if (item.type === 'media') {
                 appendThumbStrip(block, assetThumbnailUrl(asset), itemHasTimelineAudioToggle(item), asset);
@@ -4937,6 +5049,8 @@
             }
             track.appendChild(block);
         });
+        // Block cũ không còn cần (ra khỏi khung nhìn, bị xoá, đổi nội dung đã dựng bản mới).
+        reusableBlocks.forEach((el) => el.remove());
 
         renderTransitionNodes(track, rows);
         attachWaveformCanvas(track); // canvas sóng âm nằm TRONG #segmentsTrack -> gắn lại sau mỗi render
@@ -4947,7 +5061,8 @@
             guide.style.left = `${timelineX(editingSnapGuide.time)}px`;
             track.appendChild(guide);
         }
-        renderEditingRuler();
+        // Khung nhìn đã đọc ở đầu lượt dựng: đọc lại sau khi DOM vừa đổi là ép layout.
+        renderEditingRuler(timelineRenderWindow);
         refreshTransitionInspector();
     }
 
@@ -5171,17 +5286,27 @@
         if (outer) {
             outer.addEventListener('scroll', scheduleEditingRulerRender, { passive: true });
             outer.addEventListener('wheel', scheduleEditingRulerRender, { passive: true });
+            // Block timeline được ảo hoá theo khung nhìn (xem computeTimelineRenderWindow).
+            outer.addEventListener('scroll', scheduleTimelineWindowCheck, { passive: true });
         }
         document.getElementById('zoomSlider')?.addEventListener('input', scheduleEditingRulerRender);
         window.addEventListener('resize', scheduleEditingRulerRender);
     }
 
+    /* Mốc lượt vẽ thước gần nhất. renderEditingTimeline cũng vẽ thước; nếu nó đã chạy SAU lúc
+       lên lịch (vd. kéo thanh zoom: listener 'input' lên lịch, rồi flushFrame dựng timeline
+       kèm thước ngay trong khung đó) thì lượt lên lịch khỏi vẽ lại — vẽ lại là đọc scrollLeft
+       ngay sau khi DOM vừa đổi, tức một lượt layout bị ép cho cả timeline. */
+    let rulerRenderedAt = 0;
+
     function scheduleEditingRulerRender() {
         if (rulerRenderScheduled) return;
         rulerRenderScheduled = true;
+        const requestedAt = performance.now();
         const run = () => {
             if (!rulerRenderScheduled) return;   // lượt kia chạy trước rồi
             rulerRenderScheduled = false;
+            if (rulerRenderedAt >= requestedAt) return;
             renderEditingRuler();
         };
         requestAnimationFrame(run);
@@ -5190,22 +5315,27 @@
         setTimeout(run, 120);
     }
 
-    function renderEditingRuler() {
+    function renderEditingRuler(view = null) {
         if (currentStepId !== 'step4') return;
+        rulerRenderedAt = performance.now();
         const ruler = ensureEditingRuler();
         const outer = document.getElementById('timelineTrackOuter');
         if (!ruler || !outer) return;
 
-        const zoom = Math.max(1, Number(zoomScale) || 100);
+        const zoom = Math.max(0.01, Number(zoomScale) || 100);
         const fps = rulerFps();
         const { major, minor } = rulerSteps(zoom, fps);
 
         // Khoảng thời gian đang THẤY (trừ phần bị rail nhãn lane che).
-        const scrollLeft = outer.scrollLeft;
-        const viewWidth = outer.clientWidth;
+        const scrollLeft = view ? view.scrollLeft : outer.scrollLeft;
+        const viewWidth = view ? view.width : outer.clientWidth;
         const startPx = scrollLeft + LANE_LABEL_WIDTH;
         const endPx = scrollLeft + viewWidth;
-        const toTime = (px) => (typeof pxToTimelineTime === 'function' ? pxToTimelineTime(px) : px / zoom);
+        // Trong lượt renderEditingTimeline thì dùng lề ĐÃ CHỐT (timelineXPadLock):
+        // pxToTimelineTime đọc lại clientWidth ngay sau khi DOM vừa đổi = ép layout.
+        const toTime = (px) => (timelineXPadLock !== null
+            ? (px - timelineXPadLock) / zoom
+            : (typeof pxToTimelineTime === 'function' ? pxToTimelineTime(px) : px / zoom));
         const tStart = Math.max(0, toTime(startPx));
         const tEnd = Math.max(tStart, toTime(endPx));
 
@@ -5485,6 +5615,13 @@
             selectedTransitionKey = null;
             hideTransitionInspector();
         }
+        /* Ảo hoá như block (xem computeTimelineRenderWindow): phụ đề nối liền nhau nên dự án
+           phụ đề có hàng trăm điểm cắt, mỗi điểm một ô thả + phần tử con — đo được ~1.000 phần
+           tử thừa trong #segmentsTrack ở mức vừa khung. Dữ liệu (transitionBoundaryCache) vẫn
+           đủ; chỉ phần tử DOM là lọc theo khung nhìn. Ô thả (chưa có chuyển cảnh) rộng 20px
+           chồng lên ô trước trên cùng lane ở zoom nhỏ thì bỏ — không ai thả trúng được nó. */
+        const win = timelineRenderWindow;
+        const dropRight = new Map();
         boundaries.forEach((b) => {
             const rowIndex = rows.findIndex((row) => row.id === b.laneId);
             if (rowIndex < 0) return;
@@ -5492,6 +5629,16 @@
             const laneTop = laneRowTop(rowIndex, rows);
             const lh = laneHeight(row);
             const trans = getBoundaryTransition(b);
+            if (selectedTransitionKey !== b.key) {
+                const jx = timelineX(b.junctionTime);
+                const reach = trans ? Math.max(16, trans.duration * zoomScale) : 20;
+                if (win && (jx + reach < win.x0 || jx - reach > win.x1)) return;
+                if (!trans) {
+                    const prev = dropRight.get(b.laneId);
+                    if (prev !== undefined && jx < prev) return;
+                    dropRight.set(b.laneId, jx + 20);
+                }
+            }
             const el = document.createElement('div');
             el.dataset.key = b.key;
             el.style.top = `${laneBlockTop(laneTop)}px`;
@@ -6973,7 +7120,7 @@
             if (Math.abs(dx) <= KF_DRAG_THRESHOLD_PX) return;
             keyframeDrag.moved = true;
         }
-        const target = snapKeyframeTime(keyframeDrag, keyframeDrag.t + dx / Math.max(1, Number(zoomScale) || 100));
+        const target = snapKeyframeTime(keyframeDrag, keyframeDrag.t + dx / Math.max(0.01, Number(zoomScale) || 100));
         if (Math.abs(target - keyframeDrag.currentT) < 1e-4) return;
         if (!keyframeDrag.historySaved) {
             recordHistory();
@@ -7110,7 +7257,7 @@
         if (!editingDrag) return;
         event.preventDefault();
         const item = editingDrag.item;
-        const delta = (event.clientX - editingDrag.startX) / Math.max(1, Number(zoomScale) || 100);
+        const delta = (event.clientX - editingDrag.startX) / Math.max(0.01, Number(zoomScale) || 100);
         if (!editingDrag.historySaved && (Math.abs(event.clientX - editingDrag.startX) > 2 || Math.abs(event.clientY - editingDrag.startY) > 2)) {
             recordHistory();
             editingDrag.historySaved = true;
@@ -7568,7 +7715,7 @@
             && Math.abs(dx) < MAIN_DRAG_THRESHOLD_PX && Math.abs(dy) < MAIN_DRAG_THRESHOLD_PX) return;
         event.preventDefault();
         drag.moved = true;
-        const deltaSec = dx / Math.max(1, Number(zoomScale) || 100);
+        const deltaSec = dx / Math.max(0.01, Number(zoomScale) || 100);
 
         if (isResize) {
             if (!drag.historySaved) {
@@ -20492,15 +20639,20 @@
                 /* CHỈ HIỆN khi trỏ vào hoặc khi block đang được chọn — đúng như CapCut.
                    Trước đây hai vạch trắng này hiện trên MỌI block, nên timeline lúc nào
                    cũng đầy cạnh sáng và khung chọn không còn gì để nổi bật.
-                   Dùng opacity (không dùng display/visibility) để VÙNG BẤM vẫn còn: trỏ vào
-                   là trim được ngay, không phải chọn trước. */
-                opacity: 0;
-                transition: opacity var(--dur-fast) var(--ease-out);
+                   Ẩn bằng VISIBILITY, không bằng opacity:0 (2026-09-27): phần tử opacity < 1 vẫn
+                   có nút hiệu ứng riêng trong cây thuộc tính paint, tức MỖI block thêm hai paint
+                   chunk mà trình duyệt phải chia lớp lại ở mỗi lượt vẽ. Đo khi kéo thanh zoom
+                   với ~200 block phụ đề: long task giảm ~một nửa (≈580 ms -> ≈230 ms / 2 giây).
+                   Vùng bấm KHÔNG mất: trỏ vào block là block :hover -> tay cầm hiện ra trước
+                   cú bấm, nên trỏ vào là trim được ngay như cũ. */
+                visibility: hidden;
             }
             .editing-block:hover .editing-resize-handle,
             .editing-block.is-selected .editing-resize-handle {
-                opacity: 1;
+                visibility: visible;
+                animation: editing-handle-in var(--dur-fast) var(--ease-out);
             }
+            @keyframes editing-handle-in { from { opacity: 0; } to { opacity: 1; } }
             .editing-resize-handle.left { left: 0; border-radius: 6px 0 0 6px; }
             .editing-resize-handle.right { right: 0; border-radius: 0 6px 6px 0; }
             .editing-block:hover .editing-resize-handle { background: rgba(255,255,255,0.7); }
@@ -23702,6 +23854,8 @@
         beginHistoryBatch,
         splitTextToMaxLines,
         textFitsOneLine,
+        // Số block timeline đã dựng ở lượt gần nhất / tổng số item (ảo hoá — dùng cho test).
+        getTimelineRenderStats: () => ({ ...timelineRenderStats }),
         // ----- LỒNG TIẾNG (static/js/dubbing.js) -----
         addDubbingAudio,
         renderAll,

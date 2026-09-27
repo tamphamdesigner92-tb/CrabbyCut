@@ -755,7 +755,7 @@
                 // và quá hẹp khi zoom thấp.
                 const snapThresholdSec = typeof window.matchTrimSnapSeconds === 'function'
                     ? window.matchTrimSnapSeconds()
-                    : 10 / Math.max(1, Number(zoomScale) || 100);
+                    : 10 / Math.max(0.01, Number(zoomScale) || 100);
                 const playheadTime = video.currentTime;
 
                 if (directionSnapshot === 'LEFT') {
