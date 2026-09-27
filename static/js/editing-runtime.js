@@ -2370,6 +2370,19 @@
         return chunks.length ? chunks : [String(text == null ? '' : text)];
     }
 
+    /* `text` có nằm gọn trên MỘT dòng của textbox mặc định không — cùng phép đo (magicWrap,
+       defaultTextWrapWidth) mà addTextItem dùng để gói dòng, nên dòng nào qua được đây thì
+       block dựng ra cũng không tự gói thêm. Auto Subtitle gọi hàm này cho từng dòng ứng viên
+       khi xếp phụ đề 42 ký tự; splitTextToMaxLines(text, 1) cho cùng câu trả lời nhưng đo lại
+       cả chuỗi sau MỖI token, quá đắt khi gọi hàng nghìn lần. */
+    function textFitsOneLine(text, styleOverrides = null) {
+        const style = { ...defaultTextStyle(), ...(styleOverrides || {}) };
+        const fontSize = Math.max(8, Math.min(400, Number(style.font_size) || 56));
+        const letterPx = textLetterSpacingPx(style, fontSize);
+        return magicWrap(String(text == null ? '' : text), fontSize, style.font_family, style.font_weight,
+            letterPx, defaultTextWrapWidth()).lines.length <= 1;
+    }
+
     /* `keepLineBreaks` — GIỮ xuống dòng có sẵn trong `text`, chỉ gói thêm dòng nào quá rộng.
        Tệp phụ đề nhập vào (Local Subtitle) ngắt dòng CÓ CHỦ Ý — song ngữ một dòng một thứ
        tiếng, hai người nói mỗi người một dòng — mà magicWrap coi "\n" như dấu cách và gói
@@ -2438,12 +2451,22 @@
             style,
         };
         editingItems.push(item);
-        selectEditingItem(item.id);
         /* `options.defer` — BỎ QUA lượt vẽ lại của RIÊNG block này; nơi gọi tự gọi renderAll()
          * MỘT lần ở cuối. Auto Subtitle dựng hàng trăm block liên tiếp (video 10 phút ra 300+
          * phụ đề) mà renderAll() vẽ lại cả timeline lẫn lớp overlay — 300 lượt vẽ toàn phần là
-         * treo UI vài giây, không phải "hơi chậm". Mặc định KHÔNG defer. */
-        if (!options.defer) renderAll();
+         * treo UI vài giây, không phải "hơi chậm". Mặc định KHÔNG defer.
+         * defer CHỈ GHI trạng thái chọn: selectEditingItem tự gọi renderAll() nên trước đây
+         * defer vô hiệu (~52 ms/block, 509 phụ đề ≈ 26 s treo UI — đo 2026-09-27). */
+        if (options.defer) {
+            selectedEditingItemId = item.id;
+            selectedEditingItemIds = new Set([item.id]);
+            selectedMainClipIndexes = new Set();
+            selectedTimelineClipIndex = -1;
+            inspectorEditInProgress = false;
+        } else {
+            selectEditingItem(item.id);
+            renderAll();
+        }
         return item;   // nơi gọi cần nó để chỉnh tiếp
     }
 
@@ -4028,7 +4051,16 @@
         return Math.max(180, LANE_TOP_PADDING + rowsHeight + Math.max(0, rows.length - 1) * LANE_GAP + 18);
     }
 
+    /* Lề hai bên timeline, CHỐT MỘT LẦN cho cả lượt renderEditingTimeline (null = đọc sống).
+     * timelineTimeToPx() đọc `#timelineTrackOuter.clientWidth` ở MỖI lần gọi; trong vòng dựng
+     * block, mỗi block vừa append vào DOM làm layout bẩn, nên mỗi lượt đọc là một lượt layout
+     * CẢ TRANG — O(n²) theo số block. Đo trong Electron (2026-09-27), 742 block phụ đề song
+     * ngữ: một lượt dựng ~900 ms, 65% nằm trong timelineX. Lề chỉ đổi khi khung nhìn đổi
+     * rộng, không đổi giữa chừng một lượt dựng. */
+    let timelineXPadLock = null;
+
     function timelineX(time) {
+        if (timelineXPadLock !== null) return timelineXPadLock + (time * zoomScale);
         return typeof timelineTimeToPx === 'function'
             ? timelineTimeToPx(time)
             : time * (Number(zoomScale) || 100);
@@ -4726,6 +4758,18 @@
 
     function renderEditingTimeline() {
         if (currentMode !== 'FINAL' || currentStepId !== 'step4') return;
+        // Chốt lề một lần cho cả lượt dựng (xem timelineXPadLock). Chỉ chốt khi hàm của
+        // index.html có mặt — không có thì timelineX vốn không đọc DOM.
+        const lockPad = timelineXPadLock === null && typeof getTimelineSidePaddingPx === 'function';
+        if (lockPad) timelineXPadLock = getTimelineSidePaddingPx();
+        try {
+            renderEditingTimelineBody();
+        } finally {
+            if (lockPad) timelineXPadLock = null;
+        }
+    }
+
+    function renderEditingTimelineBody() {
         ensureDefaultTracks();
         if (timelineRenderer) {
             timelineRenderer.renderSegments({
@@ -5624,6 +5668,11 @@
 
     function activeOverlayTransition(seqTime) {
         if (!transitionsAvailable()) return null;
+        /* Hàm này chạy MỖI KHUNG khi phát, còn transitionBoundaries() gom + sắp xếp mọi block
+           của mọi lane. Chuyển cảnh overlay luôn nằm trên block TRÁI (getBoundaryTransition),
+           nên không block nào mang `transition` = chắc chắn không có — quét một vòng rẻ hơn
+           hẳn việc dựng cả danh sách (dự án phụ đề hàng trăm block, không cái nào có). */
+        if (!editingItems.some((it) => it.transition)) return null;
         const list = transitionBoundaries();
         for (const b of list) {
             if (b.kind !== 'overlay') continue;
@@ -23652,6 +23701,7 @@
         addTextItem,
         beginHistoryBatch,
         splitTextToMaxLines,
+        textFitsOneLine,
         // ----- LỒNG TIẾNG (static/js/dubbing.js) -----
         addDubbingAudio,
         renderAll,

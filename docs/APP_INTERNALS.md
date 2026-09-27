@@ -8596,7 +8596,8 @@ POST /api/subtitles/transcribe  → job nền, trả job_id ngay
        ▼
 GET /api/subtitles/jobs/:id  (panel poll 700 ms, vẽ thanh tiến trình)
        ▼
-cuesFromSegments()  →  chunkSpansForScene()   (luật chia phụ đề, xem lệch #2 bên dưới)
+cuesFromSegments()  →  dựng câu từ MỐC TỪNG TỪ (mục "Chia phụ đề theo câu" bên dưới);
+                       segment không có mốc từ → chunkSpansForScene() (xem lệch #2)
        ▼
 applyCuesToTimeline()  →  ER.addTextItem() trong một batch lịch sử (Ctrl+Z hoàn tác cả bộ)
        ▼
@@ -8711,6 +8712,66 @@ khoá được gì. Sửa một block trên timeline, hoặc đổi ngôn ngữ 
 trượt đúng lúc nó phải trượt. Thiếu mã ngôn ngữ trong khoá thì đổi từ "vi" sang "ja" rồi bấm
 "Tạo lại phụ đề" sẽ TRÚNG cache của lượt trước và trả về nguyên bản tiếng cũ — hỏng im lặng,
 trông y như model bóc sai.
+
+### Chia phụ đề theo câu (2026-09-27)
+
+Người dùng báo phụ đề tự động "quá dài, không chia theo câu, hiện cả chỗ không có thoại".
+Nguyên nhân nằm ở ASR: sidecar Windows chạy faster-whisper `BatchedInferencePipeline`, và
+chế độ này trả **một segment cho cả khối VAD ~30 giây lời nói**, bỏ qua khoảng lặng ở giữa.
+Dự án thật (phim 39 phút): 35 segment, segment đầu 13,55s → 151,78s, 100 từ, bắc qua khoảng
+lặng 53 giây → phụ đề cũ dài 66 giây gộp ba câu. Mốc TỪNG TỪ thì đúng, nên
+`cuesFromSegments` (auto-subtitle.js) dựng lại câu từ mốc từ — không đổi sidecar, không phải
+bóc băng lại (cache cũ vẫn dùng được, "Tạo lại phụ đề" là ra cách chia mới).
+
+Luật (theo mặc định Create Captions của Premiere Pro; người dùng chọn):
+
+| Hằng | Giá trị | Ý nghĩa |
+| --- | --- | --- |
+| `CAPTION_MAX_CHARS` / `_CJK` | 42 / 16 | ký tự mỗi dòng (zh/ja/ko dùng 16) |
+| `CAPTION_MAX_LINES` | 2 | dòng mỗi phụ đề |
+| `CAPTION_PAUSE_SEC` | 0,8 | khoảng lặng giữa hai từ đủ để tách phụ đề |
+| `CAPTION_MIN_SEC` | 1,2 | giữ tối thiểu, **không bao giờ lấn phụ đề sau** |
+| `CAPTION_CHAIN_GAP_SEC` | 0,2 | hở nhỏ hơn thì nối liền, khỏi nháy |
+
+Ngoài ra: ngắt ở dấu kết câu (trừ viết tắt `Mr.`/`Dr.`…); câu dài chia nhiều phụ đề cân nhau,
+ưu tiên ngắt sau dấu phẩy; từ trơ bị tách bởi khoảng lặng (Whisper đặt lệch mốc) được gộp vào
+câu sau; token nối (`non` + `-transferable`, `99` + `.9%`) dính vào từ trước. Dòng còn phải
+vừa bề rộng textbox — đo bằng `EditingRuntime.textFitsOneLine` (cùng `magicWrap` với
+`addTextItem`), và `applyCuesToTimeline` truyền `keepLineBreaks` để block giữ đúng cách
+xuống dòng đã xếp. Kết quả trên dự án thật: 134 → 509 phụ đề, dài nhất 66s → 4,5s.
+
+**`addTextItem({ defer: true })` trước đây KHÔNG defer**: nó gọi `selectEditingItem` →
+`setPrimaryItemSelection` → `renderAll()`, tức mỗi block một lượt vẽ lại inspector kèm toàn
+bộ thumbnail mẫu văn bản/hoạt ảnh (~52 ms/block). Nay defer chỉ ghi trạng thái chọn; 58 phụ
+đề: 4,8 s → 0,38 s.
+
+### Hiệu năng timeline khi có nhiều block phụ đề (2026-09-27)
+
+Người dùng báo preview giật khi có phụ đề, "cực kỳ lag" với phụ đề song ngữ (742 block).
+Đo trong Electron (CPU profile qua `--remote-debugging-port`): khi phát, main thread bị chặn
+bởi long task 800–1000 ms nối liền, 6 giây phát vẽ được 2 khung, 67/163 khung video rớt; 85%
+CPU nằm trong `renderEditingTimeline`. Hai lỗi chồng nhau:
+
+1. **Cuộn timeline = dựng lại cả timeline.** Handler 'scroll' của `#timelineTrackOuter` trong
+   perf-runtime.js đánh dấu `timelineVisual`, mà ở Editing cờ đó chạy `renderEditingTimeline`
+   (xoá trắng rồi dựng mọi block). Khi phát, timeline tự cuộn theo playhead → dựng lại MỖI
+   KHUNG. Nay ở step4 cuộn không đánh dấu nữa: block đặt theo toạ độ nội dung, thước DOM và
+   canvas sóng âm đã có listener 'scroll' riêng. RAW/MAPPED giữ nguyên (Pixi cull theo viewport).
+2. **O(n²) layout trong vòng dựng block.** `timelineX` → `timelineTimeToPx` →
+   `getTimelineSidePaddingPx` đọc `clientWidth` mỗi lần gọi; block vừa append làm layout bẩn
+   nên mỗi lượt đọc là một lượt layout cả trang. Nay lề được chốt một lần cho cả lượt dựng
+   (`timelineXPadLock`): một lượt dựng 742 block ~900 ms → ~145 ms (phần còn lại là layout
+   DOM thật của 742 block, chỉ còn trả khi sửa/chọn, không trả khi phát).
+
+A/B cùng phiên, 3 lượt × 5 giây: hành vi cũ 34–37 khung, p50 183 ms, rớt 95/127 khung video;
+sau sửa 266–276 khung, p50 16,7 ms, rớt 0/121. Thêm: `activeOverlayTransition` (chạy mỗi
+khung) thoát sớm khi không block nào mang `transition`, khỏi gom + sắp xếp cả danh sách.
+
+> **Đo trong pane trình duyệt của Claude Code cho số layout SAI**: một lượt layout ở đó tốn
+> ~5 ms tỉ lệ với số block (cây accessibility bật), trong Electron chỉ 0,1 ms. Đo hiệu năng
+> renderer phải trong Electron: chạy backend thử ở cổng riêng, `BACKEND_PORT=<cổng>
+> electron . --remote-debugging-port=9333` (Electron coi đó là backend ngoài), rồi điều khiển
+> bằng CDP (`Runtime.evaluate`, `Profiler.start/stop`).
 
 ## Auto Subtitle đa ngôn ngữ — menu ngôn ngữ, font CJK, đồng bộ phụ đề (2026-09-14)
 

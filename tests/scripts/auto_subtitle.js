@@ -209,6 +209,73 @@ function loadScript(win, relPath) {
   assert.ok(noWords[1].start >= noWords[0].end - 1e-9, 'không được chồng mốc');
   console.log('  ok  cuesFromSegments: thiếu mốc từng từ thì rơi về tỉ lệ ký tự');
 
+  /* --- LUẬT CHIA THEO CÂU (2026-09-27) ---
+   * Mẫu lấy từ dự án thật: faster-whisper batched trả MỘT segment cho cả khối VAD ~30s, bắc
+   * qua khoảng lặng hàng chục giây (13,55s → 151,78s, 100 từ). Bản cũ ra phụ đề 66 giây gộp
+   * ba câu, đứng suốt đoạn không ai nói. Mốc từng từ thì đúng — luật mới dựng câu từ đó. */
+  {
+    const w = (text, start, end) => ({ text, start, end });
+    const saved = win.EditingRuntime.textFitsOneLine;
+    win.EditingRuntime.textFitsOneLine = () => true;   // chỉ kiểm luật KÝ TỰ ở đây
+    const vad = [{
+      start: 13.55, end: 151.78, text: 'x',
+      words: [
+        w('to', 13.55, 13.63), w('miss', 13.63, 13.77), w('you', 13.77, 13.91), w('so', 13.91, 14.09), w('much.', 14.09, 14.41),
+        w('Today,', 71.94, 72.2), w('we', 72.42, 72.86), w('saw', 72.86, 73.12), w('another', 73.12, 73.5),
+        w('Cennet', 73.5, 74.0), w('client', 74.0, 74.4), w('begin', 74.4, 74.78), w('a', 74.78, 74.96),
+        w('new', 74.96, 75.14), w('life', 75.14, 75.5), w('in', 75.5, 75.86), w('this', 75.86, 76.08), w('vault.', 76.08, 76.38),
+        // Mốc Whisper đặt lệch: "I" đứng trơ 26 giây trước phần còn lại của câu.
+        w('I', 237.52, 237.7), w('gave', 263.71, 263.93), w('each', 263.93, 264.17), w('of', 264.17, 264.31),
+        w('you', 264.31, 264.43), w('a', 264.43, 264.65), w('non', 264.65, 264.8), w('-transferable', 264.8, 265.3),
+        w('vault.', 265.3, 265.6),
+        w('Mr.', 266.5, 266.7), w('Josier,', 266.7, 267.1), w('what', 267.1, 267.3), w('about', 267.3, 267.5),
+        w('the', 267.5, 267.6), w('company?', 267.6, 268.0),
+        w('Hi.', 270.0, 270.3), w('Any', 270.5, 270.7), w('news?', 270.7, 271.0),
+      ],
+    }];
+    const out = panel.cuesFromSegments(vad, {}, { language: 'en' });
+    const texts = out.map((c) => c.text.replace(/\n/g, ' '));
+    assert.strictEqual(texts[0], 'to miss you so much.', 'dấu kết câu phải ngắt phụ đề');
+    assert.ok(out[0].end < 20, `phụ đề đầu KHÔNG được kéo qua khoảng lặng 53s (end=${out[0].end})`);
+    assert.ok(Math.abs(out[1].start - 71.94) < 1e-6, 'câu sau khoảng lặng bật đúng lúc từ đầu được đọc');
+    out.forEach((c) => {
+      const lines = c.text.split('\n');
+      assert.ok(lines.length <= 2, `tối đa 2 dòng: "${c.text}"`);
+      lines.forEach((l) => assert.ok([...l].length <= 42, `mỗi dòng ≤ 42 ký tự: "${l}" (${[...l].length})`));
+    });
+    assert.ok(out[1].text.includes('\n'), 'câu 55 ký tự phải xuống thành 2 dòng, không nằm một dòng');
+    const gave = out.find((c) => /gave each/.test(c.text));
+    assert.ok(/^I gave/.test(gave.text), 'từ trơ "I" phải được gộp vào câu sau, không thành phụ đề một chữ');
+    assert.ok(gave.start > 263, `…và KHÔNG kéo phụ đề phủ 26 giây im lặng (start=${gave.start})`);
+    assert.ok(texts.some((t) => t.includes('non-transferable')), 'token nối "-transferable" phải dính vào từ trước');
+    assert.ok(texts.some((t) => t.startsWith('Mr. Josier')), '"Mr." là viết tắt, không phải hết câu');
+    const hi = out.find((c) => c.text === 'Hi.');
+    assert.ok(hi, 'câu một từ có dấu kết câu vẫn là một phụ đề riêng');
+    const next = out[out.indexOf(hi) + 1];
+    assert.ok(hi.end <= next.start + 1e-9, 'kéo dài tối thiểu KHÔNG được lấn phụ đề sau');
+    assert.ok(Math.abs(hi.end - next.start) < 1e-6, 'hở 0,2s giữa hai phụ đề thì nối liền (khỏi nháy)');
+    const company = out.find((c) => /company\?$/.test(c.text));
+    assert.ok(company.end - company.start >= 1.2 - 1e-9, 'phụ đề ngắn được giữ tối thiểu 1,2s khi còn chỗ');
+    for (let i = 1; i < out.length; i += 1) assert.ok(out[i].start >= out[i - 1].end - 1e-9, 'không chồng mốc');
+
+    /* Câu dài: chia nhiều phụ đề CÂN NHAU (không để mảnh cuối cụt một hai từ). */
+    const long = 'one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twentyone'.split(' ');
+    const longCues = panel.cuesFromSegments([{ start: 0, end: 20, text: 'x', words: long.map((t, i) => w(t, i * 0.4, i * 0.4 + 0.35)) }], {}, { language: 'en' });
+    assert.ok(longCues.length >= 2, 'câu > 84 ký tự phải chia nhiều phụ đề');
+    const sizes = longCues.map((c) => c.text.replace(/\n/g, ' ').length);
+    assert.ok(Math.min(...sizes) >= Math.max(...sizes) * 0.5, `các mảnh phải dài xấp xỉ nhau: ${sizes.join(', ')}`);
+
+    /* CJK: nối KHÔNG dấu cách, trần 16 ký tự mỗi dòng. */
+    const zh = Array.from('今天我们看到了另一位客户在这个金库里开始了新的生活。').map((ch, i) => w(ch, i * 0.2, i * 0.2 + 0.18));
+    const zhCues = panel.cuesFromSegments([{ start: 0, end: 10, text: 'x', words: zh }], {}, { language: 'zh' });
+    zhCues.forEach((c) => {
+      assert.ok(!/ /.test(c.text), `chữ Hán không được chèn dấu cách: "${c.text}"`);
+      c.text.split('\n').forEach((l) => assert.ok([...l].length <= 16, `CJK ≤ 16 ký tự/dòng: "${l}"`));
+    });
+    win.EditingRuntime.textFitsOneLine = saved;
+    console.log('  ok  cuesFromSegments: ngắt theo câu/khoảng lặng, 2 dòng × 42 ký tự, tối thiểu 1,2s không lấn');
+  }
+
   /* --- .srt phải đi theo BLOCK ĐANG CÓ, không theo ảnh chụp lúc bóc băng ---
    * Người dùng sửa chữ / kéo mốc từng block phụ đề sau khi tạo là chuyện bình thường.
    * Ghi .srt theo `subtitleState.cues` cũ thì tệp lệch với video ngay lần sửa đầu tiên. */

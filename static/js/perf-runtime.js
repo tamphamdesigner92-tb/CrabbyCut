@@ -1772,7 +1772,18 @@
     timelineOuter.addEventListener('scroll', () => {
         applyRendererViewport();
         renderRulerDomLabels();
-        if (flags.perf_scheduler) {
+        /* Ở Editing (step4) CUỘN KHÔNG ĐƯỢC DỰNG LẠI TIMELINE (2026-09-27). 'timelineVisual'
+         * ở đây chạy updateTimelineLayout đã vá -> renderEditingTimeline(), tức xoá trắng rồi
+         * dựng lại MỌI block. Khi phát, timeline tự cuộn theo playhead nên đó là một lượt dựng
+         * lại MỖI KHUNG. Dự án ít block thì không ai thấy; dự án phụ đề song ngữ 742 block đo
+         * được trong Electron: long task 800–1000 ms nối liền nhau, 6 giây phát chỉ vẽ được 2
+         * khung, 67/163 khung video rớt — và mỗi khung > 60 ms còn kích hoạt vòng tua lùi tự
+         * khuếch đại (xem handler 'scroll' trong index.html).
+         * Block editing đặt theo toạ độ NỘI DUNG nên cuộn tự khớp; hai thứ phụ thuộc khung
+         * nhìn (thước DOM, canvas sóng âm) đã có listener 'scroll' riêng ở editing-runtime.js.
+         * Luồng RAW/MAPPED giữ nguyên: Pixi ở đó cull theo viewport nên phải vẽ lại. */
+        const isEditingStage = currentMode === 'FINAL' && currentStepId === 'step4';
+        if (flags.perf_scheduler && !isEditingStage) {
             markDirty('timelineVisual');
         }
     }, { passive: true });

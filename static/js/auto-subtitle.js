@@ -226,7 +226,187 @@
         return spans;
     }
 
-    function cuesFromSegments(segments, style) {
+    /* ── LUẬT CHIA PHỤ ĐỀ THEO CÂU (2026-09-27) ─────────────────────────────────
+     *
+     * VÌ SAO KHÔNG DÙNG THẲNG SEGMENT CỦA WHISPER. Sidecar Windows chạy faster-whisper ở chế
+     * độ BatchedInferencePipeline: VAD gom lời nói thành từng khối ~30 giây (bỏ khoảng lặng
+     * ở giữa) và mỗi khối trả về MỘT segment. Đo trên dự án thật (phim 39 phút, tiếng Anh):
+     * 35 segment, segment đầu kéo từ 13,55s tới 151,78s với 100 từ, bắc qua cả khoảng lặng
+     * 53 giây. Chia segment đó theo "≤ 2 dòng" thì ra phụ đề 66 giây gộp ba câu, đứng trên
+     * màn hình suốt đoạn không ai nói. Nhưng MỐC TỪNG TỪ thì chính xác và có khoảng lặng rõ
+     * ràng (`paradise.` dứt 18,16s → `Today,` bắt đầu 71,94s), nên dựng lại câu từ mốc từ là
+     * đủ — không phải bóc băng lại, và cache cũ vẫn dùng được: bấm "Tạo lại phụ đề" là ra
+     * cách chia mới ngay.
+     *
+     * LUẬT (theo mặc định Create Captions của Premiere Pro, người dùng chọn 2026-09-27):
+     *   1. Ngắt câu ở dấu kết câu và ở khoảng lặng ≥ CAPTION_PAUSE_SEC giữa hai từ.
+     *   2. Mỗi phụ đề ≤ 2 dòng, mỗi dòng ≤ 42 ký tự (Trung/Nhật/Hàn: 16) VÀ vừa bề rộng
+     *      textbox. Câu dài chia thành nhiều phụ đề cân nhau, ưu tiên ngắt sau dấu phẩy.
+     *   3. Mốc = từ đầu tới từ cuối. Câu quá ngắn được giữ tối thiểu 1,2s cho kịp đọc, nhưng
+     *      KHÔNG BAO GIỜ lấn sang phụ đề sau.
+     * Segment KHÔNG có mốc từng từ (whisper.cpp) rơi về chunkSpansForScene như cũ.
+     *
+     * ⚠️ Nhánh macOS dùng chung luật chia với "Tạo video AI" (ai-video-panel.js). Luật mới
+     * này chỉ thay cho Auto Subtitle; port sang macOS thì đặt nó cạnh chunkSpansForScene. */
+    const CAPTION_MAX_LINES = 2;
+    const CAPTION_MAX_CHARS = 42;          // Premiere Pro: "Maximum length in characters" mặc định
+    const CAPTION_MAX_CHARS_CJK = 16;      // chữ Hán/Kana/Hangul: mỗi ký tự rộng gấp ~2 chữ Latin
+    const CAPTION_PAUSE_SEC = 0.8;         // khoảng lặng giữa hai từ đủ để tách phụ đề
+    const CAPTION_MIN_SEC = 1.2;           // thời lượng tối thiểu (mức nhỏ nhất Premiere cho phép)
+    const CAPTION_CHAIN_GAP_SEC = 0.2;     // hở < ~5 khung giữa hai phụ đề thì nối liền, khỏi nháy
+    const CAPTION_LONE_WORD_MAX_GAP = 3;   // xem attachLoneWords
+    const CJK_LANGS = new Set(['zh', 'ja', 'ko']);
+
+    // Hán + Kana + dấu câu CJK + dạng full-width: viết liền, KHÔNG có dấu cách giữa hai chữ.
+    // Hangul cố ý không có ở đây: tiếng Hàn viết cách từ như tiếng Việt.
+    const NO_SPACE_RE = /[⺀-〿぀-ヿ㐀-䶿一-鿿豈-﫿＀-￯]/;
+    const SENTENCE_END_RE = /[.!?…。！？]["'”’)\]»」』]*$/;
+    const CLAUSE_END_RE = /[,;:，、；：]["'”’)\]»」』]*$/;
+    // Viết tắt có dấu chấm KHÔNG kết câu: "Mr. Djoser" mà ngắt ở "Mr." là ra phụ đề một chữ.
+    const ABBREV_RE = /^(mr|mrs|ms|dr|prof|st|jr|sr|vs|mt)\.$/i;
+
+    const charCount = (text) => Array.from(String(text)).length;
+
+    function joinTokens(tokens) {
+        let out = '';
+        for (const token of tokens) {
+            if (out && !NO_SPACE_RE.test(out.slice(-1)) && !NO_SPACE_RE.test(token.text[0])) out += ' ';
+            out += token.text;
+        }
+        return out;
+    }
+
+    const endsSentence = (text) => SENTENCE_END_RE.test(text) && !ABBREV_RE.test(text);
+
+    /* Chuỗi từ -> các câu. Ngắt khi từ kết câu, hoặc khi khoảng lặng tới từ kế ≥ ngưỡng. */
+    function phrasesFromWords(words) {
+        const phrases = [];
+        let cur = [];
+        words.forEach((word, i) => {
+            cur.push(word);
+            const next = words[i + 1];
+            const pause = next ? next.start - word.end : Infinity;
+            if (!next || endsSentence(word.text) || pause >= CAPTION_PAUSE_SEC) {
+                phrases.push({ tokens: cur, bySentence: endsSentence(word.text) });
+                cur = [];
+            }
+        });
+        return attachLoneWords(phrases);
+    }
+
+    /* Mảnh MỘT TỪ bị tách chỉ vì khoảng lặng (không phải vì hết câu) gần như luôn là mốc
+     * Whisper đặt lệch: "I" 237,5s rồi "gave each of you a vault" 263,7s. Để nguyên thì ra
+     * một phụ đề chỉ có chữ "I". Gộp nó vào câu sau; nếu khoảng lặng dài quá mức một nhịp
+     * ngập ngừng thì kéo luôn mốc của từ đó về sát câu sau, không để phụ đề phủ khoảng lặng. */
+    function attachLoneWords(phrases) {
+        const out = [];
+        for (let i = 0; i < phrases.length; i += 1) {
+            const phrase = phrases[i];
+            const next = phrases[i + 1];
+            const lone = phrase.tokens.length === 1 && !phrase.bySentence
+                && !CLAUSE_END_RE.test(phrase.tokens[0].text);
+            if (lone && next) {
+                const word = phrase.tokens[0];
+                const gap = next.tokens[0].start - word.end;
+                const moved = gap > CAPTION_LONE_WORD_MAX_GAP
+                    ? { ...word, start: next.tokens[0].start - Math.min(0.5, word.end - word.start), end: next.tokens[0].start }
+                    : word;
+                next.tokens = [moved, ...next.tokens];
+                continue;
+            }
+            out.push(phrase);
+        }
+        return out;
+    }
+
+    /* Xếp một nhóm từ vào tối đa CAPTION_MAX_LINES dòng. Trả mảng dòng, hoặc null nếu không
+     * vừa. Hai dòng thì chọn điểm ngắt cho hai dòng dài ngang nhau (ưu tiên sau dấu phẩy,
+     * tránh để trơ một từ ở dòng dưới) — cùng thói quen của phụ đề chuyên nghiệp. */
+    function layoutCue(tokens, fitsLine) {
+        if (fitsLine(tokens)) return [joinTokens(tokens)];
+        if (CAPTION_MAX_LINES < 2) return null;
+        let best = null;
+        for (let i = 1; i < tokens.length; i += 1) {
+            const top = tokens.slice(0, i);
+            if (!fitsLine(top)) break;               // dòng trên chỉ dài thêm -> không cứu được
+            const bottom = tokens.slice(i);
+            if (!fitsLine(bottom)) continue;
+            const a = charCount(joinTokens(top));
+            const b = charCount(joinTokens(bottom));
+            const score = Math.max(a, b)
+                - (CLAUSE_END_RE.test(top[top.length - 1].text) ? 6 : 0)
+                + (bottom.length === 1 ? 8 : 0);
+            if (!best || score < best.score) best = { score, lines: [joinTokens(top), joinTokens(bottom)] };
+        }
+        return best ? best.lines : null;
+    }
+
+    /* Tham lam: nhồi từ vào phụ đề tới khi hết chỗ. Lúc tràn, nếu nửa sau của phụ đề đang dựng
+     * có dấu phẩy thì ngắt ở đó thay vì giữa một cụm. */
+    function packPhrase(tokens, fitsLine) {
+        const pieces = [];
+        let cur = [];
+        for (const token of tokens) {
+            const next = cur.concat(token);
+            if (!cur.length || layoutCue(next, fitsLine)) { cur = next; continue; }
+            let cut = cur.length;
+            for (let j = cur.length - 1; j >= Math.ceil(cur.length / 2); j -= 1) {
+                if (CLAUSE_END_RE.test(cur[j - 1].text) && layoutCue(cur.slice(j).concat(token), fitsLine)) { cut = j; break; }
+            }
+            pieces.push(cur.slice(0, cut));
+            cur = cur.slice(cut).concat(token);
+        }
+        if (cur.length) pieces.push(cur);
+        return pieces;
+    }
+
+    /* Một câu -> các phụ đề. Tham lam để lại mảnh cuối cụt ("... một hai ba bốn" + "năm");
+     * nên sau khi biết số mảnh k, hạ dần trần ký tự mỗi dòng tới mức nhỏ nhất mà vẫn ra đúng
+     * k mảnh — các mảnh tự dài ngang nhau. */
+    function cuesFromPhrase(tokens, maxChars, fitsWidth) {
+        const fitsWith = (limit) => (list) => charCount(joinTokens(list)) <= limit && fitsWidth(joinTokens(list));
+        let pieces = packPhrase(tokens, fitsWith(maxChars));
+        if (pieces.length > 1) {
+            const floor = Math.ceil(maxChars / 2);
+            for (let limit = maxChars - 2; limit >= floor; limit -= 2) {
+                const trial = packPhrase(tokens, fitsWith(limit));
+                if (trial.length !== pieces.length || trial.some((p) => !layoutCue(p, fitsWith(limit)))) break;
+                pieces = trial;
+            }
+        }
+        const fits = fitsWith(maxChars);
+        return pieces.map((piece) => ({
+            // Một từ dài hơn cả dòng (URL, tên ghép) vẫn phải hiện ra — để nguyên một dòng.
+            text: (layoutCue(piece, fits) || [joinTokens(piece)]).join('\n'),
+            start: Number(piece[0].start),
+            end: Number(piece[piece.length - 1].end),
+        }));
+    }
+
+    /* Token NỐI TIẾP từ trước, không phải từ mới: Whisper tách "non-transferable" thành " non"
+     * + "-transferable", và backend đã trim mất dấu cách đầu token nên không còn phân biệt
+     * được. Để riêng thì ra "non -transferable", tệ hơn là bị ngắt dòng/ngắt phụ đề giữa từ. */
+    const GLUE_BEFORE_RE = /^([-'’]|[.,]\d|[.,!?;:…)\]}%»”’]+$)/;   // "[.,]\d": "99" + ".9%"
+
+    function wordsOf(seg) {
+        const words = [];
+        (Array.isArray(seg.words) ? seg.words : [])
+            .map((w) => ({ text: String(w?.text ?? w?.word ?? '').trim(), start: Number(w?.start), end: Number(w?.end) }))
+            .filter((w) => w.text && Number.isFinite(w.start) && Number.isFinite(w.end))
+            .forEach((w) => {
+                const prev = words[words.length - 1];
+                if (prev && (GLUE_BEFORE_RE.test(w.text) || /-$/.test(prev.text))) {
+                    prev.text += w.text;
+                    prev.end = Math.max(prev.end, w.end);
+                    return;
+                }
+                words.push({ ...w, end: Math.max(w.start, w.end) });
+            });
+        return words;
+    }
+
+    /* `options.language` = ngôn ngữ THẬT của bản bóc băng (chọn trần ký tự Latin hay CJK). */
+    function cuesFromSegments(segments, style, options = {}) {
         const runtime = ER();
         // Ưu tiên bản của ai-video-panel.js nếu nhánh này được port thêm tính năng đó — hai bản
         // luật cùng chạy là hai kiểu ngắt phụ đề khác nhau cho cùng một thứ người dùng nhìn thấy.
@@ -234,7 +414,23 @@
         if (!runtime) {
             throw new Error(_t('Chưa nạp được {file} — không chia được phụ đề.', { file: 'editing-runtime.js' }));
         }
+        const maxChars = CJK_LANGS.has(String(options.language || '').toLowerCase())
+            ? CAPTION_MAX_CHARS_CJK
+            : CAPTION_MAX_CHARS;
+        // Bề rộng đo bằng ĐÚNG style sẽ vẽ (xem subtitleStyleFor): dòng 42 ký tự vẫn có thể
+        // tràn khung dọc 9:16 với cỡ chữ lớn.
+        const fitsWidth = typeof runtime.textFitsOneLine === 'function'
+            ? (text) => runtime.textFitsOneLine(text, style)
+            : (typeof runtime.splitTextToMaxLines === 'function'
+                ? (text) => runtime.splitTextToMaxLines(text, 1, style).length <= 1
+                : () => true);
+
         const cues = [];
+        let stream = [];   // từ của các segment CÓ mốc từng từ liền nhau: một câu có thể vắt qua ranh giới hai khối VAD
+        const flush = () => {
+            phrasesFromWords(stream).forEach((phrase) => cues.push(...cuesFromPhrase(phrase.tokens, maxChars, fitsWidth)));
+            stream = [];
+        };
         (Array.isArray(segments) ? segments : []).forEach((seg) => {
             const scene = {
                 start: Number(seg.start) || 0,
@@ -243,6 +439,9 @@
                 words: Array.isArray(seg.words) ? seg.words : [],
             };
             if (!scene.text || scene.end <= scene.start) return;
+            const words = wordsOf(scene);
+            if (words.length) { stream.push(...words); return; }
+            flush();
             for (const span of split(scene, runtime, style)) {
                 const text = String(span.text || '').trim();
                 if (!text) continue;
@@ -253,10 +452,24 @@
                 });
             }
         });
-        /* Ép ĐƠN ĐIỆU lần cuối trên TOÀN BỘ danh sách (chunkSpansForScene chỉ ép trong
-         * phạm vi một câu). Hai câu ASR chồng mốc lên nhau là hai block text chồng
-         * nhau, và mỗi cái bị đẩy sang một lane mới — timeline thành cái thang. */
+        flush();
+
         cues.sort((a, b) => a.start - b.start);
+        /* Thời lượng: giữ tối thiểu CAPTION_MIN_SEC nhưng không lấn phụ đề sau; hở rất nhỏ thì
+         * nối liền (tắt rồi bật lại sau 2-3 khung trông như nháy). */
+        cues.forEach((cue, i) => {
+            const next = cues[i + 1];
+            cue.start = Math.max(0, cue.start);
+            let end = Math.max(cue.end, cue.start + CAPTION_MIN_SEC);
+            if (next) {
+                // Phần KÉO THÊM dừng ở mốc phụ đề sau; mốc lời nói thật thì không cắt.
+                end = Math.min(end, Math.max(cue.end, next.start));
+                if (next.start > end && next.start - end < CAPTION_CHAIN_GAP_SEC) end = next.start;
+            }
+            cue.end = end;
+        });
+        /* Ép ĐƠN ĐIỆU lần cuối trên TOÀN BỘ danh sách. Hai câu ASR chồng mốc lên nhau là hai
+         * block text chồng nhau, và mỗi cái bị đẩy sang một lane mới — timeline thành cái thang. */
         let cursor = 0;
         for (const cue of cues) {
             cue.start = Math.max(cue.start, cursor);
@@ -290,9 +503,12 @@
                 const want = Math.max(0.3, cue.end - cue.start);
                 /* `defer: true` — KHÔNG vẽ lại sau từng block. Video 10 phút ra 300+ phụ đề;
                  * renderAll() mỗi lượt là treo UI vài giây. Vẽ một lần ở cuối (dưới). */
+                /* `keepLineBreaks` — cuesFromSegments đã xếp sẵn tối đa 2 dòng × 42 ký tự; để
+                 * addTextItem gói lại từ đầu theo bề rộng khung là mất luật đó (khung 4K vừa
+                 * ~80 ký tự một dòng). Dòng nào vẫn quá rộng thì nó vẫn gói thêm như cũ. */
                 const item = runtime.addTextItem(
                     { start: cue.start },
-                    { text: cue.text, duration: want, defer: true, style },
+                    { text: cue.text, duration: want, defer: true, style, keepLineBreaks: true },
                 );
                 if (!item) return;
                 itemIds.push(String(item.id));
@@ -453,7 +669,7 @@
            (xem subtitleStyleFor), nên hai bước phải nhìn thấy cùng một ngôn ngữ. */
         const language = String(job.result?.language || state.language || 'vi');
         const style = subtitleStyleFor(language);
-        const cues = cuesFromSegments(segments, style);
+        const cues = cuesFromSegments(segments, style, { language });
         if (!cues.length) {
             state.lastError = _t('Bóc băng xong nhưng không dựng được câu phụ đề nào.');
             return;
