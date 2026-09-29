@@ -1,0 +1,33 @@
+# Bộ phụ thuộc của "Lồng tiếng" (tab Âm thanh) — server tts/server.py.
+#
+# CÀI VÀO MÔI TRƯỜNG RIÊNG, KHÔNG CÀI CHUNG requirements.txt:
+#   · vieneu kéo numpy 2.x + gradio; .venv chính ghim mediapipe==0.10.21 (numpy<2) cho
+#     Auto-Reframe — cài chung là một trong hai bên hỏng.
+#   · ~1,5 GB gói Python mà phần lớn người dùng không bao giờ lồng tiếng — không bắt ai tải
+#     lúc `npm run setup`.
+# Dựng bằng:  npm run setup:tts   (scripts/setup_tts.js — từ mã nguồn tạo .venv-tts; bản cài
+# .exe tự cài vào %LOCALAPPDATA%\CrabbyCut\runtime\tts-site khi bấm "Cài đặt" trong panel).
+#
+# CHỈ GÓI PYTHON — KHÔNG MODEL. Model (F5 ~1,4 GB, VieNeu ~0,9 GB) do tts/model_store.py tải ở
+# lần dùng đầu, có thanh tiến trình trên thanh trạng thái.
+
+# Engine "f5" — Vi-F5-TTS, nhân bản giọng (port từ Vi-TTS Studio / repo TTS-App).
+f5-tts>=1.1.0
+# Engine "vieneu" — VieNeu-TTS v2, 7 giọng Việt (port từ server TTS của CrabbyCut_Private).
+vieneu>=3.3.0
+# Engine "voxcpm" — VoxCPM2 qua MLX, chỉ macOS Apple Silicon (Windows không có wheel MLX).
+mlx-audio>=0.5.0; sys_platform == "darwin"
+
+# VieNeu đường safetensors cần transformers>=4.51 + torch (đường GGUF cần llama-cpp-python,
+# không có wheel dựng sẵn ở mọi nền tảng). F5-TTS cũng cần torch/torchaudio.
+# Trên Windows, torch từ PyPI là bản CPU. Máy có GPU NVIDIA muốn nhanh hơn: đặt biến môi trường
+# CRAB_TTS_TORCH_INDEX=https://download.pytorch.org/whl/cu126 trước khi chạy setup:tts.
+transformers>=4.51
+torch>=2.4
+torchaudio>=2.4
+
+fastapi>=0.115
+uvicorn>=0.32
+soundfile>=0.12
+huggingface-hub>=0.26
+numpy

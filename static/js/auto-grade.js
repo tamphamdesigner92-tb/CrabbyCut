@@ -56,6 +56,9 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (ColorAdjust) {
     'use strict';
 
+    const _t = (typeof globalThis !== 'undefined' && globalThis._t)
+        || ((k, p) => (p ? String(k).replace(/\{(\w+)\}/g, (m, n) => (n in p ? p[n] : m)) : k));
+
     // ---------------------------------------------------------------------
     // 1. MỤC TIÊU (đích mà bộ giải nhắm tới)
     // ---------------------------------------------------------------------
@@ -97,78 +100,83 @@
      * `bias` cộng vào SAU khi solveWhiteBalance đã trung tính hoá — tức "Ấm" nghĩa là
      * cân trắng cho đúng RỒI mới ngả ấm có chủ đích, chứ không phải bỏ qua cân trắng.
      */
+    const G_BASIC = _t('Cơ bản');
+    const G_CONTRAST = _t('Tương phản');
+    const G_TEMP = _t('Nhiệt độ');
+    const G_HUE = _t('Sắc');
+    const G_SAT = _t('Bão hoà');
     const STYLES = [
         // --- Trung tính / độ sáng ---
-        { id: '', name: 'Trung tính', group: 'Cơ bản',
-          hint: 'Cân về chuẩn, không thêm ý đồ màu.',
+        { id: '', name: _t('Trung tính'), group: G_BASIC,
+          hint: _t('Cân về chuẩn, không thêm ý đồ màu.'),
           targets: {}, bias: {} },
-        { id: 'soft_bright', name: 'Sáng & dịu', group: 'Cơ bản',
-          hint: 'Sáng hơn, tương phản thấp, màu nhẹ — nội dung tích cực/giáo dục.',
+        { id: 'soft_bright', name: _t('Sáng & dịu'), group: G_BASIC,
+          hint: _t('Sáng hơn, tương phản thấp, màu nhẹ — nội dung tích cực/giáo dục.'),
           targets: { median: 0.53, spread: 0.62, saturation: 0.28, black: 0.030 }, bias: {} },
-        { id: 'high_key', name: 'Rất sáng (high-key)', group: 'Cơ bản',
-          hint: 'Sáng nhất, gần như không bóng tối — bảng trắng, quay màn hình.',
+        { id: 'high_key', name: _t('Rất sáng (high-key)'), group: G_BASIC,
+          hint: _t('Sáng nhất, gần như không bóng tối — bảng trắng, quay màn hình.'),
           targets: { median: 0.60, spread: 0.55, saturation: 0.27, black: 0.045, white: 0.975 }, bias: {} },
-        { id: 'bright', name: 'Sáng vừa', group: 'Cơ bản',
-          hint: 'Sáng hơn trung tính một chút, giữ nguyên tương phản.',
+        { id: 'bright', name: _t('Sáng vừa'), group: G_BASIC,
+          hint: _t('Sáng hơn trung tính một chút, giữ nguyên tương phản.'),
           targets: { median: 0.50 }, bias: {} },
-        { id: 'dim', name: 'Trầm', group: 'Cơ bản',
-          hint: 'Tối hơn, đằm hơn — kể chuyện, phỏng vấn.',
+        { id: 'dim', name: _t('Trầm'), group: G_BASIC,
+          hint: _t('Tối hơn, đằm hơn — kể chuyện, phỏng vấn.'),
           targets: { median: 0.40, spread: 0.70 }, bias: {} },
 
         // --- Tương phản ---
-        { id: 'flat', name: 'Phẳng (để chỉnh tay)', group: 'Tương phản',
-          hint: 'Nền phẳng, giữ tối đa chi tiết 2 đầu để tự grade tiếp.',
+        { id: 'flat', name: _t('Phẳng (để chỉnh tay)'), group: G_CONTRAST,
+          hint: _t('Nền phẳng, giữ tối đa chi tiết 2 đầu để tự chỉnh màu tiếp.'),
           targets: { median: 0.48, spread: 0.56, saturation: 0.30, black: 0.035, white: 0.965 }, bias: {} },
-        { id: 'low_contrast', name: 'Tương phản nhẹ', group: 'Tương phản',
-          hint: 'Mềm, không có mảng đen sâu.',
+        { id: 'low_contrast', name: _t('Tương phản nhẹ'), group: G_CONTRAST,
+          hint: _t('Mềm, không có mảng đen sâu.'),
           targets: { spread: 0.64, black: 0.028 }, bias: {} },
-        { id: 'punchy', name: 'Đậm nét', group: 'Tương phản',
-          hint: 'Tương phản và màu mạnh hơn.',
+        { id: 'punchy', name: _t('Đậm nét'), group: G_CONTRAST,
+          hint: _t('Tương phản và màu mạnh hơn.'),
           targets: { median: 0.45, spread: 0.86, saturation: 0.44 }, bias: {} },
-        { id: 'high_contrast', name: 'Tương phản cao', group: 'Tương phản',
-          hint: 'Đen sâu, trắng gắt — đồ hoạ, tiêu đề.',
+        { id: 'high_contrast', name: _t('Tương phản cao'), group: G_CONTRAST,
+          hint: _t('Đen sâu, trắng gắt — đồ hoạ, tiêu đề.'),
           targets: { median: 0.44, spread: 0.94, black: 0.006, white: 0.994 }, bias: {} },
 
         // --- Nhiệt độ ---
-        { id: 'warm_soft', name: 'Ấm nhẹ', group: 'Nhiệt độ',
-          hint: 'Ngả ấm vừa phải, giữ da tự nhiên.',
+        { id: 'warm_soft', name: _t('Ấm nhẹ'), group: G_TEMP,
+          hint: _t('Ngả ấm vừa phải, giữ da tự nhiên.'),
           targets: {}, bias: { temperature: 8, tint: -1 } },
-        { id: 'warm', name: 'Ấm', group: 'Nhiệt độ',
-          hint: 'Cân trắng xong ngả ấm có chủ đích.',
+        { id: 'warm', name: _t('Ấm'), group: G_TEMP,
+          hint: _t('Cân trắng xong ngả ấm có chủ đích.'),
           targets: { saturation: 0.36 }, bias: { temperature: 15, tint: -2 } },
-        { id: 'warm_strong', name: 'Ấm đậm', group: 'Nhiệt độ',
-          hint: 'Ngả ấm rõ — hoàng hôn, đèn vàng.',
+        { id: 'warm_strong', name: _t('Ấm đậm'), group: G_TEMP,
+          hint: _t('Ngả ấm rõ — hoàng hôn, đèn vàng.'),
           targets: { saturation: 0.38 }, bias: { temperature: 28, tint: -4 } },
-        { id: 'cool_soft', name: 'Lạnh nhẹ', group: 'Nhiệt độ',
-          hint: 'Ngả lạnh vừa phải, sạch mắt.',
+        { id: 'cool_soft', name: _t('Lạnh nhẹ'), group: G_TEMP,
+          hint: _t('Ngả lạnh vừa phải, sạch mắt.'),
           targets: {}, bias: { temperature: -8, tint: 0 } },
-        { id: 'cool', name: 'Lạnh', group: 'Nhiệt độ',
-          hint: 'Cân trắng xong ngả lạnh có chủ đích.',
+        { id: 'cool', name: _t('Lạnh'), group: G_TEMP,
+          hint: _t('Cân trắng xong ngả lạnh có chủ đích.'),
           targets: { saturation: 0.33 }, bias: { temperature: -15, tint: 0 } },
-        { id: 'cool_strong', name: 'Lạnh đậm', group: 'Nhiệt độ',
-          hint: 'Ngả lạnh rõ — đêm, cảnh mưa.',
+        { id: 'cool_strong', name: _t('Lạnh đậm'), group: G_TEMP,
+          hint: _t('Ngả lạnh rõ — đêm, cảnh mưa.'),
           targets: { saturation: 0.31 }, bias: { temperature: -28, tint: 0 } },
 
         // --- Sắc ---
-        { id: 'amber', name: 'Ngả vàng', group: 'Sắc',
-          hint: 'Vàng kim, không đỏ — nắng chiều.',
+        { id: 'amber', name: _t('Ngả vàng'), group: G_HUE,
+          hint: _t('Vàng kim, không đỏ — nắng chiều.'),
           targets: { saturation: 0.37 }, bias: { temperature: 18, tint: 10 } },
-        { id: 'rose', name: 'Ngả hồng', group: 'Sắc',
-          hint: 'Hồng phấn nhẹ — chân dung, nội dung nhẹ nhàng.',
+        { id: 'rose', name: _t('Ngả hồng'), group: G_HUE,
+          hint: _t('Hồng phấn nhẹ — chân dung, nội dung nhẹ nhàng.'),
           targets: { saturation: 0.35 }, bias: { temperature: 8, tint: -16 } },
-        { id: 'green', name: 'Ngả lục', group: 'Sắc',
-          hint: 'Ngả lục — thiên nhiên, cây cỏ.',
+        { id: 'green', name: _t('Ngả lục'), group: G_HUE,
+          hint: _t('Ngả lục — thiên nhiên, cây cỏ.'),
           targets: { saturation: 0.35 }, bias: { temperature: -4, tint: 18 } },
-        { id: 'violet', name: 'Ngả tím', group: 'Sắc',
-          hint: 'Ngả tím lạnh — đêm, sân khấu.',
+        { id: 'violet', name: _t('Ngả tím'), group: G_HUE,
+          hint: _t('Ngả tím lạnh — đêm, sân khấu.'),
           targets: { saturation: 0.34 }, bias: { temperature: -12, tint: -18 } },
 
         // --- Bão hoà ---
-        { id: 'muted', name: 'Màu nhạt', group: 'Bão hoà',
-          hint: 'Rút bớt màu, giữ sáng — nền cho chữ.',
+        { id: 'muted', name: _t('Màu nhạt'), group: G_SAT,
+          hint: _t('Rút bớt màu, giữ sáng — nền cho chữ.'),
           targets: { saturation: 0.22 }, bias: {} },
-        { id: 'vivid', name: 'Màu đậm', group: 'Bão hoà',
-          hint: 'Màu bật hơn, không đụng tương phản.',
+        { id: 'vivid', name: _t('Màu đậm'), group: G_SAT,
+          hint: _t('Màu bật hơn, không đụng tương phản.'),
           targets: { saturation: 0.48 }, bias: {} },
     ];
 

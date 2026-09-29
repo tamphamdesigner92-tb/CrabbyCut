@@ -9,6 +9,10 @@ contextBridge.exposeInMainWorld('desktopEnv', {
    * process và im lặng khi đã mới nhất; lượt này thì luôn trả lời, vì đã hỏi thì phải được
    * đáp. Trả về phiên bản đang chạy để giao diện hiện được. */
   checkForUpdates: async () => ipcRenderer.invoke('check-for-updates'),
+  // Số phiên bản thật (app.getVersion) + phiên bản Electron/Chromium — xem `app-info` ở main.js.
+  getAppInfo: async () => ipcRenderer.invoke('app-info'),
+  // Mở trang dự án / báo lỗi / Releases / giấy phép. Chỉ nhận KHOÁ, main tự dựng URL.
+  openProjectLink: async (key) => ipcRenderer.invoke('open-project-link', key),
   pickVideoSources: async () => ipcRenderer.invoke('pick-video-sources'),
   pickEditingAssets: async (kind) => ipcRenderer.invoke('pick-editing-assets', kind),
   pickEditingAssetFolders: async () => ipcRenderer.invoke('pick-editing-asset-folders'),

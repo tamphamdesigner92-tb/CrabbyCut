@@ -15,7 +15,7 @@
     // Lane overlay HÌNH (media = ảnh/video) cố ý THẤP HƠN lane chính: lane chính là
     // mạch chuyện, lane phủ chỉ là lớp chèn — cao bằng nhau thì mắt không phân được
     // đâu là trục chính. Block media 45 ≈ 2/3 block chính 74 (chốt 2026-08-12).
-    const LANE_HEIGHTS = { main: 78, media: 49, text: 32, shape: 32, vector: 32, audio: 40, adjust: 26 };
+    const LANE_HEIGHTS = { main: 62, media: 49, text: 32, shape: 32, vector: 32, audio: 40, adjust: 26 };
     const ASSET_KIND_ACCEPT = {
         media: '.mp4,.mov,.m4v,.webm,.png,.jpg,.jpeg,.webp,.svg',
         audio: '.mp3,.wav,.m4a,.aac',
@@ -167,8 +167,8 @@
     let editPanelLibCategory = 'video';
     let editPanelTransitionCat = 'all'; // sub-tab đang chọn trong panel "Chuyển tiếp"
     let editPanelLutCat = 'soft';       // sub-tab đang chọn trong panel "LUT" (mặc định nhóm dịu)
-    let editPanelTextSub = 'import';    // sub-tab đang chọn trong panel "Văn bản" (Nhập | Mẫu văn bản)
-    let editPanelAudioSub = 'import';   // sub-tab của panel "Âm thanh" (Nhập | Auto Subtitle)
+    let editPanelTextSub = 'import';    // sub-tab đang chọn trong panel "Văn bản" (Nhập | Mẫu | Hiệu ứng | Auto/Local Subtitle)
+    let editPanelAudioSub = 'import';   // sub-tab của panel "Âm thanh" (hiện chỉ còn Nhập — Auto Subtitle đã sang tab Văn bản)
     let transitionBoundaryCache = [];   // điểm cắt đã render gần nhất (để hit-test khi kéo-thả)
     let selectedTransitionKey = null;   // node chuyển cảnh đang được chọn (key điểm cắt)
     let transitionDndSetup = false;     // đã gắn handler kéo-thả chưa
@@ -325,10 +325,13 @@
     }
 
     function trackLabel(type, index) {
-        if (type === 'main') return 'Main Clips';
-        if (type === 'adjust') return `Điều chỉnh ${index}`;
-        const base = type === 'audio' ? 'Audio' : (type === 'text' ? 'Text' : (type === 'shape' ? 'Shape' : (type === 'vector' ? 'Vector' : 'Media')));
-        return `${base} ${index}`;
+        if (type === 'main') return _t('Lane chính');
+        if (type === 'adjust') return _t('Điều chỉnh {n}', { n: index });
+        if (type === 'audio') return _t('Âm thanh {n}', { n: index });
+        if (type === 'text') return _t('Văn bản {n}', { n: index });
+        if (type === 'shape') return _t('Hình khối {n}', { n: index });
+        if (type === 'vector') return _t('Vector {n}', { n: index });
+        return _t('Video {n}', { n: index });
     }
 
     // Icon loại lane. Trước đây là KÝ TỰ hình học (◐ ⬡ ✦ ♪ và chữ T) — phụ thuộc font,
@@ -445,10 +448,18 @@
 
     function createTrack(type) {
         const sameType = tracksOfType(type);
+        // Số NHỎ NHẤT chưa có lane nào mang tên đó. `sameType.length + 1` trùng tên ngay khi
+        // dự án từng xoá lane (còn "Điều chỉnh 2" mà không có "Điều chỉnh 1" -> lane mới cũng
+        // tên "Điều chỉnh 2").
+        const usedNames = new Set(editingTracks.map((row) => row.name));
+        let labelIndex = sameType.length + 1;
+        for (let n = 1; n <= sameType.length + 1; n += 1) {
+            if (!usedNames.has(trackLabel(type, n))) { labelIndex = n; break; }
+        }
         const track = {
             id: nextId(`track_${type}`),
             type,
-            name: trackLabel(type, sameType.length + 1),
+            name: trackLabel(type, labelIndex),
             order: editingTracks.length,
             locked: false,
             muted: false,
@@ -467,7 +478,7 @@
             main = {
                 id: 'track_main',
                 type: 'main',
-                name: 'Main Clips',
+                name: trackLabel('main', 0),
                 order: 0,
                 locked: false,
                 muted: false,
@@ -986,9 +997,9 @@
         if (mainSourceInfoPromise) return mainSourceInfoPromise;
         mainSourceInfoPromise = (async () => {
             const resp = await fetch(`${API_BASE}/editing-assets/main-source`);
-            if (!resp.ok) throw new Error(`không lấy được nguồn lane chính (${resp.status})`);
+            if (!resp.ok) throw new Error(_t('không lấy được nguồn lane chính ({status})', { status: resp.status }));
             const data = await resp.json();
-            if (!data?.asset?.path) throw new Error('nguồn lane chính không hợp lệ');
+            if (!data?.asset?.path) throw new Error(_t('nguồn lane chính không hợp lệ'));
             mainSourceInfo = data.asset;
             return mainSourceInfo;
         })();
@@ -1071,11 +1082,13 @@
         const onLaneCount = sourcePaths.filter((p) => lanePaths.has(p)).length;
         if (!options.skipConfirm && typeof window.confirm === 'function') {
             const notes = [];
-            if (usedCount > 0) notes.push(`${usedCount} block trên timeline`);
-            if (onLaneCount > 0) notes.push(`clip của ${onLaneCount} video trên lane chính`);
-            const what = list.length === 1 ? `Tệp "${list[0].name}"` : `${list.length} tệp`;
-            const tail = notes.length ? `\n\nSẽ xoá luôn: ${notes.join(', ')}.` : '';
-            if (!window.confirm(`${what} sẽ bị xoá khỏi dự án.${tail}\n\nTệp trên đĩa KHÔNG bị xoá. Tiếp tục?`)) return false;
+            if (usedCount > 0) notes.push(_t('{n} block trên timeline', { n: usedCount }));
+            if (onLaneCount > 0) notes.push(_t('clip của {n} video trên lane chính', { n: onLaneCount }));
+            const tail = notes.length ? `\n\n${_t('Sẽ xoá luôn: {list}.', { list: notes.join(', ') })}` : '';
+            const head = list.length === 1
+                ? _t('Tệp "{name}" sẽ bị xoá khỏi dự án.', { name: list[0].name })
+                : _t('{n} tệp sẽ bị xoá khỏi dự án.', { n: list.length });
+            if (!window.confirm(`${head}${tail}\n\n${_t('Tệp trên đĩa KHÔNG bị xoá. Tiếp tục?')}`)) return false;
         }
         recordHistory();
         editingItems = editingItems.filter((it) => !idSet.has(String(it.asset_id)));
@@ -1426,7 +1439,7 @@
     const TEXT_EFFECT_PRESETS = [
         {
             id: 'fx1',
-            name: 'Viền bo tròn',
+            name: _t('Viền bo tròn'),
             /* Poppins Black chứ không phải Nunito: mẫu là kiểu chữ HÌNH HỌC — bụng chữ
                tròn vành vạnh và chữ 'a' MỘT TẦNG (xem "Matcha" trong ảnh mẫu). Nunito có
                'a' hai tầng nên dù cũng bo tròn vẫn ra dáng khác hẳn.
@@ -1465,7 +1478,7 @@
            trong ảnh tham chiếu đều là MỘT kiểu chữ, khác nhau ở màu thân/viền/bóng. */
         {
             id: 'fx2',
-            name: 'Vệt cọ tím',
+            name: _t('Vệt cọ tím'),
             /* Mẫu là chữ trắng viền than mảnh nằm trên một VỆT CỌ tím. Vệt cọ là ảnh
                texture của CapCut — không có trong dự án, nên dựng gần nhất bằng hộp nền
                tím bo góc mạnh: giữ đúng tương phản trắng-trên-tím của mẫu. */
@@ -1485,7 +1498,7 @@
         },
         {
             id: 'fx3',
-            name: 'Viền hồng',
+            name: _t('Viền hồng'),
             patch: {
                 ...FX_OFF, font_family: 'Poppins', font_weight: 900, color: '#ffffff',
                 stroke_enabled: true, stroke_color: '#FF657D', stroke2_color: '#ffffff',
@@ -1496,7 +1509,7 @@
         },
         {
             id: 'fx4',
-            name: 'Viền xanh biển',
+            name: _t('Viền xanh biển'),
             patch: {
                 ...FX_OFF, font_family: 'Poppins', font_weight: 900, color: '#ffffff',
                 stroke_enabled: true, stroke_color: '#74b8e8', stroke2_color: '#ffffff',
@@ -1507,7 +1520,7 @@
         },
         {
             id: 'fx5',
-            name: 'Cốm neon',
+            name: _t('Cốm neon'),
             /* Thân cốm + vòng trong xanh đen, vòng ngoài trắng mảnh, rồi QUẦNG SÁNG cốm
                toả đều quanh chữ — bóng đặt lệch 0 và nhoè lớn chính là quầng đó. */
             patch: {
@@ -1520,7 +1533,7 @@
         },
         {
             id: 'fx6',
-            name: 'Kem viền than',
+            name: _t('Kem viền than'),
             patch: {
                 ...FX_OFF, font_family: 'Poppins', font_weight: 900, color: '#f2e9e4',
                 stroke_enabled: true, stroke_color: '#22243a', stroke2_color: '#f2e9e4',
@@ -1531,7 +1544,7 @@
         },
         {
             id: 'fx7',
-            name: 'Hồng kẹo',
+            name: _t('Hồng kẹo'),
             patch: {
                 ...FX_OFF, font_family: 'Poppins', font_weight: 900, color: '#eb449c',
                 stroke_enabled: true, stroke_color: '#f4d4f0', stroke2_color: '#ffffff',
@@ -1542,7 +1555,7 @@
         },
         {
             id: 'fx8',
-            name: 'Tím pastel',
+            name: _t('Tím pastel'),
             // Một vòng trắng duy nhất, không vòng ngoài — mẫu chỉ có thân tím và viền trắng.
             patch: {
                 ...FX_OFF, font_family: 'Poppins', font_weight: 900, color: '#b1a9d0',
@@ -1554,7 +1567,7 @@
         },
         {
             id: 'fx9',
-            name: 'Hồng đất bóng kem',
+            name: _t('Hồng đất bóng kem'),
             /* Bóng CỨNG màu kem hắt xuống dưới-phải: đây mới là nét chính của mẫu, nên
                độ nhoè để 0 và độ lệch lớn hẳn để thấy rõ khối bóng lệch. */
             patch: {
@@ -1567,7 +1580,7 @@
         },
         {
             id: 'fx10',
-            name: 'Xanh cobalt viền vàng',
+            name: _t('Xanh cobalt viền vàng'),
             patch: {
                 ...FX_OFF, font_family: 'Poppins', font_weight: 900, color: '#ffffff',
                 stroke_enabled: true, stroke_color: '#0d56ff', stroke2_color: '#ffc400',
@@ -1578,7 +1591,7 @@
         },
         {
             id: 'fx11',
-            name: 'Cam khối',
+            name: _t('Cam khối'),
             patch: {
                 ...FX_OFF, font_family: 'Poppins', font_weight: 900, color: '#fc671c',
                 stroke_enabled: true, stroke_color: '#ffffff',
@@ -1589,7 +1602,7 @@
         },
         {
             id: 'fx12',
-            name: 'Kem viền xanh',
+            name: _t('Kem viền xanh'),
             patch: {
                 ...FX_OFF, font_family: 'Poppins', font_weight: 900, color: '#f5eeca',
                 stroke_enabled: true, stroke_color: '#429cc2', stroke2_color: '#ffffff',
@@ -1600,7 +1613,7 @@
         },
         {
             id: 'fx13',
-            name: 'Xanh lá kép',
+            name: _t('Xanh lá kép'),
             patch: {
                 ...FX_OFF, font_family: 'Poppins', font_weight: 900, color: '#ffffff',
                 stroke_enabled: true, stroke_color: '#0a6b08', stroke2_color: '#80c60b',
@@ -1611,7 +1624,7 @@
         },
         {
             id: 'fx14',
-            name: 'Cốm khối xanh',
+            name: _t('Cốm khối xanh'),
             patch: {
                 ...FX_OFF, font_family: 'Poppins', font_weight: 900, color: '#d1f94a',
                 stroke_enabled: true, stroke_color: '#3f6629', stroke2_color: '#dcf6a7',
@@ -1658,7 +1671,7 @@
         ratioKeys.forEach((k) => { ratios[k] = (Number(style?.[k]) || 0) / size; });
         return {
             id: `ux${Date.now().toString(36)}${Math.floor(Math.random() * 46656).toString(36)}`,
-            name: String(name || '').trim() || 'Hiệu ứng của tôi',
+            name: String(name || '').trim() || _t('Hiệu ứng của tôi'),
             patch,
             ratios,
         };
@@ -1667,7 +1680,7 @@
        người dùng vừa tạo xong một thiết kế, tưởng đã lưu mà mất là mất thật. */
     function writeCustomTextEffects(next, okMessage) {
         const A = window.AppSettings;
-        if (!A) { showToast('Chưa nạp được cài đặt ứng dụng — không lưu được hiệu ứng.', { type: 'error' }); return; }
+        if (!A) { showToast(_t('Chưa nạp được cài đặt ứng dụng — không lưu được hiệu ứng.'),{ type: 'error' }); return; }
         const cur = A.get();
         A.save({ ...cur, textEffects: next })
             .then(() => {
@@ -1677,25 +1690,25 @@
                 // vẽ lại, không thì hiệu ứng vừa lưu chỉ hiện ở panel Thuộc tính.
                 renderEditPanel();
             })
-            .catch((error) => showToast(`Không lưu được hiệu ứng: ${error?.message || error}`, { type: 'error' }));
+            .catch((error) => showToast(_t('Không lưu được hiệu ứng: {error}', { error: error?.message || error }),{ type: 'error' }));
     }
     function saveCurrentTextEffect(item, name) {
         const A = window.AppSettings;
         const list = customTextEffects();
         const max = A?.TEXT_EFFECT_MAX || 200;
         if (list.length >= max) {
-            showToast(`Thư viện hiệu ứng đã đầy (${max}). Xoá bớt rồi lưu lại.`, { type: 'warning' });
+            showToast(_t('Thư viện hiệu ứng đã đầy ({max}). Xoá bớt rồi lưu lại.', { max }),{ type: 'warning' });
             return;
         }
         const fx = textEffectFromStyle(inspectorTextStyle(item), name);
         writeCustomTextEffects(list.concat([fx]).map(({ custom, ...rest }) => rest),
-            `Đã lưu hiệu ứng "${fx.name}" vào thư viện.`);
+            _t('Đã lưu hiệu ứng "{name}" vào thư viện.', { name: fx.name }));
     }
     function deleteCustomTextEffect(id) {
         const list = customTextEffects();
         if (!list.some((fx) => fx.id === id)) return;
         writeCustomTextEffects(list.filter((fx) => fx.id !== id).map(({ custom, ...rest }) => rest),
-            'Đã xoá hiệu ứng khỏi thư viện.');
+            _t('Đã xoá hiệu ứng khỏi thư viện.'));
     }
 
     /* Patch THẬT của một hiệu ứng khi áp lên một style cụ thể: `patch` là phần cố định,
@@ -2117,18 +2130,23 @@
         return true;
     }
 
-    function shapeOptionsHtml(selectedType) {
-        const options = [
-            ['rectangle', 'Rectangle'],
-            ['square', 'Square'],
-            ['circle', 'Circle'],
-            ['triangle', 'Triangle'],
-            ['trapezoid', 'Trapezoid'],
-            ['polygon', 'Polygon'],
-            ['star', 'Star'],
-            ['line', 'Line'],
+    let shapeOptionsCache = null;
+    function shapeOptionsList() {
+        if (!shapeOptionsCache) shapeOptionsCache = [
+            ['rectangle', _t('Hình chữ nhật')],
+            ['square', _t('Hình vuông')],
+            ['circle', _t('Hình tròn')],
+            ['triangle', _t('Tam giác')],
+            ['trapezoid', _t('Hình thang')],
+            ['polygon', _t('Đa giác')],
+            ['star', _t('Ngôi sao')],
+            ['line', _t('Đường thẳng')],
         ];
-        return options
+        return shapeOptionsCache;
+    }
+
+    function shapeOptionsHtml(selectedType) {
+        return shapeOptionsList()
             .map(([value, label]) => `<option value="${value}" ${value === selectedType ? 'selected' : ''}>${label}</option>`)
             .join('');
     }
@@ -2161,17 +2179,17 @@
         }).join('');
         return `<div class="font-picker" data-font-picker>
             <select id="editingTextFontFamily" class="font-picker-native" tabindex="-1" aria-hidden="true">${fontOptionsHtml(selected)}</select>
-            <button type="button" class="fig-field font-picker-btn" data-font-picker-toggle aria-haspopup="listbox" aria-expanded="false" aria-label="Font chữ">
+            <button type="button" class="fig-field font-picker-btn" data-font-picker-toggle aria-haspopup="listbox" aria-expanded="false" aria-label="${_t('Font chữ')}">
                 <span class="font-picker-name" style="font-family:'${escapeHtml(selected)}', sans-serif;">${escapeHtml(selected)}</span>
                 <svg class="font-picker-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
             </button>
             <div class="font-picker-menu" hidden>
                 <div class="font-picker-search">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
-                    <input type="text" data-font-search placeholder="Tìm font…" autocomplete="off" spellcheck="false">
+                    <input type="text" data-font-search placeholder="${_t('Tìm font…')}" autocomplete="off" spellcheck="false">
                 </div>
                 <div class="font-picker-list">${rows}</div>
-                <div class="font-picker-empty" hidden>Không có font nào khớp.</div>
+                <div class="font-picker-empty" hidden>${_t('Không có font nào khớp.')}</div>
             </div>
         </div>`;
     }
@@ -2352,14 +2370,35 @@
         return chunks.length ? chunks : [String(text == null ? '' : text)];
     }
 
-    function defaultTextPlacementFor(text, style) {
+    /* `text` có nằm gọn trên MỘT dòng của textbox mặc định không — cùng phép đo (magicWrap,
+       defaultTextWrapWidth) mà addTextItem dùng để gói dòng, nên dòng nào qua được đây thì
+       block dựng ra cũng không tự gói thêm. Auto Subtitle gọi hàm này cho từng dòng ứng viên
+       khi xếp phụ đề 42 ký tự; splitTextToMaxLines(text, 1) cho cùng câu trả lời nhưng đo lại
+       cả chuỗi sau MỖI token, quá đắt khi gọi hàng nghìn lần. */
+    function textFitsOneLine(text, styleOverrides = null) {
+        const style = { ...defaultTextStyle(), ...(styleOverrides || {}) };
+        const fontSize = Math.max(8, Math.min(400, Number(style.font_size) || 56));
+        const letterPx = textLetterSpacingPx(style, fontSize);
+        return magicWrap(String(text == null ? '' : text), fontSize, style.font_family, style.font_weight,
+            letterPx, defaultTextWrapWidth()).lines.length <= 1;
+    }
+
+    /* `keepLineBreaks` — GIỮ xuống dòng có sẵn trong `text`, chỉ gói thêm dòng nào quá rộng.
+       Tệp phụ đề nhập vào (Local Subtitle) ngắt dòng CÓ CHỦ Ý — song ngữ một dòng một thứ
+       tiếng, hai người nói mỗi người một dòng — mà magicWrap coi "\n" như dấu cách và gói
+       lại từ đầu. Bỏ trống = hành vi cũ (Auto Subtitle, Magic Fill). */
+    function defaultTextPlacementFor(text, style, keepLineBreaks = false) {
         const seq = payloadSequence();
         const seqH = Math.max(2, Math.round(Number(seq.height)) || 1080);
         const insets = defaultTextSafeInsets();
         const maxWidth = defaultTextWrapWidth();
         const fontSize = Math.max(8, Math.min(400, Number(style.font_size) || 64));
         const letterPx = textLetterSpacingPx(style, fontSize);
-        const wrapped = magicWrap(text, fontSize, style.font_family, style.font_weight, letterPx, maxWidth);
+        const wrapLine = (value) => magicWrap(value, fontSize, style.font_family, style.font_weight, letterPx, maxWidth);
+        const parts = keepLineBreaks ? String(text).split('\n').filter((line) => line.trim()) : [];
+        const wrapped = parts.length > 1
+            ? parts.map(wrapLine).reduce((acc, w) => ({ lines: acc.lines.concat(w.lines), width: Math.max(acc.width, w.width) }), { lines: [], width: 1 })
+            : wrapLine(text);
         const wrappedText = wrapped.lines.join('\n');
         const boxWidth = Math.ceil(wrapped.width);
         const height = measureTextItemBox({ text: wrappedText, style: { ...style, box_width: boxWidth } }).height;
@@ -2390,9 +2429,9 @@
            và với phụ đề CJK khác biệt là cả một dòng thừa. */
         const style = { ...defaultTextStyle(), ...(options.style || {}) };
         const transform = defaultTransform();
-        let text = 'Text';
+        let text = _t('Văn bản');
         if (autoText) {
-            const fit = defaultTextPlacementFor(autoText, style);
+            const fit = defaultTextPlacementFor(autoText, style, !!options.keepLineBreaks);
             style.box_width = fit.box_width;
             transform.position_y = fit.position_y;
             text = fit.text;
@@ -2412,12 +2451,22 @@
             style,
         };
         editingItems.push(item);
-        selectEditingItem(item.id);
         /* `options.defer` — BỎ QUA lượt vẽ lại của RIÊNG block này; nơi gọi tự gọi renderAll()
          * MỘT lần ở cuối. Auto Subtitle dựng hàng trăm block liên tiếp (video 10 phút ra 300+
          * phụ đề) mà renderAll() vẽ lại cả timeline lẫn lớp overlay — 300 lượt vẽ toàn phần là
-         * treo UI vài giây, không phải "hơi chậm". Mặc định KHÔNG defer. */
-        if (!options.defer) renderAll();
+         * treo UI vài giây, không phải "hơi chậm". Mặc định KHÔNG defer.
+         * defer CHỈ GHI trạng thái chọn: selectEditingItem tự gọi renderAll() nên trước đây
+         * defer vô hiệu (~52 ms/block, 509 phụ đề ≈ 26 s treo UI — đo 2026-09-27). */
+        if (options.defer) {
+            selectedEditingItemId = item.id;
+            selectedEditingItemIds = new Set([item.id]);
+            selectedMainClipIndexes = new Set();
+            selectedTimelineClipIndex = -1;
+            inspectorEditInProgress = false;
+        } else {
+            selectEditingItem(item.id);
+            renderAll();
+        }
         return item;   // nơi gọi cần nó để chỉnh tiếp
     }
 
@@ -3081,7 +3130,7 @@
 
     function addTextTemplateItem(templateId, placement = null) {
         const tpl = window.TextTemplates ? TextTemplates.byId(templateId) : null;
-        if (!tpl) { setEditingStatusText('Không tìm thấy mẫu văn bản này.'); return; }
+        if (!tpl) { setEditingStatusText(_t('Không tìm thấy mẫu văn bản này.')); return; }
         recordHistory();
         const { start, duration, track } = resolveNewItemPlacement('text', Number(tpl.duration) || 3, placement);
         const item = {
@@ -3119,7 +3168,7 @@
         });
         // Mẫu có lớp ảnh: hỏi thư viện ngay để hình mặc định hiện ra cùng lúc với chữ.
         if ((tpl.layers || []).some((l) => l && l.kind === 'image')) ensureTemplateArtItems();
-        setEditingStatusText(`Đã thêm mẫu "${tpl.name}". Sửa chữ ở panel Thuộc tính bên phải.`);
+        setEditingStatusText(_t('Đã thêm mẫu "{name}". Sửa chữ ở panel Thuộc tính bên phải.', { name: tpl.name }));
     }
 
     /* ĐỔI MẪU NGAY TRÊN BLOCK ĐANG CHỌN (subtab "Mẫu" của panel Thuộc tính, kiểu CapCut).
@@ -3179,7 +3228,7 @@
             renderPreviewOverlays();
             renderAll();
             syncOverlayInspector(item);
-            setEditingStatusText('Đã chuyển về văn bản thường.');
+            setEditingStatusText(_t('Đã chuyển về văn bản thường.'));
             return;
         }
 
@@ -3214,8 +3263,8 @@
         // Mẫu có lớp ảnh (Custom): hỏi thư viện ngay, giống addTextTemplateItem.
         if ((tpl.layers || []).some((l) => l && l.kind === 'image')) ensureTemplateArtItems();
         setEditingStatusText(wasTemplate
-            ? `Đã đổi sang mẫu "${tpl.name}".`
-            : `Đã chuyển block chữ sang mẫu "${tpl.name}".`);
+            ? _t('Đã đổi sang mẫu "{name}".', { name: tpl.name })
+            : _t('Đã chuyển block chữ sang mẫu "{name}".', { name: tpl.name }));
     }
 
     function addShapeItem(shapeType, placement = null) {
@@ -3262,22 +3311,25 @@
     function addAdjustmentLayer() {
         const total = Math.max(0.4, timelineDuration());
         recordHistory();
-        let track = tracksOfType('adjust')[0];
-        if (!track) track = createTrack('adjust');
+        /* Lane như CapCut: lane Điều chỉnh nào còn TRỐNG cả khoảng [0, total) thì dùng, hết
+         * chỗ thì tạo lane mới NẰM TRÊN lane đang bị chiếm — cùng đường với mọi block khác
+         * (trackForNewItemAtRange). Bản trước lấy cứng lane Điều chỉnh đầu tiên nên lớp thứ
+         * hai nằm ĐÈ lên lớp thứ nhất trên cùng một lane. Lane trên = áp SAU (xem
+         * activeAdjustmentLayers), nên lớp mới tạo tác động lên kết quả của lớp cũ. */
+        const track = trackForNewItemAtRange('adjust', 0, total);
         const item = {
             id: nextId('item_adjust'),
             type: 'adjust',
             track_id: track.id,
             timeline_start: 0,
             duration: total,
-            name: `Điều chỉnh ${editingItems.filter((it) => it.type === 'adjust').length + 1}`,
+            name: _t('Điều chỉnh {n}', { n: editingItems.filter((it) => it.type === 'adjust').length + 1 }),
             adjustments: ColorAdjust ? ColorAdjust.normalize(null) : null,
         };
         editingItems.push(item);
         selectEditingItem(item.id);
         renderAll();
-        setEditingStatusText('Đã thêm lớp Điều chỉnh — mọi block NẰM DƯỚI nó sẽ nhận màu này.'
-            + ' Chỉnh ở tab "Điều chỉnh" bên phải, hoặc kéo một LUT thả vào chính lớp này.');
+        setEditingStatusText(_t('Đã thêm lớp Điều chỉnh — mọi block NẰM DƯỚI nó sẽ nhận màu này. Chỉnh ở tab "Điều chỉnh" bên phải, hoặc kéo một LUT thả vào chính lớp này.'));
     }
 
     function trackOrderOf(item) {
@@ -3312,16 +3364,15 @@
         return out;
     }
 
-    /* MỘT lớp Điều chỉnh tại một thời điểm — lớp TRÊN CÙNG thắng nếu có chồng nhau.
+    /* NHIỀU LỚP ĐIỀU CHỈNH CHỒNG NHAU -> XẾP CHỒNG, kiểu Adjustment Layer của Premiere /
+     * CapCut: lớp DƯỚI áp trước, lớp TRÊN áp lên kết quả đó.
      *
-     * VÌ SAO KHÔNG XẾP CHỒNG NHIỀU LỚP: yêu cầu cứng của tính năng này là preview khớp
-     * export. Ở export, mỗi lớp cần chuỗi filter riêng KÈM .cube riêng, mà cơ chế
-     * LUT3D_SLOT của backend chỉ có MỘT chỗ trống cho mỗi block. Cho xếp chồng nghĩa
-     * là phải làm slot nhiều chỗ ở backend + vòng lặp ở sidecar, và mỗi thứ đó là một
-     * chỗ để preview lệch export. Một lớp tại một thời điểm thì hai bên khớp TUYỆT ĐỐI
-     * bằng CẤU TRÚC. Muốn nhiều tầng: đặt LUT lên chính block, hoặc trim các lớp Điều
-     * chỉnh cho nối tiếp nhau thay vì chồng lên nhau.
-     */
+     * Trước 2026-09-25 luật là "MỘT lớp tại một thời điểm, lớp TRÊN CÙNG thắng" (backend chỉ
+     * có một chỗ LUT3D cho mỗi block). Hậu quả người dùng gặp: dự án có lớp "Bạc hà" (LUT tĩnh)
+     * nằm TRÊN lớp "Ửng hồng" (LUT có keyframe cường độ 100 -> 0) -> lớp dưới bị bỏ trắng ở CẢ
+     * preview LẪN bản xuất, trông như "keyframe cường độ làm mất LUT". Nay backend nhận MẢNG
+     * spec (`color_adjust_layer` là mảng) và sidecar nối từng chuỗi lớp theo thứ tự, nên preview
+     * và export vẫn khớp bằng CẤU TRÚC: cùng một danh sách, cùng thứ tự dưới -> trên. */
     /* PHẠM VI CỦA LỚP: chỉ những gì NẰM DƯỚI lane của nó (đúng Adjustment Layer của
      * Premiere / CapCut). `target` = item overlay đang vẽ/xuất; null (hoặc thứ không phải
      * editing item, như clip lane chính) = LANE CHÍNH — luôn nằm dưới mọi lane hình nên
@@ -3333,15 +3384,13 @@
         return trackOrderOf(layer) < trackOrderOf(target);
     }
 
-    function activeAdjustmentLayer(t, target = null) {
-        let best = null;
-        editingItems.forEach((it) => {
-            if (!adjustLayerIsActive(it)) return;
-            if (!adjustLayerAppliesTo(it, target)) return;
-            if (!(t >= it.timeline_start - 1e-6 && t < it.timeline_start + it.duration - 1e-6)) return;
-            if (!best || trackOrderOf(it) < trackOrderOf(best)) best = it;   // order nhỏ = trên cao
-        });
-        return best;
+    /* Mọi lớp đang tác dụng tại `t` lên `target`, xếp DƯỚI -> TRÊN (thứ tự áp). order lớn =
+     * lane nằm dưới. Cùng order (hai lớp cùng lane không thể chồng giờ) thì giữ thứ tự mảng. */
+    function activeAdjustmentLayers(t, target = null) {
+        return editingItems
+            .filter((it) => adjustLayerIsActive(it) && adjustLayerAppliesTo(it, target)
+                && t >= it.timeline_start - 1e-6 && t < it.timeline_start + it.duration - 1e-6)
+            .sort((x, y) => trackOrderOf(y) - trackOrderOf(x));
     }
 
     /* OPACITY CỦA LỚP = CƯỜNG ĐỘ HIỆU ỨNG, không phải alpha của một hình.
@@ -3363,18 +3412,33 @@
         return clamp((opacity == null ? 100 : Number(opacity)) / 100, 0, 1);
     }
 
-    // Giá trị HIỆU DỤNG của lớp tại thời điểm sequence `t` (lớp cũng keyframe được).
-    // null = lớp không còn tác dụng gì (kéo Opacity về 0) -> mọi đường vẽ bỏ qua lượt lớp.
-    function activeAdjustmentLayerAdjustments(t, target = null) {
-        const layer = activeAdjustmentLayer(t, target);
-        if (!layer) return null;
-        const base = effectiveAdjustments(layer, Math.max(0, t - layer.timeline_start)) || layer.adjustments;
-        const adj = ColorAdjust.scaleStrength(base, adjustLayerStrength(layer));
-        return ColorAdjust.isIdentity(adj) ? null : adj;
+    // Giá trị HIỆU DỤNG của TỪNG lớp tại thời điểm sequence `t` (lớp cũng keyframe được),
+    // DƯỚI -> TRÊN. Lớp không còn tác dụng (Opacity 0, keyframe về trung tính) bị bỏ khỏi
+    // danh sách. Mảng rỗng = không có lượt lớp nào -> mọi đường vẽ bỏ qua.
+    function activeAdjustmentLayerAdjustmentsList(t, target = null) {
+        const out = [];
+        activeAdjustmentLayers(t, target).forEach((layer) => {
+            const base = effectiveAdjustments(layer, Math.max(0, t - layer.timeline_start)) || layer.adjustments;
+            const adj = ColorAdjust.scaleStrength(base, adjustLayerStrength(layer));
+            if (!ColorAdjust.isIdentity(adj)) out.push(adj);
+        });
+        return out;
     }
 
-    /* SPEC EXPORT của lớp Điều chỉnh cho MỘT block chiếm [seqStart, seqEnd] trên
-     * sequence. Trả về null nếu không lớp nào phủ block đó.
+    /* Áp lần lượt các lớp lên `drawable` (canvas nhiều lượt). Mỗi lớp một khoá renderer riêng
+     * (`<key>~adjlayer<k>`): colorAdjustedDrawable trả về CHÍNH canvas của renderer, nên dùng
+     * chung một khoá cho hai lớp là lớp sau đọc-ghi đè lên canvas đang làm nguồn của nó. */
+    function applyAdjustmentLayers(drawable, texW, texH, layerAdjs, key) {
+        let out = drawable;
+        (layerAdjs || []).forEach((adj, k) => {
+            out = colorAdjustedDrawable(out, texW, texH, adj, `${key}~adjlayer${k}`);
+        });
+        return out;
+    }
+
+    /* SPEC EXPORT của các lớp Điều chỉnh cho MỘT block chiếm [seqStart, seqEnd] trên
+     * sequence -> MẢNG spec xếp DƯỚI -> TRÊN (đúng thứ tự áp của preview), hoặc null nếu
+     * không lớp nào phủ block. Backend nhận cả mảng lẫn một object (payload cũ).
      *
      * QUY ĐỔI THỜI GIAN — chỗ dễ sai nhất: lớp định vị theo thời gian SEQUENCE, nhưng
      * chuỗi filter chạy TRONG một đoạn đã trim+setpts nên `t` của `enable` là thời gian
@@ -3384,50 +3448,45 @@
      *
      * Phủ TRỌN block -> `enableBetween` trả '' -> không phát `enable`, chuỗi rẻ hơn và
      * không phải lo sai số biên. Đây là ca thường gặp nhất (lớp mặc định phủ cả bài).
+     *
+     * MỌI lớp giao với block đều vào mảng, mỗi lớp mang cửa sổ `enable` của riêng nó. Bản
+     * trước chỉ giữ MỘT lớp (lớp phủ block nhiều nhất, hoà thì lớp trên cùng) -> hai lớp chồng
+     * nhau thì lớp dưới mất trắng trong bản xuất.
      */
     async function adjustLayerExportSpec(seqStart, seqEnd, options = {}) {
         if (!window.ColorAdjust) return null;
         const dur = Math.max(0.05, seqEnd - seqStart);
-        /* Lớp áp cho block = lớp PHỦ BLOCK NHIỀU NHẤT (bằng nhau thì lớp trên cùng thắng,
-         * cùng luật với activeAdjustmentLayer). Bản trước lấy lớp phủ ĐIỂM GIỮA block: lớp
-         * chỉ phủ nửa đầu một clip dài (ca rất thường — dự án hay là MỘT clip dài) thì
-         * preview có lớp ở nửa đó còn bản xuất bỏ trắng. Chuỗi xuất chỉ mang được MỘT lớp
-         * (một chỗ LUT3D), nên block có nhiều lớp nối tiếp vẫn chỉ nhận lớp lớn nhất. */
-        let layer = null;
-        let bestOverlap = 0;
-        editingItems.forEach((it) => {
-            if (!adjustLayerIsActive(it)) return;
-            if (!adjustLayerAppliesTo(it, options.target || null)) return;
-            const overlap = Math.min(seqEnd, it.timeline_start + it.duration) - Math.max(seqStart, it.timeline_start);
-            if (!(overlap > 1e-4)) return;
-            const better = overlap > bestOverlap + 1e-4
-                || (Math.abs(overlap - bestOverlap) <= 1e-4 && layer && trackOrderOf(it) < trackOrderOf(layer));
-            if (!layer || better) {
-                layer = it;
-                bestOverlap = overlap;
-            }
-        });
-        if (!layer) return null;
-        const from = Math.max(seqStart, layer.timeline_start) - seqStart;
-        const to = Math.min(seqEnd, layer.timeline_start + layer.duration) - seqStart;
-        const enable = ColorAdjust.enableBetween(from, to, dur);
-        if (enable === null) return null;   // không giao nhau
-        // CƯỜNG ĐỘ (Opacity của lớp): kéo cả giá trị TĨNH lẫn các danh sách KEYFRAME —
-        // bản xuất dựng biểu thức trực tiếp từ keyframe nên bỏ sót là lệch preview.
-        const strength = adjustLayerStrength(layer);
-        const layerAdj = ColorAdjust.scaleStrength(layer.adjustments, strength);
-        const layerKf = shiftKeyframeTimes(
-            ColorAdjust.scaleStrengthKeyframes(layer.keyframes, strength),
-            (Number(layer.timeline_start) || 0) - seqStart);
-        if (ColorAdjust.isIdentity(layerAdj) && !ColorAdjust.hasAdjustKeyframes(layerKf)) return null;
+        const layers = editingItems
+            .filter((it) => adjustLayerIsActive(it) && adjustLayerAppliesTo(it, options.target || null)
+                && (Math.min(seqEnd, it.timeline_start + it.duration) - Math.max(seqStart, it.timeline_start)) > 1e-4)
+            .sort((x, y) => trackOrderOf(y) - trackOrderOf(x));   // DƯỚI -> TRÊN
         const { target: _target, ...specOptions } = options;
-        const spec = await colorAdjustExportSpec(layerAdj, layerKf, {
-            ...specOptions,
-            duration: dur,
-            label: `${options.label || 'blk'}_al`,
-            enable,
-        });
-        return spec;
+        const specs = [];
+        for (let k = 0; k < layers.length; k++) {
+            const layer = layers[k];
+            const from = Math.max(seqStart, layer.timeline_start) - seqStart;
+            const to = Math.min(seqEnd, layer.timeline_start + layer.duration) - seqStart;
+            const enable = ColorAdjust.enableBetween(from, to, dur);
+            if (enable === null) continue;   // không giao nhau
+            // CƯỜNG ĐỘ (Opacity của lớp): kéo cả giá trị TĨNH lẫn các danh sách KEYFRAME —
+            // bản xuất dựng biểu thức trực tiếp từ keyframe nên bỏ sót là lệch preview.
+            const strength = adjustLayerStrength(layer);
+            const layerAdj = ColorAdjust.scaleStrength(layer.adjustments, strength);
+            const layerKf = shiftKeyframeTimes(
+                ColorAdjust.scaleStrengthKeyframes(layer.keyframes, strength),
+                (Number(layer.timeline_start) || 0) - seqStart);
+            if (ColorAdjust.isIdentity(layerAdj) && !ColorAdjust.hasAdjustKeyframes(layerKf)) continue;
+            // Nhãn RIÊNG cho từng lớp: nhãn đặt tên instance filter (colorbalance@…) mà file
+            // lệnh sendcmd trỏ tới — hai lớp chung nhãn là lệnh của lớp này đổi nhầm lớp kia.
+            const spec = await colorAdjustExportSpec(layerAdj, layerKf, {
+                ...specOptions,
+                duration: dur,
+                label: `${options.label || 'blk'}_al${k}`,
+                enable,
+            });
+            if (spec) specs.push(spec);
+        }
+        return specs.length ? specs : null;
     }
 
     function clampItemTiming(item) {
@@ -3602,8 +3661,24 @@
      * có kênh lưu thứ hai nào phải bảo trì.
      *   { id, created_at, engine, source_scope, cues: [{start,end,text}],
      *     item_ids: [...], srt_path }
+     *
+     * NHIỀU BỘ SONG SONG (2026-09-26, Văn bản → Local Subtitle). Mỗi tệp phụ đề người dùng
+     * nhập vào là MỘT BỘ riêng trong `subtitleImports` — giống mỗi tệp caption là một track
+     * riêng ở Premiere — nên đặt được phụ đề song ngữ (Việt + Anh cùng lúc). Bộ của Auto
+     * Subtitle vẫn nằm ở khoá `subtitleState` CŨ, không dời vào mảng, vì ba thứ đã dựng trên
+     * giao ước "một bộ tự động, ghi ra <Tên dự án>.srt cạnh .crab": lượt Lưu, Đóng gói dự án
+     * (electron/project-package.js đọc thẳng `editingState.subtitleState`) và nhánh macOS mở
+     * cùng tệp .crab. Dời khoá là phải di trú cả ba; để nguyên thì dự án cũ mở lên không có gì
+     * phải đổi, còn bản cũ của ứng dụng mở dự án mới chỉ mất các bộ nhập (vẫn còn là block
+     * text thường, không mất chữ).
+     *
+     * Mọi hàm nhận `setId` bên dưới: bỏ trống = bộ Auto Subtitle (hành vi cũ, nơi gọi cũ
+     * không phải sửa); truyền id = đúng bộ đó, dù là bộ tự động hay bộ nhập.
+     *   subtitleImports[i] = { id, created_at, engine:'file', name, source_name, format,
+     *                          language, sync_style, cues, item_ids }
      */
     let subtitleState = null;
+    let subtitleImports = [];
 
     function getSubtitleState() {
         return subtitleState ? deepClone(subtitleState) : null;
@@ -3614,10 +3689,39 @@
         return getSubtitleState();
     }
 
+    function getSubtitleImports() {
+        return deepClone(subtitleImports);
+    }
+
+    function setSubtitleImports(list) {
+        subtitleImports = Array.isArray(list)
+            ? deepClone(list.filter((set) => set && typeof set === 'object' && set.id))
+            : [];
+        return getSubtitleImports();
+    }
+
+    function allSubtitleSets() {
+        return subtitleState ? [subtitleState, ...subtitleImports] : subtitleImports;
+    }
+
+    function findSubtitleSet(setId) {
+        if (setId == null || setId === '') return subtitleState;
+        const id = String(setId);
+        return allSubtitleSets().find((set) => String(set.id) === id) || null;
+    }
+
+    /* Bộ chứa block này (hoặc null). Một block chỉ thuộc tối đa một bộ: mỗi bộ tự dựng block
+     * của riêng nó, và thay/xoá một bộ chỉ gỡ đúng block trong item_ids của bộ đó. */
+    function subtitleSetOfItem(item) {
+        if (!item) return null;
+        const id = String(item.id);
+        return allSubtitleSets().find((set) => (set.item_ids || []).some((x) => String(x) === id)) || null;
+    }
+
     /* Block phụ đề còn sống trên timeline. Lọc theo item_ids chứ không theo chữ: người dùng
      * sửa/xoá tay một block thì bộ phụ đề vẫn phải khớp thực tế. */
-    function subtitleItems() {
-        const ids = new Set((subtitleState?.item_ids || []).map(String));
+    function subtitleItems(setId) {
+        const ids = new Set((findSubtitleSet(setId)?.item_ids || []).map(String));
         return editingItems.filter((it) => ids.has(String(it.id)));
     }
 
@@ -3630,8 +3734,8 @@
      *
      * `item.text` đã là chữ ĐÃ GÓI DÒNG (addTextItem gói sẵn) nên xuống dòng trong .srt trùng
      * đúng xuống dòng đang hiện trên khung hình. */
-    function subtitleCuesFromItems() {
-        return subtitleItems()
+    function subtitleCuesFromItems(setId) {
+        return subtitleItems(setId)
             .map((it) => ({
                 start: Math.max(0, Number(it.timeline_start) || 0),
                 end: Math.max(0, Number(it.timeline_start) || 0) + Math.max(0, Number(it.duration) || 0),
@@ -3656,31 +3760,38 @@
      *
      * KHÔNG đồng bộ `item.text`, `timeline_start` và `duration`: đó là nội dung và mốc
      * tiếng của TỪNG câu — ghi đè cả nhóm bằng một giá trị là xoá dữ liệu chứ không phải
-     * "đồng bộ thuộc tính". Đây cũng đúng ranh giới mà patchTextStyle đã vạch sẵn. */
-    function subtitleStyleSyncEnabled() {
-        return !!subtitleState && subtitleState.sync_style !== false;
+     * "đồng bộ thuộc tính". Đây cũng đúng ranh giới mà patchTextStyle đã vạch sẵn.
+     *
+     * CỜ THEO TỪNG BỘ: đồng bộ chỉ lan TRONG một bộ. Phụ đề song ngữ là hai bộ, và kéo bộ
+     * tiếng Anh lên trên mà bộ tiếng Việt cũng chạy theo là mất đúng thứ người dùng muốn. */
+    function subtitleStyleSyncEnabled(setId) {
+        const set = findSubtitleSet(setId);
+        return !!set && set.sync_style !== false;
     }
 
-    function setSubtitleStyleSync(enabled) {
-        if (!subtitleState) return false;
-        subtitleState.sync_style = !!enabled;
-        return subtitleStyleSyncEnabled();
+    function setSubtitleStyleSync(enabled, setId) {
+        const set = findSubtitleSet(setId);
+        if (!set) return false;
+        set.sync_style = !!enabled;
+        return subtitleStyleSyncEnabled(setId);
     }
 
     function isSubtitleItem(item) {
-        if (!item || !subtitleState) return false;
-        return (subtitleState.item_ids || []).some((id) => String(id) === String(item.id));
+        return !!subtitleSetOfItem(item);
     }
 
     /* Bộ block sẽ nhận CÙNG một thay đổi. Rỗng = không đồng bộ (nơi gọi giữ luật cũ).
      * Lọc track khoá ở đây luôn: khoá lane là để chặn MỌI đường ghi, kể cả đường này. */
     function subtitleSyncTargets(item) {
-        if (!isSubtitleItem(item) || !subtitleStyleSyncEnabled()) return [];
-        return subtitleItems().filter((it) => !isTrackLocked(itemTrack(it)));
+        const set = subtitleSetOfItem(item);
+        if (!set || set.sync_style === false) return [];
+        return subtitleItems(set.id).filter((it) => !isTrackLocked(itemTrack(it)));
     }
 
-    function removeSubtitleItems() {
-        const ids = new Set((subtitleState?.item_ids || []).map(String));
+    /* Gỡ block của MỘT bộ (bỏ trống = bộ Auto Subtitle). Chỉ gỡ block, KHÔNG xoá sổ của bộ —
+     * nơi gọi tự quyết (chạy lại thì ghi sổ mới đè lên, "Xoá" thì bỏ sổ). */
+    function removeSubtitleItems(setId) {
+        const ids = new Set((findSubtitleSet(setId)?.item_ids || []).map(String));
         if (!ids.size) return 0;
         const before = editingItems.length;
         editingItems = editingItems.filter((it) => !ids.has(String(it.id)));
@@ -3805,7 +3916,7 @@
     function announceSelectionCount() {
         const count = selectionCount();
         if (typeof setStatusText !== 'function') return;
-        if (count > 1) setStatusText(`Đã chọn ${count} block`, false);
+        if (count > 1) setStatusText(_t('Đã chọn {n} block', { n: count }), false);
     }
 
     function clearEditingSelection() {
@@ -3901,6 +4012,7 @@
 
     function renderAll() {
         updateEditingStatus();
+        refreshAdjustLayerCount();
         if (typeof updateTimelineLayout === 'function') updateTimelineLayout();
         if (typeof updateInspectorState === 'function') updateInspectorState();
         if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
@@ -3913,8 +4025,13 @@
             acc[item.type] = (acc[item.type] || 0) + 1;
             return acc;
         }, {});
-        const text = Object.entries(counts).map(([type, count]) => `${type}: ${count}`).join(', ');
-        el.innerText = text || 'Chưa có overlay nào trong Editing.';
+        // Tên loại nội bộ (media/text/…) -> nhãn giao diện; loại lạ thì hiện nguyên tên.
+        const typeLabels = {
+            media: _t('Tệp phương tiện'), text: _t('Văn bản'), shape: _t('Hình khối'),
+            vector: _t('Vector'), audio: _t('Âm thanh'), adjust: _t('Điều chỉnh'),
+        };
+        const text = Object.entries(counts).map(([type, count]) => `${typeLabels[type] || type}: ${count}`).join(', ');
+        el.innerText = text || _t('Chưa có overlay nào trong Editing.');
     }
 
     function rowTopByIndex(rows, index) {
@@ -3934,7 +4051,16 @@
         return Math.max(180, LANE_TOP_PADDING + rowsHeight + Math.max(0, rows.length - 1) * LANE_GAP + 18);
     }
 
+    /* Lề hai bên timeline, CHỐT MỘT LẦN cho cả lượt renderEditingTimeline (null = đọc sống).
+     * timelineTimeToPx() đọc `#timelineTrackOuter.clientWidth` ở MỖI lần gọi; trong vòng dựng
+     * block, mỗi block vừa append vào DOM làm layout bẩn, nên mỗi lượt đọc là một lượt layout
+     * CẢ TRANG — O(n²) theo số block. Đo trong Electron (2026-09-27), 742 block phụ đề song
+     * ngữ: một lượt dựng ~900 ms, 65% nằm trong timelineX. Lề chỉ đổi khi khung nhìn đổi
+     * rộng, không đổi giữa chừng một lượt dựng. */
+    let timelineXPadLock = null;
+
     function timelineX(time) {
+        if (timelineXPadLock !== null) return timelineXPadLock + (time * zoomScale);
         return typeof timelineTimeToPx === 'function'
             ? timelineTimeToPx(time)
             : time * (Number(zoomScale) || 100);
@@ -3952,7 +4078,7 @@
     }
 
     function editingMoveSnapThresholdSeconds() {
-        return 10 / Math.max(1, Number(zoomScale) || 100);
+        return 10 / Math.max(0.01, Number(zoomScale) || 100);
     }
 
     // Snap candidates gồm playhead + cạnh start/end của item ở MỌI lane (snap chéo lane).
@@ -4078,7 +4204,9 @@
         inspectorEditInProgress = false;
         if (typeof updateTimelineSelectionVisuals === 'function') updateTimelineSelectionVisuals();
         if (typeof setStatusText === 'function') {
-            setStatusText(`Đã chọn ${selectionCount()} block bên ${side === 'left' ? 'trái' : 'phải'} con trỏ`, false);
+            setStatusText(side === 'left'
+                ? _t('Đã chọn {n} block bên trái con trỏ', { n: selectionCount() })
+                : _t('Đã chọn {n} block bên phải con trỏ', { n: selectionCount() }), false);
         }
         renderAll();
     }
@@ -4337,7 +4465,7 @@
         if (typeof updateTimelineSelectionVisuals === 'function') updateTimelineSelectionVisuals();
         renderAll();
         if (commit && typeof setStatusText === 'function') {
-            setStatusText(`Đã chọn ${selectionCount()} block`, false);
+            setStatusText(_t('Đã chọn {n} block', { n: selectionCount() }), false);
         }
     }
 
@@ -4427,9 +4555,13 @@
     }
 
     function blockLabelForItem(item) {
-        if (item.type === 'adjust') return item.name || 'Điều chỉnh';
-        if (item.type === 'text') return item.text || 'Text';
-        if (item.type === 'shape') return item.style?.shape_type || 'Shape';
+        if (item.type === 'adjust') return item.name || _t('Điều chỉnh');
+        if (item.type === 'text') return item.text || _t('Văn bản');
+        if (item.type === 'shape') {
+            const shapeType = item.style?.shape_type || '';
+            const hit = shapeType && shapeOptionsList().find(([value]) => value === shapeType);
+            return hit ? hit[1] : (shapeType || _t('Hình khối'));
+        }
         const asset = findAsset(item.asset_id);
         return asset?.name || item.type;
     }
@@ -4586,7 +4718,7 @@
         lockBtn.type = 'button';
         lockBtn.className = 'editing-lane-icon-btn';
         setButtonIcon(lockBtn, track.locked ? 'lock' : 'unlock');
-        lockBtn.title = track.locked ? 'Mở khóa lane' : 'Khóa lane';
+        lockBtn.title = track.locked ? _t('Mở khoá lane') : _t('Khoá lane');
         lockBtn.addEventListener('click', (event) => {
             stopLaneControlEvent(event);
             toggleTrackState(track, 'locked');
@@ -4598,7 +4730,7 @@
             eyeBtn.type = 'button';
             eyeBtn.className = 'editing-lane-icon-btn';
             setButtonIcon(eyeBtn, track.visible === false ? 'eye-off' : 'eye');
-            eyeBtn.title = track.visible === false ? 'Hiển thị lane' : 'Ẩn lane';
+            eyeBtn.title = track.visible === false ? _t('Hiển thị lane') : _t('Ẩn lane');
             eyeBtn.addEventListener('click', (event) => {
                 stopLaneControlEvent(event);
                 toggleTrackState(track, 'visible');
@@ -4611,7 +4743,7 @@
             muteBtn.type = 'button';
             muteBtn.className = 'editing-lane-icon-btn';
             setButtonIcon(muteBtn, track.muted ? 'volume-off' : 'volume');
-            muteBtn.title = track.muted ? 'Bật âm thanh lane' : 'Tắt âm thanh lane';
+            muteBtn.title = track.muted ? _t('Bật âm thanh lane') : _t('Tắt âm thanh lane');
             muteBtn.addEventListener('click', (event) => {
                 stopLaneControlEvent(event);
                 toggleTrackState(track, 'muted');
@@ -4624,8 +4756,86 @@
         label.appendChild(controls);
     }
 
+    /* ===== ẢO HOÁ BLOCK TIMELINE (2026-09-27) =====
+     * Chỉ dựng block overlay nằm trong khung nhìn ± TIMELINE_RENDER_MARGIN bề rộng khung,
+     * cùng cách thước DOM và canvas sóng âm đã làm. Đo trong Electron, dự án phụ đề song ngữ
+     * 1.117 block (phim 39 phút):
+     *   - một lượt dựng đủ 1.117 block ~320 ms, mà lượt dựng chạy ở MỖI nấc kéo thanh zoom
+     *     và MỖI mousemove khi kéo block -> 2 giây kéo zoom chỉ xử lý được 5 sự kiện;
+     *   - khi cuộn / phát, thước và sóng âm vẽ lại mỗi khung, và mỗi lượt vẽ lại trình
+     *     duyệt phải chia lớp compositing ("Layerize") cho MỌI block trong DOM: ~7 ms/khung
+     *     dù chỉ vài chục block đang thấy.
+     * Block ĐANG CHỌN / ĐANG KÉO luôn được dựng dù ở ngoài khung (kéo tay cầm, keyframe
+     * marker, viền chọn cần phần tử thật). Cuộn ra khỏi vùng đã dựng thì handler 'scroll'
+     * (scheduleTimelineWindowCheck) dựng lại — với lề một bề rộng khung, cuộn/phát liên tục
+     * chỉ tốn một lượt dựng nhỏ sau mỗi ~một bề rộng khung.
+     * Mọi chỗ khác đọc block từ DOM đều chịu được: tô viền chọn chỉ tô block đang có (block
+     * mới dựng tự mang class đúng), hit-test luôn nhắm block dưới con trỏ, khung quét chọn
+     * và mốc snap tính từ DỮ LIỆU chứ không từ DOM. */
+    const TIMELINE_RENDER_MARGIN = 0.5;        // số bề rộng khung dựng thêm mỗi bên
+    /* Nhãn chữ đặt ở left 7px, đệm 6px mỗi bên (CSS .editing-block-label) -> block hẹp hơn
+       mức này không còn chỗ cho một ký tự nào, nhưng trình duyệt vẫn dàn cả câu phụ đề. */
+    const TIMELINE_LABEL_MIN_W = 24;
+    let timelineRenderWindow = null;           // { x0, x1 } toạ độ nội dung px; null = dựng hết
+    let timelineRenderStats = { rendered: 0, total: 0 };
+
+    function computeTimelineRenderWindow() {
+        const outer = document.getElementById('timelineTrackOuter');
+        const width = outer?.clientWidth || 0;
+        if (!outer || width <= 0) return null;   // chưa có khung nhìn thật -> dựng hết cho chắc
+        const margin = width * TIMELINE_RENDER_MARGIN;
+        return { x0: outer.scrollLeft - margin, x1: outer.scrollLeft + width + margin, scrollLeft: outer.scrollLeft, width };
+    }
+
+    /* Chữ ký của một block overlay: mọi thứ quyết định NỘI DUNG phần tử, trừ vị trí và bề
+       rộng. Trùng chữ ký (và cùng object item — listener mousedown đóng gói item) thì lượt
+       dựng sau chỉ đổi left/top/width/height của phần tử cũ. null = không bao giờ tái dùng:
+         - block đang chọn/đang kéo: mang keyframe marker, viền chọn, trạng thái kéo;
+         - block media: dải thumbnail chia ô THEO BỀ RỘNG block nên đổi zoom là phải dựng lại. */
+    function timelineBlockSignature(item, track, pinned, width) {
+        if (pinned || item.type === 'media') return null;
+        return [item.type, width >= TIMELINE_LABEL_MIN_W ? blockLabelForItem(item) : '', isTrackVisible(track) ? 1 : 0,
+            isTrackLocked(track) ? 1 : 0, item.magic_fill_review ? 1 : 0].join('\u0001');
+    }
+
+    function timelineItemPinned(item) {
+        if (selectedEditingItemIds.has(item.id)) return true;
+        if (!editingDrag) return false;
+        return editingDrag.item === item || !!editingDrag.group?.some((entry) => entry.item === item);
+    }
+
     function renderEditingTimeline() {
         if (currentMode !== 'FINAL' || currentStepId !== 'step4') return;
+        // Chốt lề một lần cho cả lượt dựng (xem timelineXPadLock). Chỉ chốt khi hàm của
+        // index.html có mặt — không có thì timelineX vốn không đọc DOM.
+        const lockPad = timelineXPadLock === null && typeof getTimelineSidePaddingPx === 'function';
+        if (lockPad) timelineXPadLock = getTimelineSidePaddingPx();
+        // Đọc khung nhìn TRƯỚC khi đụng vào DOM: đọc sau khi đã xoá/append block là ép layout.
+        timelineRenderWindow = computeTimelineRenderWindow();
+        try {
+            renderEditingTimelineBody();
+        } finally {
+            if (lockPad) timelineXPadLock = null;
+        }
+    }
+
+    /* Cuộn ra ngoài vùng đã dựng -> dựng lại (gộp về một lượt mỗi khung). */
+    let timelineWindowCheckPending = false;
+    function scheduleTimelineWindowCheck() {
+        if (timelineWindowCheckPending) return;
+        timelineWindowCheckPending = true;
+        requestAnimationFrame(() => {
+            timelineWindowCheckPending = false;
+            if (currentMode !== 'FINAL' || currentStepId !== 'step4' || !timelineRenderWindow) return;
+            const outer = document.getElementById('timelineTrackOuter');
+            if (!outer) return;
+            const left = outer.scrollLeft;
+            const right = left + outer.clientWidth;
+            if (left < timelineRenderWindow.x0 || right > timelineRenderWindow.x1) renderEditingTimeline();
+        });
+    }
+
+    function renderEditingTimelineBody() {
         ensureDefaultTracks();
         if (timelineRenderer) {
             timelineRenderer.renderSegments({
@@ -4642,7 +4852,14 @@
         const rows = visibleRows();
         const height = editingTimelineHeight(rows);
         container.style.height = `${height}px`;
-        track.innerHTML = '';
+        /* GIỮ LẠI block overlay có thể tái dùng (xem timelineBlockSignature), dọn mọi thứ khác.
+           Xoá sạch rồi dựng lại là mỗi nấc zoom tạo mới ~200-400 block × 4 phần tử: đo được
+           74 ms/lượt với 393 block, trong khi chỉ đổi left/width trên phần tử có sẵn là 15 ms. */
+        const reusableBlocks = new Map();
+        Array.from(track.children).forEach((child) => {
+            if (child.__blockSig && child.classList.contains('editing-item-block')) reusableBlocks.set(child.dataset.itemId, child);
+            else child.remove();
+        });
         track.classList.add('editing-lanes');
         const mainTrack = rows.find((row) => row.type === 'main');
 
@@ -4661,13 +4878,16 @@
             label.draggable = row.type !== 'main';
             const nameSpan = document.createElement('span');
             nameSpan.className = 'editing-lane-name';
-            nameSpan.textContent = row.name;
-            nameSpan.title = row.type === 'main' ? row.name : 'Double-click để đổi tên lane';
+            // Lane chính không đổi tên được -> luôn hiện nhãn theo ngôn ngữ giao diện
+            // (dự án cũ lưu tên "Main Clips").
+            const shownName = row.type === 'main' ? trackLabel('main', 0) : row.name;
+            nameSpan.textContent = shownName;
+            nameSpan.title = row.type === 'main' ? shownName : _t('Bấm đúp để đổi tên lane');
             const renameLane = (event) => {
                 event.preventDefault();
                 event.stopPropagation();
                 if (row.type === 'main') return;
-                const nextName = window.prompt('Tên lane', row.name);
+                const nextName = window.prompt(_t('Tên lane'), row.name);
                 if (nextName === null) return;
                 const cleaned = nextName.trim();
                 if (!cleaned) return;
@@ -4676,7 +4896,7 @@
             };
             nameSpan.addEventListener('dblclick', renameLane);
             label.appendChild(nameSpan);
-            // Hàng tên chỉ hiện ở lane đủ cao (main 78 / media 49 / audio 40); lane 32px chỉ
+            // Hàng tên chỉ hiện ở lane đủ cao (main 62 / media 49 / audio 40); lane 32px chỉ
             // còn hàng điều khiển, danh tính đã do badge V1/A1 đảm nhiệm. Tên 13 + khe 3 +
             // nút 20 = 36px vừa lane audio 40px.
             label.classList.toggle('has-name', laneHeight(row) >= 40);
@@ -4717,7 +4937,7 @@
             block.style.top = `${laneBlockTop(laneRowTop(mainIndex, rows))}px`;
             block.style.width = `${span.duration * zoomScale}px`;
             block.style.height = `${laneBlockHeight('main')}px`;
-            block.appendChild(createBlockLabel(span.clip.text || `Clip ${span.index + 1}`));
+            block.appendChild(createBlockLabel(span.clip.text || _t('Clip {n}', { n: span.index + 1 })));
             appendThumbStrip(block, mainThumbnailUrl(), true);
             // Tay cầm trim 2 đầu — giống lane overlay. Lane chính xếp gạch liền mạch nên
             // trim là RIPPLE: đổi vùng nguồn (clip.start/clip.end) và mọi block sau dồn theo.
@@ -4754,13 +4974,52 @@
             track.appendChild(block);
         });
 
+        /* Chuẩn hoá dữ liệu cho MỌI item (fixItemTrack/clampItemTiming có thể sửa item), rồi
+           mới lọc những block cần dựng (xem khối "ẢO HOÁ BLOCK TIMELINE"). */
+        const win = timelineRenderWindow;
+        const drawList = [];
         editingItems.forEach((item) => {
             fixItemTrack(item);
             clampItemTiming(item);
-            const itemTrackRef = itemTrack(item);
             const rowIndex = rows.findIndex((row) => row.id === item.track_id);
             if (rowIndex < 0) return;
+            const x = timelineX(item.timeline_start);
+            const naturalW = item.duration * zoomScale;
+            const w = Math.max(8, naturalW);
+            const pinned = timelineItemPinned(item);
+            if (win && !pinned && (x + w < win.x0 || x > win.x1)) return;
+            drawList.push({ item, rowIndex, x, w, naturalW, pinned });
+        });
+        /* Zoom rất nhỏ (phim dài ở mức vừa khung: 0,65 px/s) thì block phụ đề 2 giây chỉ còn
+           ~1 px nhưng vẫn vẽ tối thiểu 8 px, nên hàng chục block chồng lên cùng một chỗ. Block
+           bắt đầu BÊN TRONG block vừa vẽ trên cùng lane và tự nó hẹp hơn mức tối thiểu thì
+           không nhìn thấy gì khác — bỏ qua. Duyệt theo thời gian để phép so "block trước"
+           đúng nghĩa; block trên cùng lane vốn không chồng nhau nên thứ tự DOM không đổi gì. */
+        drawList.sort((a, b) => a.x - b.x);
+        const laneRight = new Map();
+        timelineRenderStats = { rendered: 0, total: editingItems.length };
+        drawList.forEach(({ item, rowIndex, x, w, naturalW, pinned }) => {
+            const right = laneRight.get(item.track_id);
+            if (!pinned && naturalW < 8 && right !== undefined && x < right) return;
+            laneRight.set(item.track_id, Math.max(right ?? -Infinity, x + w));
+            timelineRenderStats.rendered += 1;
+            const itemTrackRef = itemTrack(item);
+            const sig = timelineBlockSignature(item, itemTrackRef, pinned, w);
+            const old = reusableBlocks.get(String(item.id));
+            if (sig && old && old.__blockSig === sig && old.__blockItem === item) {
+                reusableBlocks.delete(String(item.id));
+                // Block không chọn/không kéo (nếu có thì đã không tái dùng) -> gỡ class tạm
+                // mà refreshSelectionClasses / lượt kéo có thể còn để lại.
+                old.classList.remove('is-selected', 'is-secondary-selection', 'is-dragging');
+                old.style.left = `${x}px`;
+                old.style.top = `${laneBlockTop(laneRowTop(rowIndex, rows))}px`;
+                old.style.width = `${w}px`;
+                old.style.height = `${laneBlockHeight(item.type)}px`;
+                return;
+            }
             const block = document.createElement('div');
+            block.__blockSig = sig;
+            block.__blockItem = item;   // listener mousedown bên dưới đóng gói ĐÚNG object này
             block.className = `editing-block editing-item-block editing-item-${item.type} ${item.type === 'media' ? 'editing-media-block' : ''}`;
             block.classList.toggle('is-selected', selectedEditingItemIds.has(item.id));
             block.classList.toggle('is-secondary-selection', selectedEditingItemIds.has(item.id) && item.id !== selectedEditingItemId);
@@ -4768,11 +5027,11 @@
             block.classList.toggle('is-locked-by-track', isTrackLocked(itemTrackRef));
             block.classList.toggle('is-magic-fill-review', !!item.magic_fill_review);
             block.dataset.itemId = item.id;
-            block.style.left = `${timelineX(item.timeline_start)}px`;
+            block.style.left = `${x}px`;
             block.style.top = `${laneBlockTop(laneRowTop(rowIndex, rows))}px`;
-            block.style.width = `${Math.max(8, item.duration * zoomScale)}px`;
+            block.style.width = `${w}px`;
             block.style.height = `${laneBlockHeight(item.type)}px`;
-            block.appendChild(createBlockLabel(blockLabelForItem(item)));
+            if (pinned || w >= TIMELINE_LABEL_MIN_W) block.appendChild(createBlockLabel(blockLabelForItem(item)));
             const asset = findAsset(item.asset_id);
             if (item.type === 'media') {
                 appendThumbStrip(block, assetThumbnailUrl(asset), itemHasTimelineAudioToggle(item), asset);
@@ -4790,6 +5049,8 @@
             }
             track.appendChild(block);
         });
+        // Block cũ không còn cần (ra khỏi khung nhìn, bị xoá, đổi nội dung đã dựng bản mới).
+        reusableBlocks.forEach((el) => el.remove());
 
         renderTransitionNodes(track, rows);
         attachWaveformCanvas(track); // canvas sóng âm nằm TRONG #segmentsTrack -> gắn lại sau mỗi render
@@ -4800,7 +5061,8 @@
             guide.style.left = `${timelineX(editingSnapGuide.time)}px`;
             track.appendChild(guide);
         }
-        renderEditingRuler();
+        // Khung nhìn đã đọc ở đầu lượt dựng: đọc lại sau khi DOM vừa đổi là ép layout.
+        renderEditingRuler(timelineRenderWindow);
         refreshTransitionInspector();
     }
 
@@ -5024,17 +5286,27 @@
         if (outer) {
             outer.addEventListener('scroll', scheduleEditingRulerRender, { passive: true });
             outer.addEventListener('wheel', scheduleEditingRulerRender, { passive: true });
+            // Block timeline được ảo hoá theo khung nhìn (xem computeTimelineRenderWindow).
+            outer.addEventListener('scroll', scheduleTimelineWindowCheck, { passive: true });
         }
         document.getElementById('zoomSlider')?.addEventListener('input', scheduleEditingRulerRender);
         window.addEventListener('resize', scheduleEditingRulerRender);
     }
 
+    /* Mốc lượt vẽ thước gần nhất. renderEditingTimeline cũng vẽ thước; nếu nó đã chạy SAU lúc
+       lên lịch (vd. kéo thanh zoom: listener 'input' lên lịch, rồi flushFrame dựng timeline
+       kèm thước ngay trong khung đó) thì lượt lên lịch khỏi vẽ lại — vẽ lại là đọc scrollLeft
+       ngay sau khi DOM vừa đổi, tức một lượt layout bị ép cho cả timeline. */
+    let rulerRenderedAt = 0;
+
     function scheduleEditingRulerRender() {
         if (rulerRenderScheduled) return;
         rulerRenderScheduled = true;
+        const requestedAt = performance.now();
         const run = () => {
             if (!rulerRenderScheduled) return;   // lượt kia chạy trước rồi
             rulerRenderScheduled = false;
+            if (rulerRenderedAt >= requestedAt) return;
             renderEditingRuler();
         };
         requestAnimationFrame(run);
@@ -5043,22 +5315,27 @@
         setTimeout(run, 120);
     }
 
-    function renderEditingRuler() {
+    function renderEditingRuler(view = null) {
         if (currentStepId !== 'step4') return;
+        rulerRenderedAt = performance.now();
         const ruler = ensureEditingRuler();
         const outer = document.getElementById('timelineTrackOuter');
         if (!ruler || !outer) return;
 
-        const zoom = Math.max(1, Number(zoomScale) || 100);
+        const zoom = Math.max(0.01, Number(zoomScale) || 100);
         const fps = rulerFps();
         const { major, minor } = rulerSteps(zoom, fps);
 
         // Khoảng thời gian đang THẤY (trừ phần bị rail nhãn lane che).
-        const scrollLeft = outer.scrollLeft;
-        const viewWidth = outer.clientWidth;
+        const scrollLeft = view ? view.scrollLeft : outer.scrollLeft;
+        const viewWidth = view ? view.width : outer.clientWidth;
         const startPx = scrollLeft + LANE_LABEL_WIDTH;
         const endPx = scrollLeft + viewWidth;
-        const toTime = (px) => (typeof pxToTimelineTime === 'function' ? pxToTimelineTime(px) : px / zoom);
+        // Trong lượt renderEditingTimeline thì dùng lề ĐÃ CHỐT (timelineXPadLock):
+        // pxToTimelineTime đọc lại clientWidth ngay sau khi DOM vừa đổi = ép layout.
+        const toTime = (px) => (timelineXPadLock !== null
+            ? (px - timelineXPadLock) / zoom
+            : (typeof pxToTimelineTime === 'function' ? pxToTimelineTime(px) : px / zoom));
         const tStart = Math.max(0, toTime(startPx));
         const tEnd = Math.max(tStart, toTime(endPx));
 
@@ -5338,6 +5615,13 @@
             selectedTransitionKey = null;
             hideTransitionInspector();
         }
+        /* Ảo hoá như block (xem computeTimelineRenderWindow): phụ đề nối liền nhau nên dự án
+           phụ đề có hàng trăm điểm cắt, mỗi điểm một ô thả + phần tử con — đo được ~1.000 phần
+           tử thừa trong #segmentsTrack ở mức vừa khung. Dữ liệu (transitionBoundaryCache) vẫn
+           đủ; chỉ phần tử DOM là lọc theo khung nhìn. Ô thả (chưa có chuyển cảnh) rộng 20px
+           chồng lên ô trước trên cùng lane ở zoom nhỏ thì bỏ — không ai thả trúng được nó. */
+        const win = timelineRenderWindow;
+        const dropRight = new Map();
         boundaries.forEach((b) => {
             const rowIndex = rows.findIndex((row) => row.id === b.laneId);
             if (rowIndex < 0) return;
@@ -5345,6 +5629,16 @@
             const laneTop = laneRowTop(rowIndex, rows);
             const lh = laneHeight(row);
             const trans = getBoundaryTransition(b);
+            if (selectedTransitionKey !== b.key) {
+                const jx = timelineX(b.junctionTime);
+                const reach = trans ? Math.max(16, trans.duration * zoomScale) : 20;
+                if (win && (jx + reach < win.x0 || jx - reach > win.x1)) return;
+                if (!trans) {
+                    const prev = dropRight.get(b.laneId);
+                    if (prev !== undefined && jx < prev) return;
+                    dropRight.set(b.laneId, jx + 20);
+                }
+            }
             const el = document.createElement('div');
             el.dataset.key = b.key;
             el.style.top = `${laneBlockTop(laneTop)}px`;
@@ -5355,7 +5649,7 @@
                 if (selectedTransitionKey === b.key) el.classList.add('is-selected');
                 el.style.left = `${timelineX(b.junctionTime - half)}px`;
                 el.style.width = `${Math.max(16, trans.duration * zoomScale)}px`;
-                el.title = `Chuyển cảnh: ${window.Transitions.labelFor(trans.type)} · ${trans.duration.toFixed(2)}s — bấm để chọn (Delete để xoá); kéo 2 đầu để đổi độ dài; kéo hiệu ứng khác thả vào để thay`;
+                el.title = _t('Chuyển cảnh: {name} · {dur}s — bấm để chọn (Delete để xoá); kéo 2 đầu để đổi độ dài; kéo hiệu ứng khác thả vào để thay', { name: window.Transitions.labelFor(trans.type), dur: trans.duration.toFixed(2) });
                 el.innerHTML = `<span class="editing-transition-icon">${transitionMarkerSvg()}</span>`
                     + `<span class="editing-transition-handle left" data-th-side="left"></span>`
                     + `<span class="editing-transition-handle right" data-th-side="right"></span>`;
@@ -5375,7 +5669,7 @@
                 el.className = 'editing-transition-dropzone transition-hit';
                 el.style.left = `${timelineX(b.junctionTime)}px`;
                 el.style.width = '20px';
-                el.title = 'Kéo hiệu ứng chuyển cảnh vào đây';
+                el.title = _t('Kéo hiệu ứng chuyển cảnh vào đây');
             }
             track.appendChild(el);
         });
@@ -5463,15 +5757,15 @@
         const maxD = boundaryMaxDuration(b.leftDur, b.rightDur);
         const { MIN } = transDefaults();
         panel.innerHTML = `
-            <div class="clip-inspector-title"><span>Hiệu ứng chuyển tiếp</span></div>
+            <div class="clip-inspector-title"><span>${_t('Hiệu ứng chuyển cảnh')}</span></div>
             <div class="ins-sec">
-                <div class="ins-sec-head"><span class="ins-sec-title">Thông số hiệu ứng chuyển tiếp</span></div>
-                <div class="ins-row"><label id="transInsNameLabel">Tên</label><div class="trans-ins-name" role="note" aria-labelledby="transInsNameLabel">${escapeHtml(T.labelFor(trans.type))}</div></div>
-                <div class="ins-row"><label for="transInsDur">Thời lượng</label><div class="inspector-control-row">
+                <div class="ins-sec-head"><span class="ins-sec-title">${_t('Thông số chuyển cảnh')}</span></div>
+                <div class="ins-row"><label id="transInsNameLabel">${_t('Tên')}</label><div class="trans-ins-name" role="note" aria-labelledby="transInsNameLabel">${escapeHtml(T.labelFor(trans.type))}</div></div>
+                <div class="ins-row"><label for="transInsDur">${_t('Thời lượng')}</label><div class="inspector-control-row">
                     <input id="transInsDur" type="range" min="${MIN}" max="${maxD}" step="0.05" value="${Math.min(trans.duration, maxD)}">
                     <div class="fig-field"><input id="transInsDurNum" type="text" inputmode="decimal" value="${trans.duration.toFixed(2)}"><span class="fig-affix">s</span></div>
                 </div></div>
-                <button type="button" id="transInsDelete" class="trans-ins-del">Xoá hiệu ứng chuyển cảnh</button>
+                <button type="button" id="transInsDelete" class="trans-ins-del">${_t('Xoá hiệu ứng chuyển cảnh')}</button>
             </div>`;
         // Ẩn CHẮC CHẮN clip inspector khi đang xem thông số chuyển cảnh (class + CSS !important,
         // vì updateInspectorState có thể ghi đè display của #clipInspectorPanel).
@@ -5521,6 +5815,11 @@
 
     function activeOverlayTransition(seqTime) {
         if (!transitionsAvailable()) return null;
+        /* Hàm này chạy MỖI KHUNG khi phát, còn transitionBoundaries() gom + sắp xếp mọi block
+           của mọi lane. Chuyển cảnh overlay luôn nằm trên block TRÁI (getBoundaryTransition),
+           nên không block nào mang `transition` = chắc chắn không có — quét một vòng rẻ hơn
+           hẳn việc dựng cả danh sách (dự án phụ đề hàng trăm block, không cái nào có). */
+        if (!editingItems.some((it) => it.transition)) return null;
         const list = transitionBoundaries();
         for (const b of list) {
             if (b.kind !== 'overlay') continue;
@@ -5721,7 +6020,8 @@
     const layerFxPool = new Map();   // key -> { renderer, sig }
     // 6 = preview Pixi (clip + lớp) + chuyển cảnh (clip A + clip B + lượt lớp chung) + 1 dư.
     // Ở 4, bật lớp Điều chỉnh trong vùng chuyển cảnh là pool bỏ-rồi-dựng-lại context mỗi khung.
-    const LAYER_FX_MAX = 6;
+    // Nhiều lớp Điều chỉnh xếp chồng thêm một renderer mỗi lớp (applyAdjustmentLayers) -> 8.
+    const LAYER_FX_MAX = 8;
 
     /* MẶT NẠ CẮT HÌNH — nhân alpha của drawable theo mặt nạ, trả về canvas MỚI có alpha.
      *
@@ -5881,10 +6181,8 @@
             // MỘT bộ dựng chung cho lượt lớp của mọi clip (A lẫn B của chuyển cảnh): kết
             // quả được blit NGAY bên dưới trước khi clip kia dùng lại bộ dựng, và hai clip
             // tại cùng mốc thường chung một lớp nên uniform/LUT không phải nạp lại.
-            const layerAdj = activeAdjustmentLayerAdjustments(span.start + localT);
-            if (layerAdj) {
-                drawable = colorAdjustedDrawable(drawable, texW, texH, layerAdj, 'maincanvas~adjlayer');
-            }
+            drawable = applyAdjustmentLayers(drawable, texW, texH,
+                activeAdjustmentLayerAdjustmentsList(span.start + localT), 'maincanvas');
         }
         /* CỠ VẼ tính từ KHUNG NỐI × hệ số vừa-khung, KHÔNG từ cỡ texture.
          *
@@ -6306,7 +6604,7 @@
         clampItemTiming(item);
         selectEditingItem(item.id);
         renderAll();
-        setEditingStatusText(`Đã thay thế bằng "${asset.name}"`);
+        setEditingStatusText(_t('Đã thay thế bằng "{name}"', { name: asset.name }));
     }
 
     // Block kề phải trên CÙNG lane có còn dính cạnh không (điều kiện tồn tại của chuyển cảnh)
@@ -6430,12 +6728,12 @@
         const templateArtDropVerdict = (box) => {
             const payload = dndPanelPayload;
             if (!payload || payload.source !== 'library' || payload.libCat !== TEMPLATE_ART_CATEGORY) {
-                return { ok: false, why: 'Chỉ thả được hình lấy từ panel Thư viện › Elements.' };
+                return { ok: false, why: _t('Chỉ thả được hình lấy từ panel Thư viện › Elements.') };
             }
             const name = String(payload.libName || '');
             const prefix = String(box.dataset.tplArtPrefix || '');
             if (prefix && !name.toLowerCase().startsWith(prefix.toLowerCase())) {
-                return { ok: false, why: `Mẫu đang ở kiểu ${box.dataset.tplArtVariant || ''} — chỉ nhận tệp bắt đầu bằng "${prefix}". Đổi kiểu ở panel Thuộc tính trước.` };
+                return { ok: false, why: _t('Mẫu đang ở kiểu {variant} — chỉ nhận tệp bắt đầu bằng "{prefix}". Đổi kiểu ở panel Thuộc tính trước.', { variant: box.dataset.tplArtVariant || '', prefix }) };
             }
             return { ok: true, name, url: String(payload.libUrl || '') };
         };
@@ -6525,8 +6823,10 @@
         const entry = adjustLutCatalog().find((l) => l.id === id);
         applyLutToTargets(hit.targets, id);
         const t = hit.targets[0];
-        setEditingStatusText(`Đã áp LUT "${entry ? entry.name : id}" cho ${
-            t.type === 'adjust' ? 'lớp Điều chỉnh' : 'block'} — Ctrl+Z để hoàn tác.`);
+        const lutName = entry ? entry.name : id;
+        setEditingStatusText(t.type === 'adjust'
+            ? _t('Đã áp LUT "{name}" cho lớp Điều chỉnh — Ctrl+Z để hoàn tác.', { name: lutName })
+            : _t('Đã áp LUT "{name}" cho block — Ctrl+Z để hoàn tác.', { name: lutName }));
         renderEditPanel();
     }
 
@@ -6629,7 +6929,7 @@
         clearTransitionDropState();
         dndTransitionId = null;
         if (!id || !node) {
-            if (!node) setEditingStatusText('Hãy thả vào ĐÚNG điểm giao giữa 2 block cùng loại (icon con thoi sáng lên).');
+            if (!node) setEditingStatusText(_t('Hãy thả vào ĐÚNG điểm giao giữa 2 block cùng loại (icon con thoi sáng lên).'));
             return;
         }
         const b = (transitionBoundaryCache || []).find((x) => x.key === node.dataset.key);
@@ -6639,10 +6939,10 @@
         if (existing) {
             // Thả lên node ĐÃ CÓ hiệu ứng -> THAY hiệu ứng, GIỮ NGUYÊN thời lượng cũ.
             b.leftRef.transition = { type: id, duration: existing.duration };
-            setEditingStatusText(`Đã thay chuyển cảnh thành "${window.Transitions.labelFor(id)}" (giữ thời lượng ${existing.duration.toFixed(2)}s).`);
+            setEditingStatusText(_t('Đã thay chuyển cảnh thành "{name}" (giữ thời lượng {dur}s).', { name: window.Transitions.labelFor(id), dur: existing.duration.toFixed(2) }));
         } else {
             setBoundaryTransition(b, id);
-            setEditingStatusText(`Đã thêm chuyển cảnh "${window.Transitions.labelFor(id)}".`);
+            setEditingStatusText(_t('Đã thêm chuyển cảnh "{name}".', { name: window.Transitions.labelFor(id) }));
         }
         renderEditingTimeline();
     }
@@ -6696,8 +6996,8 @@
             }
             marker.style.left = `${t * zoomScale}px`;
             marker.title = locked
-                ? `Keyframe @ ${t.toFixed(2)}s — lane đang khoá`
-                : `Keyframe @ ${t.toFixed(2)}s — kéo ngang để đổi thời điểm`;
+                ? _t('Keyframe @ {t}s — lane đang khoá', { t: t.toFixed(2) })
+                : _t('Keyframe @ {t}s — kéo ngang để đổi thời điểm', { t: t.toFixed(2) });
             marker.addEventListener('mousedown', (event) => {
                 startKeyframeDrag(event, { owner, ownerKey, t, blockStartSeq, blockDuration, locked });
             });
@@ -6820,7 +7120,7 @@
             if (Math.abs(dx) <= KF_DRAG_THRESHOLD_PX) return;
             keyframeDrag.moved = true;
         }
-        const target = snapKeyframeTime(keyframeDrag, keyframeDrag.t + dx / Math.max(1, Number(zoomScale) || 100));
+        const target = snapKeyframeTime(keyframeDrag, keyframeDrag.t + dx / Math.max(0.01, Number(zoomScale) || 100));
         if (Math.abs(target - keyframeDrag.currentT) < 1e-4) return;
         if (!keyframeDrag.historySaved) {
             recordHistory();
@@ -6950,14 +7250,14 @@
             && editingDrag.group.every((entry) => entry.item.type === item.type && entry.item.track_id === item.track_id);
         block.classList.add('is-dragging');
         setTimelineDragCursor(mode);
-        if (duplicating) setEditingStatusText('Đang nhân bản block — thả để đặt bản sao.');
+        if (duplicating) setEditingStatusText(_t('Đang nhân bản block — thả để đặt bản sao.'));
     }
 
     function handleItemDrag(event) {
         if (!editingDrag) return;
         event.preventDefault();
         const item = editingDrag.item;
-        const delta = (event.clientX - editingDrag.startX) / Math.max(1, Number(zoomScale) || 100);
+        const delta = (event.clientX - editingDrag.startX) / Math.max(0.01, Number(zoomScale) || 100);
         if (!editingDrag.historySaved && (Math.abs(event.clientX - editingDrag.startX) > 2 || Math.abs(event.clientY - editingDrag.startY) > 2)) {
             recordHistory();
             editingDrag.historySaved = true;
@@ -6972,7 +7272,7 @@
                 const targetTrack = trackForItemDrop(item, event.clientY);
                 if (targetTrack && targetTrack.id !== item.track_id) {
                     editingDrag.group.forEach((entry) => { entry.item.track_id = targetTrack.id; });
-                    setEditingStatusText(`Chuyển ${editingDrag.group.length} block sang lane "${targetTrack.name}"`);
+                    setEditingStatusText(_t('Chuyển {n} block sang lane "{name}"', { n: editingDrag.group.length, name: targetTrack.name }));
                 }
             }
             const snappedStart = snapMoveStart(item, editingDrag.startTime + delta, item.track_id);
@@ -7012,8 +7312,10 @@
             const durationLimit = itemSourceDurationLimit(item);
             const atMediaEdge = Number.isFinite(durationLimit)
                 && Number(item.duration) >= durationLimit - 1e-6;
-            setEditingStatusText(`Trim block: ${Number(item.duration).toFixed(2)}s`
-                + (atMediaEdge ? ' — đã hết video nguồn' : ''));
+            const dur = Number(item.duration).toFixed(2);
+            setEditingStatusText(atMediaEdge
+                ? _t('Cắt tỉa block: {dur}s — đã hết video nguồn', { dur })
+                : _t('Cắt tỉa block: {dur}s', { dur }));
         }
         renderEditingTimeline();
         renderPreviewOverlays();
@@ -7039,7 +7341,7 @@
         } else {
             renderAll();
         }
-        if (duplicated) setEditingStatusText('Đã nhân bản block.');
+        if (duplicated) setEditingStatusText(_t('Đã nhân bản block.'));
     }
 
     /* =========================================================================
@@ -7267,7 +7569,7 @@
         try {
             asset = await ensureMainSourceAsset();
         } catch (error) {
-            setEditingStatusText(`Không sao chép được sang lane overlay: ${error.message}`);
+            setEditingStatusText(_t('Không sao chép được sang lane overlay: {error}', { error: error.message }));
             return;
         }
         recordHistory();
@@ -7324,9 +7626,9 @@
         clampItemTiming(item);
         editingSnapGuide.active = false;
         selectEditingItem(item.id);
-        setEditingStatusText(`Đã sao chép clip #${index + 1} sang ${track.name} (tiếng đang tắt).`);
+        setEditingStatusText(_t('Đã sao chép clip #{n} sang {name} (tiếng đang tắt).', { n: index + 1, name: track.name }));
         if (typeof setStatusText === 'function') {
-            setStatusText(`Đã sao chép clip #${index + 1} lên lane overlay "${track.name}"`, false);
+            setStatusText(_t('Đã sao chép clip #{n} lên lane overlay "{name}"', { n: index + 1, name: track.name }), false);
         }
     }
 
@@ -7413,7 +7715,7 @@
             && Math.abs(dx) < MAIN_DRAG_THRESHOLD_PX && Math.abs(dy) < MAIN_DRAG_THRESHOLD_PX) return;
         event.preventDefault();
         drag.moved = true;
-        const deltaSec = dx / Math.max(1, Number(zoomScale) || 100);
+        const deltaSec = dx / Math.max(0.01, Number(zoomScale) || 100);
 
         if (isResize) {
             if (!drag.historySaved) {
@@ -7457,8 +7759,10 @@
             const atMediaEdge = drag.mode === 'resize-left'
                 ? Math.abs(Number(clip.start) - minStart) <= 1e-6
                 : (Number.isFinite(sourceLimit) && Math.abs(Number(clip.end) - sourceLimit) <= 1e-6);
-            setEditingStatusText(`Trim clip #${drag.index + 1}: ${(Number(clip.end) - Number(clip.start)).toFixed(2)}s`
-                + (atMediaEdge ? ' — đã hết video nguồn' : ''));
+            const trimArgs = { n: drag.index + 1, dur: (Number(clip.end) - Number(clip.start)).toFixed(2) };
+            setEditingStatusText(atMediaEdge
+                ? _t('Cắt tỉa clip #{n}: {dur}s — đã hết video nguồn', trimArgs)
+                : _t('Cắt tỉa clip #{n}: {dur}s', trimArgs));
             return;
         }
 
@@ -7489,8 +7793,8 @@
                 ghost.classList.toggle('is-new-lane', drag.overlayTarget.newLane === true);
             }
             setEditingStatusText(drag.overlayTarget.newLane
-                ? `Sao chép clip #${drag.index + 1} sang LANE OVERLAY MỚI`
-                : `Sao chép clip #${drag.index + 1} sang lane "${findTrack(drag.overlayTarget.trackId)?.name || 'overlay'}"`);
+                ? _t('Sao chép clip #{n} sang LANE OVERLAY MỚI', { n: drag.index + 1 })
+                : _t('Sao chép clip #{n} sang lane "{name}"', { n: drag.index + 1, name: findTrack(drag.overlayTarget.trackId)?.name || 'overlay' }));
             return;
         }
         hideMainOverlayGhost();
@@ -7502,8 +7806,8 @@
             indicator.style.left = `${Math.round(timelineX(target.guideTime))}px`;
         }
         setEditingStatusText(drag.mode === 'duplicate'
-            ? `Nhân bản clip #${drag.index + 1} → vị trí #${target.insertAt + 1}`
-            : `Chuyển clip #${drag.index + 1} → vị trí #${target.insertAt + 1}`);
+            ? _t('Nhân bản clip #{n} → vị trí #{at}', { n: drag.index + 1, at: target.insertAt + 1 })
+            : _t('Chuyển clip #{n} → vị trí #{at}', { n: drag.index + 1, at: target.insertAt + 1 }));
     }
 
     function finishMainBlockDrag(commit) {
@@ -7596,7 +7900,7 @@
         const wanted = Number.isFinite(sequenceTimeBeforeTrim) ? sequenceTimeBeforeTrim : currentSequenceTime();
         setSequenceTime(clamp(wanted, 0, Math.max(0, total)));
         if (typeof setStatusText === 'function') {
-            setStatusText(`Đã trim clip #${index + 1} (${(Number(clip.end) - Number(clip.start)).toFixed(2)}s)`, false);
+            setStatusText(_t('Đã cắt tỉa clip #{n} ({dur}s)', { n: index + 1, dur: (Number(clip.end) - Number(clip.start)).toFixed(2) }), false);
         }
     }
 
@@ -7620,7 +7924,7 @@
         if (typeof refreshFinalArtifactsFromTimeline === 'function') refreshFinalArtifactsFromTimeline();
         renderAll();
         if (typeof setStatusText === 'function') {
-            setStatusText(`Đã nhân bản clip #${index + 1} → vị trí #${at + 1}`, false);
+            setStatusText(_t('Đã nhân bản clip #{n} → vị trí #{at}', { n: index + 1, at: at + 1 }), false);
         }
     }
 
@@ -7697,7 +8001,7 @@
         const cut = Number(cutTime);
         const minDuration = 0.2;
         if (!Number.isFinite(cut) || cut <= start + minDuration || cut >= end - minDuration) {
-            if (typeof setStatusText === 'function') setStatusText('Không thể cắt block quá ngắn', false);
+            if (typeof setStatusText === 'function') setStatusText(_t('Không thể cắt block quá ngắn'), false);
             return false;
         }
         recordHistory();
@@ -7722,7 +8026,7 @@
         selectedMainClipIndexes = new Set();
         selectedTimelineClipIndex = -1;
         renderAll();
-        if (typeof setStatusText === 'function') setStatusText('Đã cắt block Editing', false);
+        if (typeof setStatusText === 'function') setStatusText(_t('Đã cắt block Editing'), false);
         return true;
     }
 
@@ -7765,30 +8069,30 @@
     // gọn" bằng cách đổi chúng sang `tone.*`: `curves` không nhận biểu thức theo thời gian nên
     // keyframe của chúng sẽ hết rẻ, và cả chuỗi filter phải dựng lại.
     const ADJUST_BASIC_FIELDS = [
-        { key: 'temperature', label: 'Nhiệt độ' },
-        { key: 'tint', label: 'Sắc thái' },
-        { key: 'saturation', label: 'Bão hoà' },
+        { key: 'temperature', label: _t('Nhiệt độ') },
+        { key: 'tint', label: _t('Sắc thái') },
+        { key: 'saturation', label: _t('Bão hoà') },
     ];
     // Nằm ở khối "Độ sáng" nhưng dữ liệu thuộc `basic.*` (xem trên).
     const ADJUST_BRIGHTNESS_BASIC_FIELDS = [
-        { key: 'exposure', label: 'Phơi sáng' },
-        { key: 'contrast', label: 'Tương phản' },
+        { key: 'exposure', label: _t('Phơi sáng') },
+        { key: 'contrast', label: _t('Tương phản') },
     ];
     // Nhóm Hiệu ứng: 4 thông số một chiều (0..100) + Viền mờ hai chiều (±100, âm = làm
     // sáng viền). Đây là các phép KHÔNG GIAN nên preview phải chạy nhiều lượt shader.
     const ADJUST_EFFECT_FIELDS = [
-        { key: 'sharpen', label: 'Làm sắc nét', min: 0 },
-        { key: 'clarity', label: 'Độ rõ nét', min: 0 },
-        { key: 'grain', label: 'Hạt nhỏ', min: 0 },
-        { key: 'blur', label: 'Làm mờ', min: 0 },
-        { key: 'vignette', label: 'Viền mờ dần', min: -100 },
+        { key: 'sharpen', label: _t('Làm sắc nét'), min: 0 },
+        { key: 'clarity', label: _t('Độ rõ nét'), min: 0 },
+        { key: 'grain', label: _t('Hạt nhỏ'), min: 0 },
+        { key: 'blur', label: _t('Làm mờ'), min: 0 },
+        { key: 'vignette', label: _t('Viền mờ dần'), min: -100 },
     ];
     const ADJUST_TONE_FIELDS = [
-        { key: 'highlights', label: 'Vùng sáng' },
-        { key: 'shadows', label: 'Bóng' },
-        { key: 'whites', label: 'Vùng sáng nhất' },
-        { key: 'blacks', label: 'Vùng tối nhất' },
-        { key: 'glow', label: 'Độ chói' },
+        { key: 'highlights', label: _t('Vùng sáng') },
+        { key: 'shadows', label: _t('Bóng') },
+        { key: 'whites', label: _t('Vùng sáng nhất') },
+        { key: 'blacks', label: _t('Vùng tối nhất') },
+        { key: 'glow', label: _t('Độ chói') },
     ];
     // Trạng thái riêng của UI (không thuộc dữ liệu dự án): dải HSL và kênh curve đang xem.
     let adjustUiBand = 'red';
@@ -7929,7 +8233,7 @@
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
             const c = (data.clips || [])[0];
-            if (!c) throw new Error('không có dữ liệu');
+            if (!c) throw new Error(_t('không có dữ liệu'));
             const store = {
                 fps: Number(c.fps) || 30,
                 start: Number(c.start) || 0,
@@ -7945,7 +8249,7 @@
             return store;
         } catch (error) {
             retouchFaceCache.set(key, 'error');
-            setEditingStatusText(`Không bám được khuôn mặt: ${error.message}`);
+            setEditingStatusText(_t('Không bám được khuôn mặt: {error}', { error: error.message }));
             refreshRetouchPanel();
             return null;
         }
@@ -8260,25 +8564,25 @@
         return `
             <div class="ins-sec" data-ins-tab="video" data-ins-sub="mask">
                 <div class="ins-sec-head">
-                    <span class="ins-sec-title">Mặt nạ</span>
-                    <button type="button" class="anim-preview-btn" id="editingVMaskReset" ${on ? '' : 'disabled'}>Đặt lại</button>
+                    <span class="ins-sec-title">${_t('Mặt nạ')}</span>
+                    <button type="button" class="anim-preview-btn" id="editingVMaskReset" ${on ? '' : 'disabled'}>${_t('Đặt lại')}</button>
                 </div>
                 <label class="editing-checkbox-row">
-                    <input id="editingVMaskEnabled" type="checkbox" ${on ? 'checked' : ''}> Bật mặt nạ (cắt hình block)
+                    <input id="editingVMaskEnabled" type="checkbox" ${on ? 'checked' : ''}> ${_t('Bật mặt nạ (cắt hình block)')}
                 </label>
                 <div class="vmask-grid ${on ? '' : 'is-off'}">${cards}</div>
                 <label class="editing-checkbox-row">
-                    <input id="editingVMaskInvert" type="checkbox" ${mk.invert ? 'checked' : ''} ${on ? '' : 'disabled'}> Đảo mặt nạ
+                    <input id="editingVMaskInvert" type="checkbox" ${mk.invert ? 'checked' : ''} ${on ? '' : 'disabled'}> ${_t('Đảo mặt nạ')}
                 </label>
-                ${row('editingVMask_x', 'Vị trí X', mk.x, -1, 1, 0.01)}
-                ${row('editingVMask_y', 'Vị trí Y', mk.y, -1, 1, 0.01)}
-                ${row('editingVMask_rotation', 'Xoay', mk.rotation, -180, 180, 1)}
-                ${hasSize ? row('editingVMask_width', 'Rộng (px)', Math.round(mk.width * frame.W),
+                ${row('editingVMask_x', _t('Vị trí X'), mk.x, -1, 1, 0.01)}
+                ${row('editingVMask_y', _t('Vị trí Y'), mk.y, -1, 1, 0.01)}
+                ${row('editingVMask_rotation', _t('Xoay'), mk.rotation, -180, 180, 1)}
+                ${hasSize ? row('editingVMask_width', _t('Rộng (px)'), Math.round(mk.width * frame.W),
                     Math.max(2, Math.round(MASK_SIZE_MIN_RATIO * frame.W)), Math.round(MASK_SIZE_MAX_RATIO * frame.W), 1) : ''}
-                ${hasHeight ? row('editingVMask_height', 'Cao (px)', Math.round(mk.height * frame.H),
+                ${hasHeight ? row('editingVMask_height', _t('Cao (px)'), Math.round(mk.height * frame.H),
                     Math.max(2, Math.round(MASK_SIZE_MIN_RATIO * frame.H)), Math.round(MASK_SIZE_MAX_RATIO * frame.H), 1) : ''}
-                ${row('editingVMask_feather', 'Làm mờ viền', mk.feather, 0, 100, 1)}
-                ${CA.MASK_TYPES_ROUNDNESS.has(mk.type) ? row('editingVMask_roundness', 'Góc tròn', mk.roundness, 0, 100, 1) : ''}
+                ${row('editingVMask_feather', _t('Làm mờ viền'), mk.feather, 0, 100, 1)}
+                ${CA.MASK_TYPES_ROUNDNESS.has(mk.type) ? row('editingVMask_roundness', _t('Góc tròn'), mk.roundness, 0, 100, 1) : ''}
             </div>`;
     }
 
@@ -8524,9 +8828,9 @@
         const status = target ? retouchStatusFor(target) : 'none';
         const on = r.enabled;
         const GROUPS = [
-            ['warp', 'Định hình khuôn mặt'],
-            ['freq', 'Da & kết cấu'],
-            ['color', 'Sáng & màu'],
+            ['warp', _t('Định hình khuôn mặt')],
+            ['freq', _t('Da & kết cấu')],
+            ['color', _t('Sáng & màu')],
         ];
         const rows = GROUPS.map(([kind, title]) => {
             const items = Retouch.PARAMS.filter((p) => p.kind === kind).map((p) => `
@@ -8543,52 +8847,52 @@
         const swatches = RETOUCH_SKIN_TONES.map((hex) => `
             <button type="button" class="rt-swatch ${r.skinTone === hex ? 'is-active' : ''}"
                     data-retouch-tone="${hex}" style="background:${hex}"
-                    title="${escapeHtml(hex)}" aria-label="Tông da ${escapeHtml(hex)}" ${on ? '' : 'disabled'}></button>`).join('');
+                    title="${escapeHtml(hex)}" aria-label="${escapeHtml(_t('Tông da {hex}', { hex }))}" ${on ? '' : 'disabled'}></button>`).join('');
 
         const statusText = {
-            none: 'Chưa bám khuôn mặt — bật công tắc để phân tích.',
-            loading: 'Đang bám khuôn mặt…',
-            error: 'Không bám được khuôn mặt. Thử lại hoặc chọn block khác.',
-            ready: 'Đã bám khuôn mặt.',
-            unsupported: 'Block này không bám mặt được (Retouch cần block video hoặc ảnh có khuôn mặt).',
+            none: _t('Chưa bám khuôn mặt — bật công tắc để phân tích.'),
+            loading: _t('Đang bám khuôn mặt…'),
+            error: _t('Không bám được khuôn mặt. Thử lại hoặc chọn block khác.'),
+            ready: _t('Đã bám khuôn mặt.'),
+            unsupported: _t('Block này không bám mặt được (Retouch cần block video hoặc ảnh có khuôn mặt).'),
         }[status];
 
         return `
             <div class="ins-sec" data-ins-tab="retouch" data-ins-sub="basic">
                 <div class="ins-sec-head">
-                    <span class="ins-sec-title">Retouch</span>
+                    <span class="ins-sec-title">${_t('Retouch')}</span>
                     <!-- GIỮ để xem ảnh gốc, thả ra là về ảnh đã retouch. Kiểu "giữ" chứ
                          không phải "bật/tắt": nhìn xong buông tay là xong, không có
                          trạng thái nào để quên tắt rồi tưởng retouch hỏng. -->
                     <button type="button" class="adj-mini-btn ${on ? '' : 'is-off'}"
                             id="editingRtCompare" ${on ? '' : 'disabled'}
-                            title="Giữ để xem ảnh gốc">Giữ để so sánh</button>
-                    <button type="button" class="adj-mini-btn ${on ? '' : 'is-off'}" id="editingRtReset">Đặt lại tất cả</button>
+                            title="${_t('Giữ để xem ảnh gốc')}">${_t('Giữ để so sánh')}</button>
+                    <button type="button" class="adj-mini-btn ${on ? '' : 'is-off'}" id="editingRtReset">${_t('Đặt lại tất cả')}</button>
                 </div>
                 <div class="editing-checkbox-row">
                     <input id="editingRtEnabled" type="checkbox" data-retouch="1" ${on ? 'checked' : ''}>
-                    <label for="editingRtEnabled">Bật Retouch cho block này</label>
+                    <label for="editingRtEnabled">${_t('Bật Retouch cho block này')}</label>
                 </div>
                 <div class="ins-row rt-target-row">
-                    <label for="editingRtTarget">Áp cho</label>
+                    <label for="editingRtTarget">${_t('Áp cho')}</label>
                     <div class="fig-field">
                         <select id="editingRtTarget" data-retouch="1" ${on ? '' : 'disabled'}>
-                            <option value="single" ${r.target === 'single' ? 'selected' : ''}>Một người (mặt lớn nhất)</option>
-                            <option value="all" ${r.target === 'all' ? 'selected' : ''}>Mọi khuôn mặt</option>
+                            <option value="single" ${r.target === 'single' ? 'selected' : ''}>${_t('Một người (mặt lớn nhất)')}</option>
+                            <option value="all" ${r.target === 'all' ? 'selected' : ''}>${_t('Mọi khuôn mặt')}</option>
                         </select>
                     </div>
                 </div>
                 <div class="adj-hint rt-status is-${status}">${escapeHtml(statusText)}</div>
                 ${rows}
                 <div class="ins-sub-group">
-                    <div class="ins-sub-title">Tông da</div>
+                    <div class="ins-sub-title">${_t('Tông da')}</div>
                     <div class="rt-swatches">
                         <button type="button" class="rt-swatch rt-swatch-none ${r.skinTone ? '' : 'is-active'}"
-                                data-retouch-tone="" title="Không đổi tông" ${on ? '' : 'disabled'}>⊘</button>
+                                data-retouch-tone="" title="${_t('Không đổi tông')}" ${on ? '' : 'disabled'}>⊘</button>
                         ${swatches}
                     </div>
                     <div class="ins-row rt-row">
-                        <label for="editingRt_skinToneAmount">Mức</label>
+                        <label for="editingRt_skinToneAmount">${_t('Mức')}</label>
                         <input type="range" id="editingRt_skinToneAmount" data-retouch="1"
                                min="0" max="100" step="1" value="${r.skinToneAmount}"
                                ${on && r.skinTone ? '' : 'disabled'}>
@@ -8671,14 +8975,14 @@
         if (path) {
             const supported = ColorAdjust.canKeyframe(path);
             const field = ColorAdjust.keyframeFieldName(path);
-            const lockTip = 'FFmpeg không đổi được thông số này theo thời gian nên chưa keyframe được';
+            const lockTip = _t('FFmpeg không đổi được thông số này theo thời gian nên chưa keyframe được');
             const attrs = supported
                 ? `data-kf-field="${field}"`
                 : `data-kf-field="${field}" disabled title="${lockTip}"`;
             kf = `<div class="kf-group">`
-                + `<button type="button" class="kf-nav" ${attrs} data-kf-dir="prev" aria-label="Keyframe trước">◂</button>`
-                + `<button type="button" class="kf-diamond" ${attrs} aria-label="Keyframe ${escapeHtml(label)}">◆</button>`
-                + `<button type="button" class="kf-nav" ${attrs} data-kf-dir="next" aria-label="Keyframe sau">▸</button>`
+                + `<button type="button" class="kf-nav" ${attrs} data-kf-dir="prev" aria-label="${_t('Keyframe trước')}">◂</button>`
+                + `<button type="button" class="kf-diamond" ${attrs} aria-label="${escapeHtml(_t('Keyframe {label}', { label }))}">◆</button>`
+                + `<button type="button" class="kf-nav" ${attrs} data-kf-dir="next" aria-label="${_t('Keyframe sau')}">▸</button>`
                 + `</div>`;
         }
         return `
@@ -8737,7 +9041,7 @@
             const v = a.hsl[b.key];
             const touched = Math.abs(v.h) + Math.abs(v.s) + Math.abs(v.l) > 0;
             return `<button type="button" class="adj-swatch ${b.key === band.key ? 'is-active' : ''} ${touched ? 'is-touched' : ''}"
-                        data-adjust-band="${b.key}" title="${escapeHtml(b.label)}" aria-label="Dải màu ${escapeHtml(b.label)}" style="--sw:${b.swatch}"></button>`;
+                        data-adjust-band="${b.key}" title="${escapeHtml(b.label)}" aria-label="${escapeHtml(_t('Dải màu {name}', { name: b.label }))}" style="--sw:${b.swatch}"></button>`;
         }).join('');
 
         const wheels = ColorAdjust.WHEEL_KEYS.map((k) => {
@@ -8753,7 +9057,7 @@
                                     <span class="adj-wheel-ch adj-ch-${ch}">${ch.toUpperCase()}</span>
                                     <input id="editingAdjWheel_${k}_${ch}" type="text" inputmode="decimal" value="${w[ch]}" data-adjust="1">
                                 </div>`).join('')}
-                            <button type="button" class="adj-mini-btn" data-adjust-wheel-reset="${k}">Đặt lại</button>
+                            <button type="button" class="adj-mini-btn" data-adjust-wheel-reset="${k}">${_t('Đặt lại')}</button>
                         </div>
                     </div>
                 </div>`;
@@ -8772,15 +9076,15 @@
         // Rộng/Cao theo PIXEL (xem maskPixelSize): hai số bằng nhau mới ra hình tròn thật.
         const mkFrame = maskFrameSize();
         const maskRows = [
-            maskRow('editingAdjMask_x', 'Vị trí X', mk.x, -1, 1, 0.01),
-            maskRow('editingAdjMask_y', 'Vị trí Y', mk.y, -1, 1, 0.01),
-            maskRow('editingAdjMask_rotation', 'Xoay', mk.rotation, -180, 180, 1),
-            maskHasSize ? maskRow('editingAdjMask_width', 'Rộng (px)', Math.round(mk.width * mkFrame.W),
+            maskRow('editingAdjMask_x', _t('Vị trí X'), mk.x, -1, 1, 0.01),
+            maskRow('editingAdjMask_y', _t('Vị trí Y'), mk.y, -1, 1, 0.01),
+            maskRow('editingAdjMask_rotation', _t('Xoay'), mk.rotation, -180, 180, 1),
+            maskHasSize ? maskRow('editingAdjMask_width', _t('Rộng (px)'), Math.round(mk.width * mkFrame.W),
                 Math.max(2, Math.round(MASK_SIZE_MIN_RATIO * mkFrame.W)), Math.round(MASK_SIZE_MAX_RATIO * mkFrame.W), 1) : '',
-            (maskHasSize || maskHasHeightOnly) ? maskRow('editingAdjMask_height', 'Cao (px)', Math.round(mk.height * mkFrame.H),
+            (maskHasSize || maskHasHeightOnly) ? maskRow('editingAdjMask_height', _t('Cao (px)'), Math.round(mk.height * mkFrame.H),
                 Math.max(2, Math.round(MASK_SIZE_MIN_RATIO * mkFrame.H)), Math.round(MASK_SIZE_MAX_RATIO * mkFrame.H), 1) : '',
-            maskRow('editingAdjMask_feather', 'Làm mờ viền', mk.feather, 0, 100, 1),
-            mk.type === 'rect' ? maskRow('editingAdjMask_roundness', 'Góc tròn', mk.roundness, 0, 100, 1) : '',
+            maskRow('editingAdjMask_feather', _t('Làm mờ viền'), mk.feather, 0, 100, 1),
+            mk.type === 'rect' ? maskRow('editingAdjMask_roundness', _t('Góc tròn'), mk.roundness, 0, 100, 1) : '',
         ].filter(Boolean).join('');
 
         // HÀNG "BỘ LỌC" — chỉ ĐỌC tên LUT đang áp + chỉnh CƯỜNG ĐỘ. Việc CHỌN LUT đã
@@ -8794,26 +9098,26 @@
         const lutLabel = appliedLut ? appliedLut.name : (a.lut.name || a.lut.id);
         const lutRow = a.lut.id
             ? `<div class="ins-row adj-lut-applied">
-                   <label id="editingAdjLutLabel">Đang áp</label>
+                   <label id="editingAdjLutLabel">${_t('Đang áp')}</label>
                    <div class="adj-lut-chip" role="group" aria-labelledby="editingAdjLutLabel">
                        <span class="adj-lut-name" title="${escapeHtml(lutLabel)}">${escapeHtml(lutLabel)}</span>
                        <button type="button" class="adj-lut-remove" id="editingAdjLutRemove"
-                               title="Gỡ bộ lọc khỏi block này" aria-label="Gỡ bộ lọc">×</button>
+                               title="${_t('Gỡ bộ lọc khỏi block này')}" aria-label="${_t('Gỡ bộ lọc')}">×</button>
                    </div>
                </div>
-               ${adjustSliderRow('editingAdjLutIntensity', 'Cường độ', a.lut.intensity, 0, 100, 1, 'lut.intensity')}`
-            : `<div class="adj-hint">Chưa áp bộ lọc nào. Mở tab <b>LUT</b> ở panel trái rồi kéo thả (hoặc bấm) để áp.</div>`;
+               ${adjustSliderRow('editingAdjLutIntensity', _t('Cường độ'), a.lut.intensity, 0, 100, 1, 'lut.intensity')}`
+            : `<div class="adj-hint">${_t('Chưa áp bộ lọc nào. Mở tab <b>LUT</b> ở panel trái rồi kéo thả (hoặc bấm) để áp.')}</div>`;
 
         // Menu KIỂU CHỈNH của nút tự động. Đây KHÔNG phải danh sách LUT — nó đổi ĐÍCH
         // mà bộ giải nhắm tới (sáng/tương phản/bão hoà, ngả ấm hay lạnh). Nguồn duy
         // nhất là AutoGrade.STYLES nên thêm kiểu mới không phải sửa chỗ này.
-        const autoStyles = (window.AutoGrade && AutoGrade.STYLES) || [{ id: '', name: 'Trung tính', hint: '' }];
+        const autoStyles = (window.AutoGrade && AutoGrade.STYLES) || [{ id: '', name: _t('Trung tính'), hint: '' }];
         // Gom theo `group` bằng <optgroup>: danh sách 21 mục mà đổ phẳng thì không dò
         // được. Thứ tự nhóm lấy theo thứ tự XUẤT HIỆN trong STYLES, nên muốn đổi bố cục
         // menu thì sửa mảng đó chứ không sửa ở đây.
         const styleGroups = [];
         autoStyles.forEach((s) => {
-            const key = s.group || 'Khác';
+            const key = s.group || _t('Khác');
             let g = styleGroups.find((x) => x.key === key);
             if (!g) { g = { key, items: [] }; styleGroups.push(g); }
             g.items.push(s);
@@ -8828,70 +9132,70 @@
         return `
             <div class="ins-sec" data-ins-tab="adjust" data-ins-sub="basic">
                 <div class="ins-sec-head">
-                    <span class="ins-sec-title">Điều chỉnh cơ bản</span>
+                    <span class="ins-sec-title">${_t('Điều chỉnh cơ bản')}</span>
                     <div class="adj-head-actions">
                         <button type="button" class="adj-mini-btn adj-pick-btn" data-adjust-pick="wb"
-                                title="Cân bằng trắng: bấm nút rồi chọn một điểm đáng lẽ trung tính (xám/trắng) trên preview">
-                            <svg class="btn-ico" aria-hidden="true"><use href="#ic-crosshair"/></svg> Cân bằng trắng
+                                title="${_t('Cân bằng trắng: bấm nút rồi chọn một điểm đáng lẽ trung tính (xám/trắng) trên preview')}">
+                            <svg class="btn-ico" aria-hidden="true"><use href="#ic-crosshair"/></svg> ${_t('Cân bằng trắng')}
                         </button>
-                        <button type="button" class="adj-mini-btn ${active ? '' : 'is-off'}" id="editingAdjResetAll">Đặt lại tất cả</button>
+                        <button type="button" class="adj-mini-btn ${active ? '' : 'is-off'}" id="editingAdjResetAll">${_t('Đặt lại tất cả')}</button>
                     </div>
                 </div>
                 <div class="ins-sub-group adj-auto-row">
                     <button type="button" class="adj-mini-btn adj-auto-btn" id="editingAdjAutoRun"
                             ${autoGradeRunning ? 'disabled' : ''}
-                            title="Phân tích khung đầu của mỗi block đang chọn rồi tự điền Phơi sáng, Tương phản, Bão hoà, Nhiệt độ, Sắc thái và điểm đen/trắng. KHÔNG đụng tới LUT. Ctrl+Z để hoàn tác.">
+                            title="${_t('Phân tích khung đầu của mỗi block đang chọn rồi tự điền Phơi sáng, Tương phản, Bão hoà, Nhiệt độ, Sắc thái và điểm đen/trắng. KHÔNG đụng tới LUT. Ctrl+Z để hoàn tác.')}">
                         <svg class="btn-ico" aria-hidden="true"><use href="#ic-magic-fill"/></svg>
-                        ${autoGradeRunning ? 'Đang phân tích…' : 'Tự động chỉnh màu'}
+                        ${autoGradeRunning ? _t('Đang phân tích…') : _t('Tự động chỉnh màu')}
                     </button>
                     <select id="editingAdjAutoStyle" data-adjust="1"
-                            title="Kiểu chỉnh: đổi ĐÍCH mà bộ tự động nhắm tới. Đây không phải bộ lọc LUT — LUT áp riêng ở tab LUT và chồng lên kết quả này.">
+                            title="${_t('Kiểu chỉnh: đổi ĐÍCH mà bộ tự động nhắm tới. Đây không phải bộ lọc LUT — LUT áp riêng ở tab LUT và chồng lên kết quả này.')}">
                         ${autoGradeStyleOptions}
                     </select>
                 </div>
                 ${autoStyleHint ? `<div class="adj-hint adj-auto-hint">${escapeHtml(autoStyleHint)}</div>` : ''}
                 <div class="ins-sub-group">
-                    <div class="ins-sub-title">Độ sáng</div>
+                    <div class="ins-sub-title">${_t('Độ sáng')}</div>
                     ${tone}
                 </div>
                 <div class="ins-sub-group">
-                    <div class="ins-sub-title">Bộ lọc (LUT)</div>
+                    <div class="ins-sub-title">${_t('Bộ lọc (LUT)')}</div>
                     ${lutRow}
                 </div>
                 <div class="ins-sub-group">
-                    <div class="ins-sub-title">Màu sắc</div>
+                    <div class="ins-sub-title">${_t('Màu sắc')}</div>
                     ${basic}
                 </div>
                 <div class="ins-sub-group">
-                    <div class="ins-sub-title">Hiệu ứng</div>
+                    <div class="ins-sub-title">${_t('Hiệu ứng')}</div>
                     ${effects}
                 </div>
             </div>
             <div class="ins-sec" data-ins-tab="adjust" data-ins-sub="hsl">
                 <div class="ins-sec-head">
-                    <span class="ins-sec-title">HSL theo dải màu</span>
+                    <span class="ins-sec-title">${_t('HSL theo dải màu')}</span>
                     <div class="adj-head-actions">
                         <button type="button" class="adj-mini-btn" id="editingAdjHslReset"
-                                title="Đặt lại 3 thông số của dải ${escapeHtml(band.label)}">Đặt lại dải</button>
+                                title="${escapeHtml(_t('Đặt lại 3 thông số của dải {name}', { name: band.label }))}">${_t('Đặt lại dải')}</button>
                         <button type="button" class="adj-mini-btn ${hslActive ? '' : 'is-off'}" id="editingAdjHslResetAll"
-                                title="Đặt lại cả 8 dải màu">Đặt lại tất cả</button>
+                                title="${_t('Đặt lại cả 8 dải màu')}">${_t('Đặt lại tất cả')}</button>
                     </div>
                 </div>
                 <div class="adj-swatch-row">
                     <button type="button" class="adj-mini-btn adj-pick-btn adj-pick-round" data-adjust-pick="hsl"
-                            title="Hút màu: bấm nút rồi chọn một màu trên preview để tự chuyển sang dải HSL tương ứng"
-                            aria-label="Hút màu từ khung xem trước"><svg class="btn-ico" aria-hidden="true"><use href="#ic-crosshair"/></svg></button>
+                            title="${_t('Hút màu: bấm nút rồi chọn một màu trên preview để tự chuyển sang dải HSL tương ứng')}"
+                            aria-label="${_t('Hút màu từ khung xem trước')}"><svg class="btn-ico" aria-hidden="true"><use href="#ic-crosshair"/></svg></button>
                     <div class="adj-swatches">${swatches}</div>
                 </div>
                 <div class="adj-band-name">${escapeHtml(band.label)}</div>
-                ${adjustSliderRow('editingAdjHsl_h', 'Sắc độ', bandVal.h)}
-                ${adjustSliderRow('editingAdjHsl_s', 'Bão hoà', bandVal.s)}
-                ${adjustSliderRow('editingAdjHsl_l', 'Độ sáng', bandVal.l)}
+                ${adjustSliderRow('editingAdjHsl_h', _t('Sắc độ'), bandVal.h)}
+                ${adjustSliderRow('editingAdjHsl_s', _t('Bão hoà'), bandVal.s)}
+                ${adjustSliderRow('editingAdjHsl_l', _t('Độ sáng'), bandVal.l)}
             </div>
             <div class="ins-sec" data-ins-tab="adjust" data-ins-sub="curves">
                 <div class="ins-sec-head">
-                    <span class="ins-sec-title">Đường cong</span>
-                    <button type="button" class="adj-mini-btn" id="editingAdjCurveReset">Đặt lại kênh</button>
+                    <span class="ins-sec-title">${_t('Đường cong')}</span>
+                    <button type="button" class="adj-mini-btn" id="editingAdjCurveReset">${_t('Đặt lại kênh')}</button>
                 </div>
                 <div class="adj-curve-tabs">
                     ${ColorAdjust.CURVE_CHANNELS.map((ch) => `
@@ -8899,22 +9203,22 @@
                                 data-adjust-curve="${ch}">${escapeHtml(ColorAdjust.CURVE_LABELS[ch])}</button>`).join('')}
                 </div>
                 <canvas id="editingAdjCurveCanvas" class="adj-curve-canvas" width="240" height="240"></canvas>
-                <div class="adj-hint">Bấm để thêm điểm · kéo để chỉnh · bấm đúp để xoá</div>
+                <div class="adj-hint">${_t('Bấm để thêm điểm · kéo để chỉnh · bấm đúp để xoá')}</div>
             </div>
             <div class="ins-sec" data-ins-tab="adjust" data-ins-sub="wheels">
-                <div class="ins-sec-head"><span class="ins-sec-title">Vòng tròn màu</span></div>
+                <div class="ins-sec-head"><span class="ins-sec-title">${_t('Vòng tròn màu')}</span></div>
                 ${wheels}
             </div>
             ${!withMask ? '' : `
             <div class="ins-sec" data-ins-tab="adjust" data-ins-sub="mask">
                 <div class="ins-sec-head">
-                    <span class="ins-sec-title">Mặt nạ</span>
+                    <span class="ins-sec-title">${_t('Mặt nạ')}</span>
                     <button type="button" class="adj-mini-btn ${a.mask.enabled ? '' : 'is-off'}"
-                            id="editingAdjMaskReset">Đặt lại</button>
+                            id="editingAdjMaskReset">${_t('Đặt lại')}</button>
                 </div>
                 <div class="editing-checkbox-row">
                     <input id="editingAdjMaskEnabled" type="checkbox" data-adjust="1" ${a.mask.enabled ? 'checked' : ''}>
-                    <label for="editingAdjMaskEnabled">Bật mặt nạ (giới hạn vùng được chỉnh màu)</label>
+                    <label for="editingAdjMaskEnabled">${_t('Bật mặt nạ (giới hạn vùng được chỉnh màu)')}</label>
                 </div>
                 <div class="adj-mask-types">
                     ${ColorAdjust.MASK_TYPES.map((t) => `
@@ -8927,9 +9231,9 @@
                 <div class="editing-checkbox-row">
                     <input id="editingAdjMaskInvert" type="checkbox" data-adjust="1"
                            ${a.mask.invert ? 'checked' : ''} ${a.mask.enabled ? '' : 'disabled'}>
-                    <label for="editingAdjMaskInvert">Đảo mặt nạ</label>
+                    <label for="editingAdjMaskInvert">${_t('Đảo mặt nạ')}</label>
                 </div>
-                <div class="adj-hint">Mọi thông số tính theo TỈ LỆ khung nên mặt nạ nằm đúng chỗ ở mọi độ phân giải.</div>
+                <div class="adj-hint">${_t('Mọi thông số tính theo TỈ LỆ khung nên mặt nạ nằm đúng chỗ ở mọi độ phân giải.')}</div>
             </div>`}
             ${withRetouch ? retouchSectionHtml() : ''}
             `;
@@ -8964,7 +9268,7 @@
         if (adjustPickMode === mode) { stopAdjustPick(); return; }   // bấm lại = tắt
         stopAdjustPick();
         if (!adjustTargets().length) {
-            setEditingStatusText('Hãy chọn block cần chỉnh màu trước khi dùng ống hút.');
+            setEditingStatusText(_t('Hãy chọn block cần chỉnh màu trước khi dùng ống hút.'));
             return;
         }
         adjustPickMode = mode;
@@ -8978,8 +9282,8 @@
         document.getElementById('sequencePreviewShell')?.classList.add('is-color-picking');
         document.querySelector(`.adj-pick-btn[data-adjust-pick="${mode}"]`)?.classList.add('is-active');
         setEditingStatusText(mode === 'wb'
-            ? 'Cân bằng trắng: bấm vào một điểm đáng lẽ TRUNG TÍNH (xám/trắng) trên preview. Esc để huỷ.'
-            : 'Hút màu: bấm vào màu cần chỉnh trên preview để chọn đúng dải HSL. Esc để huỷ.');
+            ? _t('Cân bằng trắng: bấm vào một điểm đáng lẽ TRUNG TÍNH (xám/trắng) trên preview. Esc để huỷ.')
+            : _t('Hút màu: bấm vào màu cần chỉnh trên preview để chọn đúng dải HSL. Esc để huỷ.'));
 
         const onDown = (event) => {
             // Chỉ nhận cú bấm TRONG khung preview. Listener gắn ở tầng SHELL (để không bị
@@ -9004,7 +9308,7 @@
             const picked = adjustPickMode;
             stopAdjustPick();
             if (!rgb) {
-                setEditingStatusText('Không lấy được màu ở điểm đó (bấm ra ngoài khung của block đang chỉnh, hoặc video chưa có khung hình).');
+                setEditingStatusText(_t('Không lấy được màu ở điểm đó (bấm ra ngoài khung của block đang chỉnh, hoặc video chưa có khung hình).'));
                 return;
             }
             applyAdjustPick(picked, rgb);
@@ -9014,7 +9318,7 @@
             event.preventDefault();
             event.stopPropagation();
             stopAdjustPick();
-            setEditingStatusText('Đã huỷ ống hút màu.');
+            setEditingStatusText(_t('Đã huỷ ống hút màu.'));
         };
         // Nghe ở SHELL, không phải ở frame: khung chọn và tay cầm mặt nạ là con của shell và
         // phủ lên block, nên listener đặt ở frame sẽ không bao giờ thấy cú bấm trên chúng.
@@ -9035,8 +9339,7 @@
         if (mode === 'hsl') {
             const [hue, sat] = ColorAdjust.rgbToHsl(rgb[0], rgb[1], rgb[2]);
             if (sat < 0.04) {
-                setEditingStatusText('Điểm này gần như xám nên không xác định được dải màu —'
-                    + ' hãy hút vào chỗ có màu rõ.');
+                setEditingStatusText(_t('Điểm này gần như xám nên không xác định được dải màu — hãy hút vào chỗ có màu rõ.'));
                 return;
             }
             const weights = ColorAdjust.bandWeights(hue);
@@ -9045,14 +9348,13 @@
             const band = ColorAdjust.HSL_BANDS[best];
             adjustUiBand = band.key;
             refreshAdjustPanel();
-            setEditingStatusText(`Đã chọn dải ${band.label} (sắc độ ${Math.round(hue)}°).`);
+            setEditingStatusText(_t('Đã chọn dải {name} (sắc độ {hue}°).', { name: band.label, hue: Math.round(hue) }));
             return;
         }
         if (mode !== 'wb') return;
         const wb = ColorAdjust.solveWhiteBalance(currentAdjustments(), rgb);
         if (!wb) {
-            setEditingStatusText('Điểm này đã kẹp đen/trắng nên không còn thông tin màu —'
-                + ' hãy chọn vùng xám hoặc trắng CÒN CHI TIẾT.');
+            setEditingStatusText(_t('Điểm này đã kẹp đen/trắng nên không còn thông tin màu — hãy chọn vùng xám hoặc trắng CÒN CHI TIẾT.'));
             return;
         }
         applyAdjust((a) => {
@@ -9061,8 +9363,10 @@
         }, { saveHistory: true });
         refreshAdjustPanel();
         renderAll();
-        setEditingStatusText(`Cân bằng trắng: Nhiệt độ ${wb.temperature > 0 ? '+' : ''}${wb.temperature}`
-            + `, Tông màu ${wb.tint > 0 ? '+' : ''}${wb.tint}.`);
+        setEditingStatusText(_t('Cân bằng trắng: Nhiệt độ {temp}, Sắc thái {tint}.', {
+            temp: `${wb.temperature > 0 ? '+' : ''}${wb.temperature}`,
+            tint: `${wb.tint > 0 ? '+' : ''}${wb.tint}`,
+        }));
     }
 
     // ---------------------- TỰ ĐỘNG CHỈNH MÀU (Auto Color Grading) ----------------------
@@ -9163,12 +9467,12 @@
     async function runAutoColorGrade() {
         if (autoGradeRunning) return;
         if (!window.AutoGrade || !window.ColorAdjust) {
-            setEditingStatusText('Chưa nạp được engine tự động chỉnh màu.');
+            setEditingStatusText(_t('Chưa nạp được engine tự động chỉnh màu.'));
             return;
         }
         const targets = adjustTargets();
         if (!targets.length) {
-            setEditingStatusText('Hãy chọn ít nhất một block có hình để tự động chỉnh màu.');
+            setEditingStatusText(_t('Hãy chọn ít nhất một block có hình để tự động chỉnh màu.'));
             return;
         }
         // Kiểu chỉnh KHÔNG cần nạp file gì (khác LUT): nó chỉ đổi mấy con số đích trong
@@ -9177,7 +9481,7 @@
 
         autoGradeRunning = true;
         refreshAdjustPanel();
-        setEditingStatusText(`Đang phân tích ${targets.length} block…`);
+        setEditingStatusText(_t('Đang phân tích {n} block…', { n: targets.length }));
         let done = 0;
         const skipped = [];
         try {
@@ -9202,12 +9506,11 @@
         refreshAdjustPanel();
         renderAll();
         if (!done) {
-            setEditingStatusText('Không phân tích được block nào (khung đầu quá tối hoặc'
-                + ' gần như một màu). Hãy thử kéo playhead tới đoạn có hình rõ rồi cắt lại block.');
+            setEditingStatusText(_t('Không phân tích được block nào (khung đầu quá tối hoặc gần như một màu). Hãy thử kéo playhead tới đoạn có hình rõ rồi cắt lại block.'));
         } else {
-            setEditingStatusText(`Tự động chỉnh màu xong ${done} block — kiểu ${style.name}.`
-                + `${skipped.length ? ` Bỏ qua ${skipped.length} block vì khung đầu không phân tích được.` : ''}`
-                + ' Ctrl+Z để hoàn tác.');
+            setEditingStatusText(_t('Tự động chỉnh màu xong {n} block — kiểu {style}.', { n: done, style: style.name })
+                + (skipped.length ? ` ${_t('Bỏ qua {n} block vì khung đầu không phân tích được.', { n: skipped.length })}` : '')
+                + ` ${_t('Ctrl+Z để hoàn tác.')}`);
         }
     }
 
@@ -9249,7 +9552,7 @@
             .catch((err) => {
                 adjustLutLoading.delete(lutId);
                 console.warn('[ColorAdjust] không nạp được LUT', lutId, err);
-                syncAdjustLutHint(`Không nạp được LUT: ${err.message}`);
+                syncAdjustLutHint(_t('Không nạp được LUT: {error}', { error: err.message }));
             });
         return false;
     }
@@ -9260,9 +9563,9 @@
         if (!lutId || !window.ColorAdjust || ColorAdjust.hasUserLut(lutId)) return;
         if (!adjustLuts.length) await refreshLutCatalog();
         const entry = adjustLuts.find((l) => l.id === lutId);
-        if (!entry || !entry.url) throw new Error(`Không tìm thấy LUT "${lutId}"`);
+        if (!entry || !entry.url) throw new Error(_t('Không tìm thấy LUT "{id}"', { id: lutId }));
         const response = await fetch(entry.url);
-        if (!response.ok) throw new Error(`Không tải được LUT "${lutId}" (${response.status})`);
+        if (!response.ok) throw new Error(_t('Không tải được LUT "{id}" ({status})', { id: lutId, status: response.status }));
         ColorAdjust.registerUserLut(lutId, ColorAdjust.parseCube(await response.text()));
     }
 
@@ -9429,9 +9732,9 @@
         if (!hint) return;
         if (message) { hint.textContent = message; return; }
         const a = currentAdjustments();
-        if (!a.lut.id) hint.textContent = 'Chọn một bộ LUT hoặc nhập file .cube của bạn.';
-        else if (ColorAdjust.hasUserLut(a.lut.id)) hint.textContent = 'Đang áp dụng.';
-        else hint.textContent = 'Đang nạp LUT…';
+        if (!a.lut.id) hint.textContent = _t('Chọn một bộ LUT hoặc nhập file .cube của bạn.');
+        else if (ColorAdjust.hasUserLut(a.lut.id)) hint.textContent = _t('Đang áp dụng.');
+        else hint.textContent = _t('Đang nạp LUT…');
     }
 
     // ------------------------------- CURVES: canvas -------------------------------
@@ -9951,7 +10254,7 @@
                 const form = new FormData();
                 form.append('files', file);
                 const response = await fetch(`${API_BASE}/color-luts/import`, { method: 'POST', body: form });
-                if (!response.ok) throw new Error(`Nhập LUT thất bại (${response.status})`);
+                if (!response.ok) throw new Error(_t('Nhập LUT thất bại ({status})', { status: response.status }));
                 const data = await response.json();
                 await refreshLutCatalog();
                 const added = data.lut?.id;
@@ -9963,7 +10266,7 @@
                 refreshAdjustPanel();
                 renderAll();
             } catch (error) {
-                showToast(`Không dùng được file LUT này: ${error.message || error}`, { type: 'error' });
+                showToast(_t('Không dùng được file LUT này: {error}', { error: error.message || error }), { type: 'error' });
             }
         });
         input.click();
@@ -10192,8 +10495,8 @@
                 <div class="ins-sec anim-side" data-ins-tab="anim" data-ins-sub="${sideKey}">
                     <div class="anim-side-label">${sideLabel}</div>
                     ${animEffectGridHtml(`${idBase}Type`, effectOpts, cfg.type, sideKey, glyph)}
-                    <div class="ins-row"><label for="${idBase}Duration">Thời lượng</label><div class="anim-range-row"><input id="${idBase}Duration" type="range" min="0.2" max="${maxDur.toFixed(1)}" step="0.1" value="${shownDur}" ${disabled}><span class="anim-range-val" id="${idBase}DurationVal">${shownDur.toFixed(1)}s</span></div></div>
-                    <div class="ins-row"><label for="${idBase}Easing">Easing</label><div class="fig-field"><select id="${idBase}Easing" ${disabled}>${easingOpts}</select></div></div>
+                    <div class="ins-row"><label for="${idBase}Duration">${_t('Thời lượng')}</label><div class="anim-range-row"><input id="${idBase}Duration" type="range" min="0.2" max="${maxDur.toFixed(1)}" step="0.1" value="${shownDur}" ${disabled}><span class="anim-range-val" id="${idBase}DurationVal">${shownDur.toFixed(1)}s</span></div></div>
+                    <div class="ins-row"><label for="${idBase}Easing">${_t('Nhịp (Easing)')}</label><div class="fig-field"><select id="${idBase}Easing" ${disabled}>${easingOpts}</select></div></div>
                 </div>`;
         };
         const cur = TextAnimations.matchCombo(animObj);
@@ -10203,20 +10506,20 @@
         const shownTotal = Math.min(Math.max(0.4, cInDur + cOutDur), comboMax);
         const ratio = Math.min(0.85, Math.max(0.15, cInDur / ((cInDur + cOutDur) || 1)));
         // Ô đầu tiên = "Không" (value rỗng), thay cho option "— Chọn —" của select cũ
-        const comboOpts = [{ value: '', label: 'Không' }].concat(TextAnimations.COMBO_OPTIONS
+        const comboOpts = [{ value: '', label: _t('Không có') }].concat(TextAnimations.COMBO_OPTIONS
             .filter((o) => !isVideo || (TextAnimations.VIDEO_SUPPORTED_EFFECTS.has(o.in.type) && TextAnimations.VIDEO_SUPPORTED_EFFECTS.has(o.out.type))));
         const comboHtml = `
                 <div class="ins-sec anim-side" data-ins-tab="anim" data-ins-sub="combo">
-                    <div class="anim-side-label">Kết hợp (Vào + Ra)</div>
+                    <div class="anim-side-label">${_t('Kết hợp (Vào + Ra)')}</div>
                     ${animEffectGridHtml('editingAnimComboType', comboOpts, cur, 'combo', glyph)}
-                    <div class="ins-row"><label for="editingAnimComboDuration">Thời lượng</label><div class="anim-range-row"><input id="editingAnimComboDuration" type="range" min="0.4" max="${comboMax.toFixed(1)}" step="0.1" value="${shownTotal.toFixed(1)}"><span class="anim-range-val" id="editingAnimComboDurationVal">${shownTotal.toFixed(1)}s</span></div></div>
-                    <div class="ins-row"><label for="editingAnimComboRatio">Tỉ lệ Vào/Ra</label><div class="anim-range-row"><input id="editingAnimComboRatio" type="range" min="0.15" max="0.85" step="0.05" value="${ratio.toFixed(2)}"><span class="anim-range-val" id="editingAnimComboRatioVal">${Math.round(ratio * 100)}%</span></div></div>
+                    <div class="ins-row"><label for="editingAnimComboDuration">${_t('Thời lượng')}</label><div class="anim-range-row"><input id="editingAnimComboDuration" type="range" min="0.4" max="${comboMax.toFixed(1)}" step="0.1" value="${shownTotal.toFixed(1)}"><span class="anim-range-val" id="editingAnimComboDurationVal">${shownTotal.toFixed(1)}s</span></div></div>
+                    <div class="ins-row"><label for="editingAnimComboRatio">${_t('Tỉ lệ Vào/Ra')}</label><div class="anim-range-row"><input id="editingAnimComboRatio" type="range" min="0.15" max="0.85" step="0.05" value="${ratio.toFixed(2)}"><span class="anim-range-val" id="editingAnimComboRatioVal">${Math.round(ratio * 100)}%</span></div></div>
                 </div>`;
         return `
                 <div class="ins-sec" data-ins-tab="anim">
-                    <div class="ins-sec-head"><span class="ins-sec-title">Hoạt ảnh</span>
-                    <button id="btnAnimPreview" class="anim-preview-btn" type="button" title="Phát thử hiệu ứng Vào/Ra">▶ Xem thử</button></div>
-                </div>${sideHtml('in', 'Vào (In)')}${sideHtml('out', 'Ra (Out)')}${comboHtml}`;
+                    <div class="ins-sec-head"><span class="ins-sec-title">${_t('Hoạt ảnh')}</span>
+                    <button id="btnAnimPreview" class="anim-preview-btn" type="button" title="${_t('Phát thử hiệu ứng Vào/Ra')}">▶ ${_t('Xem thử')}</button></div>
+                </div>${sideHtml('in', _t('Vào (In)'))}${sideHtml('out', _t('Ra (Out)'))}${comboHtml}`;
     }
 
     /* Vẽ khung tĩnh cho mọi ô + gắn hover chạy lặp.
@@ -10320,17 +10623,17 @@
         const currentId = itemIsTextTemplate(item) ? item.template.id : '';
         const templates = (window.TextTemplates && TextTemplates.TEMPLATES) || [];
         const hint = currentId
-            ? 'Bấm một mẫu để đổi block này sang mẫu đó. Nội dung chữ được giữ lại theo thứ tự ô; thông số tự chỉnh (font/màu/nền) trở về thiết kế của mẫu mới.'
-            : 'Bấm một mẫu để biến block chữ này thành mẫu đó — giữ nguyên chỗ đứng, thời lượng và Biến đổi. Nội dung hiện tại vào ô chữ đầu tiên; font/màu/nền theo thiết kế của mẫu. Mẫu tự mang hoạt ảnh riêng nên hiệu ứng Vào/Ra đang đặt sẽ tạm ngưng — quay lại "Văn bản thường" là có lại.';
+            ? _t('Bấm một mẫu để đổi block này sang mẫu đó. Nội dung chữ được giữ lại theo thứ tự ô; thông số tự chỉnh (font/màu/nền) trở về thiết kế của mẫu mới.')
+            : _t('Bấm một mẫu để biến block chữ này thành mẫu đó — giữ nguyên chỗ đứng, thời lượng và Biến đổi. Nội dung hiện tại vào ô chữ đầu tiên; font/màu/nền theo thiết kế của mẫu. Mẫu tự mang hoạt ảnh riêng nên hiệu ứng Vào/Ra đang đặt sẽ tạm ngưng — quay lại "Văn bản thường" là có lại.');
         return `
             <div class="ins-sec" data-ins-tab="text" data-ins-sub="template">
-                <div class="ins-sec-head"><span class="ins-sec-title">${currentId ? 'Đổi mẫu' : 'Dùng mẫu'}</span></div>
+                <div class="ins-sec-head"><span class="ins-sec-title">${currentId ? _t('Đổi mẫu') : _t('Dùng mẫu')}</span></div>
                 <div class="tpl-hint">${hint}</div>
                 <div class="edit-transition-grid tpl-switch-grid">
                     <button class="edit-transition-card ${currentId ? '' : 'is-selected'}" type="button"
-                        data-tpl-switch="" title="Văn bản thường (không dùng mẫu)">
+                        data-tpl-switch="" title="${_t('Văn bản thường (không dùng mẫu)')}">
                         <span class="edit-transition-thumb tpl-none-thumb">Aa</span>
-                        <span class="edit-asset-name">Văn bản thường</span>
+                        <span class="edit-asset-name">${_t('Văn bản thường')}</span>
                     </button>
                     ${templates.map((tpl) => `
                         <button class="edit-transition-card ${tpl.id === currentId ? 'is-selected' : ''}" type="button"
@@ -10358,30 +10661,30 @@
         const saveRow = textEffectSaveOpen ? `
                 <div class="fx-save-row">
                     <input type="text" data-fx-name="1" spellcheck="false" maxlength="60"
-                        placeholder="Tên hiệu ứng" aria-label="Tên hiệu ứng"
+                        placeholder="${_t('Tên hiệu ứng')}" aria-label="${_t('Tên hiệu ứng')}"
                         value="${escapeHtml(textEffectSaveDraft)}">
-                    <button type="button" class="fx-save-go" data-fx-save-confirm="1">Lưu</button>
-                    <button type="button" class="fx-save-cancel" data-fx-save-cancel="1" title="Huỷ">✕</button>
+                    <button type="button" class="fx-save-go" data-fx-save-confirm="1">${_t('Lưu')}</button>
+                    <button type="button" class="fx-save-cancel" data-fx-save-cancel="1" title="${_t('Huỷ')}">✕</button>
                 </div>
-                <div class="tpl-hint">Lưu font, màu chữ, viền, nền và bóng của khối chữ đang chọn thành một hiệu ứng dùng lại được. Cỡ chữ và canh lề KHÔNG được lưu — các số đo viền/bóng quy theo tỉ lệ cỡ chữ nên hiệu ứng áp lên chữ to nhỏ đều cân.</div>` : '';
+                <div class="tpl-hint">${_t('Lưu font, màu chữ, viền, nền và bóng của khối chữ đang chọn thành một hiệu ứng dùng lại được. Cỡ chữ và canh lề KHÔNG được lưu — các số đo viền/bóng quy theo tỉ lệ cỡ chữ nên hiệu ứng áp lên chữ to nhỏ đều cân.')}</div>` : '';
         return `
             <div class="ins-sec" data-ins-tab="text" data-ins-sub="effect">
-                <div class="ins-sec-head"><span class="ins-sec-title">Hiệu ứng chữ</span>
+                <div class="ins-sec-head"><span class="ins-sec-title">${_t('Hiệu ứng chữ')}</span>
                     <button id="btnSaveTextEffect" class="anim-preview-btn" type="button"
-                        title="Lưu diện mạo của khối chữ đang chọn thành một hiệu ứng trong thư viện">+ Lưu hiệu ứng</button></div>
-                <div class="tpl-hint">Bấm một hiệu ứng để áp lên chữ đang chọn — font, màu và viền đổi theo thiết kế của hiệu ứng.</div>
+                        title="${_t('Lưu diện mạo của khối chữ đang chọn thành một hiệu ứng trong thư viện')}">+ ${_t('Lưu hiệu ứng')}</button></div>
+                <div class="tpl-hint">${_t('Bấm một hiệu ứng để áp lên chữ đang chọn — font, màu và viền đổi theo thiết kế của hiệu ứng.')}</div>
                 ${saveRow}
                 <div class="edit-transition-grid tpl-switch-grid">
                     <button class="edit-transition-card ${currentId ? '' : 'is-selected'}" type="button"
-                        data-text-effect="" title="Không hiệu ứng">
+                        data-text-effect="" title="${_t('Không hiệu ứng')}">
                         <span class="edit-transition-thumb tpl-none-thumb">Aa</span>
-                        <span class="edit-asset-name">Không hiệu ứng</span>
+                        <span class="edit-asset-name">${_t('Không hiệu ứng')}</span>
                     </button>
                     ${list.map((fx) => `
                         <button class="edit-transition-card ${fx.id === currentId ? 'is-selected' : ''}" type="button"
                             data-text-effect="${escapeHtml(fx.id)}" title="${escapeHtml(fx.name)}">
                             <span class="edit-transition-thumb text-effect-thumb">${textEffectThumbHtml(fx)}</span>
-                            ${fx.custom ? `<span class="fx-del" role="button" tabindex="-1" data-fx-del="${escapeHtml(fx.id)}" title="Xoá hiệu ứng này khỏi thư viện">✕</span>` : ''}
+                            ${fx.custom ? `<span class="fx-del" role="button" tabindex="-1" data-fx-del="${escapeHtml(fx.id)}" title="${_t('Xoá hiệu ứng này khỏi thư viện')}">✕</span>` : ''}
                             <span class="edit-asset-name">${escapeHtml(fx.name)}</span>
                         </button>`).join('')}
                 </div>
@@ -10396,11 +10699,11 @@
         const k = escapeHtml(key);
         const boxInner = art.src
             ? `<img src="${escapeHtml(art.src)}" alt="">`
-            : '<span class="tpl-art-empty">Chưa<br>có hình</span>';
+            : `<span class="tpl-art-empty">${_t('Chưa<br>có hình')}</span>`;
         return `
             <div class="ins-row">
-                <label>Kiểu</label>
-                <div class="text-align-group" role="group" aria-label="Kiểu hình của mẫu">
+                <label>${_t('Kiểu')}</label>
+                <div class="text-align-group" role="group" aria-label="${_t('Kiểu hình của mẫu')}">
                     ${art.variants.map((v) => `<button type="button" class="ins-align-btn ${v.key === art.variant ? 'is-active' : ''}" data-tpl-variant-layer="${k}" data-tpl-variant="${escapeHtml(v.key)}">${escapeHtml(v.label)}</button>`).join('')}
                 </div>
             </div>
@@ -10412,42 +10715,42 @@
                         data-tpl-art-prefix="${escapeHtml(art.prefix)}"
                         data-tpl-art-variant="${escapeHtml(art.variantLabel)}"
                         aria-expanded="${open ? 'true' : 'false'}"
-                        title="Bấm để chọn hình khác — hoặc kéo một hình từ panel Thư viện › Elements thả vào đây">
+                        title="${_t('Bấm để chọn hình khác — hoặc kéo một hình từ panel Thư viện › Elements thả vào đây')}">
                         ${boxInner}
                     </button>
                     <div class="tpl-art-meta">
                         <div class="tpl-art-name" title="${escapeHtml(art.name || '')}">${escapeHtml(templateArtShortName(art.name) || '—')}</div>
-                        <div class="tpl-art-sub">${art.chosen ? 'Hình bạn đã chọn' : 'Hình mặc định của kiểu'}</div>
+                        <div class="tpl-art-sub">${art.chosen ? _t('Hình bạn đã chọn') : _t('Hình mặc định của kiểu')}</div>
                     </div>
                 </div>
             </div>
             <div class="ins-row">
-                <label>Cỡ hình</label>
+                <label>${_t('Cỡ hình')}</label>
                 <div class="tpl-art-nums">
-                    <div class="fig-field"><span class="fig-affix" title="Cỡ hình so với thiết kế">⤢</span><input type="number"
+                    <div class="fig-field"><span class="fig-affix" title="${_t('Cỡ hình so với thiết kế')}">⤢</span><input type="number"
                         min="${art.scaleMin}" max="${art.scaleMax}" step="1"
                         data-scrub-axis="x" data-scrub-step="1" data-scrub-min="${art.scaleMin}" data-scrub-max="${art.scaleMax}" data-scrub-integer="1"
                         data-tpl-art-layer-num="${k}" data-tpl-art-num="scale" value="${art.scale}"><span class="fig-affix">%</span></div>
                     <button type="button" class="ins-align-btn tpl-art-reset ${art.tweaked ? '' : 'is-off'}"
                         data-tpl-art-reset="${k}" ${art.tweaked ? '' : 'disabled'}
-                        title="Trả cỡ và chỗ đặt của hình về đúng thiết kế" aria-label="Về mặc định">↺</button>
+                        title="${_t('Trả cỡ và chỗ đặt của hình về đúng thiết kế')}" aria-label="${_t('Về mặc định')}">↺</button>
                 </div>
             </div>
             <div class="ins-row">
-                <label>Lệch hình</label>
+                <label>${_t('Lệch hình')}</label>
                 <div class="tpl-art-nums">
-                    <div class="fig-field"><span class="fig-affix" title="Lệch ngang so với chỗ đặt mặc định">X</span><input type="number"
+                    <div class="fig-field"><span class="fig-affix" title="${_t('Lệch ngang so với chỗ đặt mặc định')}">X</span><input type="number"
                         step="1" data-scrub-axis="x" data-scrub-step="1" data-scrub-min="-2000" data-scrub-max="2000" data-scrub-integer="1"
                         data-tpl-art-layer-num="${k}" data-tpl-art-num="dx" value="${art.dx}"></div>
-                    <div class="fig-field"><span class="fig-affix" title="Lệch dọc so với chỗ đặt mặc định">Y</span><input type="number"
+                    <div class="fig-field"><span class="fig-affix" title="${_t('Lệch dọc so với chỗ đặt mặc định')}">Y</span><input type="number"
                         step="1" data-scrub-axis="y" data-scrub-step="1" data-scrub-min="-2000" data-scrub-max="2000" data-scrub-integer="1"
                         data-tpl-art-layer-num="${k}" data-tpl-art-num="dy" value="${art.dy}"></div>
                 </div>
             </div>
             ${open ? `<div class="tpl-art-grid">${choices.length
                 ? choices.map((it) => `<button type="button" class="tpl-art-choice ${it.url === art.src ? 'is-active' : ''}" data-tpl-art-layer="${k}" data-tpl-art-pick="${escapeHtml(it.name)}" data-tpl-art-url="${escapeHtml(it.url)}" title="${escapeHtml(it.name)}"><img src="${escapeHtml(it.url)}" alt="" loading="lazy"><span>${escapeHtml(templateArtShortName(it.name))}</span></button>`).join('')
-                : `<div class="tpl-hint">Không có tệp nào bắt đầu bằng "${escapeHtml(art.prefix)}" trong thư mục <code>library/Elements</code>.</div>`}</div>` : ''}
-            <div class="tpl-hint">Đang ở kiểu <b>${escapeHtml(art.variantLabel)}</b> nên ô hình chỉ nhận tệp <code>${escapeHtml(art.prefix)}</code>. Bấm ô để chọn trong thư viện, hoặc kéo thẳng một hình từ panel Thư viện › Elements thả vào ô. Cỡ hình KHÔNG đổi theo nội dung chữ — thêm bớt chữ chỉ làm hộp chữ nở ra hay co lại.</div>`;
+                : `<div class="tpl-hint">${_t('Không có tệp nào bắt đầu bằng "{prefix}" trong thư mục <code>library/Elements</code>.', { prefix: escapeHtml(art.prefix) })}</div>`}</div>` : ''}
+            <div class="tpl-hint">${_t('Đang ở kiểu <b>{variant}</b> nên ô hình chỉ nhận tệp <code>{prefix}</code>. Bấm ô để chọn trong thư viện, hoặc kéo thẳng một hình từ panel Thư viện › Elements thả vào ô. Cỡ hình KHÔNG đổi theo nội dung chữ — thêm bớt chữ chỉ làm hộp chữ nở ra hay co lại.', { variant: escapeHtml(art.variantLabel), prefix: escapeHtml(art.prefix) })}</div>`;
     }
 
     /* Hàng "Đồng bộ các subtitle" ở đầu khối Biến đổi. CHỈ hiện khi block đang chọn là phụ
@@ -10459,17 +10762,22 @@
     function syncSubtitleSyncRow(item) {
         const section = document.getElementById('inspectorSubtitleSyncSection');
         if (!section) return;
-        const show = isSubtitleItem(item);
-        section.style.display = show ? '' : 'none';
-        if (!show) return;
+        // Cờ là của BỘ chứa block đang chọn (Auto Subtitle hay một tệp đã nhập) — xem
+        // subtitleStyleSyncEnabled.
+        const set = subtitleSetOfItem(item);
+        section.style.display = set ? '' : 'none';
+        if (!set) return;
         const box = document.getElementById('inspectorSubtitleSync');
         const hint = document.getElementById('inspectorSubtitleSyncHint');
-        const on = subtitleStyleSyncEnabled();
+        const on = subtitleStyleSyncEnabled(set.id);
         if (box) box.checked = on;
         if (hint) {
+            const n = subtitleItems(set.id).length;
             hint.textContent = on
-                ? `Mọi thay đổi ở đây áp cho cả ${subtitleItems().length} phụ đề. Nội dung chữ và mốc thời gian của từng câu vẫn giữ riêng.`
-                : 'Mỗi phụ đề giữ kiểu chữ và thông số biến đổi riêng.';
+                ? (set.name
+                    ? _t('Mọi thay đổi ở đây áp cho cả {n} phụ đề của bộ "{name}". Nội dung chữ và mốc thời gian của từng câu vẫn giữ riêng.', { n, name: set.name })
+                    : _t('Mọi thay đổi ở đây áp cho cả {n} phụ đề. Nội dung chữ và mốc thời gian của từng câu vẫn giữ riêng.', { n }))
+                : _t('Mỗi phụ đề giữ kiểu chữ và thông số biến đổi riêng.');
         }
     }
 
@@ -10526,23 +10834,23 @@
             })
             : '';
         extra.innerHTML = `
-            ${count > 1 ? `<div class="editing-selection-note">Đang chọn ${count} block. Transform, Volume và thuộc tính chữ sẽ áp dụng theo nhóm khi phù hợp (riêng ô Nội dung chỉ sửa block đang xem).</div>` : ''}
+            ${count > 1 ? `<div class="editing-selection-note">${_t('Đang chọn {n} block. Biến đổi, âm lượng và thuộc tính chữ sẽ áp dụng theo nhóm khi phù hợp (riêng ô Nội dung chỉ sửa block đang xem).', { n: count })}</div>` : ''}
             ${audioControls ? `
                 <div class="ins-sec" data-ins-tab="audio" data-ins-sub="basic">
-                    <div class="ins-sec-head"><span class="ins-sec-title">Âm thanh</span></div>
+                    <div class="ins-sec-head"><span class="ins-sec-title">${_t('Âm thanh')}</span></div>
                     ${volumeControlsHtml(effectiveVolumePercent(item, overlayLocalTime(item), item.volume), 'editingItem')}
-                    <label class="editing-checkbox-row"><input id="editingItemMuted" type="checkbox" ${item.muted ? 'checked' : ''}> Tắt âm thanh</label>
+                    <label class="editing-checkbox-row"><input id="editingItemMuted" type="checkbox" ${item.muted ? 'checked' : ''}> ${_t('Tắt âm thanh')}</label>
                     ${denoiseControlsHtml(item.audio_denoise, 'editingItem')}
                 </div>
             ` : ''}
             ${itemSupportsSpeed(item) ? speedControlsHtml(item, 'editingItem') : ''}
             ${isTextTemplate ? `
                 <div class="ins-sec" data-ins-tab="text" data-ins-sub="basic">
-                    <div class="ins-sec-head"><span class="ins-sec-title">Mẫu văn bản</span></div>
+                    <div class="ins-sec-head"><span class="ins-sec-title">${_t('Mẫu văn bản')}</span></div>
                     <div class="tpl-name-row">${escapeHtml(itemTextTemplate(item)?.name || item.template.id)}</div>
                     ${(itemTextTemplate(item)?.slots || []).map((slot, i) => `
                         <div class="ins-stack">
-                            <label for="tplSlot${i}">${escapeHtml(slot.label || `Chữ ${i + 1}`)}</label>
+                            <label for="tplSlot${i}">${escapeHtml(slot.label || _t('Chữ {n}', { n: i + 1 }))}</label>
                             <textarea id="tplSlot${i}" data-tpl-slot="${i}" rows="2">${escapeHtml(textTemplateTexts(item)[i] || '')}</textarea>
                         </div>
                     `).join('')}
@@ -10564,51 +10872,51 @@
                     `).join('')}
                     ${tplTextLayers.length > 1 ? `
                         <div class="ins-row">
-                            <label>Lớp chữ</label>
-                            <div class="text-align-group" role="group" aria-label="Lớp chữ đang chỉnh">
+                            <label>${_t('Lớp chữ')}</label>
+                            <div class="text-align-group" role="group" aria-label="${_t('Lớp chữ đang chỉnh')}">
                                 ${tplTextLayers.map((info) => `<button type="button" class="ins-align-btn ${info.key === tplActiveKey ? 'is-active' : ''}" data-tpl-layer="${escapeHtml(info.key)}">${escapeHtml(info.label)}</button>`).join('')}
                             </div>
                         </div>
-                        <div class="tpl-hint">Typography &amp; Text Style bên dưới áp cho lớp chữ đang chọn.</div>
+                        <div class="tpl-hint">${_t('Kiểu chữ &amp; Phong cách chữ bên dưới áp cho lớp chữ đang chọn.')}</div>
                     ` : ''}
-                    <div class="tpl-hint">Mẫu tự mang hoạt ảnh riêng. Kéo/phóng/xoay cả nhóm ở subtab "Biến đổi".</div>
+                    <div class="tpl-hint">${_t('Mẫu tự mang hoạt ảnh riêng. Kéo/phóng/xoay cả nhóm ở subtab "Biến đổi".')}</div>
                 </div>
             ` : ''}
             ${textControls ? `
                 ${textTemplateSwitchSectionHtml(item)}
                 <div class="ins-sec" style="position:relative;" data-ins-tab="text" data-ins-sub="basic">
                     <div class="ins-sec-head">
-                        <span class="ins-sec-title">Typography</span>
-                        <button id="btnTextSettings" class="ins-gear-btn" type="button" title="Thuộc tính mở rộng" aria-label="Thuộc tính mở rộng" aria-haspopup="dialog" aria-expanded="false">
+                        <span class="ins-sec-title">${_t('Kiểu chữ')}</span>
+                        <button id="btnTextSettings" class="ins-gear-btn" type="button" title="${_t('Thuộc tính mở rộng')}" aria-label="${_t('Thuộc tính mở rộng')}" aria-haspopup="dialog" aria-expanded="false">
                             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M5 21v-6M5 11V3M12 21v-9M12 8V3M19 21v-4M19 13V3"/><circle cx="5" cy="13" r="2"/><circle cx="12" cy="6" r="2"/><circle cx="19" cy="15" r="2"/></svg>
                         </button>
                     </div>
                     <div id="textSettingsPopup" class="text-settings-popup">
                         <div class="tsp-group">
-                            <div class="tsp-label">Decoration</div>
+                            <div class="tsp-label">${_t('Trang trí')}</div>
                             <div class="tsp-row">
-                                <button type="button" class="tsp-btn ${style.deco_underline ? 'is-active' : ''}" data-text-deco="underline" title="Underline"><span style="text-decoration:underline">U</span></button>
-                                <button type="button" class="tsp-btn ${style.deco_strike ? 'is-active' : ''}" data-text-deco="strike" title="Strikethrough"><span style="text-decoration:line-through">S</span></button>
+                                <button type="button" class="tsp-btn ${style.deco_underline ? 'is-active' : ''}" data-text-deco="underline" title="${_t('Gạch chân')}"><span style="text-decoration:underline">U</span></button>
+                                <button type="button" class="tsp-btn ${style.deco_strike ? 'is-active' : ''}" data-text-deco="strike" title="${_t('Gạch ngang')}"><span style="text-decoration:line-through">S</span></button>
                             </div>
                         </div>
                         <div class="tsp-group">
-                            <div class="tsp-label">Case</div>
+                            <div class="tsp-label">${_t('Chữ hoa/thường')}</div>
                             <div class="tsp-row tsp-wrap">
                                 ${/* small-caps render bằng font-variant của CSS; engine mẫu vẽ
                                       trên <canvas> nên không có đường tương đương -> bỏ khỏi
                                       danh sách với mẫu, thà thiếu còn hơn bấm mà không đổi gì. */
-    [['none', 'None'], ['uppercase', 'AG'], ['lowercase', 'ag'], ['title', 'Ag'], ...(isTextTemplate ? [] : [['small-caps', 'Aᴀ']])]
-        .map(([v, l]) => `<button type="button" class="tsp-btn ${(style.text_case || 'none') === v ? 'is-active' : ''}" data-text-case="${v}" title="${v}">${l}</button>`).join('')}
+    [['none', _t('Không có'), _t('Không đổi')], ['uppercase', 'AG', _t('Chữ hoa')], ['lowercase', 'ag', _t('Chữ thường')], ['title', 'Ag', _t('Viết hoa chữ đầu')], ...(isTextTemplate ? [] : [['small-caps', 'Aᴀ', _t('Chữ hoa nhỏ')]])]
+        .map(([v, l, tip]) => `<button type="button" class="tsp-btn ${(style.text_case || 'none') === v ? 'is-active' : ''}" data-text-case="${v}" title="${tip}">${l}</button>`).join('')}
                             </div>
                         </div>
                     </div>
                     ${isTextTemplate ? '' : `
                     <div class="ins-stack">
-                        <label for="editingItemText">Nội dung</label>
+                        <label for="editingItemText">${_t('Nội dung')}</label>
                         <textarea id="editingItemText" rows="2">${escapeHtml(item.text || '')}</textarea>
                     </div>`}
                     <div class="ins-row">
-                        <label id="editingTextFontLabel">Font</label>
+                        <label id="editingTextFontLabel">${_t('Phông chữ')}</label>
                         ${fontPickerHtml(style.font_family)}
                     </div>
                     <div class="ins-row-2">
@@ -10616,8 +10924,8 @@
                         <div class="fig-field"><span class="fig-affix">Aa</span><input id="editingTextFontSize" type="number" min="8" max="400" step="1" data-scrub-axis="x" value="${Number(style.font_size) || 64}"></div>
                     </div>
                     <div class="ins-row-2">
-                        <div class="fig-field"><span class="fig-affix" title="Line height">↕</span><input id="editingTextLineHeight" type="text" inputmode="decimal" data-scrub-axis="y" data-lh-auto="${(style.line_height === undefined || style.line_height === 'auto') ? '1' : '0'}" placeholder="${textLhResolved}" value="${(style.line_height !== undefined && style.line_height !== 'auto') ? Math.round(Number(style.line_height)) : 'Auto'}"></div>
-                        <div class="fig-field"><span class="fig-affix" title="Letter spacing">AV</span><input id="editingTextLetterSpacing" type="number" step="1" data-scrub-axis="x" value="${
+                        <div class="fig-field"><span class="fig-affix" title="${_t('Giãn dòng')}">↕</span><input id="editingTextLineHeight" type="text" inputmode="decimal" data-scrub-axis="y" data-lh-auto="${(style.line_height === undefined || style.line_height === 'auto') ? '1' : '0'}" placeholder="${textLhResolved}" value="${(style.line_height !== undefined && style.line_height !== 'auto') ? Math.round(Number(style.line_height)) : 'Auto'}"></div>
+                        <div class="fig-field"><span class="fig-affix" title="${_t('Giãn chữ')}">AV</span><input id="editingTextLetterSpacing" type="number" step="1" data-scrub-axis="x" value="${
     /* Làm tròn 2 số lẻ CHỈ ĐỂ HIỂN THỊ: text thường luôn ra số nguyên, nhưng MẪU VĂN BẢN
        quy letter-spacing từ px thiết kế sang % (1.36px ở cỡ 147.4 = 0.9226594…%) — bày
        nguyên dãy thập phân ra ô nhập thì không đọc nổi. Giá trị THẬT vẫn nằm trong
@@ -10625,26 +10933,26 @@
     Math.round((Number(style.letter_spacing) || 0) * 100) / 100}"><span class="fig-affix">%</span></div>
                     </div>
                     <div class="ins-row">
-                        <label for="editingTextColor">Màu</label>
-                        <div class="fig-field color-row"><input id="editingTextColor" class="color-swatch" type="color" value="${style.color || '#ffffff'}"><input type="text" class="color-hex" value="${hexLabel(style.color || '#ffffff')}" maxlength="6" spellcheck="false" autocomplete="off" aria-label="Mã màu (hex)"></div>
+                        <label for="editingTextColor">${_t('Màu')}</label>
+                        <div class="fig-field color-row"><input id="editingTextColor" class="color-swatch" type="color" value="${style.color || '#ffffff'}"><input type="text" class="color-hex" value="${hexLabel(style.color || '#ffffff')}" maxlength="6" spellcheck="false" autocomplete="off" aria-label="${_t('Mã màu (hex)')}"></div>
                     </div>
                     <div class="ins-row">
-                        <label id="editingTextAlignLabel">Căn lề</label>
+                        <label id="editingTextAlignLabel">${_t('Căn lề')}</label>
                         <div class="text-align-group" role="group" aria-labelledby="editingTextAlignLabel">
-                            ${['left', 'center', 'right'].map((a) => `<button type="button" class="ins-align-btn ${(style.align || 'center') === a ? 'is-active' : ''}" data-text-align="${a}" title="${a}">${alignIconSvg(a)}</button>`).join('')}
+                            ${[['left', _t('Căn trái')], ['center', _t('Căn giữa')], ['right', _t('Căn phải')]].map(([a, tip]) => `<button type="button" class="ins-align-btn ${(style.align || 'center') === a ? 'is-active' : ''}" data-text-align="${a}" title="${tip}">${alignIconSvg(a)}</button>`).join('')}
                         </div>
                     </div>
                 </div>
                 <div class="ins-sec" data-ins-tab="text" data-ins-sub="basic">
-                    <div class="ins-sec-head"><span class="ins-sec-title">Text Style</span></div>
+                    <div class="ins-sec-head"><span class="ins-sec-title">${_t('Phong cách chữ')}</span></div>
                     <div class="text-preset-grid">
                         ${TEXT_STYLE_PRESETS.map((p) => `<button type="button" class="text-preset ${isTextPresetActive(style, p.patch) ? 'is-active' : ''}" data-text-preset="${p.id}" title="${p.id}"><span style="${textPresetThumbCss(p.patch)}">Aa</span></button>`).join('')}
                     </div>
                     <div class="ins-row">
-                        <label for="editingTextStrokeOn">Viền</label>
+                        <label for="editingTextStrokeOn">${_t('Viền')}</label>
                         <div class="ts-ctl">
                             <input id="editingTextStrokeOn" type="checkbox" ${style.stroke_enabled ? 'checked' : ''}>
-                            <div class="fig-field color-row ts-color"><input id="editingTextStrokeColor" class="color-swatch" type="color" value="${style.stroke_color || '#000000'}"><input type="text" class="color-hex color-hex-sm" value="${hexLabel(style.stroke_color || '#000000')}" maxlength="6" spellcheck="false" autocomplete="off" aria-label="Mã màu (hex)"></div>
+                            <div class="fig-field color-row ts-color"><input id="editingTextStrokeColor" class="color-swatch" type="color" value="${style.stroke_color || '#000000'}"><input type="text" class="color-hex color-hex-sm" value="${hexLabel(style.stroke_color || '#000000')}" maxlength="6" spellcheck="false" autocomplete="off" aria-label="${_t('Mã màu (hex)')}"></div>
                             <div class="fig-field ts-num"><span class="fig-affix">W</span><input id="editingTextStrokeWidth" type="number" min="0" max="60" step="1" data-scrub-axis="x" value="${Number(style.stroke_width) || 0}"></div>
                         </div>
                     </div>
@@ -10653,40 +10961,40 @@
                           không có vòng ngoài, và cả hai vòng đều tắt theo ô "Viền" ở trên
                           — cùng luật với engine mẫu văn bản. */''}
                     <div class="ins-row">
-                        <label for="editingTextStroke2Width">Viền ngoài</label>
+                        <label for="editingTextStroke2Width">${_t('Viền ngoài')}</label>
                         <div class="ts-ctl">
-                            <div class="fig-field color-row ts-color"><input id="editingTextStroke2Color" class="color-swatch" type="color" value="${style.stroke2_color || '#000000'}"><input type="text" class="color-hex color-hex-sm" value="${hexLabel(style.stroke2_color || '#000000')}" maxlength="6" spellcheck="false" autocomplete="off" aria-label="Mã màu (hex)"></div>
+                            <div class="fig-field color-row ts-color"><input id="editingTextStroke2Color" class="color-swatch" type="color" value="${style.stroke2_color || '#000000'}"><input type="text" class="color-hex color-hex-sm" value="${hexLabel(style.stroke2_color || '#000000')}" maxlength="6" spellcheck="false" autocomplete="off" aria-label="${_t('Mã màu (hex)')}"></div>
                             <div class="fig-field ts-num"><span class="fig-affix">W</span><input id="editingTextStroke2Width" type="number" min="0" max="60" step="1" data-scrub-axis="x" value="${Number(style.stroke2_width) || 0}"></div>
                         </div>
                     </div>
                     <div class="ins-row">
-                        <label for="editingTextBgOn">Nền</label>
+                        <label for="editingTextBgOn">${_t('Nền')}</label>
                         <div class="ts-ctl">
                             <input id="editingTextBgOn" type="checkbox" ${style.bg_enabled ? 'checked' : ''}>
-                            <div class="fig-field color-row" style="flex:1"><input id="editingTextBgColor" class="color-swatch" type="color" value="${style.bg_color || '#000000'}"><input type="text" class="color-hex" value="${hexLabel(style.bg_color || '#000000')}" maxlength="6" spellcheck="false" autocomplete="off" aria-label="Mã màu (hex)"></div>
+                            <div class="fig-field color-row" style="flex:1"><input id="editingTextBgColor" class="color-swatch" type="color" value="${style.bg_color || '#000000'}"><input type="text" class="color-hex" value="${hexLabel(style.bg_color || '#000000')}" maxlength="6" spellcheck="false" autocomplete="off" aria-label="${_t('Mã màu (hex)')}"></div>
                         </div>
                     </div>
                     <div class="ins-row-2">
-                        <div class="fig-field"><span class="fig-affix" title="Bo góc nền">R</span><input id="editingTextBgRadius" type="number" min="0" max="999" step="1" data-scrub-axis="x" value="${Number(style.bg_radius) || 0}"></div>
-                        <div class="fig-field"><span class="fig-affix" title="Độ mờ nền">O</span><input id="editingTextBgOpacity" type="number" min="0" max="100" step="1" data-scrub-axis="x" value="${style.bg_opacity == null ? 100 : Number(style.bg_opacity)}"><span class="fig-affix">%</span></div>
+                        <div class="fig-field"><span class="fig-affix" title="${_t('Bo góc nền')}">R</span><input id="editingTextBgRadius" type="number" min="0" max="999" step="1" data-scrub-axis="x" value="${Number(style.bg_radius) || 0}"></div>
+                        <div class="fig-field"><span class="fig-affix" title="${_t('Độ mờ nền')}">O</span><input id="editingTextBgOpacity" type="number" min="0" max="100" step="1" data-scrub-axis="x" value="${style.bg_opacity == null ? 100 : Number(style.bg_opacity)}"><span class="fig-affix">%</span></div>
                     </div>
                     ${/* Lề chữ ↔ mép nền (Width/Height của nền, kiểu CapCut). Theo % CỠ CHỮ nên
                           đổi cỡ chữ không làm hỏng tỉ lệ — xem textBgPadPx. Với MẪU VĂN BẢN, ô H
                           giữ đúng tỉ lệ lề trên/dưới của thiết kế (xem textBgPadPatch). */''}
                     <div class="ins-row-2">
-                        <div class="fig-field"><span class="fig-affix" title="Lề ngang: khoảng cách chữ tới mép trái/phải của nền (theo % cỡ chữ)">W</span><input id="editingTextBgPadX" type="number" min="0" max="300" step="1" data-scrub-axis="x" value="${textBgPadPercent(style, Number(style.font_size) || 64, 'x')}"><span class="fig-affix">%</span></div>
-                        <div class="fig-field"><span class="fig-affix" title="Lề dọc: khoảng cách chữ tới mép trên/dưới của nền (theo % cỡ chữ)">H</span><input id="editingTextBgPadY" type="number" min="0" max="300" step="1" data-scrub-axis="y" value="${textBgPadPercent(style, Number(style.font_size) || 64, 'y')}"><span class="fig-affix">%</span></div>
+                        <div class="fig-field"><span class="fig-affix" title="${_t('Lề ngang: khoảng cách chữ tới mép trái/phải của nền (theo % cỡ chữ)')}">W</span><input id="editingTextBgPadX" type="number" min="0" max="300" step="1" data-scrub-axis="x" value="${textBgPadPercent(style, Number(style.font_size) || 64, 'x')}"><span class="fig-affix">%</span></div>
+                        <div class="fig-field"><span class="fig-affix" title="${_t('Lề dọc: khoảng cách chữ tới mép trên/dưới của nền (theo % cỡ chữ)')}">H</span><input id="editingTextBgPadY" type="number" min="0" max="300" step="1" data-scrub-axis="y" value="${textBgPadPercent(style, Number(style.font_size) || 64, 'y')}"><span class="fig-affix">%</span></div>
                     </div>
                     <div class="ins-row">
-                        <label for="editingTextShadowOn">Bóng</label>
+                        <label for="editingTextShadowOn">${_t('Bóng')}</label>
                         <div class="ts-ctl">
                             <input id="editingTextShadowOn" type="checkbox" ${style.shadow_enabled ? 'checked' : ''}>
-                            <div class="fig-field color-row" style="flex:1"><input id="editingTextShadowColor" class="color-swatch" type="color" value="${style.shadow_color || '#000000'}"><input type="text" class="color-hex" value="${hexLabel(style.shadow_color || '#000000')}" maxlength="6" spellcheck="false" autocomplete="off" aria-label="Mã màu (hex)"></div>
+                            <div class="fig-field color-row" style="flex:1"><input id="editingTextShadowColor" class="color-swatch" type="color" value="${style.shadow_color || '#000000'}"><input type="text" class="color-hex" value="${hexLabel(style.shadow_color || '#000000')}" maxlength="6" spellcheck="false" autocomplete="off" aria-label="${_t('Mã màu (hex)')}"></div>
                         </div>
                     </div>
                     <div class="ins-row-2">
-                        <div class="fig-field"><span class="fig-affix" title="Lệch ngang của bóng">X</span><input id="editingTextShadowDx" type="number" step="1" data-scrub-axis="x" value="${Number(style.shadow_dx) || 0}"></div>
-                        <div class="fig-field"><span class="fig-affix" title="Lệch dọc của bóng">Y</span><input id="editingTextShadowDy" type="number" step="1" data-scrub-axis="y" value="${Number(style.shadow_dy) || 0}"></div>
+                        <div class="fig-field"><span class="fig-affix" title="${_t('Lệch ngang của bóng')}">X</span><input id="editingTextShadowDx" type="number" step="1" data-scrub-axis="x" value="${Number(style.shadow_dx) || 0}"></div>
+                        <div class="fig-field"><span class="fig-affix" title="${_t('Lệch dọc của bóng')}">Y</span><input id="editingTextShadowDy" type="number" step="1" data-scrub-axis="y" value="${Number(style.shadow_dy) || 0}"></div>
                     </div>
                     ${/* Ô nhoè TRƯỚC ĐÂY mang ký tự "○" — trông y hệt chữ "O" của ô Độ mờ ngay
                           trên (khối Nền), nên người dùng đọc nhầm nó là độ mờ của bóng. Nay:
@@ -10694,8 +11002,8 @@
                           Độ mờ THẬT — `shadow_opacity` vốn đã nằm trong style và đã được cả
                           preview lẫn khâu xuất đọc, chỉ là chưa từng có ô để chỉnh. */''}
                     <div class="ins-row-2">
-                        <div class="fig-field"><span class="fig-affix" title="Độ nhoè (blur) của bóng">${blurIconSvg()}</span><input id="editingTextShadowBlur" type="number" min="0" step="1" data-scrub-axis="x" value="${Number(style.shadow_blur) || 0}"></div>
-                        <div class="fig-field"><span class="fig-affix" title="Độ mờ của bóng">O</span><input id="editingTextShadowOpacity" type="number" min="0" max="100" step="1" data-scrub-axis="x" value="${style.shadow_opacity == null ? 100 : Number(style.shadow_opacity)}"><span class="fig-affix">%</span></div>
+                        <div class="fig-field"><span class="fig-affix" title="${_t('Độ nhoè (blur) của bóng')}">${blurIconSvg()}</span><input id="editingTextShadowBlur" type="number" min="0" step="1" data-scrub-axis="x" value="${Number(style.shadow_blur) || 0}"></div>
+                        <div class="fig-field"><span class="fig-affix" title="${_t('Độ mờ của bóng')}">O</span><input id="editingTextShadowOpacity" type="number" min="0" max="100" step="1" data-scrub-axis="x" value="${style.shadow_opacity == null ? 100 : Number(style.shadow_opacity)}"><span class="fig-affix">%</span></div>
                     </div>
                 </div>
                 ${textEffectSectionHtml(item, style)}
@@ -10706,9 +11014,9 @@
             ${item.type === 'adjust' ? buildAdjustSectionsHtml(item.adjustments, { mask: false, retouch: false }) : ''}
             ${shapeControls ? `
                 <div class="ins-sec" data-ins-tab="shape" data-ins-sub="basic">
-                    <div class="ins-sec-head"><span class="ins-sec-title">Hình dạng</span></div>
+                    <div class="ins-sec-head"><span class="ins-sec-title">${_t('Hình dạng')}</span></div>
                     <div class="ins-row">
-                        <label for="editingShapeType">Loại</label>
+                        <label for="editingShapeType">${_t('Loại')}</label>
                         <div class="fig-field"><select id="editingShapeType">${shapeOptionsHtml(shapeStyle.shape_type)}</select></div>
                     </div>
                     <div class="ins-row-2">
@@ -10717,31 +11025,31 @@
                     </div>
                     ${!isLineShape ? `
                     <div class="ins-row">
-                        <label for="editingShapeFillColor">Fill</label>
-                        <div class="fig-field color-row"><input id="editingShapeFillColor" class="color-swatch" type="color" value="${shapeStyle.fill_color}"><input type="text" class="color-hex" value="${hexLabel(shapeStyle.fill_color)}" maxlength="6" spellcheck="false" autocomplete="off" aria-label="Mã màu (hex)"></div>
+                        <label for="editingShapeFillColor">${_t('Màu tô')}</label>
+                        <div class="fig-field color-row"><input id="editingShapeFillColor" class="color-swatch" type="color" value="${shapeStyle.fill_color}"><input type="text" class="color-hex" value="${hexLabel(shapeStyle.fill_color)}" maxlength="6" spellcheck="false" autocomplete="off" aria-label="${_t('Mã màu (hex)')}"></div>
                     </div>
                     ` : ''}
                     <div class="ins-row">
-                        <label for="editingShapeStrokeColor">${isLineShape ? 'Màu' : 'Line'}</label>
-                        <div class="fig-field color-row"><input id="editingShapeStrokeColor" class="color-swatch" type="color" value="${shapeStyle.stroke_color}"><input type="text" class="color-hex" value="${hexLabel(shapeStyle.stroke_color)}" maxlength="6" spellcheck="false" autocomplete="off" aria-label="Mã màu (hex)"></div>
+                        <label for="editingShapeStrokeColor">${isLineShape ? _t('Màu') : _t('Viền')}</label>
+                        <div class="fig-field color-row"><input id="editingShapeStrokeColor" class="color-swatch" type="color" value="${shapeStyle.stroke_color}"><input type="text" class="color-hex" value="${hexLabel(shapeStyle.stroke_color)}" maxlength="6" spellcheck="false" autocomplete="off" aria-label="${_t('Mã màu (hex)')}"></div>
                     </div>
                     <div class="ins-row-2">
                         <div class="fig-field"><span class="fig-affix">SW</span><input id="editingShapeStrokeWidth" type="number" min="0" max="100" step="1" value="${Math.round(shapeStyle.stroke_width)}"></div>
                         ${!isLineShape ? `<div class="fig-field"><select id="editingShapeStrokePosition">
-                            <option value="inside" ${shapeStyle.stroke_position === 'inside' ? 'selected' : ''}>Inside</option>
-                            <option value="center" ${shapeStyle.stroke_position === 'center' ? 'selected' : ''}>Center</option>
-                            <option value="outside" ${shapeStyle.stroke_position === 'outside' ? 'selected' : ''}>Outside</option>
+                            <option value="inside" ${shapeStyle.stroke_position === 'inside' ? 'selected' : ''}>${_t('Bên trong')}</option>
+                            <option value="center" ${shapeStyle.stroke_position === 'center' ? 'selected' : ''}>${_t('Ở giữa')}</option>
+                            <option value="outside" ${shapeStyle.stroke_position === 'outside' ? 'selected' : ''}>${_t('Bên ngoài')}</option>
                         </select></div>` : ''}
                     </div>
                     ${supportsShapeRadius ? `
                         <div class="ins-row">
-                            <label for="editingShapeCornerRadius">Bo góc</label>
+                            <label for="editingShapeCornerRadius">${_t('Bo góc')}</label>
                             <div class="fig-field"><input id="editingShapeCornerRadius" type="number" min="0" max="500" step="1" value="${Math.round(shapeStyle.corner_radius)}"></div>
                         </div>
                     ` : ''}
                     ${supportsPolygonSides ? `
                         <div class="ins-row">
-                            <label for="editingShapeSides">Số cạnh</label>
+                            <label for="editingShapeSides">${_t('Số cạnh')}</label>
                             <div class="fig-field"><input id="editingShapeSides" type="number" min="3" max="${MAX_POLYGON_SIDES}" step="1" value="${shapeStyle.sides}"></div>
                         </div>
                     ` : ''}
@@ -10751,7 +11059,7 @@
                             <div class="fig-field"><span class="fig-affix">R</span><input id="editingShapeOuterCornerRadius" type="number" min="0" max="500" step="1" value="${Math.round(shapeStyle.outer_corner_radius)}"></div>
                         </div>
                         <div class="ins-row">
-                            <label for="editingShapeInnerCornerRadius">Bo trong</label>
+                            <label for="editingShapeInnerCornerRadius">${_t('Bo trong')}</label>
                             <div class="fig-field"><input id="editingShapeInnerCornerRadius" type="number" min="0" max="500" step="1" value="${Math.round(shapeStyle.inner_corner_radius)}"></div>
                         </div>
                     ` : ''}
@@ -10797,9 +11105,9 @@
         // phải theo chỗ block thật sự chiếm, không theo độ dài đoạn nguồn.
         const clipDuration = Math.max(0.05, (Number(clip.end) || 0) - (Number(clip.start) || 0)) / speedRate(clip);
         const animHtml = count === 1 ? buildAnimSectionHtml(clip.animation, { isVideo: true, duration: clipDuration }) : '';
-        extra.innerHTML = `${count > 1 ? `<div class="editing-selection-note">Đang chọn ${count} block. Thay đổi Volume sẽ áp dụng cho các block có âm thanh.</div>` : ''}
+        extra.innerHTML = `${count > 1 ? `<div class="editing-selection-note">${_t('Đang chọn {n} block. Thay đổi âm lượng sẽ áp dụng cho các block có âm thanh.', { n: count })}</div>` : ''}
             <div class="ins-sec" data-ins-tab="audio" data-ins-sub="basic">
-                <div class="ins-sec-head"><span class="ins-sec-title">Âm thanh</span></div>
+                <div class="ins-sec-head"><span class="ins-sec-title">${_t('Âm thanh')}</span></div>
                 ${volumeControlsHtml(effectiveVolumePercent(clip, mainClipLocalTime(clip), ensureMainClipAudioVolume(clip)), 'editingMain')}
                 ${denoiseControlsHtml(clip.audio_denoise, 'editingMain')}
             </div>${speedControlsHtml(clip, 'editingMain')}${animHtml}${buildVideoMaskSectionHtml()}${buildAdjustSectionsHtml(clip.adjustments)}`;
@@ -10831,13 +11139,13 @@
         // Cụm ◂ ◆ ▸ giống hệt các thông số keyframe được khác (xem adjustSliderRow): cùng
         // class + data-kf-field nên dùng chung luôn handler và hàm đồng bộ trạng thái.
         const kf = `<div class="kf-group">`
-            + `<button type="button" class="kf-nav" data-kf-field="volume" data-kf-dir="prev" aria-label="Keyframe trước">◂</button>`
-            + `<button type="button" class="kf-diamond" data-kf-field="volume" aria-label="Keyframe âm lượng">◆</button>`
-            + `<button type="button" class="kf-nav" data-kf-field="volume" data-kf-dir="next" aria-label="Keyframe sau">▸</button>`
+            + `<button type="button" class="kf-nav" data-kf-field="volume" data-kf-dir="prev" aria-label="${_t('Keyframe trước')}">◂</button>`
+            + `<button type="button" class="kf-diamond" data-kf-field="volume" aria-label="${_t('Keyframe âm lượng')}">◆</button>`
+            + `<button type="button" class="kf-nav" data-kf-field="volume" data-kf-dir="next" aria-label="${_t('Keyframe sau')}">▸</button>`
             + `</div>`;
         return `
             <div class="ins-row">
-                <label for="${prefix}VolumeDbRange">Volume</label>
+                <label for="${prefix}VolumeDbRange">${_t('Âm lượng')}</label>
                 <div class="inspector-control-row">
                     <input id="${prefix}VolumeDbRange" type="range" min="-60" max="20" step="0.1" value="${volumeDb.toFixed(1)}">
                     <div class="fig-field"><input id="${prefix}VolumeDb" type="text" inputmode="decimal" value="${volumeDb.toFixed(1)}"><span class="fig-affix">dB</span></div>
@@ -10998,19 +11306,19 @@
         }).join('');
         const reduction = window.AudioDenoise.reductionDb(denoise);
         return `
-            <label class="editing-checkbox-row"><input id="${prefix}DenoiseOn" type="checkbox" ${denoise.enabled ? 'checked' : ''}> Khử tiếng ồn</label>
+            <label class="editing-checkbox-row"><input id="${prefix}DenoiseOn" type="checkbox" ${denoise.enabled ? 'checked' : ''}> ${_t('Khử tiếng ồn')}</label>
             <div class="ins-row">
-                <label for="${prefix}DenoiseProfile">Kiểu ồn</label>
+                <label for="${prefix}DenoiseProfile">${_t('Kiểu ồn')}</label>
                 <div class="fig-field"><select id="${prefix}DenoiseProfile" ${off}>${options}</select></div>
             </div>
             <div class="ins-row">
-                <label for="${prefix}DenoiseAmount">Mức độ</label>
+                <label for="${prefix}DenoiseAmount">${_t('Mức độ')}</label>
                 <div class="anim-range-row">
                     <input id="${prefix}DenoiseAmount" type="range" min="0" max="100" step="1" value="${denoise.amount}" ${off}>
                     <span class="anim-range-val" id="${prefix}DenoiseAmountVal">${denoise.amount}%</span>
                 </div>
             </div>
-            <div id="${prefix}DenoiseReadout" class="editing-db-readout">${denoise.enabled ? `Giảm tối đa ${reduction.toFixed(1)} dB` : 'Đang tắt'}</div>
+            <div id="${prefix}DenoiseReadout" class="editing-db-readout">${denoise.enabled ? _t('Giảm tối đa {db} dB', { db: reduction.toFixed(1) }) : _t('Đang tắt')}</div>
         `;
     }
 
@@ -11030,8 +11338,8 @@
         if (amountVal) amountVal.textContent = `${denoise.amount}%`;
         if (readout) {
             readout.textContent = denoise.enabled
-                ? `Giảm tối đa ${window.AudioDenoise.reductionDb(denoise).toFixed(1)} dB`
-                : 'Đang tắt';
+                ? _t('Giảm tối đa {db} dB', { db: window.AudioDenoise.reductionDb(denoise).toFixed(1) })
+                : _t('Đang tắt');
         }
         // Lane bị khoá thì mọi control đã disabled sẵn từ nơi dựng HTML; ở đây chỉ lo
         // phần phụ thuộc công tắc bật/tắt.
@@ -11157,16 +11465,16 @@
         }).join('');
         return `
             <div class="ins-sec" data-ins-tab="speed" data-ins-sub="basic">
-                <div class="ins-sec-head"><span class="ins-sec-title">Tốc độ</span></div>
+                <div class="ins-sec-head"><span class="ins-sec-title">${_t('Tốc độ')}</span></div>
                 <div class="ins-row">
-                    <label for="${prefix}SpeedRange">Tốc độ</label>
+                    <label for="${prefix}SpeedRange">${_t('Tốc độ')}</label>
                     <div class="inspector-control-row">
                         <input id="${prefix}SpeedRange" type="range" min="0" max="${SPEED_SLIDER_STEPS}" step="1" value="${speedRateToSlider(cfg.rate)}">
                         <div class="fig-field"><input id="${prefix}SpeedRate" type="text" inputmode="decimal" value="${cfg.rate}"><span class="fig-affix">x</span></div>
                     </div>
                 </div>
                 <div class="speed-preset-row" id="${prefix}SpeedPresets">${presets}</div>
-                <label class="editing-checkbox-row"><input id="${prefix}SpeedPitch" type="checkbox" ${cfg.pitch_correct ? 'checked' : ''}> Giữ cao độ giọng nói</label>
+                <label class="editing-checkbox-row"><input id="${prefix}SpeedPitch" type="checkbox" ${cfg.pitch_correct ? 'checked' : ''}> ${_t('Giữ cao độ giọng nói')}</label>
                 <div id="${prefix}SpeedReadout" class="editing-db-readout">${speedReadoutText(prefix, obj)}</div>
             </div>`;
     }
@@ -11175,8 +11483,8 @@
         if (!window.ClipSpeed) return '';
         const cfg = ClipSpeed.normalize(obj?.speed);
         const dur = speedTargetDuration(prefix, obj);
-        const pitch = cfg.pitch_correct ? 'giữ cao độ' : 'đổi cao độ (méo giọng)';
-        return `Thời lượng ${ClipSpeed.formatDuration(dur)} · ${pitch}`;
+        const pitch = cfg.pitch_correct ? _t('giữ cao độ') : _t('đổi cao độ (méo giọng)');
+        return _t('Thời lượng {duration} · {pitch}', { duration: ClipSpeed.formatDuration(dur), pitch });
     }
 
     function syncSpeedControls(prefix, obj, sourceId = '') {
@@ -12116,7 +12424,7 @@
         if (event.target.closest('#btnSaveTextEffect')) {
             textEffectSaveOpen = !textEffectSaveOpen;
             // Tên gợi ý sẵn để bấm Lưu phát ăn ngay; người dùng vẫn sửa được.
-            if (textEffectSaveOpen) textEffectSaveDraft = `Hiệu ứng ${customTextEffects().length + 1}`;
+            if (textEffectSaveOpen) textEffectSaveDraft = _t('Hiệu ứng {n}', { n: customTextEffects().length + 1 });
             syncOverlayInspector(item);   // chỉ mở/đóng ô nhập, KHÔNG đổi dữ liệu -> không recordHistory
             const nameInput = document.querySelector('[data-fx-name]');
             nameInput?.focus();
@@ -12143,7 +12451,7 @@
         if (fxDel) {
             const fx = findTextEffect(fxDel.dataset.fxDel);
             if (fx && (typeof window.confirm !== 'function'
-                || window.confirm(`Xoá hiệu ứng "${fx.name}" khỏi thư viện?\n\nCác khối chữ đã áp hiệu ứng này KHÔNG bị đổi.`))) {
+                || window.confirm(_t('Xoá hiệu ứng "{name}" khỏi thư viện?\n\nCác khối chữ đã áp hiệu ứng này KHÔNG bị đổi.', { name: fx.name })))) {
                 deleteCustomTextEffect(fx.id);
             }
             return;
@@ -12336,7 +12644,7 @@
      * Hoàn tác, đồng bộ control anh em và vẽ lại preview — không nhân bản một dòng logic.
      * ================================================================ */
     const FIG_SPIN_HOSTS = '.fig-field, .rt-row, .adj-wheel-field';
-    const FIG_SPIN_TIP = 'Giữ Shift: bước nhỏ (1/10) • Giữ Alt: bước lớn (×10)';
+    const FIG_SPIN_TIP = _t('Giữ Shift: bước nhỏ (1/10) • Giữ Alt: bước lớn (×10)');
     let figSpinTemplate = null;
     let figSpinObserver = null;
 
@@ -12433,7 +12741,7 @@
             const btn = (dir, label, path) => `<button type="button" class="fig-spin-btn"`
                 + ` data-fig-spin="${dir}" tabindex="-1" aria-label="${label}" title="${label} — ${FIG_SPIN_TIP}">`
                 + `<svg viewBox="0 0 10 6" aria-hidden="true"><path d="${path}"/></svg></button>`;
-            figSpinTemplate.innerHTML = btn(1, 'Tăng', 'M1 4.8 L5 1.2 L9 4.8') + btn(-1, 'Giảm', 'M1 1.2 L5 4.8 L9 1.2');
+            figSpinTemplate.innerHTML = btn(1, _t('Tăng'), 'M1 4.8 L5 1.2 L9 4.8') + btn(-1, _t('Giảm'), 'M1 1.2 L5 4.8 L9 1.2');
         }
         return figSpinTemplate.cloneNode(true);
     }
@@ -12553,9 +12861,15 @@
             if (resetBtn) resetBtn.disabled = false;
             if (target) {
                 const count = selectionCount();
+                const overlayKindLabel = {
+                    text: _t('Overlay văn bản'),
+                    media: _t('Overlay tệp phương tiện'),
+                    shape: _t('Overlay hình khối'),
+                    audio: _t('Overlay âm thanh'),
+                }[item.type];
                 target.innerText = count > 1
-                    ? `${count} selected blocks`
-                    : (item.type === 'adjust' ? 'Lớp Điều chỉnh' : `${item.type} overlay`);
+                    ? _t('Đã chọn {n} block', { n: count })
+                    : (item.type === 'adjust' ? _t('Lớp Điều chỉnh') : (overlayKindLabel || _t('Overlay {type}', { type: item.type })));
             }
             item.transform = normalizeTransform(item.transform);
             // KEYFRAME: hiển thị giá trị HIỆU DỤNG tại playhead (xem getInspectorTargetTransform).
@@ -13014,7 +13328,8 @@
         //             lượt 2 (màu của lớp) vào canvas hiện.
         //   không   -> y như cũ, đúng một lượt.
         // Thứ tự này khớp export: chuỗi của block chạy TRƯỚC, chuỗi của lớp nối SAU.
-        const layerAdj = activeAdjustmentLayerAdjustments(currentSequenceTime(), item);
+        // Nhiều lớp chồng nhau: các lớp DƯỚI qua canvas đệm, lớp TRÊN CÙNG vào canvas hiện.
+        const layerAdjs = activeAdjustmentLayerAdjustmentsList(currentSequenceTime(), item);
         // RETOUCH TRƯỚC CHUỖI MÀU — cùng thứ tự với lane chính và với khâu xuất: retouch
         // sửa DA (kết cấu, khuyết điểm), grade/LUT là lớp thẩm mỹ áp LÊN kết quả đó.
         // Mốc thời gian là currentTime của chính thẻ nguồn, tức trục thời gian của ASSET —
@@ -13026,9 +13341,10 @@
                 Number(sourceEl.currentTime) || 0, w / Math.max(1, h)) || src;
         }
         let adj = ColorAdjust.normalize(itemColorAdjustments(item));
-        if (layerAdj) {
+        if (layerAdjs.length) {
             src = colorAdjustedDrawable(src, w, h, adj, `ovlbase:${item.id}`);
-            adj = ColorAdjust.normalize(layerAdj);
+            src = applyAdjustmentLayers(src, w, h, layerAdjs.slice(0, -1), `ovl:${item.id}`);
+            adj = ColorAdjust.normalize(layerAdjs[layerAdjs.length - 1]);
         }
         // Uniform + texture LUT chỉ nạp lại khi thông số ĐỔI (bake cube tốn hàng chục
         // ms, upload texture cũng không rẻ) — còn khung hình thì vẽ lại mỗi frame.
@@ -13430,7 +13746,7 @@
         // Tay cầm XOAY: icon SVG thay ký tự ↻ trong ::before (ký tự phụ thuộc font, lệch baseline).
         if (String(className || '').includes('rotate')) {
             handle.innerHTML = '<svg class="btn-ico" aria-hidden="true"><use href="#ic-rotate-cw"/></svg>';
-            handle.setAttribute('aria-label', 'Xoay block');
+            handle.setAttribute('aria-label', _t('Xoay block'));
         }
         handle.addEventListener('mousedown', (event) => startPreviewBoxDrag(event, mode));
         return handle;
@@ -14990,11 +15306,11 @@
                 canvas.height = Math.max(1, Math.round(natH * scale));
                 canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
                 canvas.toBlob(
-                    (blob) => (blob ? resolve(blob) : reject(new Error('không dựng được PNG từ file vector'))),
+                    (blob) => (blob ? resolve(blob) : reject(new Error(_t('Không dựng được PNG từ file vector')))),
                     'image/png',
                 );
             };
-            img.onerror = () => reject(new Error('không nạp được file vector'));
+            img.onerror = () => reject(new Error(_t('Không nạp được file vector')));
             img.src = url;
         });
     }
@@ -15049,7 +15365,7 @@
         });
         if (groupPaths.some((g) => g.length)) form.append('group_paths', JSON.stringify(groupPaths));
         const response = await fetch(`${API_BASE}/editing-assets/upload`, { method: 'POST', body: form });
-        if (!response.ok) throw new Error(`Import asset thất bại (${response.status})`);
+        if (!response.ok) throw new Error(_t('Nhập tệp thất bại ({status})', { status: response.status }));
         const data = await response.json();
         const imported = await rasterizeVectorAssets(data.assets || [], kind);
         if (imported.length) recordHistory();
@@ -15065,7 +15381,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ kind, paths }),
         });
-        if (!response.ok) throw new Error(`Import asset thất bại (${response.status})`);
+        if (!response.ok) throw new Error(_t('Nhập tệp thất bại ({status})', { status: response.status }));
         const data = await response.json();
         const imported = await rasterizeVectorAssets(data.assets || [], kind);
         if (imported.length) recordHistory();
@@ -15087,7 +15403,7 @@
         });
         if (!response.ok) {
             const detail = await response.json().catch(() => ({}));
-            throw new Error(detail.detail || `Thêm thư mục thất bại (${response.status})`);
+            throw new Error(detail.detail || _t('Thêm thư mục thất bại ({status})', { status: response.status }));
         }
         const data = await response.json();
         // Lọc trùng TRƯỚC khi rasterize: id băm từ file nguồn nên vẫn nhận ra file đã có,
@@ -15102,8 +15418,8 @@
         // Nút "Nhập" gộp nên một lượt có thể lẫn tệp lẻ và thư mục -> câu trạng thái
         // không được nói riêng "từ thư mục" nữa.
         setEditingStatusText(fresh.length
-            ? `Đã thêm ${fresh.length} tệp.`
-            : 'Những tệp này đã có sẵn trong panel.');
+            ? _t('Đã thêm {n} tệp.', { n: fresh.length })
+            : _t('Những tệp này đã có sẵn trong panel.'));
     }
 
     function fileMatchesAssetKind(file, kind) {
@@ -15125,8 +15441,8 @@
         const body = document.getElementById('editPanelBody');
         if (!body || body.__importDndSetup) return;
         body.__importDndSetup = true;
-        // Nhóm "Auto Subtitle" của tab Âm thanh KHÔNG phải chỗ nhận tệp: thả file vào đó mà
-        // vẫn nhập như cũ thì người dùng tưởng mình vừa thả trượt.
+        // Chỉ nhóm "Nhập" của tab Âm thanh là chỗ nhận tệp phương tiện. (Tab Văn bản không nằm
+        // trong danh sách: nhóm Local Subtitle tự nhận tệp PHỤ ĐỀ bằng vùng thả của riêng nó.)
         const isImportTab = () => editPanelTab === 'media'
             || (editPanelTab === 'audio' && editPanelAudioSub === 'import');
         const hasFiles = (dt) => Array.from(dt?.types || []).includes('Files');
@@ -15154,7 +15470,7 @@
                 }
                 const files = (await collectDroppedAssetFiles(event.dataTransfer)).filter((f) => fileMatchesAssetKind(f, kind));
                 if (!files.length) {
-                    showToast('Không tìm thấy tệp phương tiện hợp lệ trong nội dung kéo thả.', { type: 'error' });
+                    showToast(_t('Không tìm thấy tệp phương tiện hợp lệ trong nội dung kéo thả.'), { type: 'error' });
                     return;
                 }
                 await importFiles(kind, files);
@@ -15276,47 +15592,54 @@
     // Nhóm của tab "LUT". Phải khai TRƯỚC EDIT_PANEL_SUBTABS: object đó đọc mảng này
     // ngay lúc nạp module, để dưới là vào vùng chết (TDZ) của const -> crash.
     const LUT_CATS = [
-        { id: 'soft', label: 'Dịu nhẹ' },
-        { id: 'bright', label: 'Tươi sáng' },
-        { id: 'cine', label: 'Điện ảnh' },
-        { id: 'mono', label: 'Đơn sắc' },
-        { id: 'user', label: 'Của tôi' },
+        { id: 'soft', label: _t('Dịu nhẹ') },
+        { id: 'bright', label: _t('Tươi sáng') },
+        { id: 'cine', label: _t('Điện ảnh') },
+        { id: 'mono', label: _t('Đơn sắc') },
+        { id: 'user', label: _t('Của tôi') },
     ];
 
     const EDIT_PANEL_SUBTABS = {
-        media: [{ id: 'import', label: 'Nhập' }],
+        media: [{ id: 'import', label: _t('Nhập') }],
+        /* "Lồng tiếng" (2026-09-27): đọc tệp phụ đề thành giọng nói đúng mốc thời gian — panel ở
+           static/js/dubbing.js. Kết quả là block AUDIO nên đứng ở tab Âm thanh. */
         audio: [
-            { id: 'import', label: 'Nhập' },
-            { id: 'subtitle', label: 'Auto Subtitle' },
+            { id: 'import', label: _t('Nhập') },
+            { id: 'dubbing', label: _t('Lồng tiếng') },
         ],
+        /* Auto Subtitle dời từ tab Âm thanh sang đây (2026-09-26, theo yêu cầu người dùng):
+           thứ nó SINH RA là block văn bản, nên nó đứng cạnh "Local Subtitle" — hai đường vào
+           cùng một loại kết quả. */
         text: [
-            { id: 'import', label: 'Nhập' },
-            { id: 'template', label: 'Mẫu văn bản' },
-            { id: 'effect', label: 'Hiệu ứng chữ' },
+            { id: 'import', label: _t('Nhập') },
+            { id: 'template', label: _t('Mẫu văn bản') },
+            { id: 'effect', label: _t('Hiệu ứng chữ') },
+            { id: 'subtitle', label: 'Auto Subtitle' },
+            { id: 'local-subtitle', label: 'Local Subtitle' },
         ],
-        shape: [{ id: 'shapes', label: 'Hình dạng' }],
+        shape: [{ id: 'shapes', label: _t('Hình dạng') }],
         transition: [
-            { id: 'all', label: 'Tất cả' },
+            { id: 'all', label: _t('Tất cả') },
             ...((window.Transitions && window.Transitions.TRANSITION_CATEGORIES) || []),
         ],
         lut: LUT_CATS,
-        adjust: [{ id: 'custom', label: 'Điều chỉnh' }],
+        adjust: [{ id: 'custom', label: _t('Điều chỉnh') }],
         library: [
-            { id: 'video', label: 'Video' },
-            { id: 'elements', label: 'Elements' },
-            { id: 'sfxs', label: 'SFXs' },
-            { id: 'music', label: 'Music' },
+            { id: 'video', label: _t('Video') },
+            { id: 'elements', label: _t('Elements') },
+            { id: 'sfxs', label: _t('SFXs') },
+            { id: 'music', label: _t('Nhạc') },
         ],
     };
     const BASIC_SHAPES = [
-        { type: 'rectangle', label: 'Chữ nhật' },
-        { type: 'square', label: 'Vuông' },
-        { type: 'circle', label: 'Tròn' },
-        { type: 'triangle', label: 'Tam giác' },
-        { type: 'trapezoid', label: 'Hình thang' },
-        { type: 'polygon', label: 'Đa giác' },
-        { type: 'star', label: 'Ngôi sao' },
-        { type: 'line', label: 'Đường kẻ' },
+        { type: 'rectangle', label: _t('Chữ nhật') },
+        { type: 'square', label: _t('Vuông') },
+        { type: 'circle', label: _t('Tròn') },
+        { type: 'triangle', label: _t('Tam giác') },
+        { type: 'trapezoid', label: _t('Hình thang') },
+        { type: 'polygon', label: _t('Đa giác') },
+        { type: 'star', label: _t('Ngôi sao') },
+        { type: 'line', label: _t('Đường kẻ') },
     ];
 
     function assetThumbHtml(asset) {
@@ -15390,8 +15713,8 @@
                 <div class="emt-shade" style="left:0;width:${inPct}%"></div>
                 <div class="emt-shade" style="left:${outPct}%;right:0"></div>
                 <div class="emt-range" style="left:${inPct}%;width:${Math.max(0, outPct - inPct)}%"></div>
-                <div class="emt-handle" data-emt-handle="in" style="left:${inPct}%" title="Điểm vào"></div>
-                <div class="emt-handle" data-emt-handle="out" style="left:${outPct}%" title="Điểm ra"></div>
+                <div class="emt-handle" data-emt-handle="in" style="left:${inPct}%" title="${_t('Điểm vào')}"></div>
+                <div class="emt-handle" data-emt-handle="out" style="left:${outPct}%" title="${_t('Điểm ra')}"></div>
                 <div class="emt-playhead" data-emt-playhead style="left:${inPct}%"></div>
                 <div class="emt-badge" data-emt-badge>${dur > 0 ? formatClock(span) : '--:--'}</div>
             </div>`;
@@ -15401,12 +15724,12 @@
     function panelTrimFootHtml(sel) {
         if (!sel || panelPreviewKind(sel.type) !== 'video') return '';
         const dur = Number(sel.duration) || 0;
-        if (!dur) return `<div class="emt-foot"><span class="emt-foot-label">Đang đọc thời lượng…</span></div>`;
+        if (!dur) return `<div class="emt-foot"><span class="emt-foot-label">${_t('Đang đọc thời lượng…')}</span></div>`;
         // Nhãn CHỈ mốc vào–ra: độ dài đoạn đã nằm ở huy hiệu góc thumbnail, nhét cả hai
         // vào một dòng rộng ~160px thì chữ xuống 3 hàng.
         return `<div class="emt-foot">
                 <span class="emt-foot-label" data-emt-foot-label>${formatClock(sel.inPoint)} – ${formatClock(sel.outPoint)}</span>
-                <button type="button" class="emt-reset" data-emt-reset title="Chọn lại toàn bộ tệp">Cả tệp</button>
+                <button type="button" class="emt-reset" data-emt-reset title="${_t('Chọn lại toàn bộ tệp')}">${_t('Cả tệp')}</button>
             </div>`;
     }
 
@@ -15496,11 +15819,11 @@
         if (!panelSelectedAssetIds.size) return '';
         const paths = panelSelectionMainLanePaths();
         return `<div class="edit-pane-selbar">
-                <span class="eps-count">Đã chọn ${panelSelectedAssetIds.size} tệp</span>
+                <span class="eps-count">${_t('Đã chọn {n} tệp', { n: panelSelectedAssetIds.size })}</span>
                 ${paths.length
-                    ? `<button type="button" class="eps-main" data-edit-selection-to-main title="Nối ${paths.length} video vào cuối lane chính">Thêm vào lane chính (${paths.length})</button>`
+                    ? `<button type="button" class="eps-main" data-edit-selection-to-main title="${_t('Nối {n} video vào cuối lane chính', { n: paths.length })}">${_t('Thêm vào lane chính ({n})', { n: paths.length })}</button>`
                     : ''}
-                <button type="button" class="eps-clear" data-edit-selection-clear title="Bỏ chọn tất cả">Bỏ chọn</button>
+                <button type="button" class="eps-clear" data-edit-selection-clear title="${_t('Bỏ chọn tất cả')}">${_t('Bỏ chọn')}</button>
             </div>`;
     }
 
@@ -15517,8 +15840,8 @@
          * overlay bằng một cú bấm vẫn còn, không mất đi. Ảnh/âm thanh giữ nguyên nghĩa cũ. */
         const addToMain = canJoinMain && !onMain;
         const addBtn = addToMain
-            ? `<button class="edit-asset-add edit-asset-add-main" type="button" data-edit-asset-main="${asset.id}" title="Thêm vào LANE CHÍNH (nối vào cuối, dùng làm nguồn bóc băng)" aria-label="Thêm vào lane chính">+</button>`
-            : `<button class="edit-asset-add" type="button" data-edit-asset-add="${asset.id}" title="${onMain ? 'Đã ở lane chính — bấm để đặt thêm một bản lên lane overlay tại playhead' : 'Thêm vào timeline (tại playhead)'}" aria-label="Thêm vào timeline">+</button>`;
+            ? `<button class="edit-asset-add edit-asset-add-main" type="button" data-edit-asset-main="${asset.id}" title="${_t('Thêm vào LANE CHÍNH (nối vào cuối, dùng làm nguồn bóc băng)')}" aria-label="${_t('Thêm vào lane chính')}">+</button>`
+            : `<button class="edit-asset-add" type="button" data-edit-asset-add="${asset.id}" title="${onMain ? _t('Đã ở lane chính — bấm để đặt thêm một bản lên lane overlay tại playhead') : _t('Thêm vào timeline (tại playhead)')}" aria-label="${_t('Thêm vào timeline')}">+</button>`;
         return mediaCardHtml({
             key: panelPreviewKeyForAsset(asset),
             type: asset.type,
@@ -15529,13 +15852,13 @@
                 + (onMain ? ' is-on-main-lane' : ''),
             // Huy hiệu "LANE CHÍNH": người dùng phải nhìn ra ngay video nào đang là nguồn
             // của phim, vì đó là thứ quyết định độ dài và là đầu vào của bóc băng.
-            badgeHtml: onMain ? `<div class="edit-asset-mainbadge" title="Video này đang nằm trên lane chính (nguồn của dự án)">LANE CHÍNH</div>` : '',
+            badgeHtml: onMain ? `<div class="edit-asset-mainbadge" title="${_t('Video này đang nằm trên lane chính (nguồn của dự án)')}">${_t('LANE CHÍNH')}</div>` : '',
             // Video nguồn dựng từ thư viện bước Upload KHÔNG có nút "×": danh sách đó do
             // panel bước Upload quản, xoá từ đây thì lần vào Editing sau
             // syncProjectSourceAssets() lại dựng lại nguyên vẹn — nút không có tác dụng thật.
             buttonsHtml: (asset.source === 'project'
                 ? ''
-                : `<button class="edit-asset-del" type="button" data-edit-asset-del="${asset.id}" title="Xoá tệp khỏi dự án" aria-label="Xoá tệp">×</button>`)
+                : `<button class="edit-asset-del" type="button" data-edit-asset-del="${asset.id}" title="${_t('Xoá tệp khỏi dự án')}" aria-label="${_t('Xoá tệp')}">×</button>`)
                 + addBtn,
             nameHtml: panelRenameInputHtml('asset', String(asset.id), asset.name),
         });
@@ -15549,7 +15872,7 @@
             name: item.name,
             thumbnail_url: item.thumbnail_url,
             idAttrs: `data-edit-lib="${key}" data-edit-lib-cat="${category}" data-edit-lib-url="${escapeHtml(item.url || '')}"`,
-            buttonsHtml: `<button class="edit-asset-add" type="button" data-edit-lib-add="${key}" data-edit-lib-cat="${category}" title="Thêm vào timeline (tại playhead)" aria-label="Thêm vào timeline">+</button>`,
+            buttonsHtml: `<button class="edit-asset-add" type="button" data-edit-lib-add="${key}" data-edit-lib-cat="${category}" title="${_t('Thêm vào timeline (tại playhead)')}" aria-label="${_t('Thêm vào timeline')}">+</button>`,
         });
     }
 
@@ -15567,9 +15890,9 @@
         layer.innerHTML = `
             <video id="panelMediaPreviewVideo" playsinline></video>
             <div class="pmp-head"><span class="pmp-title" data-pmp-title></span>
-                <button type="button" class="pmp-close" data-pmp-close title="Đóng xem trước (Esc)" aria-label="Đóng xem trước"><svg class="btn-ico" aria-hidden="true"><use href="#ic-x"/></svg></button></div>
+                <button type="button" class="pmp-close" data-pmp-close title="${_t('Đóng xem trước (Esc)')}" aria-label="${_t('Đóng xem trước')}"><svg class="btn-ico" aria-hidden="true"><use href="#ic-x"/></svg></button></div>
             <div class="pmp-bar">
-                <button type="button" class="pmp-play" data-pmp-toggle aria-label="Phát/Dừng"><svg class="btn-ico" aria-hidden="true"><use href="#ic-play"/></svg></button>
+                <button type="button" class="pmp-play" data-pmp-toggle aria-label="${_t('Phát/Tạm dừng')}"><svg class="btn-ico" aria-hidden="true"><use href="#ic-play"/></svg></button>
                 <div class="pmp-scrub" data-pmp-scrub><div class="pmp-scrub-range" data-pmp-scrub-range></div><div class="pmp-scrub-dot" data-pmp-scrub-dot></div></div>
                 <span class="pmp-time" data-pmp-time>0:00 / 0:00</span>
             </div>`;
@@ -15684,7 +16007,7 @@
         bar.hidden = true;
         bar.innerHTML = `
             <audio id="panelAudioPreviewEl" preload="metadata"></audio>
-            <button type="button" class="pap-thumb" data-pap-toggle aria-label="Phát/Dừng">
+            <button type="button" class="pap-thumb" data-pap-toggle aria-label="${_t('Phát/Tạm dừng')}">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><use href="#ic-transcribe"/></svg>
                 <span class="pap-thumb-ico" data-pap-icon><svg class="btn-ico" aria-hidden="true"><use href="#ic-play"/></svg></span>
             </button>
@@ -15695,7 +16018,7 @@
                     <div class="pap-scrub" data-pap-scrub><div class="pap-scrub-fill" data-pap-fill></div><div class="pap-scrub-dot" data-pap-dot></div></div>
                 </div>
             </div>
-            <button type="button" class="pap-close" data-pap-close title="Đóng (Esc)" aria-label="Đóng nghe thử"><svg class="btn-ico" aria-hidden="true"><use href="#ic-x"/></svg></button>`;
+            <button type="button" class="pap-close" data-pap-close title="${_t('Đóng (Esc)')}" aria-label="${_t('Đóng nghe thử')}"><svg class="btn-ico" aria-hidden="true"><use href="#ic-x"/></svg></button>`;
         panel.appendChild(bar);
         const audio = bar.querySelector('#panelAudioPreviewEl');
         audio.addEventListener('loadedmetadata', () => {
@@ -15920,7 +16243,7 @@
         // cần biết nhánh nào, mà chỉ có tên đoạn cuối thì hai thư mục cùng tên ở hai nhánh
         // khác nhau là không phân biệt được.
         const full = [...(currentPath || []), folder.name];
-        return `<div class="edit-asset-card edit-folder-card" data-edit-folder-open="${escapeHtml(folder.name)}" data-edit-folder-kind="${kind}" data-edit-folder-path="${escapeHtml(full.join('/'))}" title="${escapeHtml(folder.name)} — ${folder.count} tệp">
+        return `<div class="edit-asset-card edit-folder-card" data-edit-folder-open="${escapeHtml(folder.name)}" data-edit-folder-kind="${kind}" data-edit-folder-path="${escapeHtml(full.join('/'))}" title="${escapeHtml(_t('{name} — {n} tệp', { name: folder.name, n: folder.count }))}">
             <div class="edit-asset-thumb-wrap">
                 <div class="edit-asset-thumb edit-folder-thumb">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><use href="#ic-folder"/></svg>
@@ -15977,8 +16300,8 @@
         // tưởng mình bấm hụt) — chỉ làm mờ và nói rõ là không còn gì để thêm.
         const done = pending.length === 0;
         const title = done
-            ? `Cả ${videos.length} video trong thư mục này đã ở trên lane chính`
-            : `Thêm ${pending.length} video trong thư mục này vào cuối lane chính, xếp theo tên tệp`;
+            ? _t('Cả {n} video trong thư mục này đã ở trên lane chính', { n: videos.length })
+            : _t('Thêm {n} video trong thư mục này vào cuối lane chính, xếp theo tên tệp', { n: pending.length });
         return `<div class="edit-asset-card edit-bulk-card${done ? ' is-done' : ''}"`
             + `${done ? '' : ` data-edit-folder-bulk-main="${escapeHtml(kind)}"`}`
             + ` role="button" tabindex="${done ? -1 : 0}" aria-disabled="${done}" title="${escapeHtml(title)}">
@@ -15987,7 +16310,7 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><use href="#ic-plus-double"/></svg>
                 </div>
             </div>
-            <div class="edit-asset-name">${done ? 'Đã thêm hết' : `Thêm ${pending.length} video`}</div>
+            <div class="edit-asset-name">${done ? _t('Đã thêm hết') : _t('Thêm {n} video', { n: pending.length })}</div>
         </div>`;
     }
 
@@ -16017,7 +16340,7 @@
     function panelRenameInputHtml(kind, key, name) {
         if (!panelRenaming || panelRenaming.kind !== kind || panelRenaming.key !== key) return '';
         return `<input class="edit-asset-rename" type="text" data-edit-rename="1" spellcheck="false"
-            draggable="false" aria-label="Tên mới" value="${escapeHtml(name || '')}">`;
+            draggable="false" aria-label="${escapeHtml(_t('Tên mới'))}" value="${escapeHtml(name || '')}">`;
     }
 
     function startPanelRename(kind, key, paneKind) {
@@ -16098,12 +16421,12 @@
         if (!target) return;
         const api = window.desktopEnv;
         if (typeof api?.showItemInFolder !== 'function') {
-            showToast('Mở vị trí tệp chỉ có ở bản desktop.', { type: 'warning' });
+            showToast(_t('Mở vị trí tệp chỉ có ở bản desktop.'), { type: 'warning' });
             return;
         }
         Promise.resolve(api.showItemInFolder(target))
             .then((ok) => {
-                if (ok === false) showToast('Không tìm thấy tệp trên đĩa — có thể đã bị di chuyển hoặc đổi tên.', { type: 'warning' });
+                if (ok === false) showToast(_t('Không tìm thấy tệp trên đĩa — có thể đã bị di chuyển hoặc đổi tên.'), { type: 'warning' });
             })
             .catch((error) => showToast(error?.message || String(error), { type: 'error' }));
     }
@@ -16162,13 +16485,13 @@
                 ? panelSelectedAssets()
                 : [asset];
             openPanelContextMenu(event.clientX, event.clientY, [
-                { label: 'Đổi tên', run: () => startPanelRename('asset', String(asset.id), paneKind),
-                    hint: 'Đổi tên trong dự án (không đổi tên tệp trên đĩa)' },
-                { label: 'Mở vị trí tệp', disabled: !disk || !desktop,
-                    hint: disk ? disk : 'Tệp này không có đường dẫn thật trên máy',
+                { label: _t('Đổi tên'), run: () => startPanelRename('asset', String(asset.id), paneKind),
+                    hint: _t('Đổi tên trong dự án (không đổi tên tệp trên đĩa)') },
+                { label: _t('Mở vị trí tệp'), disabled: !disk || !desktop,
+                    hint: disk ? disk : _t('Tệp này không có đường dẫn thật trên máy'),
                     run: () => revealPathInFolder(disk) },
                 { sep: true },
-                { label: targets.length > 1 ? `Xoá ${targets.length} tệp khỏi dự án` : 'Xoá khỏi dự án',
+                { label: targets.length > 1 ? _t('Xoá {n} tệp khỏi dự án', { n: targets.length }) : _t('Xoá khỏi dự án'),
                     danger: true,
                     run: () => { removeAssetsFromProject(targets.map((a) => a.id)); } },
             ]);
@@ -16180,23 +16503,23 @@
         const desktop = typeof window.desktopEnv?.showItemInFolder === 'function';
         const virtual = isVirtualSourceFolder(folderPath);
         openPanelContextMenu(event.clientX, event.clientY, [
-            { label: 'Đổi tên', disabled: virtual,
+            { label: _t('Đổi tên'), disabled: virtual,
                 hint: virtual
-                    ? 'Thư mục này do dự án tự dựng từ danh sách video nguồn — không đổi tên được'
-                    : 'Đổi tên thư mục trong dự án (không đổi tên thư mục trên đĩa)',
+                    ? _t('Thư mục này do dự án tự dựng từ danh sách video nguồn — không đổi tên được')
+                    : _t('Đổi tên thư mục trong dự án (không đổi tên thư mục trên đĩa)'),
                 run: () => startPanelRename('folder', folderPath.join('/'), paneKind) },
-            { label: 'Mở vị trí tệp', disabled: !firstDisk || !desktop,
-                hint: firstDisk || 'Không có tệp nào trong thư mục này có đường dẫn thật',
+            { label: _t('Mở vị trí tệp'), disabled: !firstDisk || !desktop,
+                hint: firstDisk || _t('Không có tệp nào trong thư mục này có đường dẫn thật'),
                 run: () => revealPathInFolder(firstDisk) },
             { sep: true },
-            { label: `Xoá khỏi dự án (${inside.length} tệp)`, danger: true, disabled: !inside.length,
+            { label: _t('Xoá khỏi dự án ({n} tệp)', { n: inside.length }), danger: true, disabled: !inside.length,
                 run: () => { removeAssetsFromProject(inside.map((a) => a.id)); } },
         ]);
     }
 
     function importPaneCrumbsHtml(kind, currentPath) {
         if (!currentPath.length) return '';
-        const crumbs = [{ label: 'Tất cả', depth: 0 }]
+        const crumbs = [{ label: _t('Tất cả'), depth: 0 }]
             .concat(currentPath.map((seg, i) => ({ label: seg, depth: i + 1 })));
         return `<div class="media-crumbs">${crumbs.map((c, i) => {
             const sep = i > 0 ? '<span class="media-crumb-sep">›</span>' : '';
@@ -16213,10 +16536,10 @@
     function importPaneHeadHtml(kind) {
         return `<div class="edit-pane-head">
             <div class="edit-import-wrap">
-                <button class="edit-import-btn" type="button" data-edit-import-any="${kind}" aria-haspopup="true" aria-expanded="false" title="Nhập tệp hoặc cả thư mục từ máy"><svg class="btn-ico"><use href="#ic-plus"/></svg>Nhập</button>
+                <button class="edit-import-btn" type="button" data-edit-import-any="${kind}" aria-haspopup="true" aria-expanded="false" title="${escapeHtml(_t('Nhập tệp hoặc cả thư mục từ máy'))}"><svg class="btn-ico"><use href="#ic-plus"/></svg>${_t('Nhập')}</button>
                 <div class="edit-import-menu" data-edit-import-menu="${kind}" hidden>
-                    <button type="button" data-edit-import="${kind}"><svg class="btn-ico"><use href="#ic-file"/></svg>Tệp…</button>
-                    <button type="button" data-edit-import-folder="${kind}" title="Thêm cả thư mục (giữ nguyên cấu trúc, không chép file)"><svg class="btn-ico"><use href="#ic-folder"/></svg>Thư mục…</button>
+                    <button type="button" data-edit-import="${kind}"><svg class="btn-ico"><use href="#ic-file"/></svg>${_t('Tệp…')}</button>
+                    <button type="button" data-edit-import-folder="${kind}" title="${escapeHtml(_t('Thêm cả thư mục (giữ nguyên cấu trúc, không chép file)'))}"><svg class="btn-ico"><use href="#ic-folder"/></svg>${_t('Thư mục…')}</button>
                 </div>
             </div>
         </div>`;
@@ -16228,11 +16551,11 @@
     function importPaneDropZoneHtml(kind) {
         // Panel mặc định chỉ rộng ~166px -> câu phải NGẮN, nếu không nó xuống 4-5 dòng.
         const sub = kind === 'audio'
-            ? 'Kéo thả âm thanh hoặc thư mục vào đây'
-            : 'Kéo thả video, ảnh hoặc thư mục vào đây';
+            ? _t('Kéo thả âm thanh hoặc thư mục vào đây')
+            : _t('Kéo thả video, ảnh hoặc thư mục vào đây');
         return `<button class="edit-import-drop" type="button" data-edit-import-any="${kind}">
             <span class="edit-import-drop-ico"><svg class="btn-ico"><use href="#ic-plus"/></svg></span>
-            <span class="edit-import-drop-title">Nhập</span>
+            <span class="edit-import-drop-title">${_t('Nhập')}</span>
             <span class="edit-import-drop-sub">${sub}</span>
         </button>`;
     }
@@ -16289,8 +16612,8 @@
         if (editPanelTextSub === 'effect') return renderTextEffectPaneHtml();
         return `<div class="edit-card-grid">
             <button class="edit-add-card" type="button" draggable="true" data-edit-add-text="1" data-edit-drag-kind="text">
-                <div class="edit-add-card-preview">Văn bản<br>mặc định</div>
-                <div class="edit-asset-name">Văn bản mặc định</div>
+                <div class="edit-add-card-preview">${_t('Văn bản<br>mặc định')}</div>
+                <div class="edit-asset-name">${_t('Văn bản mặc định')}</div>
             </button>
         </div>`;
     }
@@ -16306,7 +16629,7 @@
                 <span class="edit-transition-thumb text-effect-thumb">${textEffectThumbHtml(fx)}</span>
                 <span class="edit-asset-name">${escapeHtml(fx.name)}</span>
             </button>`).join('');
-        return `<div class="edit-transition-hint">Bấm để thêm khối chữ mới với hiệu ứng này, hoặc kéo thả xuống lane overlay. Có thể đổi/bỏ hiệu ứng ở panel Thuộc tính bên phải — chỗ đó cũng là nơi LƯU một khối chữ bạn tự chỉnh thành hiệu ứng mới cho thư viện này.</div>
+        return `<div class="edit-transition-hint">${_t('Bấm để thêm khối chữ mới với hiệu ứng này, hoặc kéo thả xuống lane overlay. Có thể đổi/bỏ hiệu ứng ở panel Thuộc tính bên phải — chỗ đó cũng là nơi LƯU một khối chữ bạn tự chỉnh thành hiệu ứng mới cho thư viện này.')}</div>
             <div class="edit-transition-grid">${cards}</div>`;
     }
 
@@ -16327,14 +16650,14 @@
      * xem trước không bao giờ lệch với thứ rơi xuống timeline. */
     function renderTextTemplatePaneHtml() {
         const T = window.TextTemplates;
-        if (!T) return `<div class="edit-empty">Không nạp được engine mẫu văn bản.</div>`;
+        if (!T) return `<div class="edit-empty">${_t('Không nạp được engine mẫu văn bản.')}</div>`;
         const cards = T.TEMPLATES.map((tpl) => `
             <button class="edit-transition-card" type="button" draggable="true"
                 data-edit-add-text-template="${escapeHtml(tpl.id)}" data-edit-drag-kind="text" title="${escapeHtml(tpl.name)}">
                 <span class="edit-transition-thumb"><canvas width="120" height="68" data-text-template-thumb="${escapeHtml(tpl.id)}"></canvas></span>
                 <span class="edit-asset-name">${escapeHtml(tpl.name)}</span>
             </button>`).join('');
-        return `<div class="edit-transition-hint">Bấm để thêm mẫu tại playhead, hoặc kéo thả xuống lane overlay. Nội dung chữ sửa ở panel Thuộc tính bên phải.</div>
+        return `<div class="edit-transition-hint">${_t('Bấm để thêm mẫu tại playhead, hoặc kéo thả xuống lane overlay. Nội dung chữ sửa ở panel Thuộc tính bên phải.')}</div>
             <div class="edit-transition-grid">${cards}</div>`;
     }
 
@@ -16410,12 +16733,12 @@
     function scriptPaneStatusText() {
         const text = String(scriptPaneSourceEl()?.value || '').trim();
         const meta = window.currentScriptMetadataRef ? window.currentScriptMetadataRef() : null;
-        if (!text) return 'Chưa có kịch bản — tuỳ chọn. Chỉ cần khi dùng "Lọc video theo kịch bản" hoặc Magic Fill.';
-        if (!meta) return 'Kịch bản dạng chữ thuần (không có cụm in đậm hay ghi chú).';
+        if (!text) return _t('Chưa có kịch bản — tuỳ chọn. Chỉ cần khi dùng "Lọc video theo kịch bản" hoặc Magic Fill.');
+        if (!meta) return _t('Kịch bản dạng chữ thuần (không có cụm in đậm hay ghi chú).');
         const bold = (meta.bold_ranges || []).length;
         const notes = (meta.notes || []).filter((n) => String(n?.text || '').trim()).length;
-        const stale = meta.stale === true ? ' · ⚠ đã sửa tay sau khi nạp tệp' : '';
-        return `${bold} cụm in đậm · ${notes} ghi chú${stale}`;
+        const stale = meta.stale === true ? ` · ${_t('⚠ đã sửa tay sau khi nạp tệp')}` : '';
+        return _t('{bold} cụm in đậm · {notes} ghi chú', { bold, notes }) + stale;
     }
 
     function renderScriptPaneHtml() {
@@ -16423,11 +16746,11 @@
         return `
             <div class="edit-script-pane" data-edit-script-zone>
                 <div class="edit-pane-head edit-script-head">
-                    <button class="edit-import-btn" type="button" data-edit-script-pick><svg class="btn-ico"><use href="#ic-file"/></svg>Chọn tệp kịch bản</button>
+                    <button class="edit-import-btn" type="button" data-edit-script-pick><svg class="btn-ico"><use href="#ic-file"/></svg>${_t('Chọn tệp kịch bản')}</button>
                 </div>
-                <div class="edit-script-drop" data-edit-script-drop>Kéo thả tệp <b>.md</b> vào bất kỳ đâu trong tab này<br><span>(hoặc .txt / .doc / .docx)</span></div>
+                <div class="edit-script-drop" data-edit-script-drop>${_t('Kéo thả tệp <b>.md</b> vào bất kỳ đâu trong tab này<br><span>(hoặc .txt / .doc / .docx)</span>')}</div>
                 <textarea id="editScriptText" class="edit-script-text" spellcheck="false"
-                    placeholder="Dán kịch bản vào đây, hoặc kéo thả tệp .md…">${escapeHtml(text)}</textarea>
+                    placeholder="${escapeHtml(_t('Dán kịch bản vào đây, hoặc kéo thả tệp .md…'))}">${escapeHtml(text)}</textarea>
                 <div class="edit-script-status">${escapeHtml(scriptPaneStatusText())}</div>
             </div>
         `;
@@ -16514,16 +16837,16 @@
     // GĐ1: chỉ hiển thị thư viện + hover preview + chọn hiệu ứng. Áp vào điểm cắt = GĐ2.
     function renderTransitionPaneHtml() {
         const T = window.Transitions;
-        if (!T) return `<div class="edit-empty">Không nạp được engine chuyển cảnh.</div>`;
+        if (!T) return `<div class="edit-empty">${_t('Không nạp được engine chuyển cảnh.')}</div>`;
         const opts = T.optionsByCategory(editPanelTransitionCat);
-        if (!opts.length) return `<div class="edit-empty">Chưa có hiệu ứng trong nhóm này.</div>`;
+        if (!opts.length) return `<div class="edit-empty">${_t('Chưa có hiệu ứng trong nhóm này.')}</div>`;
         const cards = opts.map((o) => `
             <button class="edit-transition-card" type="button"
                 draggable="true" data-edit-transition="${o.id}" title="${escapeHtml(o.label)}">
                 <span class="edit-transition-thumb"><canvas width="120" height="68" data-transition-thumb="${o.id}"></canvas></span>
                 <span class="edit-asset-name">${escapeHtml(o.label)}</span>
             </button>`).join('');
-        return `<div class="edit-transition-hint">Kéo hiệu ứng thả vào điểm giao giữa 2 block cùng loại trên timeline — hoặc bấm chọn hiệu ứng rồi bấm vào điểm giao.</div>
+        return `<div class="edit-transition-hint">${_t('Kéo hiệu ứng thả vào điểm giao giữa 2 block cùng loại trên timeline — hoặc bấm chọn hiệu ứng rồi bấm vào điểm giao.')}</div>
             <div class="edit-transition-grid">${cards}</div>`;
     }
 
@@ -16608,11 +16931,11 @@
 
     function renderLutPaneHtml() {
         const list = lutsInCategory(editPanelLutCat);
-        if (!adjustLutCatalog().length) return `<div class="edit-loading">Đang tải thư viện LUT…</div>`;
+        if (!adjustLutCatalog().length) return `<div class="edit-loading">${_t('Đang tải thư viện LUT…')}</div>`;
         if (!list.length) {
             return editPanelLutCat === 'user'
-                ? `<div class="edit-empty">Chưa có LUT riêng.<br>Bấm <b>Nhập .cube…</b> để thêm file của bạn.</div>`
-                : `<div class="edit-empty">Chưa có LUT trong nhóm này.</div>`;
+                ? `<div class="edit-empty">${_t('Chưa có LUT riêng.<br>Bấm <b>Nhập .cube…</b> để thêm file của bạn.')}</div>`
+                : `<div class="edit-empty">${_t('Chưa có LUT trong nhóm này.')}</div>`;
         }
         const applied = currentAdjustments().lut.id;
         const cards = list.map((l) => `
@@ -16622,10 +16945,9 @@
                       data-lut-thumb="${escapeHtml(l.id)}"></canvas></span>
                 <span class="edit-asset-name">${escapeHtml(l.name)}</span>
             </button>`).join('');
-        return `<div class="edit-transition-hint">Kéo LUT thả vào block trên timeline để áp — hoặc chọn block rồi bấm vào LUT.
-                Bấm lại LUT đang áp để gỡ. Cường độ chỉnh ở panel phải.</div>
-            <div class="edit-lut-actions"><button type="button" class="adj-mini-btn" id="editLutImport">Nhập .cube…</button>
-                <button type="button" class="adj-mini-btn" id="editLutClear">Gỡ LUT khỏi block đang chọn</button></div>
+        return `<div class="edit-transition-hint">${_t('Kéo LUT thả vào block trên timeline để áp — hoặc chọn block rồi bấm vào LUT. Bấm lại LUT đang áp để gỡ. Cường độ chỉnh ở panel phải.')}</div>
+            <div class="edit-lut-actions"><button type="button" class="adj-mini-btn" id="editLutImport">${_t('Nhập .cube…')}</button>
+                <button type="button" class="adj-mini-btn" id="editLutClear">${_t('Gỡ LUT khỏi block đang chọn')}</button></div>
             <div class="edit-lut-grid">${cards}</div>`;
     }
 
@@ -16664,16 +16986,29 @@
     // ===== Panel "Điều chỉnh" — ô tạo lớp Điều chỉnh (adjustment layer) =====
     function renderAdjustPaneHtml() {
         const count = editingItems.filter((it) => it.type === 'adjust').length;
-        return `<div class="edit-transition-hint">Lớp Điều chỉnh áp màu lên MỌI block nằm dưới nó,
-                trong đúng khoảng thời gian nó phủ — giống Adjustment Layer của Premiere.
-                Kéo 2 đầu để giới hạn phạm vi; kéo LUT thả vào nó để áp LUT cho cả đoạn.</div>
+        return `<div class="edit-transition-hint">${_t('Lớp Điều chỉnh áp màu lên MỌI block nằm dưới nó, trong đúng khoảng thời gian nó phủ — giống Adjustment Layer của Premiere. Kéo 2 đầu để giới hạn phạm vi; kéo LUT thả vào nó để áp LUT cho cả đoạn.')}</div>
             <div class="edit-adjust-grid">
                 <button type="button" class="edit-adjust-card" id="editAddAdjustLayer">
                     <span class="edit-adjust-icon"><svg class="btn-ico" aria-hidden="true"><use href="#ic-sliders"/></svg></span>
-                    <span class="edit-asset-name">Điều chỉnh tuỳ chỉnh</span>
+                    <span class="edit-asset-name">${_t('Điều chỉnh tuỳ chỉnh')}</span>
                 </button>
             </div>
-            ${count ? `<div class="edit-adjust-note">Đang có ${count} lớp Điều chỉnh trong dự án.</div>` : ''}`;
+            <div class="edit-adjust-note" id="editAdjustLayerCount"${count ? '' : ' hidden'}>${adjustLayerCountText(count)}</div>`;
+    }
+
+    function adjustLayerCountText(count) {
+        return _t('Đang có {n} lớp Điều chỉnh trong dự án.', { n: count });
+    }
+
+    /* Dòng đếm chỉ được dựng lúc vẽ panel -> thêm/xoá lớp mà không vẽ lại panel thì nó đứng
+     * yên ở số cũ ("Đang có 1 lớp" trong khi timeline đã có 3). Gọi từ renderAll: chỉ đụng
+     * đúng một nút, và thoát ngay khi panel không mở. */
+    function refreshAdjustLayerCount() {
+        const note = document.getElementById('editAdjustLayerCount');
+        if (!note) return;
+        const count = editingItems.filter((it) => it.type === 'adjust').length;
+        note.hidden = !count;
+        note.textContent = adjustLayerCountText(count);
     }
 
     // Ghi LUT vào MỘT target cụ thể (dùng cho cả kéo-thả lẫn bấm chọn).
@@ -16703,7 +17038,7 @@
     function paintLibrary(bodyEl, items, category) {
         if (editPanelTab !== 'library' || editPanelLibCategory !== category) return;
         if (!items.length) {
-            bodyEl.innerHTML = `<div class="edit-empty">Chưa có asset trong "${category}".<br>Thêm file vào thư mục <code>library/</code> của ứng dụng.</div>`;
+            bodyEl.innerHTML = `<div class="edit-empty">${_t('Chưa có asset trong "{category}".<br>Thêm file vào thư mục <code>library/</code> của ứng dụng.', { category: escapeHtml(category) })}</div>`;
             return;
         }
         bodyEl.innerHTML = `<div class="edit-asset-grid ${panelPreviewSel ? 'has-previewing' : ''}">${items.map((it) => libCardHtml(it, category)).join('')}</div>`;
@@ -16715,7 +17050,7 @@
             paintLibrary(bodyEl, libraryCache[category], category);
             return;
         }
-        bodyEl.innerHTML = '<div class="edit-loading">Đang tải thư viện…</div>';
+        bodyEl.innerHTML = `<div class="edit-loading">${_t('Đang tải thư viện…')}</div>`;
         let items = [];
         try {
             const resp = await fetch(`${API_BASE}/library?category=${encodeURIComponent(category)}`);
@@ -16756,23 +17091,33 @@
         subEl.innerHTML = subs.map((s) => `<button class="edit-subtab ${s.id === activeSub ? 'is-active' : ''}" type="button" data-edit-subtab="${s.id}" role="tab" aria-selected="${s.id === activeSub}" aria-controls="editPanelBody">${s.label}</button>`).join('');
         if (editPanelTab === 'media') bodyEl.innerHTML = renderImportPaneHtml('media');
         else if (editPanelTab === 'audio') {
-            if (editPanelAudioSub === 'subtitle') {
-                // Panel Auto Subtitle sống ở static/js/auto-subtitle.js — một tính năng độc
-                // lập, test riêng được mà không cần DOM thật.
-                if (window.AutoSubtitlePanel) {
-                    bodyEl.innerHTML = window.AutoSubtitlePanel.renderPaneHtml();
-                    window.AutoSubtitlePanel.bindPane(bodyEl);
+            if (editPanelAudioSub === 'dubbing') {
+                if (window.DubbingPanel) {
+                    bodyEl.innerHTML = window.DubbingPanel.renderPaneHtml();
+                    window.DubbingPanel.bindPane(bodyEl);
                 } else {
-                    bodyEl.innerHTML = '<div class="edit-empty">Không nạp được auto-subtitle.js</div>';
+                    bodyEl.innerHTML = `<div class="edit-empty">${_t('Không nạp được {file}', { file: 'dubbing.js' })}</div>`;
                 }
-            } else {
-                bodyEl.innerHTML = renderImportPaneHtml('audio');
-            }
+            } else bodyEl.innerHTML = renderImportPaneHtml('audio');
         }
         else if (editPanelTab === 'script') { bodyEl.innerHTML = renderScriptPaneHtml(); bindScriptPane(bodyEl); }
         else if (editPanelTab === 'text') {
-            bodyEl.innerHTML = renderTextPaneHtml();
-            if (editPanelTextSub === 'template') initTextTemplateThumbs(bodyEl);
+            /* Hai panel phụ đề sống ở tệp riêng (auto-subtitle.js, local-subtitle.js) — tính
+               năng độc lập, test riêng được mà không cần DOM thật. */
+            const subtitlePanel = editPanelTextSub === 'subtitle' ? { mod: window.AutoSubtitlePanel, file: 'auto-subtitle.js' }
+                : editPanelTextSub === 'local-subtitle' ? { mod: window.LocalSubtitlePanel, file: 'local-subtitle.js' }
+                    : null;
+            if (subtitlePanel) {
+                if (subtitlePanel.mod) {
+                    bodyEl.innerHTML = subtitlePanel.mod.renderPaneHtml();
+                    subtitlePanel.mod.bindPane(bodyEl);
+                } else {
+                    bodyEl.innerHTML = `<div class="edit-empty">${_t('Không nạp được {file}', { file: subtitlePanel.file })}</div>`;
+                }
+            } else {
+                bodyEl.innerHTML = renderTextPaneHtml();
+                if (editPanelTextSub === 'template') initTextTemplateThumbs(bodyEl);
+            }
         }
         else if (editPanelTab === 'shape') bodyEl.innerHTML = renderShapePaneHtml();
         else if (editPanelTab === 'transition') { bodyEl.innerHTML = renderTransitionPaneHtml(); initTransitionThumbs(bodyEl); }
@@ -16801,10 +17146,10 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ category, name }),
         });
-        if (!resp.ok) throw new Error(`Thêm asset thư viện thất bại (${resp.status})`);
+        if (!resp.ok) throw new Error(_t('Thêm asset thư viện thất bại ({status})', { status: resp.status }));
         const data = await resp.json();
         const raw = (data.assets || [])[0];
-        if (!raw) throw new Error('Không tìm thấy asset thư viện.');
+        if (!raw) throw new Error(_t('Không tìm thấy asset thư viện.'));
         const existing = raw.rel_path ? editingAssets.find((a) => a.rel_path === raw.rel_path) : null;
         return existing || addAssetRecord(raw);
     }
@@ -16843,9 +17188,9 @@
         if (event.target.closest('#editLutImport')) { importLutFile(); return; }
         if (event.target.closest('#editLutClear')) {
             const targets = adjustTargets();
-            if (!targets.length) { setEditingStatusText('Hãy chọn block cần gỡ LUT.'); return; }
+            if (!targets.length) { setEditingStatusText(_t('Hãy chọn block cần gỡ LUT.')); return; }
             applyLutToTargets(targets, '');
-            setEditingStatusText(`Đã gỡ LUT khỏi ${targets.length} block.`);
+            setEditingStatusText(_t('Đã gỡ LUT khỏi {n} block.', { n: targets.length }));
             renderEditPanel();
             return;
         }
@@ -16854,15 +17199,15 @@
             const lutId = lutCard.dataset.editLut;
             const targets = adjustTargets();
             if (!targets.length) {
-                setEditingStatusText('Hãy chọn một block có hình trên timeline, hoặc kéo thẳng LUT vào block.');
+                setEditingStatusText(_t('Hãy chọn một block có hình trên timeline, hoặc kéo thẳng LUT vào block.'));
                 return;
             }
             // Bấm lại LUT ĐANG áp = gỡ (toggle) — không cần đi tìm nút riêng.
             const already = ColorAdjust.normalize(targets[0].adjustments).lut.id === lutId;
             applyLutToTargets(targets, already ? '' : lutId);
             setEditingStatusText(already
-                ? 'Đã gỡ LUT.'
-                : `Đã áp LUT "${lutCard.title}" cho ${targets.length} block.`);
+                ? _t('Đã gỡ LUT.')
+                : _t('Đã áp LUT "{name}" cho {n} block.', { name: lutCard.title, n: targets.length }));
             renderEditPanel();
             return;
         }
@@ -17709,21 +18054,21 @@
         const giveUp = (why) => {
             console.warn(`[retouch] ảnh ${item.id}: ${why} — ảnh này xuất ra KHÔNG có retouch`);
             if (typeof setEditingStatusText === 'function') {
-                setEditingStatusText(`Không bake được Retouch cho một ảnh overlay (${why}).`);
+                setEditingStatusText(_t('Không dựng được Retouch cho một ảnh overlay ({why}).', { why }));
             }
             return null;
         };
         try {
-            if (!await awaitRetouchFaces(item)) return giveUp('chưa bám được khuôn mặt');
+            if (!await awaitRetouchFaces(item)) return giveUp(_t('chưa bám được khuôn mặt'));
             const image = await loadImageEl(src);
             const texW = image.naturalWidth || 0;
             const texH = image.naturalHeight || 0;
-            if (!(texW > 0 && texH > 0)) return giveUp('ảnh không có kích thước');
+            if (!(texW > 0 && texH > 0)) return giveUp(_t('ảnh không có kích thước'));
             const out = retouchedDrawable(image, texW, texH, item, 0, texW / Math.max(1, texH));
             // Trả về CHÍNH ảnh vào = retouch không áp được (không thấy mặt / không có
             // WebGL). Không phải lỗi, nhưng vẫn phải nói ra vì kết quả là "xuất không có
             // retouch" dù người dùng đã bật.
-            if (!out || out === image) return giveUp('không thấy khuôn mặt trong ảnh');
+            if (!out || out === image) return giveUp(_t('không thấy khuôn mặt trong ảnh'));
             const canvas = document.createElement('canvas');
             canvas.width = texW;
             canvas.height = texH;
@@ -17793,16 +18138,14 @@
             && adjustLayerAppliesTo(it, item)
             && it.timeline_start < itemEnd && it.timeline_start + it.duration > itemStart);
         const layerAt = (localT) => (layerTouches
-            ? activeAdjustmentLayerAdjustments(itemStart + (Number(localT) || 0), item)
-            : null);
+            ? activeAdjustmentLayerAdjustmentsList(itemStart + (Number(localT) || 0), item)
+            : []);
         const animatedColor = !!window.ColorAdjust
             && (ColorAdjust.hasAdjustKeyframes(item.keyframes) || layerTouches);
         const sourceAt = (localT) => {
             let out = colorAdjustedDrawable(
                 image, texW, texH, effectiveAdjustments(item, localT), `imgseq:${item.id}`);
-            const layerAdj = layerAt(localT);
-            if (layerAdj) out = colorAdjustedDrawable(out, texW, texH, layerAdj, `imgseq:${item.id}~adjlayer`);
-            return out;
+            return applyAdjustmentLayers(out, texW, texH, layerAt(localT), `imgseq:${item.id}`);
         };
         const staticSource = animatedColor ? null : sourceAt(0);
         const drawInto = (ctx, _charFrac, localT) => ctx.drawImage(
@@ -18099,10 +18442,8 @@
             // là nửa mở [start, end)). Khung chuyển cảnh bake xong đi `color_source:'baked'`
             // nên sidecar không áp lớp lần nữa.
             const seamSeqT = (Number(item.timeline_start) || 0) + (side === 'A' ? Math.max(0, seamLocalT - 0.001) : 0);
-            const layerAdj = activeAdjustmentLayerAdjustments(seamSeqT, item);
-            if (layerAdj) {
-                drawable = colorAdjustedDrawable(drawable, texW, texH, layerAdj, `bake:${item.id}:${side}~adjlayer`);
-            }
+            drawable = applyAdjustmentLayers(drawable, texW, texH,
+                activeAdjustmentLayerAdjustmentsList(seamSeqT, item), `bake:${item.id}:${side}`);
             return { drawable, w0: sz.width, h0: sz.height };
         }
         return null;
@@ -18382,7 +18723,7 @@
             const d = transDef.duration, half = d / 2, J = a.end;
             done += 1;
             if (typeof setStatusText === 'function') {
-                setStatusText(`Đang dựng khung chuyển cảnh ${done}/${todo}...`, true);
+                setStatusText(_t('Đang dựng khung chuyển cảnh {done}/{total}...', { done, total: todo }), true);
             }
             // Thanh tiến độ XÁC ĐỊNH dưới header (Phase D1) — cùng số liệu với dòng trạng
             // thái, chỉ thêm một kênh trình bày, không đổi phép đếm.
@@ -18452,8 +18793,7 @@
         // Keyframe màu có thể BẬT hiệu ứng không gian giữa chừng -> soi vài mốc.
         for (const t of [0, d * 0.25, d * 0.5, d * 0.75, d]) {
             if (spatial(effectiveAdjustments(target, t))) return true;
-            if (typeof activeAdjustmentLayerAdjustments === 'function'
-                && spatial(activeAdjustmentLayerAdjustments(seqStart + t, target))) return true;
+            if (activeAdjustmentLayerAdjustmentsList(seqStart + t, target).some(spatial)) return true;
         }
         return spatial(target.adjustments);
     }
@@ -18585,11 +18925,11 @@
             vid.src = srcUrl;
             await new Promise((res, rej) => {
                 vid.addEventListener('loadeddata', res, { once: true });
-                vid.addEventListener('error', () => rej(new Error(`không nạp được ${srcUrl}`)), { once: true });
-                setTimeout(() => rej(new Error('quá hạn nạp nguồn')), 30000);
+                vid.addEventListener('error', () => rej(new Error(_t('không nạp được {src}', { src: srcUrl }))), { once: true });
+                setTimeout(() => rej(new Error(_t('quá hạn nạp nguồn'))), 30000);
             });
             const texW = vid.videoWidth, texH = vid.videoHeight;
-            if (!(texW > 0 && texH > 0)) throw new Error('nguồn không có kích thước');
+            if (!(texW > 0 && texH > 0)) throw new Error(_t('nguồn không có kích thước'));
             const grab = bakeCanvas('retouchSrc', texW, texH);
             for (let i = 0; i < times.length; i++) {
                 await new Promise((res) => {
@@ -18741,7 +19081,7 @@
                 const out = await bakeRetouchSequence(span, exportFps, seqW, seqH, srcUrl, collect, (n, all) => {
                     if (n % 5 !== 0) return;
                     if (typeof setStatusText === 'function') {
-                        setStatusText(`Đang dựng khung Retouch ${done + n}/${totalFrames}...`, true);
+                        setStatusText(_t('Đang dựng khung Retouch {done}/{total}...', { done: done + n, total: totalFrames }), true);
                     }
                     window.updateAppTask?.(done + n, totalFrames);   // Phase D1
                 });
@@ -18749,7 +19089,7 @@
                 if (!out || !bakedSeqHasFrames(out.seq)) {
                     console.warn(`[retouch] không bake được block ${span.index} — bản xuất sẽ KHÔNG có retouch ở đoạn này`);
                     if (typeof setEditingStatusText === 'function') {
-                        setEditingStatusText(`Không bake được Retouch cho block ${span.index + 1} — đoạn đó xuất ra không có retouch.`);
+                        setEditingStatusText(_t('Không dựng được Retouch cho block {n} — đoạn đó xuất ra không có retouch.', { n: span.index + 1 }));
                     }
                     continue;
                 }
@@ -18838,10 +19178,10 @@
         const r = Retouch.normalize(item.retouch);
         const store = await awaitRetouchFaces(item);
         if (!store || !Array.isArray(store.frames) || !store.frames.length) {
-            return { skip: 'chưa bám được khuôn mặt' };
+            return { skip: _t('chưa bám được khuôn mặt') };
         }
         if (retouchSpatialFx(item, Number(item.duration) || 0, Number(item.timeline_start) || 0)) {
-            return { skip: 'có hiệu ứng không gian (viền mờ / hạt / nét / làm mờ)' };
+            return { skip: _t('có hiệu ứng không gian (viền mờ / hạt / nét / làm mờ)') };
         }
         const size = itemBaseSize(item, asset);
         const w0 = Math.max(2, Number(size.width) || 0);
@@ -18871,13 +19211,13 @@
                 runFrom = -1;
             }
         }
-        if (best.len < 2) return { skip: 'lớp không đục hoàn toàn ở đoạn nào đủ dài (độ mờ / hoạt ảnh mờ dần)' };
+        if (best.len < 2) return { skip: _t('lớp không đục hoàn toàn ở đoạn nào đủ dài (độ mờ / hoạt ảnh mờ dần)') };
         if (best.len < frameCount) {
             // Miếng vá bắt đầu MUỘN hơn item, mà sidecar tính LOCALT của chuỗi màu theo
             // mốc bắt đầu của CHÍNH overlay -> keyframe màu sẽ chạy lệch đúng bằng khoảng
             // trễ đó. Không có cách khai lệch mốc trong payload, nên ca này bỏ hẳn.
             if (window.ColorAdjust && ColorAdjust.hasAdjustKeyframes(item.keyframes)) {
-                return { skip: 'vừa có keyframe màu vừa có đoạn mờ dần — hai thứ này chưa vá chung được' };
+                return { skip: _t('vừa có keyframe màu vừa có đoạn mờ dần — hai thứ này chưa vá chung được') };
             }
             console.warn(`[retouch] overlay ${item.id}: chỉ vá ${best.len}/${frameCount} khung`
                 + ' — các khung còn lại lớp đang mờ dần nên không vá được');
@@ -18895,8 +19235,8 @@
             aspect: w0 / Math.max(1, h0),
             placeAt, w0, h0, seqW, seqH,
         });
-        if (!found.sawFace) return { skip: 'không thấy khuôn mặt nào trong block' };
-        if (!found.rect) return { skip: 'vùng mặt chiếm quá lớn trên khung' };
+        if (!found.sawFace) return { skip: _t('không thấy khuôn mặt nào trong block') };
+        if (!found.rect) return { skip: _t('vùng mặt chiếm quá lớn trên khung') };
         const rect = found.rect;
         const featherPx = found.feather;
 
@@ -18917,7 +19257,7 @@
             wrote += 1;
             if (progress) progress(wrote, best.len);
         });
-        if (wrote < 2) return { skip: 'không bắt đủ khung từ nguồn' };
+        if (wrote < 2) return { skip: _t('không bắt đủ khung từ nguồn') };
         // Miếng vá chỉ phủ DẢI ĐỤC, nên mốc và độ dài của nó là của dải — không phải của
         // cả item. Mốc rơi đúng lưới khung: snapT(ts + first/fps) = round(ts·fps) + first.
         const runStart = ts + first / exportFps;
@@ -18937,11 +19277,11 @@
         const warn = (item, why) => {
             console.warn(`[retouch] overlay ${item.id}: ${why} — overlay này xuất ra KHÔNG có retouch`);
             if (typeof setEditingStatusText === 'function') {
-                setEditingStatusText(`Không bake được Retouch cho một overlay video (${why}).`);
+                setEditingStatusText(_t('Không dựng được Retouch cho một overlay video ({why}).', { why }));
             }
         };
         if (typeof collect !== 'function') {
-            targets.forEach((it) => warn(it, 'thiếu đường gửi khung (collectFile)'));
+            targets.forEach((it) => warn(it, _t('thiếu đường gửi khung (collectFile)')));
             return;
         }
         const seqDim = payloadSequence();
@@ -18950,18 +19290,18 @@
         window.beginAppTask?.();
         for (const item of targets) {
             const asset = findAsset(item.asset_id);
-            if (!asset || !asset.url) { warn(item, 'thiếu tệp nguồn'); continue; }
+            if (!asset || !asset.url) { warn(item, _t('thiếu tệp nguồn')); continue; }
             try {
                 const out = await bakeOverlayRetouchSequence(
                     item, asset, exportFps, seqW, seqH, collect, (n, all) => {
                         if (n % 5 !== 0) return;
                         if (typeof setStatusText === 'function') {
-                            setStatusText(`Đang dựng khung Retouch cho overlay ${n}/${all}...`, true);
+                            setStatusText(_t('Đang dựng khung Retouch cho overlay {done}/{total}...', { done: n, total: all }), true);
                         }
                         window.updateAppTask?.(n, all);   // Phase D1
                     });
                 if (!out || out.skip || !bakedSeqHasFrames(out.seq)) {
-                    warn(item, out?.skip || 'không dựng được chuỗi khung');
+                    warn(item, out?.skip || _t('không dựng được chuỗi khung'));
                     continue;
                 }
                 const { rect } = out;
@@ -19007,7 +19347,7 @@
                 items.push(patch);
             } catch (error) {
                 console.warn('Retouch overlay bake error:', error);
-                warn(item, error?.message || 'lỗi khi dựng khung');
+                warn(item, error?.message || _t('lỗi khi dựng khung'));
             }
         }
         window.endAppTask?.();
@@ -19196,6 +19536,8 @@
             // AUTO SUBTITLE: đi chung đường với mọi state khác -> .crab và undo/redo nhớ bộ
             // phụ đề mà không cần kênh lưu riêng (xem ghi chú ở subtitleState).
             subtitleState: subtitleState ? deepClone(subtitleState) : null,
+            // Các bộ nhập từ tệp (Local Subtitle) — khoá riêng, xem ghi chú ở subtitleState.
+            subtitleImports: deepClone(subtitleImports),
         };
     }
 
@@ -19234,6 +19576,8 @@
         subtitleState = (state.subtitleState && typeof state.subtitleState === 'object')
             ? deepClone(state.subtitleState)
             : null;
+        // Dự án lưu trước khi có Local Subtitle không có khoá này -> [] (cùng lý do như trên).
+        setSubtitleImports(state.subtitleImports);
         ensureDefaultTracks();
         /* MỞ LẠI DỰ ÁN: block đã có sẵn nên KHÔNG có lượt `ensureAssetProbed` nào chạy,
          * mà prewarm phía backend chỉ thấy asset lúc NHẬP. Không kick ở đây thì proxy LQ
@@ -19305,6 +19649,7 @@
          * Mở một dự án khác thì không dính vì restoreEditingHistoryState đặt lại khoá này;
          * chỉ đường "Dự án mới" là thiếu. */
         subtitleState = null;
+        subtitleImports = [];   // cùng lý do: bộ nhập của dự án cũ không được sống sang dự án mới
         selectedEditingItemId = '';
         selectedEditingItemIds.clear();
         selectedMainClipIndexes.clear();
@@ -20294,15 +20639,20 @@
                 /* CHỈ HIỆN khi trỏ vào hoặc khi block đang được chọn — đúng như CapCut.
                    Trước đây hai vạch trắng này hiện trên MỌI block, nên timeline lúc nào
                    cũng đầy cạnh sáng và khung chọn không còn gì để nổi bật.
-                   Dùng opacity (không dùng display/visibility) để VÙNG BẤM vẫn còn: trỏ vào
-                   là trim được ngay, không phải chọn trước. */
-                opacity: 0;
-                transition: opacity var(--dur-fast) var(--ease-out);
+                   Ẩn bằng VISIBILITY, không bằng opacity:0 (2026-09-27): phần tử opacity < 1 vẫn
+                   có nút hiệu ứng riêng trong cây thuộc tính paint, tức MỖI block thêm hai paint
+                   chunk mà trình duyệt phải chia lớp lại ở mỗi lượt vẽ. Đo khi kéo thanh zoom
+                   với ~200 block phụ đề: long task giảm ~một nửa (≈580 ms -> ≈230 ms / 2 giây).
+                   Vùng bấm KHÔNG mất: trỏ vào block là block :hover -> tay cầm hiện ra trước
+                   cú bấm, nên trỏ vào là trim được ngay như cũ. */
+                visibility: hidden;
             }
             .editing-block:hover .editing-resize-handle,
             .editing-block.is-selected .editing-resize-handle {
-                opacity: 1;
+                visibility: visible;
+                animation: editing-handle-in var(--dur-fast) var(--ease-out);
             }
+            @keyframes editing-handle-in { from { opacity: 0; } to { opacity: 1; } }
             .editing-resize-handle.left { left: 0; border-radius: 6px 0 0 6px; }
             .editing-resize-handle.right { right: 0; border-radius: 0 6px 6px 0; }
             .editing-block:hover .editing-resize-handle { background: rgba(255,255,255,0.7); }
@@ -21118,9 +21468,11 @@
         /* "Đồng bộ các subtitle" ở khối Biến đổi. KHÔNG recordHistory: bật/tắt nó không đổi
            một pixel nào trên khung hình, chỉ đổi cách các lượt chỉnh SAU đó lan ra — nhét
            vào undo/redo thì Ctrl+Z sau khi chỉnh cỡ chữ lại hoàn tác cái nút. `renderEditPanel`
-           để ô tích cùng tên ở panel Auto Subtitle bên trái không hiện ngược trạng thái. */
+           để ô tích cùng tên ở panel Auto Subtitle / Local Subtitle bên trái không hiện ngược
+           trạng thái. Cờ là của bộ chứa block đang chọn, không phải luôn luôn bộ Auto Subtitle. */
         document.getElementById('inspectorSubtitleSync')?.addEventListener('change', (event) => {
-            setSubtitleStyleSync(!!event.target.checked);
+            const set = subtitleSetOfItem(selectedEditingItem());
+            if (set) setSubtitleStyleSync(!!event.target.checked, set.id);
             syncSubtitleSyncRow(selectedEditingItem());
             renderEditPanel();
         });
@@ -21147,7 +21499,7 @@
         document.getElementById('editingAssetFolderInput')?.addEventListener('change', async (event) => {
             const files = Array.from(event.target.files || []).filter((f) => fileMatchesAssetKind(f, importKind));
             if (!files.length) {
-                showToast('Không tìm thấy tệp phương tiện hợp lệ trong thư mục.', { type: 'error' });
+                showToast(_t('Không tìm thấy tệp phương tiện hợp lệ trong thư mục.'), { type: 'error' });
                 return;
             }
             try {
@@ -21945,7 +22297,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ paths: need }),
         });
-        if (!resp.ok) throw new Error(`Không nạp được asset thư viện (HTTP ${resp.status})`);
+        if (!resp.ok) throw new Error(_t('Không nạp được asset thư viện (HTTP {status})', { status: resp.status }));
         const data = await resp.json();
         for (const raw of (Array.isArray(data.assets) ? data.assets : [])) {
             const asset = addAssetRecord(raw);
@@ -22502,22 +22854,22 @@
             ? meta.notes.filter((n) => n && String(n.text || '').trim()).length
             : 0;
         if (!bolds.length && !noteCount) {
-            magicStatus('Magic Fill: Kịch bản .md chưa có cụm in đậm (**...**) hay ghi chú (/*…*/)', false);
+            magicStatus(_t('Magic Fill: Kịch bản .md chưa có cụm in đậm (**...**) hay ghi chú (/*…*/)'), false);
             return;
         }
         const inEditing = (typeof currentMode !== 'undefined' && currentMode === 'FINAL')
             && (typeof currentStepId !== 'undefined' && currentStepId === 'step4');
         if (!inEditing) {
-            magicStatus('Magic Fill chỉ chạy ở giai đoạn Editing', false);
+            magicStatus(_t('Magic Fill chỉ chạy ở giai đoạn Editing'), false);
             return;
         }
         const clips = Array.isArray(latestTimeline) ? latestTimeline : [];
         if (!clips.length) {
-            magicStatus('Magic Fill: timeline chưa có clip', false);
+            magicStatus(_t('Magic Fill: timeline chưa có clip'), false);
             return;
         }
 
-        magicStatus('Magic Fill: đang bóc băng lại audio timeline + đọc thư viện...', true);
+        magicStatus(_t('Magic Fill: đang bóc băng lại audio timeline + đọc thư viện...'), true);
         // Magic Fill KHÔNG còn kích hoạt Auto-Reframe: AR là việc của giai đoạn Timeline
         // (nút "AR"). Ở đây chỉ ĐỌC dữ liệu mặt đã có (nếu chưa chạy AR thì né mặt rơi về
         // mặc định). Chạy song song: bóc băng lại đúng phần audio đã dựng (word-level mới,
@@ -22959,22 +23311,23 @@
 
         clearEditingSelection();
         renderAll();
-        const warn = weakCount ? ` (${weakCount} cụm chưa khớp — block TÍM SỌC trên timeline, cần rà lại vị trí)` : '';
+        const warn = weakCount ? ` ${_t('({n} cụm chưa khớp — block TÍM SỌC trên timeline, cần rà lại vị trí)', { n: weakCount })}` : '';
         const dataNote = freshWords
-            ? ' • word-level bóc lại từ timeline'
-            : (retranscribeError ? ' • dùng dữ liệu bóc băng gốc (bóc lại lỗi)' : '');
+            ? ` • ${_t('dữ liệu từng từ bóc lại từ timeline')}`
+            : (retranscribeError ? ` • ${_t('dùng dữ liệu bóc băng gốc (bóc lại lỗi)')}` : '');
         let assetNote = '';
         if (assetError) {
-            assetNote = ' • lỗi khi thêm đối tượng thư viện';
+            assetNote = ` • ${_t('lỗi khi thêm đối tượng thư viện')}`;
         } else if (assetReport.created || assetReport.noteKeywords || assetReport.boldMatched) {
             const missed = assetReport.noAsset.length + assetReport.noTime.length;
-            assetNote = ` • ${assetReport.created} đối tượng thư viện`
-                + (missed ? ` (${missed} ghi chú chưa có file/chưa định vị được)` : '');
+            assetNote = ` • ${_t('{n} đối tượng thư viện', { n: assetReport.created })}`
+                + (missed ? ` ${_t('({n} ghi chú chưa có file/chưa định vị được)', { n: missed })}` : '');
         }
         /* Một cụm có thể sinh NHIỀU khối (tách theo dấu phân chia ở 1a, cắt cụm dài ở 1b)
            nên `created` không so được trực tiếp với số cụm — nói rõ từng loại khối. */
-        const tplNote = templateUnits.length ? ` • ${templateUnits.length} mẫu Custom kèm hình` : '';
-        magicStatus(`Magic Fill: đã tạo ${created} khối từ ${planned.length}/${bolds.length} cụm kịch bản${tplNote}${warn}${assetNote}${dataNote}`, false);
+        const tplNote = templateUnits.length ? ` • ${_t('{n} mẫu Custom kèm hình', { n: templateUnits.length })}` : '';
+        magicStatus(_t('Magic Fill: đã tạo {created} khối từ {planned}/{total} cụm kịch bản', { created, planned: planned.length, total: bolds.length })
+            + `${tplNote}${warn}${assetNote}${dataNote}`, false);
     }
 
     /* =========================================================================
@@ -23011,6 +23364,89 @@
         const track = createTrack('audio');
         track.name = tracks.length ? `${prefix} ${tracks.length + 1}` : prefix;
         return track;
+    }
+
+    /* ===== LỒNG TIẾNG (tab Âm thanh → Lồng tiếng, static/js/dubbing.js) =====
+     *
+     * Đặt audio do server TTS sinh ra lên timeline: một clip ghép cả bài, hoặc mỗi câu một clip
+     * (`split`) để người dùng kéo chỉnh từng câu. Lane riêng tên "Lồng tiếng" — cùng lý do như lane
+     * Auto SFX: dễ nhận ra, và lượt lồng lại xoá ĐÚNG phần của mình (`dubbing_source`) mà không đụng
+     * audio người dùng tự thêm.
+     *
+     * Tệp đi qua /editing-assets/import-local như tệp nhập tay (chép vào editing_assets): đó là
+     * đường mà đóng gói dự án (.crab) đã biết mang theo. Asset "link" thì trỏ ra ngoài, không hợp
+     * với tệp sinh trong temp_uploads — "Dự án mới" xoá temp là clip mất tiếng.
+     *
+     * KẸP VÀO TIMELINE như mọi block (resolveNewItemPlacement): phần nằm sau cuối lane chính bị
+     * cắt, câu bắt đầu sau cuối thì bỏ — và báo lại số liệu cho panel nói ra. */
+    async function addDubbingAudio(entries, options = {}) {
+        const list = (entries || []).filter((e) => e && e.path && Number(e.duration) > 0);
+        if (!list.length) return { placed: 0, skipped: 0, clamped: 0, removed: 0 };
+        const total = timelineDuration();
+        if (!(total > 0)) throw new Error(_t('Timeline chưa có video nào. Thêm video vào lane chính trước — lồng tiếng được đặt theo mốc thời gian của timeline.'));
+        const response = await fetch(`${API_BASE}/editing-assets/import-local`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ kind: 'audio', paths: list.map((e) => e.path) }),
+        });
+        if (!response.ok) {
+            const detail = await response.json().catch(() => ({}));
+            throw new Error(detail.detail || _t('Nhập tệp thất bại ({status})', { status: response.status }));
+        }
+        const data = await response.json();
+        const pathKey = (p) => String(p || '').replace(/[\\/]+/g, '/').toLowerCase();
+        const bySource = new Map((data.assets || []).map((raw) => [pathKey(raw.source_path), raw]));
+        const trackName = _t('Lồng tiếng');
+        const source = String(options.sourceKey || '');
+        const endBatch = beginHistoryBatch();
+        let placed = 0;
+        let skipped = 0;
+        let clamped = 0;
+        let removed = 0;
+        try {
+            if (source && options.replace) {
+                const before = editingItems.length;
+                for (let i = editingItems.length - 1; i >= 0; i -= 1) {
+                    if (editingItems[i].dubbing_source === source) editingItems.splice(i, 1);
+                }
+                removed = before - editingItems.length;
+            }
+            list.forEach((entry) => {
+                const raw = bySource.get(pathKey(entry.path));
+                if (!raw) { skipped += 1; return; }
+                const asset = editingAssets.find((a) => a.id === raw.id) || addAssetRecord(raw) || editingAssets.find((a) => a.id === raw.id);
+                if (!asset) { skipped += 1; return; }
+                const start = Math.max(0, Number(entry.start) || 0);
+                if (start >= total - 0.05) { skipped += 1; return; }
+                const want = Number(entry.duration);
+                const duration = Math.max(0.05, Math.min(want, total - start));
+                if (want - duration > 0.05) clamped += 1;
+                const track = autoSfxTrackForRange(trackName, start, duration);
+                editingItems.push({
+                    id: nextId('item_audio'),
+                    type: 'audio',
+                    track_id: track.id,
+                    timeline_start: start,
+                    duration,
+                    asset_id: asset.id,
+                    source_start: 0,
+                    muted: false,
+                    volume: 100,
+                    transform: defaultTransform(),
+                    text: '',
+                    style: defaultTextStyle(),
+                    dubbing: true,
+                    dubbing_source: source,
+                });
+                placed += 1;
+            });
+        } finally {
+            endBatch();
+        }
+        sortTracks();
+        renderAll();
+        renderEditPanel();
+        return { placed, skipped, clamped, removed };
     }
 
     // Chờ .pk sẵn sàng rồi tìm ĐỈNH SÓNG. Backend sinh peak bất đồng bộ (POST /library/add
@@ -23121,18 +23557,18 @@
      */
     async function autoSoundEffects() {
         if (!window.AutoSfxAssets || !window.AppSettings) {
-            showToast('Thiếu module Auto Sound Effects.', { type: 'warning' });
+            showToast(_t('Thiếu module Auto Sound Effects.'), { type: 'warning' });
             return;
         }
         const total = timelineDuration();
         if (!Array.isArray(latestTimeline) || !latestTimeline.length || total <= 0) {
-            showToast('Timeline chưa có block nào trên lane chính.', { type: 'warning' });
+            showToast(_t('Timeline chưa có block nào trên lane chính.'), { type: 'warning' });
             return;
         }
         const A = window.AutoSfxAssets;
         await AppSettings.ready();
         const cfg = autoSfxConfig();
-        if (!cfg) { showToast('Không đọc được cài đặt Auto Sound Effects.', { type: 'error' }); return; }
+        if (!cfg) { showToast(_t('Không đọc được cài đặt Auto Sound Effects.'), { type: 'error' }); return; }
 
         // Đã chạy trước đó -> hỏi ghi đè hay bù thiếu. window.confirm là cách hỏi hiện hành
         // của runtime (xem chỗ xoá asset đang được dùng).
@@ -23140,13 +23576,11 @@
         let replaceAll = true;
         if (existing.length) {
             replaceAll = window.confirm(
-                `Đã có ${existing.length} block do Auto Sound Effects tạo.\n\n`
-                + 'OK — Điền lại từ đầu (xoá các block ASE cũ).\n'
-                + 'Cancel — Giữ nguyên, chỉ bù những vị trí chưa có tiếng.',
+                _t('Đã có {n} block do Auto Sound Effects tạo.\n\nOK — Điền lại từ đầu (xoá các block ASE cũ).\nCancel — Giữ nguyên, chỉ bù những vị trí chưa có tiếng.', { n: existing.length }),
             );
         }
 
-        magicStatus('Auto Sound Effects: đang dò hiệu ứng…', true);
+        magicStatus(_t('Auto Sound Effects: đang dò hiệu ứng…'), true);
         const cues = autoSfxCollectCues(cfg);
 
         // Gom mọi file cần dùng của các nhóm được nhắc tới + nhạc nền, nạp MỘT lượt.
@@ -23155,8 +23589,8 @@
             libraryIndex = (await magicLibraryIndex()).map((entry) => entry.rel_path).filter(Boolean);
         } catch (err) {
             console.warn('Auto Sound Effects: không đọc được thư viện:', err);
-            showToast('Không đọc được thư viện library/.', { type: 'error' });
-            magicStatus('Auto Sound Effects: lỗi đọc thư viện', false);
+            showToast(_t('Không đọc được thư viện library/.'), { type: 'error' });
+            magicStatus(_t('Auto Sound Effects: lỗi đọc thư viện'), false);
             return;
         }
         const groupFiles = new Map();
@@ -23185,11 +23619,11 @@
         } catch (err) {
             console.warn('Auto Sound Effects: không nạp được asset:', err);
             showToast(err.message || String(err), { type: 'error' });
-            magicStatus('Auto Sound Effects: lỗi nạp asset', false);
+            magicStatus(_t('Auto Sound Effects: lỗi nạp asset'), false);
             return;
         }
 
-        magicStatus('Auto Sound Effects: đang dò đỉnh sóng…', true);
+        magicStatus(_t('Auto Sound Effects: đang dò đỉnh sóng…'), true);
         const plans = [];
         for (const { cue, rel } of cuePick) {
             const asset = assets.get(rel);
@@ -23308,11 +23742,11 @@
 
         const skipped = cues.length - usableCues.length;
         const notes = [];
-        if (musicCreated) notes.push('1 nhạc nền');
-        if (skipped) notes.push(`${skipped} mốc thiếu file trong nhóm`);
-        if (missingNames.length) notes.push(`${new Set(missingNames).size} file trong cài đặt không có trên đĩa`);
+        if (musicCreated) notes.push(_t('1 nhạc nền'));
+        if (skipped) notes.push(_t('{n} mốc thiếu file trong nhóm', { n: skipped }));
+        if (missingNames.length) notes.push(_t('{n} file trong cài đặt không có trên đĩa', { n: new Set(missingNames).size }));
         magicStatus(
-            `Auto Sound Effects: đã thêm ${created} SFX${notes.length ? ` • ${notes.join(' • ')}` : ''}`,
+            _t('Auto Sound Effects: đã thêm {n} SFX', { n: created }) + (notes.length ? ` • ${notes.join(' • ')}` : ''),
             false,
         );
     }
@@ -23366,7 +23800,8 @@
         // nào đang phủ playhead không. `currentSequenceTime` đi kèm vì lớp định vị theo
         // THỜI GIAN SEQUENCE, còn video.currentTime là thời gian NGUỒN — dùng nhầm là
         // lớp bật/tắt sai chỗ.
-        activeAdjustmentLayerAdjustments,
+        activeAdjustmentLayerAdjustmentsList,
+        applyAdjustmentLayers,
         currentSequenceTime,
         // RETOUCH: lane chính vẽ ở index.html nên điểm nối phải lộ ra ngoài.
         retouchedDrawable,
@@ -23408,11 +23843,21 @@
         subtitleStyleSyncEnabled,
         setSubtitleStyleSync,
         isSubtitleItem,
+        // ----- LOCAL SUBTITLE (static/js/local-subtitle.js) -----
+        getSubtitleImports,
+        setSubtitleImports,
+        timelineDuration,
+        currentSequenceTime,
         subtitleTextStyle,
         subtitleFontForLanguage,
         addTextItem,
         beginHistoryBatch,
         splitTextToMaxLines,
+        textFitsOneLine,
+        // Số block timeline đã dựng ở lượt gần nhất / tổng số item (ảo hoá — dùng cho test).
+        getTimelineRenderStats: () => ({ ...timelineRenderStats }),
+        // ----- LỒNG TIẾNG (static/js/dubbing.js) -----
+        addDubbingAudio,
         renderAll,
         renderEditPanel,
         getState: () => ({

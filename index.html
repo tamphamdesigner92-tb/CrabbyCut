@@ -3,6 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <title>CrabbyCut</title>
+    <!-- Đa ngôn ngữ: NẠP ĐẦU TIÊN — mọi module sau dịch chuỗi bằng _t() ngay lúc nạp. Hai
+         chú thích CRAB_I18N_* là chỗ backend chèn cấu hình + từ điển (injectI18n ở
+         backend/server.js); mở trang không qua backend thì chúng vô hại -> tiếng Việt. -->
+    <!--CRAB_I18N_BOOT-->
+    <script src="/static/js/i18n.js?v=i18n-p1"></script>
+    <!--CRAB_I18N_DICT-->
     <!-- Hệ phản hồi dùng chung (toast + thanh tiến độ). Nạp trước mọi module để
          editing-runtime.js / settings-panel.js gọi window.showToast được ngay. -->
     <script src="/static/js/ui-feedback.js?v=feedback-p1"></script>
@@ -25,7 +31,9 @@
     <script src="/static/js/shortcuts.js?v=keys-p1"></script>
     <script src="/static/js/app-settings.js?v=settings-p2"></script>
     <script src="/static/js/auto-sfx-assets.js?v=ase-p1"></script>
-    <script src="/static/js/settings-panel.js?v=settings-p2"></script>
+    <!-- Số phiên bản (Trang chủ, thanh trạng thái, Cài đặt → Về CrabbyCut) — nạp TRƯỚC settings-panel.js. -->
+    <script src="/static/js/app-info.js?v=appinfo-p1"></script>
+    <script src="/static/js/settings-panel.js?v=settings-p3"></script>
     <script src="/static/js/audio-waveform.js?v=waveform-strip-p4"></script>
     <script src="/static/js/audio-denoise.js?v=denoise-p1"></script>
     <script src="/static/js/clip-speed.js?v=speed-p2"></script>
@@ -33,7 +41,16 @@
     <!-- auto-grade.js đọc window.ColorAdjust lúc khởi tạo (UMD) -> phải nạp SAU color-adjust.js -->
     <script src="/static/js/auto-grade.js?v=autograde-p1"></script>
     <script src="/static/js/retouch.js?v=retouch-p1"></script>
-    <script src="/static/js/auto-subtitle.js?v=autosub-lumen-p1"></script>
+    <script src="/static/js/auto-subtitle.js?v=autosub-lumen-p2"></script>
+    <!-- Văn bản → Local Subtitle: bộ đọc tệp phụ đề (hàm thuần) + panel. Panel dùng lại buildSrt/
+         injectStyle của auto-subtitle.js nên nạp SAU nó. -->
+    <script src="/static/js/subtitle-formats.js?v=lsub-p1"></script>
+    <script src="/static/js/local-subtitle.js?v=lsub-p1"></script>
+    <!-- Âm thanh → Lồng tiếng (TTS theo mốc phụ đề). Dùng SubtitleFormats + injectStyle của
+         auto-subtitle.js nên nạp SAU hai tệp đó. -->
+    <script src="/static/js/dubbing.js?v=dub-p1"></script>
+    <!-- Thanh trạng thái: tiến trình tải model AI lần đầu (góc trái). -->
+    <script src="/static/js/model-download-status.js?v=mdl-p1"></script>
     <style>
         /* ===== UI Font (Inter, static theo độ dày từ thư mục Inter/) ===== */
         @font-face { font-family: "Inter"; src: url("/static/fonts/google/Inter/Inter_400Regular.ttf") format("truetype"); font-weight: 400; font-display: swap; }
@@ -611,7 +628,9 @@
         }
         
         /* Update existing panels for flex layout */
-        .sidebar-left { width: 288px; min-width: 250px; max-width: 600px; flex: 0 0 288px; flex-shrink: 0; }
+        /* Mặc định rộng theo cửa sổ (~27.5% màn hình, tối thiểu 288px) để lúc mở app panel trái
+           đủ rộng cho lưới thẻ media; kéo resizer vẫn ghi đè bằng style inline. */
+        .sidebar-left { width: clamp(288px, 27.5vw, 600px); min-width: 250px; max-width: 600px; flex: 0 0 clamp(288px, 27.5vw, 600px); flex-shrink: 0; }
         .sidebar-script { width: 304px; min-width: 260px; max-width: 560px; flex: 0 0 304px; flex-shrink: 0; }
         /* .sidebar-right: kích thước khai duy nhất ở khối "Cột phải: Transcript" bên dưới
            (trước đây khai 340px ở đây rồi bị 380px ghi đè -> rule chết). */
@@ -647,7 +666,7 @@
         
         /* Cột trái: Tools & Settings */
         .sidebar-left {
-            width: 288px;
+            width: clamp(288px, 27.5vw, 600px);
             background: var(--panel-bg);
             border-right: 1px solid var(--border-color);
             display: flex;
@@ -1062,10 +1081,11 @@
         }
         /* Cột Thuộc tính riêng bên phải (kiểu CapCut) */
         .sidebar-inspector {
-            width: 356px;
+            /* ~23% cửa sổ, tối thiểu 356px như trước */
+            width: clamp(356px, 23vw, 560px);
             min-width: 296px;
             max-width: 560px;
-            flex: 0 0 356px;
+            flex: 0 0 clamp(356px, 23vw, 560px);
             flex-shrink: 0;
             display: none;
             flex-direction: column;
@@ -3037,6 +3057,15 @@
         .set-unit { width: 22px; color: var(--text-muted); }
         .set-empty { font-size: var(--fs-2xs); color: var(--text-muted); font-style: italic; }
         .set-note { font-size: var(--fs-2xs); color: var(--text-muted); line-height: 1.5; margin: 10px 0 0; }
+        /* Cài đặt → Về CrabbyCut */
+        .set-about-head { display: flex; align-items: center; gap: 10px; margin: 2px 0 var(--sp-3); }
+        .set-about-head .app-logo { height: 24px; }
+        .set-about-ver { font: var(--fw-medium) var(--fs-xs)/1.4 var(--font-mono); color: var(--text-muted); }
+        .set-kv { display: grid; grid-template-columns: 96px 1fr; gap: 6px 12px; margin: 0; font-size: var(--fs-xs); }
+        .set-kv dt { color: var(--text-muted); }
+        .set-kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+        .set-kv-sub { color: var(--text-muted); }
+        .set-about-actions { display: flex; flex-wrap: wrap; gap: 6px; }
         .set-check { display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); cursor: pointer; }
         .set-check input { width: auto; margin: 0; }
         .set-cache-size { font-size: var(--fs-2xs); color: var(--text-muted); flex-shrink: 0; margin-right: 4px; }
@@ -3623,7 +3652,7 @@
     </style>
     <!-- Lớp giao diện Lumen (mẫu Figma). PHẢI là phần tử cuối trong <head>: editing-runtime.js
          và auto-subtitle.js chèn <style> của chúng NGAY TRƯỚC #lumenSkin để lớp này thắng. -->
-    <link id="lumenSkin" rel="stylesheet" href="/static/css/lumen-skin.css?v=2">
+    <link id="lumenSkin" rel="stylesheet" href="/static/css/lumen-skin.css?v=3">
 </head>
 <!-- home-active ghi thẳng vào markup, đúng cơ chế #step0 dùng: JS không phải gọi gì lúc
      khởi động, và không có nháy hình giữa "giao diện dựng" và "Home". -->
@@ -3717,7 +3746,10 @@
 </svg>
 
 <div class="header-bar">
-    <div style="flex-shrink: 0; z-index: 2;"><svg class="app-logo" viewBox="0 0 876.8 229.5" role="img" aria-label="CrabbyCut"><use href="#logo-crabbycut"/></svg></div>
+    <div style="flex-shrink: 0; z-index: 2;"><svg class="app-logo" viewBox="0 0 876.8 229.5" role="img" aria-label="CrabbyCut"><use href="#logo-crabbycut"/></svg>
+        <!-- Số phiên bản cạnh logo, CHỈ hiện ở Trang chủ (vào dự án thì nó ở góc phải thanh trạng
+             thái). app-info.js điền số thật từ package.json rồi mới bỏ `hidden`. -->
+        <span class="app-version-badge" data-app-version title="Phiên bản CrabbyCut" hidden></span></div>
     <!-- .breadcrumb-container là position:absolute căn giữa nên thanh này không tranh chỗ. -->
     <div id="projectTitleBar" class="project-titlebar">
         <button id="btnHomeScreen" type="button" class="titlebar-home" title="Về màn hình chính"><svg class="btn-ico"><use href="#ic-folder"/></svg>Trang chủ</button>
@@ -3732,9 +3764,9 @@
     </div>
     <div class="breadcrumb-container">
         <div class="breadcrumb" id="breadcrumb">
-            <div class="breadcrumb-item active" data-step="step0" aria-current="step">Upload</div>
+            <div class="breadcrumb-item active" data-step="step0" aria-current="step">Tải lên</div>
             <div class="breadcrumb-separator" aria-hidden="true">›</div>
-            <div class="breadcrumb-item" data-step="step1">Transcribe</div>
+            <div class="breadcrumb-item" data-step="step1">Bóc băng</div>
             <div class="breadcrumb-separator" aria-hidden="true">›</div>
             <div class="breadcrumb-item" data-step="step2">Match Script</div>
             <div class="breadcrumb-separator" aria-hidden="true">›</div>
@@ -3752,14 +3784,14 @@
                 <button id="menuSaveProject" type="button" class="app-menu-item" role="menuitem"><span class="app-menu-ico"><svg class="btn-ico" aria-hidden="true"><use href="#ic-download"/></svg></span><span>Lưu dự án</span><span class="app-menu-shortcut" data-shortcut-cmd="project.save">⌘S</span></button>
                 <button id="menuSaveAsProject" type="button" class="app-menu-item" role="menuitem"><span class="app-menu-ico"><svg class="btn-ico" aria-hidden="true"><use href="#ic-download-plus"/></svg></span><span>Lưu thành…</span><span class="app-menu-shortcut" data-shortcut-cmd="project.saveAs">⇧⌘S</span></button>
                 <button id="menuOpenAutosave" type="button" class="app-menu-item" role="menuitem"><span class="app-menu-ico"><svg class="btn-ico" aria-hidden="true"><use href="#ic-history"/></svg></span><span>Mở bản lưu tự động…</span></button>
-                <button id="menuPackageProject" type="button" class="app-menu-item" role="menuitem" title="Chép toàn bộ video của dự án vào một thư mục tự chứa, kèm bản .crab đã re-link"><span class="app-menu-ico"><svg class="btn-ico" aria-hidden="true"><use href="#ic-folder"/></svg></span><span>Đóng gói dự án…</span></button>
+                <button id="menuPackageProject" type="button" class="app-menu-item" role="menuitem" title="Chép toàn bộ video của dự án vào một thư mục tự chứa, kèm bản .crab đã liên kết lại"><span class="app-menu-ico"><svg class="btn-ico" aria-hidden="true"><use href="#ic-folder"/></svg></span><span>Đóng gói dự án…</span></button>
                 <div class="app-menu-sep"></div>
                 <button id="menuToggleDevMode" type="button" class="app-menu-item app-menu-toggle" role="menuitemcheckbox" aria-checked="false"><span class="app-menu-check"><svg class="btn-ico" aria-hidden="true"><use href="#ic-check"/></svg></span><span>Chế độ Nhà phát triển</span></button>
                 <div class="app-menu-sep"></div>
                 <button id="menuOpenSettings" type="button" class="app-menu-item" role="menuitem"><svg class="btn-ico"><use href="#ic-settings"/></svg><span>Cài đặt…</span><span class="app-menu-shortcut" data-shortcut-cmd="app.settings">⌘,</span></button>
             </div>
         </div>
-        <button id="btnExportVideo" class="btn btn-primary" disabled><svg class="btn-ico"><use href="#ic-export"/></svg>Xuất Video</button>
+        <button id="btnExportVideo" class="btn btn-primary" disabled><svg class="btn-ico"><use href="#ic-export"/></svg>Xuất video</button>
     </div>
 </div>
 <!-- MÀN HÌNH HOME: lớp phủ NGOÀI hệ step (xem CSS #homeScreen để biết vì sao). -->
@@ -3817,15 +3849,15 @@
 <div id="exportModalBackdrop" aria-hidden="true"></div>
 <div id="exportModalPanel" class="step-panel" role="dialog" aria-modal="true" aria-labelledby="exportModalTitle">
     <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px;">
-        <div id="exportModalTitle" style="font-weight:700;">Tùy chọn Export</div>
-        <button id="btnCloseExportModal" type="button" class="clip-reset-btn" title="Đóng Export" aria-label="Đóng Export"><svg class="btn-ico" aria-hidden="true"><use href="#ic-x"/></svg></button>
+        <div id="exportModalTitle" style="font-weight:700;">Tuỳ chọn xuất video</div>
+        <button id="btnCloseExportModal" type="button" class="clip-reset-btn" title="Đóng tuỳ chọn xuất video" aria-label="Đóng tuỳ chọn xuất video"><svg class="btn-ico" aria-hidden="true"><use href="#ic-x"/></svg></button>
     </div>
     <div style="font-size: var(--fs-sm); color: var(--text-muted); margin-bottom: 10px; line-height: 1.4;">
-        Export theo Sequence hiện tại và các layer trong Editing.
+        Xuất theo Sequence hiện tại và các lớp trong Editing.
     </div>
     <div class="export-settings">
         <div class="form-group">
-            <label for="exportFileName">Tên file xuất</label>
+            <label for="exportFileName">Tên tệp xuất</label>
             <input id="exportFileName" type="text" value="studio_final_cut">
         </div>
         <div class="form-group" style="display: none;">
@@ -3836,11 +3868,11 @@
                 <option value="p1080">Full HD 1080p (1920x1080)</option>
                 <option value="p1440">QHD 1440p (2560x1440)</option>
                 <option value="p2160">UHD 4K (3840x2160)</option>
-                <option value="vertical_720">Vertical 720x1280</option>
-                <option value="vertical_1080">Vertical 1080x1920</option>
-                <option value="vertical_1440">Vertical 2K 1440x2560</option>
-                <option value="vertical_2160">Vertical 4K 2160x3840</option>
-                <option value="square_1080">Square 1080x1080</option>
+                <option value="vertical_720">Dọc 720x1280</option>
+                <option value="vertical_1080">Dọc 1080x1920</option>
+                <option value="vertical_1440">Dọc 2K 1440x2560</option>
+                <option value="vertical_2160">Dọc 4K 2160x3840</option>
+                <option value="square_1080">Vuông 1080x1080</option>
             </select>
         </div>
         <div class="transcribe-options-grid">
@@ -3877,13 +3909,13 @@
             <div class="form-group">
                 <label for="exportQuality">Chất lượng</label>
                 <select id="exportQuality">
-                    <option value="high" selected>High</option>
-                    <option value="balanced">Balanced</option>
-                    <option value="small">Small file</option>
+                    <option value="high" selected>Cao</option>
+                    <option value="balanced">Cân bằng</option>
+                    <option value="small">Tệp nhỏ</option>
                 </select>
             </div>
             <div class="form-group">
-                <label for="exportAudioBitrate">Audio</label>
+                <label for="exportAudioBitrate">Âm thanh</label>
                 <select id="exportAudioBitrate">
                     <option value="128k">128 kbps</option>
                     <option value="192k" selected>192 kbps</option>
@@ -3892,7 +3924,7 @@
             </div>
         </div>
     </div>
-    <button id="btnExportFromStep4" class="btn btn-primary btn-block"><svg class="btn-ico"><use href="#ic-export"/></svg>Xuất Video Ngay</button>
+    <button id="btnExportFromStep4" class="btn btn-primary btn-block"><svg class="btn-ico"><use href="#ic-export"/></svg>Xuất video ngay</button>
 </div>
 
 <div id="captureModalBackdrop" aria-hidden="true"></div>
@@ -3913,7 +3945,7 @@
 <div id="cutPromptBackdrop" aria-hidden="true"></div>
 <div id="cutPromptPanel" role="dialog" aria-modal="true" aria-labelledby="cutPromptTitle">
     <div id="cutPromptTitle" style="font-weight:700; margin-bottom:8px;">Cắt tại điểm đổi góc máy?</div>
-    <div style="font-size: var(--fs-sm); color: var(--text-muted); line-height:1.5; margin-bottom:16px;">
+    <div data-i18n-html style="font-size: var(--fs-sm); color: var(--text-muted); line-height:1.5; margin-bottom:16px;">
         Phát hiện các block có thể chứa nhiều góc máy. Bạn có muốn tự động tách block tại vị trí đổi góc máy để căn khung chính xác hơn không?<br>
         Với video quay chuyển động liên tục, chọn <b>Không</b> để giữ nguyên block và chỉ căn chỉnh khung.
     </div>
@@ -3946,7 +3978,7 @@
                         <select id="transcribeMode">
                             <option value="vi_smart" selected>VI Smart</option>
                             <option value="hq">HQ</option>
-                            <option value="fast">Fast</option>
+                            <option value="fast">Nhanh</option>
                         </select>
                     </div>
 	                    <div id="windowsAsrModelGroup" style="display:none;">
@@ -3954,21 +3986,21 @@
                         <select id="asrModel">
                             <option value="large-v3-turbo" selected>Large v3 Turbo</option>
                         </select>
-                        <button id="btnSetupAsrModel" type="button" class="btn btn-secondary btn-block" style="margin-top: var(--sp-4);">Cài model</button>
+                        <button id="btnSetupAsrModel" type="button" class="btn btn-secondary btn-block" style="margin-top: var(--sp-4);">Cài mô hình</button>
                         <div id="asrModelStatus" style="font-size: var(--fs-xs); color: var(--text-muted); margin-top: 6px;"></div>
                     </div>
                 </div>
                 <div class="form-group">
-                    <label for="refScriptInput">Kịch bản chuẩn (Dán, kéo thả hoặc chọn file)</label>
+                    <label for="refScriptInput">Kịch bản chuẩn (Dán, kéo thả hoặc chọn tệp)</label>
                     <div id="dropzoneScript" style="border: 1px dashed var(--border-strong); padding: var(--sp-5); border-radius: var(--r-sm); background: var(--surface-3); text-align: center; position: relative;">
-                        <button type="button" id="btnChooseScriptFile" class="script-file-btn" onclick="window.pickScriptFile()" title="Chọn file kịch bản (.txt, .md, .doc, .docx)" aria-label="Chọn file kịch bản">
+                        <button type="button" id="btnChooseScriptFile" class="script-file-btn" onclick="window.pickScriptFile()" title="Chọn tệp kịch bản (.txt, .md, .doc, .docx)" aria-label="Chọn tệp kịch bản">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><use href="#ic-folder"/></svg>
                         </button>
-                        <textarea id="refScriptInput" rows="10" style="background: transparent; border: none; padding: 0 30px 0 0; margin: 0; resize: vertical;" placeholder="Dán kịch bản, kéo thả file, hoặc bấm icon thư mục để chọn file..."></textarea>
+                        <textarea id="refScriptInput" rows="10" style="background: transparent; border: none; padding: 0 30px 0 0; margin: 0; resize: vertical;" placeholder="Dán kịch bản, kéo thả tệp, hoặc bấm biểu tượng thư mục để chọn tệp…"></textarea>
                         <input type="file" id="fileScriptInput" accept=".txt,.md,.markdown,.doc,.docx,text/plain,text/markdown" style="display: none;">
                     </div>
                 </div>
-                <button id="btnStartProcess" class="btn btn-primary btn-block"><svg class="btn-ico"><use href="#ic-transcribe"/></svg>Bắt đầu Bóc băng</button>
+                <button id="btnStartProcess" class="btn btn-primary btn-block"><svg class="btn-ico"><use href="#ic-transcribe"/></svg>Bắt đầu bóc băng</button>
                 <!-- Đường lui khi người dùng đổi ý: giai đoạn này chỉ đến được từ Editing
                      (icon "Lọc video theo kịch bản"), mà trước đây không có nút nào quay
                      về — chỉ còn cách bấm Trang chủ và bỏ cả dự án đang dựng. -->
@@ -3981,16 +4013,16 @@
                     <textarea id="refScriptReview" rows="12"></textarea>
                 </div>
                 <button id="btnRetranscribe" class="btn btn-warning btn-block"><svg class="btn-ico"><use href="#ic-refresh"/></svg>Bóc băng lại</button>
-                <button id="btnFilterLLM" class="btn btn-primary btn-block"><svg class="btn-ico"><use href="#ic-match"/></svg>So khớp theo Kịch bản<svg class="btn-ico trailing"><use href="#ic-arrow-right"/></svg></button>
+                <button id="btnFilterLLM" class="btn btn-primary btn-block"><svg class="btn-ico"><use href="#ic-match"/></svg>So khớp theo kịch bản<svg class="btn-ico trailing"><use href="#ic-arrow-right"/></svg></button>
             </div>
 
             <div id="step2" class="step-panel">
-	                <div class="stage-help" data-help-step="step2" style="font-size: var(--fs-sm); color: var(--text-muted); margin-bottom: 15px; line-height: 1.4;">
-	                    💡 <b>Tính năng Studio nâng cao:</b><br>
-	                    - Nhấn <b>Phím cách (Space)</b> để Play/Pause.<br>
+	                <div class="stage-help" data-help-step="step2" data-i18n-html style="font-size: var(--fs-sm); color: var(--text-muted); margin-bottom: 15px; line-height: 1.4;">
+	                    💡 <b>Tính năng nâng cao:</b><br>
+	                    - Nhấn <b>Phím cách (Space)</b> để phát/tạm dừng.<br>
 	                    - Nhấn <b>← / →</b> để lùi/tiến 1 khung hình.<br>
-	                    - Kéo 2 đầu thanh clip dưới timeline để Trim.<br>
-	                    - Click vào khoảng trống trong đoạn văn để Chọn vùng.
+	                    - Kéo 2 đầu thanh clip dưới timeline để cắt tỉa.<br>
+	                    - Bấm vào khoảng trống trong đoạn văn để chọn vùng.
 	                </div>
 		                <button id="btnPreviewCuts" class="btn btn-primary btn-block" style="margin-bottom: var(--sp-5);"><svg class="btn-ico"><use href="#ic-film"/></svg>Xem trước (Preview Cuts)</button>
 		                <div class="step-action-grid">
@@ -4000,12 +4032,12 @@
 	            </div>
 
             <div id="step3" class="step-panel">
-                <div class="stage-help" data-help-step="step3" style="font-size: var(--fs-sm); color: var(--text-muted); margin-bottom: 15px; line-height: 1.4;">
+                <div class="stage-help" data-help-step="step3" data-i18n-html style="font-size: var(--fs-sm); color: var(--text-muted); margin-bottom: 15px; line-height: 1.4;">
                     💡 <b>Giao diện Sequence Timeline:</b><br>
                     - Các phân đoạn không chọn đã bị loại bỏ.<br>
-                    - Ở cột bên phải, <b>Kéo và Thả (Drag & Drop)</b> để sắp xếp.<br>
-                    - Bấm Play để xem trước thành phẩm hoàn chỉnh.<br>
-                    - Nút <b>Xuất Video</b> ở góc trên phải đã khả dụng tại bước này.
+                    - Ở cột bên phải, <b>kéo thả</b> để sắp xếp.<br>
+                    - Bấm Phát để xem trước thành phẩm hoàn chỉnh.<br>
+                    - Nút <b>Xuất video</b> ở góc trên phải đã khả dụng tại bước này.
 	                </div>
                     <div class="sequence-settings">
                         <div class="form-group">
@@ -4027,16 +4059,16 @@
                                 <optgroup label="1:1 — Vuông">
                                     <option value="square_1080">FHD — 1080x1080</option>
                                 </optgroup>
-                                <option value="custom">Custom</option>
+                                <option value="custom">Tuỳ chỉnh</option>
                             </select>
                         </div>
                         <div class="transcribe-options-grid">
                             <div class="form-group">
-                                <label for="sequenceWidth">Width</label>
+                                <label for="sequenceWidth">Chiều rộng</label>
                                 <input id="sequenceWidth" type="number" min="16" max="7680" step="2" value="1920">
                             </div>
                             <div class="form-group">
-                                <label for="sequenceHeight">Height</label>
+                                <label for="sequenceHeight">Chiều cao</label>
                                 <input id="sequenceHeight" type="number" min="16" max="7680" step="2" value="1080">
                             </div>
                         </div>
@@ -4070,10 +4102,10 @@
                         <div class="edit-panel-body" id="editPanelBody" role="tabpanel" tabindex="0"></div>
                     </div>
                     <div style="display:none;" aria-hidden="true">
-                        <button id="btnAddEditingMedia" type="button">＋ Media</button>
-                        <button id="btnAddEditingText" type="button">＋ Text</button>
-                        <button id="btnAddEditingShape" type="button">＋ Shape</button>
-                        <button id="btnAddEditingAudio" type="button">＋ Audio</button>
+                        <button id="btnAddEditingMedia" type="button">＋ Tệp phương tiện</button>
+                        <button id="btnAddEditingText" type="button">＋ Văn bản</button>
+                        <button id="btnAddEditingShape" type="button">＋ Hình học</button>
+                        <button id="btnAddEditingAudio" type="button">＋ Âm thanh</button>
                     </div>
                     <input id="editingAssetInput" type="file" multiple accept=".mp4,.mov,.m4v,.webm,.png,.jpg,.jpeg,.webp,.svg,.mp3,.wav,.m4a,.aac" style="display:none;">
                     <!-- Bản web: chọn cả thư mục (bản desktop dùng hộp thoại gốc, xem pickAssetFolders) -->
@@ -4092,7 +4124,7 @@
                 <div id="sequencePreviewFrame" class="sequence-preview-frame">
                     <div id="sequencePixiRoot" class="sequence-pixi-root"></div>
                     <video id="previewVideo" playsinline></video>
-                    <button id="btnPreviewQuality" class="preview-quality-toggle is-original" type="button" title="Chất lượng Preview: Gốc (HQ)" aria-label="Chất lượng Preview">HQ</button>
+                    <button id="btnPreviewQuality" class="preview-quality-toggle is-original" type="button" title="Chất lượng xem trước: Gốc (HQ)" aria-label="Chất lượng xem trước">HQ</button>
                     <div id="safeZoneOverlay" class="safe-zone-overlay" aria-hidden="true">
                         <div class="safe-zone-shade" data-safe-zone-shade="top"></div>
                         <div class="safe-zone-shade" data-safe-zone-shade="bottom"></div>
@@ -4166,7 +4198,7 @@
                 <span>Thuộc tính</span>
                 <div class="clip-inspector-actions">
                     <span id="clipInspectorTarget">Chưa chọn đoạn</span>
-                    <button id="btnResetClipTransform" class="clip-reset-btn" type="button" title="Reset thông số clip" aria-label="Reset thông số clip" disabled><svg class="btn-ico" aria-hidden="true"><use href="#ic-rotate-ccw"/></svg></button>
+                    <button id="btnResetClipTransform" class="clip-reset-btn" type="button" title="Đặt lại thông số clip" aria-label="Đặt lại thông số clip" disabled><svg class="btn-ico" aria-hidden="true"><use href="#ic-rotate-ccw"/></svg></button>
                 </div>
             </div>
             <div id="inspectorTabs" class="ins-tabs" role="tablist" aria-label="Nhóm thuộc tính"></div>
@@ -4181,14 +4213,14 @@
                     <div class="ins-sec" id="inspectorSubtitleSyncSection" style="display:none;">
                         <label class="ins-sub-sync">
                             <input type="checkbox" id="inspectorSubtitleSync">
-                            <span>Đồng bộ các subtitle</span>
+                            <span>Đồng bộ các phụ đề</span>
                         </label>
                         <div class="adj-hint" id="inspectorSubtitleSyncHint"></div>
                     </div>
                     <div class="ins-sec" id="inspectorTransformSection">
                         <div class="ins-sec-head">
                             <span class="ins-sec-title">Biến đổi</span>
-                            <div class="clip-transform-quick-actions" aria-label="Thao tác nhanh Transform">
+                            <div class="clip-transform-quick-actions" aria-label="Thao tác nhanh Biến đổi">
                                 <button id="btnRotateClip90" type="button" title="Xoay 90 độ" aria-label="Xoay 90 độ" disabled>
                                     <svg viewBox="0 0 24 24" aria-hidden="true">
                                         <path d="M7 7h6a5 5 0 1 1-4.1 7.9" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/>
@@ -4196,13 +4228,13 @@
                                         <path d="M5 18h4v3H5zM11 18h3v3h-3z" fill="currentColor"/>
                                     </svg>
                                 </button>
-                                <button id="btnFlipClipX" type="button" title="Flip theo trục X" aria-label="Flip theo trục X" disabled>
+                                <button id="btnFlipClipX" type="button" title="Lật ngang" aria-label="Lật ngang" disabled>
                                     <svg viewBox="0 0 24 24" aria-hidden="true">
                                         <path d="M12 4v16" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-dasharray="3 3"/>
                                         <path d="M4 6l6 6-6 6V6zM20 6l-6 6 6 6V6z" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"/>
                                     </svg>
                                 </button>
-                                <button id="btnFlipClipY" type="button" title="Flip theo trục Y" aria-label="Flip theo trục Y" disabled>
+                                <button id="btnFlipClipY" type="button" title="Lật dọc" aria-label="Lật dọc" disabled>
                                     <svg viewBox="0 0 24 24" aria-hidden="true">
                                         <path d="M4 12h16" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-dasharray="3 3"/>
                                         <path d="M6 4l6 6 6-6H6zM6 20l6-6 6 6H6z" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"/>
@@ -4216,11 +4248,11 @@
                             <div class="kf-group"><button type="button" class="kf-nav" data-kf-field="position" data-kf-dir="prev" title="Keyframe trước" aria-label="Keyframe trước"><svg class="btn-ico" aria-hidden="true"><use href="#ic-chevron-left"/></svg></button><button type="button" class="kf-diamond" data-kf-field="position" title="Keyframe Vị trí (X và Y)" aria-label="Keyframe Vị trí"><svg class="btn-ico" aria-hidden="true"><use href="#ic-diamond"/></svg></button><button type="button" class="kf-nav" data-kf-field="position" data-kf-dir="next" title="Keyframe sau" aria-label="Keyframe sau"><svg class="btn-ico" aria-hidden="true"><use href="#ic-chevron-right"/></svg></button></div>
                         </div>
                         <div class="ins-row">
-                            <label for="clipScaleRange">Scale</label>
+                            <label for="clipScaleRange">Tỉ lệ</label>
                             <div class="inspector-control-row">
                                 <input id="clipScaleRange" data-transform-field="scale" type="range" min="1" max="800" step="1" value="100">
-                                <div class="fig-field"><input id="clipScale" aria-label="Scale (phần trăm)" data-transform-field="scale" type="text" inputmode="decimal" min="1" max="800" step="1" value="100"><span class="fig-affix">%</span></div>
-                                <div class="kf-group"><button type="button" class="kf-nav" data-kf-field="scale" data-kf-dir="prev" title="Keyframe trước" aria-label="Keyframe trước"><svg class="btn-ico" aria-hidden="true"><use href="#ic-chevron-left"/></svg></button><button type="button" class="kf-diamond" data-kf-field="scale" title="Keyframe Scale" aria-label="Keyframe Scale"><svg class="btn-ico" aria-hidden="true"><use href="#ic-diamond"/></svg></button><button type="button" class="kf-nav" data-kf-field="scale" data-kf-dir="next" title="Keyframe sau" aria-label="Keyframe sau"><svg class="btn-ico" aria-hidden="true"><use href="#ic-chevron-right"/></svg></button></div>
+                                <div class="fig-field"><input id="clipScale" aria-label="Tỉ lệ (phần trăm)" data-transform-field="scale" type="text" inputmode="decimal" min="1" max="800" step="1" value="100"><span class="fig-affix">%</span></div>
+                                <div class="kf-group"><button type="button" class="kf-nav" data-kf-field="scale" data-kf-dir="prev" title="Keyframe trước" aria-label="Keyframe trước"><svg class="btn-ico" aria-hidden="true"><use href="#ic-chevron-left"/></svg></button><button type="button" class="kf-diamond" data-kf-field="scale" title="Keyframe Tỉ lệ" aria-label="Keyframe Tỉ lệ"><svg class="btn-ico" aria-hidden="true"><use href="#ic-diamond"/></svg></button><button type="button" class="kf-nav" data-kf-field="scale" data-kf-dir="next" title="Keyframe sau" aria-label="Keyframe sau"><svg class="btn-ico" aria-hidden="true"><use href="#ic-chevron-right"/></svg></button></div>
                             </div>
                         </div>
                         <div class="ins-row">
@@ -4235,15 +4267,15 @@
                     <div class="ins-sec" id="inspectorDisplaySection">
                         <div class="ins-sec-head"><span class="ins-sec-title">Hiển thị</span></div>
                         <div class="ins-row">
-                            <label for="clipOpacityRange">Opacity</label>
+                            <label for="clipOpacityRange">Độ mờ đục</label>
                             <div class="inspector-control-row">
                                 <input id="clipOpacityRange" data-transform-field="opacity" type="range" min="0" max="100" step="1" value="100">
-                                <div class="fig-field"><input id="clipOpacity" aria-label="Opacity (phần trăm)" data-transform-field="opacity" type="text" inputmode="decimal" min="0" max="100" step="1" value="100"><span class="fig-affix">%</span></div>
-                                <div class="kf-group"><button type="button" class="kf-nav" data-kf-field="opacity" data-kf-dir="prev" title="Keyframe trước" aria-label="Keyframe trước"><svg class="btn-ico" aria-hidden="true"><use href="#ic-chevron-left"/></svg></button><button type="button" class="kf-diamond" data-kf-field="opacity" title="Keyframe Opacity" aria-label="Keyframe Opacity"><svg class="btn-ico" aria-hidden="true"><use href="#ic-diamond"/></svg></button><button type="button" class="kf-nav" data-kf-field="opacity" data-kf-dir="next" title="Keyframe sau" aria-label="Keyframe sau"><svg class="btn-ico" aria-hidden="true"><use href="#ic-chevron-right"/></svg></button></div>
+                                <div class="fig-field"><input id="clipOpacity" aria-label="Độ mờ đục (phần trăm)" data-transform-field="opacity" type="text" inputmode="decimal" min="0" max="100" step="1" value="100"><span class="fig-affix">%</span></div>
+                                <div class="kf-group"><button type="button" class="kf-nav" data-kf-field="opacity" data-kf-dir="prev" title="Keyframe trước" aria-label="Keyframe trước"><svg class="btn-ico" aria-hidden="true"><use href="#ic-chevron-left"/></svg></button><button type="button" class="kf-diamond" data-kf-field="opacity" title="Keyframe Độ mờ đục" aria-label="Keyframe Độ mờ đục"><svg class="btn-ico" aria-hidden="true"><use href="#ic-diamond"/></svg></button><button type="button" class="kf-nav" data-kf-field="opacity" data-kf-dir="next" title="Keyframe sau" aria-label="Keyframe sau"><svg class="btn-ico" aria-hidden="true"><use href="#ic-chevron-right"/></svg></button></div>
                             </div>
                         </div>
                         <div class="adj-hint" id="inspectorAdjustOpacityHint" style="display:none;">
-                            Lớp Điều chỉnh không vẽ hình nào — Opacity ở đây làm mờ dần CHÍNH HIỆU ỨNG
+                            Lớp Điều chỉnh không vẽ hình nào — Độ mờ đục ở đây làm mờ dần CHÍNH HIỆU ỨNG
                             mà lớp đang áp (LUT + chỉnh màu) lên các block bên dưới. 0% = tắt hẳn.
                         </div>
                     </div>
@@ -4253,7 +4285,7 @@
     </div>
     <div id="panelToggleRail" class="panel-toggle-rail" aria-label="Bật tắt panel Timeline">
         <button id="btnToggleScriptPanel" class="panel-toggle-btn is-active" type="button" title="Kịch bản chuẩn" aria-label="Kịch bản chuẩn"><svg class="btn-ico" aria-hidden="true"><use href="#ic-script"/></svg></button>
-        <button id="btnToggleTransformPanel" class="panel-toggle-btn is-active" type="button" title="Clip Transform" aria-label="Clip Transform"><svg class="btn-ico" aria-hidden="true"><use href="#ic-crosshair"/></svg></button>
+        <button id="btnToggleTransformPanel" class="panel-toggle-btn is-active" type="button" title="Biến đổi clip" aria-label="Biến đổi clip"><svg class="btn-ico" aria-hidden="true"><use href="#ic-crosshair"/></svg></button>
         <button id="btnToggleSafeZone" class="panel-toggle-btn" type="button" title="Safe Zone" aria-label="Safe Zone" aria-pressed="false" disabled><svg class="btn-ico" aria-hidden="true"><use href="#ic-square-dashed"/></svg></button>
         <button id="btnToggleAutoReframe" class="panel-toggle-btn is-active" type="button" title="Auto-Reframe: BẬT" aria-label="Auto-Reframe" aria-pressed="true" style="display:none;"><svg class="btn-ico" aria-hidden="true"><use href="#ic-reframe"/></svg></button>
         <button id="btnToggleSkeleton" class="panel-toggle-btn" type="button" title="Skeleton (Nhà phát triển) — vẽ khung xương nhận diện" aria-label="Skeleton" aria-pressed="false" style="display:none;">
@@ -4268,23 +4300,23 @@
 <div class="timeline-area">
     <div class="timeline-toolbar">
         <div class="timeline-left-tools">
-            <button id="btnToggleSnap" class="tool-icon-btn is-active" title="Bật/Tắt bắt dính playhead" aria-label="Bật/Tắt bắt dính playhead" aria-pressed="true"><svg><use href="#ic-snap"/></svg></button>
+            <button id="btnToggleSnap" class="tool-icon-btn is-active" title="Bật/tắt bắt dính playhead" aria-label="Bật/tắt bắt dính playhead" aria-pressed="true"><svg><use href="#ic-snap"/></svg></button>
             <button id="btnRazorTool" class="tool-icon-btn" data-shortcut-cmd="tool.razor" data-shortcut-title="Cắt clip timeline" title="Cắt clip timeline (Cmd/Ctrl + K)" aria-label="Cắt clip timeline"><svg><use href="#ic-razor"/></svg></button>
             <span class="tool-divider" aria-hidden="true"></span>
-            <button id="btnMagicFill" class="tool-icon-btn" title="Magic Fill — cần nhập kịch bản .md có cụm in đậm (**…**) hoặc ghi chú (/*…*/) ở bước Upload" aria-label="Magic Fill" disabled><svg><use href="#ic-magic-fill"/></svg></button>
+            <button id="btnMagicFill" class="tool-icon-btn" title="Magic Fill — cần nhập kịch bản .md có cụm in đậm (**…**) hoặc ghi chú (/*…*/) ở bước Tải lên" aria-label="Magic Fill" disabled><svg><use href="#ic-magic-fill"/></svg></button>
             <button id="btnAutoSfx" class="tool-icon-btn" title="Auto Sound Effects — tự điền SFXs + nhạc nền theo hiệu ứng động / chuyển cảnh" aria-label="Auto Sound Effects" disabled><svg><use href="#ic-auto-sfx"/></svg></button>
             <button id="btnScriptFilter" class="tool-icon-btn" title="Lọc video theo kịch bản" aria-label="Lọc video theo kịch bản" disabled><svg><use href="#ic-script-filter"/></svg></button>
             <button id="btnScriptReorder" class="tool-icon-btn" title="Sắp xếp theo kịch bản chuẩn" aria-label="Sắp xếp theo kịch bản chuẩn" disabled><svg><use href="#ic-script-sort"/></svg></button>
             <span class="tool-divider" aria-hidden="true"></span>
-            <button id="btnSelectBlocksLeft" class="tool-icon-btn" data-shortcut-cmd="select.blocksLeft" data-shortcut-title="Chọn các block bên trái" title="Select Left (⌥[)" aria-label="Select Left, Option Bracket Left"><svg><use href="#ic-select-left"/></svg></button>
-            <button id="btnSelectBlocksRight" class="tool-icon-btn" data-shortcut-cmd="select.blocksRight" data-shortcut-title="Chọn các block bên phải" title="Select Right (⌥])" aria-label="Select Right, Option Bracket Right"><svg><use href="#ic-select-right"/></svg></button>
+            <button id="btnSelectBlocksLeft" class="tool-icon-btn" data-shortcut-cmd="select.blocksLeft" data-shortcut-title="Chọn các block bên trái" title="Chọn các block bên trái (⌥[)" aria-label="Chọn các block bên trái"><svg><use href="#ic-select-left"/></svg></button>
+            <button id="btnSelectBlocksRight" class="tool-icon-btn" data-shortcut-cmd="select.blocksRight" data-shortcut-title="Chọn các block bên phải" title="Chọn các block bên phải (⌥])" aria-label="Chọn các block bên phải"><svg><use href="#ic-select-right"/></svg></button>
             <span class="tool-divider" aria-hidden="true"></span>
             <button id="btnUndo" class="tool-icon-btn" data-shortcut-cmd="edit.undo" data-shortcut-title="Hoàn tác" title="Hoàn tác (Ctrl + Z)" aria-label="Hoàn tác" disabled><svg><use href="#ic-undo"/></svg></button>
             <button id="btnRedo" class="tool-icon-btn" data-shortcut-cmd="edit.redo" data-shortcut-title="Làm lại" title="Làm lại (Ctrl + Shift + Z)" aria-label="Làm lại" disabled><svg><use href="#ic-redo"/></svg></button>
         </div>
 
         <div class="timeline-controls-center">
-            <button id="btnPlayPause" class="btn btn-secondary"><svg class="btn-ico"><use href="#ic-play"/></svg>Play</button>
+            <button id="btnPlayPause" class="btn btn-secondary"><svg class="btn-ico"><use href="#ic-play"/></svg>Phát</button>
             <span id="timeDisplay" class="tl-timecode">00:00:00:00 / 00:00:00:00</span>
             <button id="btnCaptureFrame" class="tool-icon-btn" type="button" title="Chụp khung hình tại playhead" aria-label="Chụp khung hình" disabled><svg><use href="#ic-camera"/></svg></button>
         </div>
@@ -4320,6 +4352,13 @@
 <footer class="app-statusbar">
     <div class="app-statusbar-left">
         <span class="app-statusbar-dot" aria-hidden="true"></span>
+        <!-- Tải model AI lần đầu (Whisper, F5-TTS, VieNeu…): nhãn + thanh tiến trình. Ẩn khi
+             không có lượt tải nào — static/js/model-download-status.js điền và bật/tắt. -->
+        <div id="modelDownloadStatus" class="app-model-download" role="status" aria-live="polite" hidden>
+            <span class="app-model-download-label" data-mdl-label></span>
+            <span class="app-model-download-bar" aria-hidden="true"><span class="app-model-download-fill" data-mdl-fill></span></span>
+            <span class="app-model-download-meta" data-mdl-meta></span>
+        </div>
         <div id="statusText" role="status" aria-live="polite" aria-atomic="true">Sẵn sàng</div>
     </div>
     <div class="app-statusbar-right" aria-hidden="true">
@@ -4327,9 +4366,15 @@
         <span><kbd class="app-menu-shortcut" data-shortcut-cmd="tool.razor">⌘K</kbd> Cắt</span>
         <span><kbd class="app-menu-shortcut" data-shortcut-cmd="edit.undo">⌘Z</kbd> Hoàn tác</span>
     </div>
+    <!-- NGOÀI .app-statusbar-right: khối đó ẩn dưới 1100px và aria-hidden (nó chỉ nhắc phím),
+         còn số phiên bản thì luôn phải đọc được. Ẩn ở Trang chủ — ở đó số nằm cạnh logo. -->
+    <div class="app-statusbar-version" data-app-version data-app-version-prefix="Phiên bản: " hidden></div>
 </footer>
 
 <script>
+    /* Dịch markup TĨNH ở trên một lượt, TRƯỚC khi code nào đọc/chép chữ của nó (xem
+     * translateDom ở static/js/i18n.js). Chữ do JS dựng về sau thì tự bọc _t(). */
+    window.I18n?.translateDom(document.body);
     const API_BASE = "/api";
     const statusTextEl = document.getElementById('statusText');
     let statusInterval;
@@ -4451,7 +4496,7 @@
            (không tài nào bắt dính nổi vào playhead). */
         const MATCH_TRIM_SNAP_PX = 10;
         function matchTrimSnapSeconds() {
-            return MATCH_TRIM_SNAP_PX / Math.max(1, Number(zoomScale) || 100);
+            return MATCH_TRIM_SNAP_PX / Math.max(0.01, Number(zoomScale) || 100);
         }
         window.matchTrimSnapSeconds = matchTrimSnapSeconds;
         const MIN_TRANSCRIPT_CLIP_SECONDS = 0.1;
@@ -4783,7 +4828,7 @@
                 .filter(({ item }) => clipNeedsCameraCutScan(item));
             if (!targets.length) return false;
 
-            setStatusText('Đang dò điểm đổi góc máy trong các block...', true);
+            setStatusText(_t('Đang dò điểm đổi góc máy trong các block...'), true);
             const response = await fetch(`${API_BASE}/auto-reframe/detect-cuts`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -4829,7 +4874,7 @@
             }
 
             if (!plans.length) {
-                setStatusText('Không phát hiện đổi góc máy trong block nào', false);
+                setStatusText(_t('Không phát hiện đổi góc máy trong block nào'), false);
                 return false;
             }
 
@@ -4853,7 +4898,7 @@
             syncScriptHighlightAndTrim();
             updateInspectorState();
             refreshFinalArtifactsFromTimeline();
-            setStatusText(`Đã tách ${splitBlocks} block tại ${totalCuts} điểm đổi góc máy`, false);
+            setStatusText(_t('Đã tách {blocks} block tại {n} điểm đổi góc máy', { blocks: splitBlocks, n: totalCuts }), false);
             return true;
         }
 
@@ -5042,7 +5087,7 @@
             syncAutoReframeToggleButton();
             if (next) {
                 ensureTimelineAutoReframe({ reason: 'toggle-on' });
-                setStatusText('Đã bật Auto-Reframe', false);
+                setStatusText(_t('Đã bật Auto-Reframe'), false);
             } else {
                 const changed = resetAutoReframedTransforms();
                 if (changed) {
@@ -5051,7 +5096,7 @@
                     updateSequencePreviewTransform();
                     refreshFinalArtifactsFromTimeline();
                 }
-                setStatusText('Đã tắt Auto-Reframe — block trở về thông số mặc định', false);
+                setStatusText(_t('Đã tắt Auto-Reframe — block trở về thông số mặc định'), false);
             }
         }
 
@@ -5064,8 +5109,8 @@
             btn.classList.toggle('is-active', on);
             btn.setAttribute('aria-pressed', on ? 'true' : 'false');
             btn.title = on
-                ? 'Auto-Reframe: BẬT — tắt để trả block về thông số mặc định'
-                : 'Auto-Reframe: TẮT — bật để căn khung tự động theo người trong video';
+                ? _t('Auto-Reframe: BẬT — tắt để trả block về thông số mặc định')
+                : _t('Auto-Reframe: TẮT — bật để căn khung tự động theo người trong video');
         }
 
         function applyAutoReframeTransforms() {
@@ -5189,20 +5234,20 @@
                 const junction = autoReframeJunctionReport(payload);
                 const notes = [];
                 if (spread && spread.spreadPct > 15) {
-                    notes.push(`cỡ mặt còn lệch ${spread.spreadPct}% (chạm trần phóng)`);
+                    notes.push(_t('cỡ mặt còn lệch {pct}% (chạm trần phóng)', { pct: spread.spreadPct }));
                 }
                 if (junction) {
                     // Ngưỡng "coi như khớp": 1% chiều rộng khung — dưới mức này mắt không thấy giật.
                     const okPx = Math.max(6, payload.width * 0.01);
                     notes.push(junction.worstPx <= okPx
-                        ? `${junction.count} điểm cắt đã khớp (lệch ≤ ${junction.worstPx}px)`
-                        : `điểm cắt lệch tối đa ${junction.worstPx}px, trung bình ${junction.avgPx}px`);
+                        ? _t('{n} điểm cắt đã khớp (lệch ≤ {worst}px)', { n: junction.count, worst: junction.worstPx })
+                        : _t('điểm cắt lệch tối đa {worst}px, trung bình {avg}px', { worst: junction.worstPx, avg: junction.avgPx }));
                 }
                 const suffix = notes.length ? ` — ${notes.join('; ')}` : '';
-                return `Auto-Reframe đã căn ${readyCount}/${clips.length} clip${suffix}`;
+                return _t('Auto-Reframe đã căn {ready}/{total} clip', { ready: readyCount, total: clips.length }) + suffix;
             }
-            if (data?.detector && data.detector.ready === false) return 'Auto-Reframe cần MediaPipe/OpenCV để nhận diện';
-            return 'Auto-Reframe không tìm thấy người trong các clip';
+            if (data?.detector && data.detector.ready === false) return _t('Auto-Reframe cần MediaPipe/OpenCV để nhận diện');
+            return _t('Auto-Reframe không tìm thấy người trong các clip');
         }
 
         // Popup hỏi có tách block tại điểm đổi góc máy không. Trả Promise<boolean>:
@@ -5288,7 +5333,7 @@
             }
             const requestToken = ++autoReframeRequestToken;
             autoReframeInFlight = true;
-            setStatusText('Đang Auto-Reframe Timeline...', true);
+            setStatusText(_t('Đang Auto-Reframe Timeline...'), true);
 
             try {
                 if (needsCutScan) {
@@ -5322,7 +5367,7 @@
                 if (!pending.length) {
                     // Cắt góc máy có thể đã tách/đóng dấu block mà không sinh block mới cần quét.
                     applyAutoReframeTransforms();
-                    setStatusText('Auto-Reframe: không có block nào cần quét lại.', false);
+                    setStatusText(_t('Auto-Reframe: không có block nào cần quét lại.'), false);
                     return;
                 }
                 const response = await fetch(`${API_BASE}/auto-reframe/analyze`, {
@@ -5368,7 +5413,7 @@
                 setStatusText(summarizeAutoReframeResult(data), false);
             } catch (error) {
                 console.warn('Auto-Reframe failed:', error);
-                setStatusText(`Auto-Reframe lỗi: ${error.message}`, false);
+                setStatusText(_t('Auto-Reframe lỗi: {error}', { error: error.message }), false);
             } finally {
                 if (requestToken === autoReframeRequestToken) {
                     autoReframeInFlight = false;
@@ -5549,9 +5594,9 @@
             if (heightEl) heightEl.value = sequenceSettings.height || 1080;
             if (statusEl) {
                 const sourceText = sequenceSettings.source_width && sequenceSettings.source_height
-                    ? `Nguồn: ${sequenceSettings.source_width}x${sequenceSettings.source_height}${sequenceSettings.source_fps ? ` @ ${sequenceSettings.source_fps}` : ''}`
-                    : 'Nguồn: chưa xác định';
-                statusEl.innerText = `${sourceText}. Sequence: ${sequenceSettings.width}x${sequenceSettings.height}.`;
+                    ? _t('Nguồn: {size}', { size: `${sequenceSettings.source_width}x${sequenceSettings.source_height}${sequenceSettings.source_fps ? ` @ ${sequenceSettings.source_fps}` : ''}` })
+                    : _t('Nguồn: chưa xác định');
+                statusEl.innerText = _t('{source}. Sequence: {size}.', { source: sourceText, size: `${sequenceSettings.width}x${sequenceSettings.height}` });
             }
         }
 
@@ -5625,7 +5670,7 @@
             panel.classList.toggle('is-disabled', !item);
             panel.querySelectorAll('input, button').forEach((control) => { control.disabled = !item; });
             if (resetBtn) resetBtn.disabled = !item;
-            if (target) target.innerText = item ? `Đoạn #${selectedTimelineClipIndex + 1}` : 'Chưa chọn đoạn';
+            if (target) target.innerText = item ? _t('Đoạn #{n}', { n: selectedTimelineClipIndex + 1 }) : _t('Chưa chọn đoạn');
             syncInspectorControls(item ? ensureClipTransform(item) : defaultClipTransform());
             refreshInspectorTabs('main');
         }
@@ -5634,26 +5679,26 @@
         // Chỉ thay đổi cách TRÌNH BÀY: các section được gắn data-ins-tab / data-ins-sub,
         // tab bar ẩn/hiện section tương ứng. Không đụng ID control hay luồng ghi dữ liệu.
         const INSPECTOR_TAB_DEFS = {
-            video: { label: 'Video', subs: { basic: 'Cơ bản', mask: 'Mặt nạ' } },
-            audio: { label: 'Âm thanh', subs: { basic: 'Cơ bản' } },
-            speed: { label: 'Tốc độ', subs: { basic: 'Thường' } },
+            video: { label: _t('Video'), subs: { basic: _t('Cơ bản'), mask: _t('Mặt nạ') } },
+            audio: { label: _t('Âm thanh'), subs: { basic: _t('Cơ bản') } },
+            speed: { label: _t('Tốc độ'), subs: { basic: _t('Thường') } },
             // 'style' ĐÃ GỘP vào 'basic' (2026-08-18, kiểu CapCut): Typography và Text Style
             // là hai nửa của cùng một việc "định dạng chữ", tách ra chỉ tốn một cú bấm.
             /* 'template' = lưới đổi mẫu, CHỈ hiện với block mẫu văn bản: danh sách subtab
                được lọc theo section CÓ THẬT trong panel (xem presentSubs ở dưới), mà
                section đó chỉ được dựng cho mẫu — text thường tự không có tab này. */
-            text: { label: 'Văn bản', subs: { basic: 'Cơ bản', template: 'Mẫu', effect: 'Hiệu ứng', transform: 'Biến đổi' } },
-            anim: { label: 'Hiệu ứng động', subs: { in: 'Vào', out: 'Ra', combo: 'Kết hợp' } },
-            shape: { label: 'Hình dạng', subs: { basic: 'Cơ bản', transform: 'Biến đổi' } },
-            retouch: { label: 'Retouch', subs: { basic: 'Làm đẹp' } },
+            text: { label: _t('Văn bản'), subs: { basic: _t('Cơ bản'), template: _t('Mẫu'), effect: _t('Hiệu ứng'), transform: _t('Biến đổi') } },
+            anim: { label: _t('Hiệu ứng động'), subs: { in: _t('Vào'), out: _t('Ra'), combo: _t('Kết hợp') } },
+            shape: { label: _t('Hình dạng'), subs: { basic: _t('Cơ bản'), transform: _t('Biến đổi') } },
+            retouch: { label: _t('Retouch'), subs: { basic: _t('Làm đẹp') } },
             adjust: {
-                label: 'Điều chỉnh',
+                label: _t('Điều chỉnh'),
                 subs: {
                     // 'lut' đã bỏ (2026-08-04): chọn LUT chuyển ra tab "LUT" ở panel
                     // TRÁI để duyệt được thumbnail; Inspector chỉ còn ô Cường độ trong
                     // subtab "Cơ bản", vì cường độ là thuộc tính của TỪNG block.
-                    basic: 'Cơ bản', hsl: 'HSL', curves: 'Curves',
-                    wheels: 'Vòng tròn màu', mask: 'Mặt nạ',
+                    basic: _t('Cơ bản'), hsl: 'HSL', curves: _t('Đường cong'),
+                    wheels: _t('Vòng tròn màu'), mask: _t('Mặt nạ'),
                 },
             },
         };
@@ -6559,8 +6604,10 @@
 	                // đường mà hiệu ứng không gian đang dùng. Cố ý không dùng mảng
 	                // sprite.filters = [a, b]: sẽ thành HAI bản cài đặt của cùng một chuỗi
 	                // (canvas cho ca này, PIXI cho ca kia) và sớm muộn lệch nhau.
-	                const layerAdj = window.EditingRuntime?.activeAdjustmentLayerAdjustments?.(
-	                    window.EditingRuntime?.currentSequenceTime?.() ?? Number(this.videoEl.currentTime)) || null;
+	                // Nhiều lớp chồng nhau -> áp LẦN LƯỢT, dưới trước trên sau (xem
+	                // activeAdjustmentLayerAdjustmentsList ở editing-runtime.js).
+	                const layerAdjs = window.EditingRuntime?.activeAdjustmentLayerAdjustmentsList?.(
+	                    window.EditingRuntime?.currentSequenceTime?.() ?? Number(this.videoEl.currentTime)) || [];
 	                // RETOUCH — chạy TRƯỚC chuỗi chỉnh màu: nó sửa DA (kết cấu, khuyết
 	                // điểm), còn grade/LUT là lớp thẩm mỹ áp LÊN kết quả đó. Đây cũng là
 	                // thứ tự mà khâu bake khi xuất sẽ phải theo.
@@ -6573,7 +6620,7 @@
 	                const useSpatialPath = !!window.ColorAdjust
 	                    && !!window.EditingRuntime?.colorAdjustedDrawable
 	                    && this.videoEl.videoWidth > 0
-	                    && (rtOn || !!layerAdj
+	                    && (rtOn || layerAdjs.length > 0
 	                        || (!!clipAdj && !ColorAdjust.isIdentity(clipAdj) && ColorAdjust.needsMultiPass(clipAdj)));
 	                if (useSpatialPath) {
 	                    let base = this.videoEl;
@@ -6592,10 +6639,8 @@
 	                    // videoEl là dùng nó làm texture, nên ca này tự chạy đúng.
 	                    // Lượt 2: màu của lớp Điều chỉnh, ĐÚNG THỨ TỰ của export (chuỗi
 	                    // block trước, chuỗi lớp nối sau).
-	                    if (layerAdj) {
-	                        fx = window.EditingRuntime.colorAdjustedDrawable(
-	                            fx, textureW, textureH, layerAdj, 'mainpreview~adjlayer');
-	                    }
+	                    fx = window.EditingRuntime.applyAdjustmentLayers(
+	                        fx, textureW, textureH, layerAdjs, 'mainpreview');
 	                    if (fx && fx !== this.videoEl) {
 	                        /* PHẢI so cả KÍCH THƯỚC, không chỉ so danh tính đối tượng.
 	                         *
@@ -6654,7 +6699,10 @@
 
     function compactStatusMessage(raw) {
         const msg = String(raw || '').toLowerCase();
-        if (!msg) return 'Sẵn sàng';
+        if (!msg) return _t('Sẵn sàng');
+        // Các mẫu dưới so khớp câu TIẾNG VIỆT gốc. Ở ngôn ngữ khác câu đã được dịch nên
+        // không rút gọn (tránh "timeline" trong câu tiếng Anh bị rút nhầm thành "Đang dựng timeline").
+        if (window.I18n?.getLocale && window.I18n.getLocale() !== 'vi') return raw;
         if (msg.includes('tiếp nhận file')) return 'Đang nhận file...';
         if (msg.includes('nối các file video')) return 'Đang nối video...';
         if (msg.includes('bóc băng')) return 'Đang bóc băng...';
@@ -6832,13 +6880,13 @@
             const span = record.element;
             if (!item.matched) {
                 span.classList.add('match-missing');
-                span.title = 'Không tìm thấy câu này trong video';
+                span.title = _t('Không tìm thấy câu này trong video');
                 missing += 1;
                 continue;
             }
             if (Number(item.token_coverage) < 0.6 || Number(item.similarity) < 0.6) {
                 span.classList.add('match-weak');
-                span.title = `Khớp yếu — giống ${Math.round(item.similarity * 100)}%, đủ từ ${Math.round(item.token_coverage * 100)}%`;
+                span.title = _t('Khớp yếu — giống {sim}%, đủ từ {cov}%', { sim: Math.round(item.similarity * 100), cov: Math.round(item.token_coverage * 100) });
                 weak += 1;
             }
             const takes = Array.isArray(item.takes) ? item.takes : [];
@@ -6849,8 +6897,8 @@
                 const badge = document.createElement('span');
                 badge.className = 'script-take-badge';
                 badge.dataset.takePicker = String(item.script_index);
-                badge.textContent = `take ${(selected < 0 ? 0 : selected) + 1}/${takes.length}`;
-                badge.title = 'Bấm để chọn lần đọc khác';
+                badge.textContent = _t('take {n}/{total}', { n: (selected < 0 ? 0 : selected) + 1, total: takes.length });
+                badge.title = _t('Bấm để chọn lần đọc khác');
                 span.after(badge);
             }
         }
@@ -6858,11 +6906,11 @@
         const summary = document.createElement('div');
         summary.className = 'script-match-summary';
         const total = globalSentenceTakes.length;
-        const parts = [`${total - missing}/${total} câu đã khớp`];
-        if (weak) parts.push(`${weak} câu khớp yếu`);
-        if (missing) parts.push(`${missing} câu không tìm thấy`);
-        if (choices) parts.push(`${choices} câu có nhiều lần đọc — bấm nhãn "take" để đổi`);
-        if (Object.keys(pinnedTakes).length) parts.push(`${Object.keys(pinnedTakes).length} câu bạn đã tự chốt`);
+        const parts = [_t('{matched}/{total} câu đã khớp', { matched: total - missing, total })];
+        if (weak) parts.push(_t('{n} câu khớp yếu', { n: weak }));
+        if (missing) parts.push(_t('{n} câu không tìm thấy', { n: missing }));
+        if (choices) parts.push(_t('{n} câu có nhiều lần đọc — bấm nhãn "take" để đổi', { n: choices }));
+        if (Object.keys(pinnedTakes).length) parts.push(_t('{n} câu bạn đã tự chốt', { n: Object.keys(pinnedTakes).length }));
         summary.textContent = parts.join(' · ');
         viewer.parentElement?.insertBefore(summary, viewer);
     }
@@ -6880,14 +6928,14 @@
         startStatusPolling();
         try {
             const response = await fetch(`${API_BASE}/filter`, { method: "POST", body: formData });
-            if (!response.ok) throw new Error("Lỗi HTTP: " + response.status);
+            if (!response.ok) throw new Error(_t('Lỗi HTTP: {status}', { status: response.status }));
             const data = await response.json();
             if (data.status !== "success") throw new Error(data.detail);
             applyFilterResult(data, refScript);
-            showToast("Đã cập nhật theo lần đọc bạn chọn.", { type: 'success' });
+            showToast(_t('Đã cập nhật theo lần đọc bạn chọn.'), { type: 'success' });
         } catch (error) {
             console.error(error);
-            showToast("Không đổi được lần đọc: " + error.message, { type: 'error' });
+            showToast(_t('Không đổi được lần đọc: {error}', { error: error.message }), { type: 'error' });
         } finally {
             stopStatusPolling();
         }
@@ -6901,7 +6949,7 @@
         undoStack = []; redoStack = []; updateUndoRedoButtons();
         markProjectDirty();
         renderWordLevelTranscript(globalMappedChunks, 'MAPPED');
-        document.getElementById('transcriptTitle').innerText = "Rà soát so khớp kịch bản";
+        document.getElementById('transcriptTitle').innerText = _t('Rà soát so khớp kịch bản');
         renderReferenceScriptViewer(refScript);   // tự đắp lại trạng thái so khớp
     }
 
@@ -6917,7 +6965,7 @@
         const pop = document.createElement('div');
         pop.className = 'script-take-pop';
         const title = document.createElement('h6');
-        title.textContent = `Câu ${scriptIndex + 1} được nói ${item.takes.length} lần — chọn lần dùng cho timeline`;
+        title.textContent = _t('Câu {n} được nói {count} lần — chọn lần dùng cho timeline', { n: scriptIndex + 1, count: item.takes.length });
         pop.appendChild(title);
 
         item.takes.forEach((take) => {
@@ -6926,8 +6974,13 @@
             option.className = 'script-take-opt' + (take.is_selected ? ' is-selected' : '');
             const meta = document.createElement('div');
             meta.className = 'tk-meta';
-            meta.textContent = `lần ${take.take_index + 1} · ${formatClock(take.start)} → ${formatClock(take.end)}`
-                + ` · giống ${Math.round(take.similarity * 100)}% · đủ từ ${Math.round(take.token_coverage * 100)}%`;
+            meta.textContent = _t('lần {n} · {start} → {end} · giống {sim}% · đủ từ {cov}%', {
+                n: take.take_index + 1,
+                start: formatClock(take.start),
+                end: formatClock(take.end),
+                sim: Math.round(take.similarity * 100),
+                cov: Math.round(take.token_coverage * 100),
+            });
             const body = document.createElement('div');
             body.textContent = take.text;
             option.appendChild(meta);
@@ -6944,7 +6997,7 @@
             const reset = document.createElement('button');
             reset.type = 'button';
             reset.className = 'script-take-opt';
-            reset.textContent = '↺ Bỏ chốt, để máy tự chọn lại';
+            reset.textContent = _t('↺ Bỏ chốt, để máy tự chọn lại');
             reset.addEventListener('click', () => {
                 closeTakePicker();
                 delete pinnedTakes[String(scriptIndex)];
@@ -7185,8 +7238,8 @@
         for (const model of (data.models || [])) {
             const option = document.createElement('option');
             option.value = model.id;
-            const suffix = model.ready ? '' : ' (chưa cài)';
-            const blocked = model.eligible === false ? ' (thiếu VRAM)' : '';
+            const suffix = model.ready ? '' : ` ${_t('(chưa cài)')}`;
+            const blocked = model.eligible === false ? ` ${_t('(thiếu VRAM)')}` : '';
             option.innerText = `${model.label || model.id}${suffix}${blocked}`;
             option.disabled = model.eligible === false;
             select.appendChild(option);
@@ -7198,10 +7251,10 @@
         const selectedInfo = getSelectedAsrModelInfo();
         const runtime = selectedInfo?.runtime || data.runtime || {};
         const readyText = selectedInfo?.available
-            ? `Sẵn sàng: ${runtime.device || 'cpu'}/${runtime.compute_type || 'int8'}, batch ${runtime.batch_size || 1}, VAD bật`
+            ? _t('Sẵn sàng: {device}/{compute}, batch {batch}, VAD bật', { device: runtime.device || 'cpu', compute: runtime.compute_type || 'int8', batch: runtime.batch_size || 1 })
             : (selectedInfo?.reason === 'missing_python_dependencies'
-                ? 'Thiếu faster-whisper/CTranslate2 trong môi trường Python.'
-                : 'Model chưa sẵn sàng, cần cài trước.');
+                ? _t('Thiếu faster-whisper/CTranslate2 trong môi trường Python.')
+                : _t('Model chưa sẵn sàng, cần cài trước.'));
         status.innerText = readyText;
         setupBtn.disabled = !selectedInfo || selectedInfo.eligible === false || selectedInfo.available === true;
     }
@@ -7223,9 +7276,11 @@
         const originalText = btn?.innerText || '';
         if (btn) {
             btn.disabled = true;
-            btn.innerText = 'Đang cài...';
+            btn.innerText = _t('Đang cài…');
         }
         startStatusPolling();
+        // Tải model Whisper lần đầu -> thanh tiến trình ở góc trái thanh trạng thái.
+        window.ModelDownloadStatus?.kick();
         try {
             const response = await fetch(`${API_BASE}/asr-models/setup`, {
                 method: 'POST',
@@ -7242,7 +7297,7 @@
             }
             await loadAsrModelOptions(model);
         } catch (error) {
-            showToast(`Cài model ASR thất bại: ${error.message}`, { type: 'error' });
+            showToast(_t('Cài model ASR thất bại: {error}', { error: error.message }), { type: 'error' });
         } finally {
             stopStatusPolling();
             if (btn) {
@@ -7523,7 +7578,7 @@
         bar.innerHTML = '';
         if (!projectLibraryPath.length) { bar.hidden = true; return; }
         bar.hidden = false;
-        const crumbs = [{ label: 'Tất cả', depth: 0 }]
+        const crumbs = [{ label: _t('Tất cả'), depth: 0 }]
             .concat(projectLibraryPath.map((seg, i) => ({ label: seg, depth: i + 1 })));
         crumbs.forEach((crumb, i) => {
             if (i > 0) {
@@ -7573,7 +7628,7 @@
             const empty = document.createElement('div');
             empty.className = 'video-lib-empty';
             // Không còn là lời mời thêm video (xem cuối hàm) mà là lời chỉ đường về Editing.
-            empty.innerHTML = '<div class="video-lib-empty-hint">Lane chính chưa có video nào.<br>Quay lại Editing, đưa video lên lane chính rồi lọc lại.</div>';
+            empty.innerHTML = `<div class="video-lib-empty-hint">${_t('Lane chính chưa có video nào.<br>Quay lại Editing, đưa video lên lane chính rồi lọc lại.')}</div>`;
             grid.appendChild(empty);
             return;
         }
@@ -7585,14 +7640,14 @@
             const card = document.createElement('div');
             card.className = 'video-lib-item video-lib-folder';
             card.classList.toggle('is-disabled', folder.selected === 0);
-            card.title = `${folder.name} — ${folder.total} video`;
+            card.title = _t('{name} — {n} video', { name: folder.name, n: folder.total });
 
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
             checkbox.className = 'video-lib-select';
             checkbox.checked = folder.selected === folder.total;
             checkbox.indeterminate = folder.selected > 0 && folder.selected < folder.total;
-            checkbox.title = 'Chọn/bỏ chọn toàn bộ video trong thư mục';
+            checkbox.title = _t('Chọn/bỏ chọn toàn bộ video trong thư mục');
             checkbox.addEventListener('click', (event) => event.stopPropagation());
             checkbox.addEventListener('change', (event) => {
                 const wanted = event.target.checked;
@@ -7634,7 +7689,7 @@
 	            checkbox.type = 'checkbox';
 	            checkbox.className = 'video-lib-select';
 	            checkbox.checked = videoItem.selected !== false;
-	            checkbox.title = 'Chọn video đưa vào xử lý';
+	            checkbox.title = _t('Chọn video đưa vào xử lý');
 	            checkbox.addEventListener('change', (event) => {
 	                videoItem.selected = event.target.checked;
                     applySequenceDefaultFromProjectLibrary(sequenceSettings.preset === 'source');
@@ -7690,11 +7745,11 @@
 	    function refreshVideoSelectionStatus() {
 	        renderProjectVideoLibrary();
 	        if (projectVideoLibrary.length === 0) {
-	            setStatusText("Chưa chọn video", false);
+	            setStatusText(_t('Chưa chọn video'), false);
 	            return;
 	        }
 	        const selectedCount = projectVideoLibrary.filter((item) => item.selected !== false).length;
-	        setStatusText(`Đã chọn ${selectedCount}/${projectVideoLibrary.length} video`, false);
+	        setStatusText(_t('Đã chọn {n}/{total} video', { n: selectedCount, total: projectVideoLibrary.length }), false);
 	    }
 
     /* Video nguồn của giai đoạn Upload, cho EditingRuntime liệt kê lại ở tab "Tệp phương
@@ -7788,12 +7843,12 @@
         try {
             const picked = await window.desktopEnv.pickScriptFile();
             if (!picked || picked.canceled) return;
-            if (picked.error) throw new Error(picked.detail || 'Không đọc được tệp kịch bản.');
+            if (picked.error) throw new Error(picked.detail || _t('Không đọc được tệp kịch bản.'));
             applyPickedScriptFile(picked);
         } catch (error) {
             console.error(error);
-            showToast(error.message || 'Không mở được tệp kịch bản.', { type: 'error' });
-            setStatusText("Lỗi đọc file script", false);
+            showToast(error.message || _t('Không mở được tệp kịch bản.'), { type: 'error' });
+            setStatusText(_t('Lỗi đọc tệp kịch bản'), false);
         }
     };
 
@@ -7803,7 +7858,7 @@
 
     async function scanDesktopSourcePaths(paths) {
         if (!paths || !paths.length) return;
-        setStatusText("Đang quét nguồn video...", true);
+        setStatusText(_t('Đang quét nguồn video...'), true);
         try {
             const response = await fetch(`${API_BASE}/video-sources/scan`, {
                 method: "POST",
@@ -7811,7 +7866,7 @@
                 body: JSON.stringify({ source_paths: paths }),
             });
             if (!response.ok) {
-                let errDetail = `Lỗi quét nguồn: ${response.status}`;
+                let errDetail = _t('Lỗi quét nguồn: {status}', { status: response.status });
                 try {
                     const errData = await response.json();
                     errDetail = errData.detail || errDetail;
@@ -7829,8 +7884,8 @@
             selectedDesktopSourcePaths = [];
             setProjectVideoLibraryFromScannedVideos([]);
             renderProjectVideoLibrary();
-            setStatusText("Lỗi nạp nguồn video", false);
-            showToast(error.message || "Không thể quét nguồn video.", { type: 'error' });
+            setStatusText(_t('Lỗi nạp nguồn video'), false);
+            showToast(error.message || _t('Không thể quét nguồn video.'), { type: 'error' });
         }
     }
 
@@ -7867,8 +7922,8 @@
 	            const pickedFiles = normalizeVideoFileList(e.target.files);
 	            if (videoFilesInput) videoFilesInput.value = '';
 	            if (pickedFiles.length === 0) {
-	                showToast("Không tìm thấy video hợp lệ trong thư mục (.mp4/.mov/.m4v/.webm).", { type: 'error' });
-	                setStatusText("Chưa có video hợp lệ", false);
+	                showToast(_t('Không tìm thấy video hợp lệ trong thư mục (.mp4/.mov/.m4v/.webm).'), { type: 'error' });
+	                setStatusText(_t('Chưa có video hợp lệ'), false);
 	                setProjectVideoLibraryFromLocalFiles([], false);
 	                renderProjectVideoLibrary();
 	                return;
@@ -7924,10 +7979,10 @@
         const enabled = hasScript && inEditing;
         btn.disabled = !enabled;
         btn.title = !hasScript
-            ? 'Magic Fill — cần kịch bản .md có cụm in đậm (**…**) hoặc ghi chú (/*…*/); thêm ở tab "Kịch bản"'
+            ? _t('Magic Fill — cần kịch bản .md có cụm in đậm (**…**) hoặc ghi chú (/*…*/); thêm ở tab "Kịch bản"')
             : (!inEditing
-                ? 'Magic Fill — mở giai đoạn Editing để sử dụng'
-                : 'Magic Fill — tạo text box từ cụm in đậm + thêm ảnh/video thư viện theo ghi chú');
+                ? _t('Magic Fill — mở giai đoạn Editing để sử dụng')
+                : _t('Magic Fill — tạo khung văn bản từ cụm in đậm + thêm ảnh/video thư viện theo ghi chú'));
     }
 
     document.getElementById('btnMagicFill')?.addEventListener('click', () => {
@@ -7951,10 +8006,10 @@
         const enabled = inEditing && hasClips;
         btn.disabled = !enabled;
         btn.title = !inEditing
-            ? 'Auto Sound Effects — mở giai đoạn Editing để sử dụng'
+            ? _t('Auto Sound Effects — mở giai đoạn Editing để sử dụng')
             : (!hasClips
-                ? 'Auto Sound Effects — timeline chưa có block nào'
-                : 'Auto Sound Effects — tự điền SFXs + nhạc nền theo hiệu ứng động / chuyển cảnh (đổi quy tắc ở Menu → Cài đặt)');
+                ? _t('Auto Sound Effects — timeline chưa có block nào')
+                : _t('Auto Sound Effects — tự điền SFXs + nhạc nền theo hiệu ứng động / chuyển cảnh (đổi quy tắc ở Menu → Cài đặt)'));
     }
 
     /* ===== LỌC VIDEO THEO KỊCH BẢN =====
@@ -7971,41 +8026,39 @@
         const inEditing = currentStepId === 'step4';
         btn.disabled = !inEditing;
         if (!inEditing) {
-            btn.title = 'Lọc video theo kịch bản — mở giai đoạn Editing để sử dụng';
+            btn.title = _t('Lọc video theo kịch bản — mở giai đoạn Editing để sử dụng');
             return;
         }
         const picked = getSelectedDesktopSourcePaths().length;
         const hasScript = !!document.getElementById('refScriptInput')?.value.trim();
-        btn.title = 'Lọc video theo kịch bản — bóc băng rồi giữ lại đúng đoạn nói theo kịch bản'
-            + ` (đang chọn ${picked} video, kịch bản: ${hasScript ? 'đã có' : 'chưa có'}).`
-            + ' Kết quả sẽ THAY TOÀN BỘ lane chính; overlay giữ nguyên.';
+        btn.title = (hasScript
+            ? _t('Lọc video theo kịch bản — bóc băng rồi giữ lại đúng đoạn nói theo kịch bản (đang chọn {n} video, kịch bản: đã có).', { n: picked })
+            : _t('Lọc video theo kịch bản — bóc băng rồi giữ lại đúng đoạn nói theo kịch bản (đang chọn {n} video, kịch bản: chưa có).', { n: picked }))
+            + ' ' + _t('Kết quả sẽ THAY TOÀN BỘ lane chính; overlay giữ nguyên.');
     }
 
     document.getElementById('btnScriptFilter')?.addEventListener('click', () => {
         const btn = document.getElementById('btnScriptFilter');
         if (!btn || btn.disabled) return;
         if (!isDesktopVideoEnv()) {
-            showToast('Luồng "Lọc video theo kịch bản" cần bản desktop: video phải có đường dẫn thật trên máy để bóc băng.', { type: 'warning' });
+            showToast(_t('Luồng "Lọc video theo kịch bản" cần bản desktop: video phải có đường dẫn thật trên máy để bóc băng.'), { type: 'warning' });
             return;
         }
         const picked = getSelectedDesktopSourcePaths();
         const script = document.getElementById('refScriptInput').value.trim();
         if (!picked.length && !script) {
-            showToast('1) Đưa video lên LANE CHÍNH (nút "+" trên thẻ ở tab "Tệp phương tiện", hoặc kéo thả xuống lane chính).\n'
-                + '2) Tab "Kịch bản" → kéo thả tệp .md hoặc dán nội dung kịch bản.',
-                { type: 'warning', title: 'Chưa có nguồn video và chưa có kịch bản', duration: 11000 });
+            showToast(_t('1) Đưa video lên LANE CHÍNH (nút "+" trên thẻ ở tab "Tệp phương tiện", hoặc kéo thả xuống lane chính).\n2) Tab "Kịch bản" → kéo thả tệp .md hoặc dán nội dung kịch bản.'),
+                { type: 'warning', title: _t('Chưa có nguồn video và chưa có kịch bản'), duration: 11000 });
             return;
         }
         if (!picked.length) {
-            showToast('Video nào nằm trên lane chính thì video đó là nguồn của dự án. Mở tab "Tệp phương tiện", '
-                + 'bấm nút "+" trên thẻ video (hoặc kéo thả video xuống lane chính) rồi thử lại.',
-                { type: 'warning', title: 'Lane chính chưa có video nào để lọc', duration: 11000 });
+            showToast(_t('Video nào nằm trên lane chính thì video đó là nguồn của dự án. Mở tab "Tệp phương tiện", bấm nút "+" trên thẻ video (hoặc kéo thả video xuống lane chính) rồi thử lại.'),
+                { type: 'warning', title: _t('Lane chính chưa có video nào để lọc'), duration: 11000 });
             return;
         }
         if (!script) {
-            showToast('Mở tab "Kịch bản" ở panel bên trái, kéo thả tệp .md (hoặc .txt / .doc / .docx) vào ô, '
-                + 'hoặc dán thẳng nội dung kịch bản vào khung soạn thảo.',
-                { type: 'warning', title: 'Chưa có kịch bản', duration: 11000 });
+            showToast(_t('Mở tab "Kịch bản" ở panel bên trái, kéo thả tệp .md (hoặc .txt / .doc / .docx) vào ô, hoặc dán thẳng nội dung kịch bản vào khung soạn thảo.'),
+                { type: 'warning', title: _t('Chưa có kịch bản'), duration: 11000 });
             return;
         }
         /* KHÔNG gọi scanDesktopSourcePaths() ở đây: nó dựng lại projectVideoLibrary từ
@@ -8015,7 +8068,7 @@
         projectFlowMode = 'script-filter';
         showStep('step0');
         renderProjectVideoLibrary();
-        setStatusText(`Sẵn sàng bóc băng: ${picked.length} video + kịch bản. Kiểm tra lại rồi bấm "Bắt đầu Bóc băng".`, false);
+        setStatusText(_t('Sẵn sàng bóc băng: {n} video + kịch bản. Kiểm tra lại rồi bấm "Bắt đầu bóc băng".', { n: picked.length }), false);
     });
 
     document.getElementById('btnAutoSfx')?.addEventListener('click', () => {
@@ -8139,7 +8192,7 @@
 
     function applyMarkdownScriptText(text, fileName) {
         if (!window.ScriptMarkdown || typeof window.ScriptMarkdown.normalizeMarkdownScript !== 'function') {
-            throw new Error("Thiếu bộ xử lý Markdown trong ứng dụng.");
+            throw new Error(_t('Thiếu bộ xử lý Markdown trong ứng dụng.'));
         }
         const result = window.ScriptMarkdown.normalizeMarkdownScript(text, {
             sourceType: 'md',
@@ -8177,11 +8230,11 @@
     function applyScriptTextByExtension(ext, text, fileName) {
         if (MARKDOWN_SCRIPT_EXTENSIONS.has(ext)) {
             applyMarkdownScriptText(text, fileName);
-            setStatusText("Đã nạp script Markdown", false);
+            setStatusText(_t('Đã nạp kịch bản Markdown'), false);
             return;
         }
         applyPlainScriptText(text);
-        setStatusText("Đã nạp script .txt", false);
+        setStatusText(_t('Đã nạp kịch bản .txt'), false);
     }
 
     function applyScriptWordBuffer(arrayBuffer) {
@@ -8189,18 +8242,18 @@
         return mammoth.extractRawText({ arrayBuffer })
             .then((result) => {
                 applyPlainScriptText(result.value);
-                setStatusText("Đã nạp script Word", false);
+                setStatusText(_t('Đã nạp kịch bản Word'), false);
             })
             .catch(() => {
-                showToast("Không thể đọc cấu trúc file Word này. Hãy thử lưu sang .txt hoặc .docx bản mới.", { type: 'error' });
-                setStatusText("Lỗi đọc file script", false);
+                showToast(_t('Không thể đọc cấu trúc tệp Word này. Hãy thử lưu sang .txt hoặc .docx bản mới.'), { type: 'error' });
+                setStatusText(_t('Lỗi đọc tệp kịch bản'), false);
             });
     }
 
     // Kết quả từ hộp thoại gốc của Electron: đã kèm sẵn nội dung, không qua FileReader.
     function applyPickedScriptFile(picked) {
         const ext = String(picked.extension || '').toLowerCase();
-        setStatusText("Đang đọc file kịch bản...", true);
+        setStatusText(_t('Đang đọc tệp kịch bản...'), true);
         if (WORD_SCRIPT_EXTENSIONS.has(ext)) {
             const binary = atob(String(picked.base64 || ''));
             const bytes = new Uint8Array(binary.length);
@@ -8213,7 +8266,7 @@
 
     function loadScriptFile(file) {
         const ext = file.name.split('.').pop().toLowerCase();
-        setStatusText("Đang đọc file kịch bản...", true);
+        setStatusText(_t('Đang đọc tệp kịch bản...'), true);
 
         if (WORD_SCRIPT_EXTENSIONS.has(ext)) {
             const reader = new FileReader();
@@ -8222,7 +8275,7 @@
             return;
         }
         if (ext !== 'txt' && !MARKDOWN_SCRIPT_EXTENSIONS.has(ext)) {
-            showToast("Hệ thống chỉ hỗ trợ định dạng .txt, .md, .doc, hoặc .docx!", { type: 'warning' });
+            showToast(_t('Hệ thống chỉ hỗ trợ định dạng .txt, .md, .doc, hoặc .docx!'), { type: 'warning' });
             setStatusText("", false);
             return;
         }
@@ -8232,8 +8285,8 @@
                 applyScriptTextByExtension(ext, e.target.result, file.name);
             } catch (error) {
                 console.error(error);
-                showToast(error.message || "Không thể xử lý file Markdown này.", { type: 'error' });
-                setStatusText("Lỗi đọc file script", false);
+                showToast(error.message || _t('Không thể xử lý tệp Markdown này.'), { type: 'error' });
+                setStatusText(_t('Lỗi đọc tệp kịch bản'), false);
             }
         };
         reader.readAsText(file, 'UTF-8');
@@ -8467,7 +8520,7 @@
 
     async function requestSkeletonForClip(clip, key) {
         skeletonCache.set(key, { status: 'loading' });
-        setSkeletonBadge('Skeleton: đang phân tích…', '#ffd479');
+        setSkeletonBadge(_t('Skeleton: đang phân tích…'), '#ffd479');
         try {
             const response = await fetch(`${API_BASE}/pose/track`, {
                 method: 'POST',
@@ -8490,7 +8543,7 @@
         } catch (error) {
             console.warn('Pose track failed:', error);
             skeletonCache.set(key, { status: 'error', error: error.message || String(error) });
-            if (skeletonActiveKey === key) setSkeletonBadge(`Skeleton lỗi: ${error.message || error}`, '#ff8a8a');
+            if (skeletonActiveKey === key) setSkeletonBadge(_t('Skeleton lỗi: {error}', { error: error.message || error }), '#ff8a8a');
         }
     }
 
@@ -8598,23 +8651,23 @@
 
         const idx = getActivePreviewClipIndex();
         const clip = idx >= 0 ? latestTimeline[idx] : null;
-        if (!clip) { setSkeletonBadge('Skeleton: không có clip', '#ffd479'); return; }
+        if (!clip) { setSkeletonBadge(_t('Skeleton: không có clip'), '#ffd479'); return; }
         const key = skeletonClipKey({ ...clip, index: idx });
         skeletonActiveKey = key;
         const entry = skeletonCache.get(key);
         if (!entry) { requestSkeletonForClip({ ...clip, index: idx }, key); return; }
-        if (entry.status === 'loading') { setSkeletonBadge('Skeleton: đang phân tích…', '#ffd479'); return; }
-        if (entry.status === 'error') { setSkeletonBadge(`Skeleton lỗi: ${entry.error}`, '#ff8a8a'); return; }
+        if (entry.status === 'loading') { setSkeletonBadge(_t('Skeleton: đang phân tích…'), '#ffd479'); return; }
+        if (entry.status === 'error') { setSkeletonBadge(_t('Skeleton lỗi: {error}', { error: entry.error }), '#ff8a8a'); return; }
 
         const clipData = entry.data;
         const frames = clipData && clipData.frames;
         if (!frames || !frames.length) {
-            setSkeletonBadge('Skeleton: không có dữ liệu (thiếu MediaPipe?)', '#ff8a8a');
+            setSkeletonBadge(_t('Skeleton: không có dữ liệu (thiếu MediaPipe?)'), '#ff8a8a');
             return;
         }
         const frameData = nearestPoseFrame(frames, Number(video.currentTime));
         const detFrames = clipData.detected_frames || 0;
-        setSkeletonBadge(`Skeleton ✓ (${detFrames}/${clipData.frame_count} frame có người)`, '#9fe6a0');
+        setSkeletonBadge(_t('Skeleton ✓ ({n}/{total} khung hình có người)', { n: detFrames, total: clipData.frame_count }), '#9fe6a0');
         if (!frameData) return;
 
         // --- Vẽ FaceMesh (nếu có) trước, làm nền chi tiết cho khuôn mặt ---
@@ -9013,18 +9066,18 @@
     // Menu tỷ lệ khung hình: nhóm theo tỷ lệ, mỗi nhóm đủ 4 bậc HD/FHD/2K/4K.
     // `preset` khớp SEQUENCE_PRESETS (frontend) + EXPORT_RESOLUTIONS (backend).
     const PREVIEW_ASPECT_CHOICES = [
-        { preset: 'source', label: 'Theo video nguồn' },
-        { header: '16:9 — Ngang' },
+        { preset: 'source', label: _t('Theo video nguồn') },
+        { header: _t('16:9 — Ngang') },
         { preset: 'p720', label: 'HD 720p', note: '1280x720' },
         { preset: 'p1080', label: 'FHD 1080p', note: '1920x1080' },
         { preset: 'p1440', label: '2K QHD', note: '2560x1440' },
         { preset: 'p2160', label: '4K UHD', note: '3840x2160' },
-        { header: '9:16 — Dọc' },
+        { header: _t('9:16 — Dọc') },
         { preset: 'vertical_720', label: 'HD 720p', note: '720x1280' },
         { preset: 'vertical_1080', label: 'FHD 1080p', note: '1080x1920' },
         { preset: 'vertical_1440', label: '2K QHD', note: '1440x2560' },
         { preset: 'vertical_2160', label: '4K UHD', note: '2160x3840' },
-        { header: '1:1 — Vuông' },
+        { header: _t('1:1 — Vuông') },
         { preset: 'square_1080', label: 'FHD', note: '1080x1080' },
     ];
 
@@ -9065,15 +9118,15 @@
         if (fpsBtn) {
             const auto = !sequenceSettings.fps;
             const value = Math.round(resolveSequenceFps() * 100) / 100;
-            fpsBtn.textContent = `${value} fps${auto ? ' (nguồn)' : ''}`;
+            fpsBtn.textContent = auto ? _t('{fps} fps (nguồn)', { fps: value }) : `${value} fps`;
             fpsBtn.title = auto
-                ? `Tốc độ khung hình: theo video nguồn (${value} fps)`
-                : `Tốc độ khung hình: ${value} fps (tự chọn)`;
+                ? _t('Tốc độ khung hình: theo video nguồn ({fps} fps)', { fps: value })
+                : _t('Tốc độ khung hình: {fps} fps (tự chọn)', { fps: value });
         }
         const aspectBtn = document.getElementById('btnPreviewAspect');
         if (aspectBtn) {
             aspectBtn.textContent = `${sequenceSettings.width}x${sequenceSettings.height}`;
-            aspectBtn.title = 'Tỷ lệ khung hình / kích thước sequence';
+            aspectBtn.title = _t('Tỷ lệ khung hình / kích thước sequence');
         }
     }
 
@@ -9131,7 +9184,7 @@
         if (isFps) {
             const srcFps = Math.round(resolveSourceFps() * 100) / 100;
             const items = PREVIEW_FPS_CHOICES.map((v) => (v === ''
-                ? { value: '', label: 'Theo video nguồn', note: `${srcFps} fps`, active: !sequenceSettings.fps }
+                ? { value: '', label: _t('Theo video nguồn'), note: `${srcFps} fps`, active: !sequenceSettings.fps }
                 : { value: v, label: `${v} fps`, active: String(sequenceSettings.fps) === v }));
             items.splice(1, 0, { separator: true });
             buildPreviewMenu(menu, items, (item) => applySequenceFps(item.value));
@@ -9141,7 +9194,7 @@
                 : { value: c.preset, label: c.label, note: c.note, active: (sequenceSettings.preset || 'custom') === c.preset }));
             if ((sequenceSettings.preset || 'custom') === 'custom') {
                 items.push({ separator: true });
-                items.push({ value: 'custom', label: 'Tuỳ chỉnh', note: `${sequenceSettings.width}x${sequenceSettings.height}`, active: true });
+                items.push({ value: 'custom', label: _t('Tuỳ chỉnh'), note: `${sequenceSettings.width}x${sequenceSettings.height}`, active: true });
             }
             buildPreviewMenu(menu, items, (item) => {
                 if (item.value === 'custom') return;
@@ -9189,7 +9242,7 @@
         const exportFpsEl = document.getElementById('exportFps');
         if (next) setSelectValueOrAddOption(exportFpsEl, next, `${next} fps`);
         else if (exportFpsEl) exportFpsEl.value = 'source';
-        setStatusText(next ? `Tốc độ khung hình: ${next} fps` : 'Tốc độ khung hình: theo video nguồn', false);
+        setStatusText(next ? _t('Tốc độ khung hình: {fps} fps', { fps: next }) : _t('Tốc độ khung hình: theo video nguồn'), false);
     }
 
     document.getElementById('btnPreviewFps')?.addEventListener('click', (e) => { e.stopPropagation(); togglePreviewMenu('fps'); });
@@ -9771,7 +9824,7 @@
 
     function snapTimelineTimeToBlocks(timelineTime, active = true) {
         if (!active || !isSnappingEnabled) return timelineTime;
-        const threshold = 10 / Math.max(1, Number(zoomScale) || 100);
+        const threshold = 10 / Math.max(0.01, Number(zoomScale) || 100);
         let bestTime = timelineTime;
         let bestDelta = threshold;
         getTimelineBlockSnapTimes().forEach((candidate) => {
@@ -9819,24 +9872,24 @@
     // --- BREADCRUMB & NEW PROJECT ---
     const stageHelpContent = {
         step0: {
-            title: 'Upload',
-            body: 'Thêm nguồn video, chọn chế độ bóc băng và nạp kịch bản chuẩn. Có thể kéo thả hoặc chọn file văn bản.'
+            title: _t('Tải lên'),
+            body: _t('Thêm nguồn video, chọn chế độ bóc băng và nạp kịch bản chuẩn. Có thể kéo thả hoặc chọn tệp văn bản.')
         },
         step1: {
-            title: 'Transcribe',
-            body: 'Rà soát kịch bản đang hiệu chỉnh. Có thể bóc băng lại nếu nguồn hoặc thiết lập ASR cần thay đổi.'
+            title: _t('Bóc băng'),
+            body: _t('Rà soát kịch bản đang hiệu chỉnh. Có thể bóc băng lại nếu nguồn hoặc thiết lập ASR cần thay đổi.')
         },
         step2: {
-            title: 'Match Script',
-            body: 'Nhấn Space để Play/Pause, phím ← / → để lùi/tiến 1 khung hình. Kéo 2 đầu clip dưới timeline để trim. Click vào khoảng trống trong đoạn văn để chọn vùng trước khi chốt timeline.'
+            title: _t('Match Script'),
+            body: _t('Nhấn Space để Phát/Tạm dừng, phím ← / → để lùi/tiến 1 khung hình. Kéo 2 đầu clip dưới timeline để cắt tỉa. Bấm vào khoảng trống trong đoạn văn để chọn vùng trước khi chốt timeline.')
         },
         step3: {
-            title: 'Timeline',
-            body: 'Các phân đoạn không chọn đã bị loại bỏ. Dùng panel bên phải để kéo thả sắp xếp, bấm Play để xem trước, và nút Xuất Video ở góc trên phải đã khả dụng.'
+            title: _t('Timeline'),
+            body: _t('Các phân đoạn không chọn đã bị loại bỏ. Dùng panel bên phải để kéo thả sắp xếp, bấm Phát để xem trước, và nút Xuất video ở góc trên phải đã khả dụng.')
         },
         step4: {
-            title: 'Editing',
-            body: 'Thêm media, text, shape hoặc audio vào timeline nhiều lane. Visual lanes nằm trên lane chính, audio lanes nằm dưới lane chính.'
+            title: _t('Editing'),
+            body: _t('Thêm tệp phương tiện, chữ, hình khối hoặc âm thanh vào timeline nhiều lane. Lane hình ảnh nằm trên lane chính, lane âm thanh nằm dưới lane chính.')
         },
     };
 
@@ -9960,18 +10013,18 @@
      * hoặc thư mục dữ liệu app nếu dự án chưa từng Lưu), rồi đi thẳng vào openProjectByPath()
      * đã có sẵn — không cần đường nạp riêng. */
     async function openAutosavePicker() {
-        if (!isDesktopProjectEnv()) { showToast('Chỉ khả dụng trên bản desktop.', { type: 'warning' }); return; }
+        if (!isDesktopProjectEnv()) { showToast(_t('Chỉ khả dụng trên bản desktop.'), { type: 'warning' }); return; }
         let data = null;
         try {
             const firstName = projectVideoLibrary[0]?.name || 'Untitled';
             data = await window.desktopEnv.listAutosaves(currentProjectPath, `${firstName.replace(/\.[^.]+$/, '')}.crab`);
         } catch (error) {
-            showToast('Không đọc được danh sách bản lưu tự động: ' + (error?.message || error), { type: 'error' });
+            showToast(_t('Không đọc được danh sách bản lưu tự động: {error}', { error: error?.message || error }), { type: 'error' });
             return;
         }
         const items = Array.isArray(data?.items) ? data.items : [];
         if (!items.length) {
-            showToast(`Thư mục: ${data?.dir || '—'}`, { type: 'warning', title: 'Chưa có bản lưu tự động nào' });
+            showToast(_t('Thư mục: {dir}', { dir: data?.dir || '—' }), { type: 'warning', title: _t('Chưa có bản lưu tự động nào') });
             return;
         }
         const lines = items.map((it, i) => {
@@ -9979,7 +10032,7 @@
             const stamp = `${String(t.getDate()).padStart(2, '0')}/${String(t.getMonth() + 1).padStart(2, '0')} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
             return `${i + 1}. ${stamp} — ${(it.size_bytes / 1024).toFixed(0)} KB`;
         });
-        const answer = prompt(`Bản lưu tự động (mới nhất trước):\n\n${lines.join('\n')}\n\nNhập số thứ tự để mở:`, '1');
+        const answer = prompt(_t('Bản lưu tự động (mới nhất trước):\n\n{list}\n\nNhập số thứ tự để mở:', { list: lines.join('\n') }), '1');
         if (answer == null) return;
         const idx = Number(answer) - 1;
         if (!Number.isInteger(idx) || idx < 0 || idx >= items.length) return;
@@ -10089,12 +10142,12 @@
             if (!(window.EditingRuntime && EditingRuntime.captureCompositeFrame)) return;
             try {
                 if (video && !video.paused) video.pause();
-                setStatusText('Đang chụp khung hình...', true);
+                setStatusText(_t('Đang chụp khung hình…'), true);
                 const result = await EditingRuntime.captureCompositeFrame();
-                if (!result || !result.canvas) { setStatusText('Không chụp được khung hình.', false); return; }
+                if (!result || !result.canvas) { setStatusText(_t('Không chụp được khung hình.'), false); return; }
                 currentName = captureFileName();
                 currentBlob = await new Promise((resolve) => result.canvas.toBlob((b) => resolve(b), 'image/png'));
-                if (!currentBlob) { setStatusText('Không chụp được khung hình.', false); return; }
+                if (!currentBlob) { setStatusText(_t('Không chụp được khung hình.'), false); return; }
                 if (currentObjUrl) URL.revokeObjectURL(currentObjUrl);
                 currentObjUrl = URL.createObjectURL(currentBlob);
                 if (img) img.src = currentObjUrl;
@@ -10105,10 +10158,10 @@
                     document.getElementById('captureModalPanel'),
                     { initial: () => document.getElementById('btnCaptureSave') },
                 ) || null;
-                setStatusText(result.empty ? 'Khung hình trống (không có nội dung tại playhead).' : 'Đã chụp khung hình. Chọn nơi lưu.', false);
+                setStatusText(result.empty ? _t('Khung hình trống (không có nội dung tại playhead).') : _t('Đã chụp khung hình. Chọn nơi lưu.'), false);
             } catch (error) {
                 console.warn('capture frame failed', error);
-                setStatusText('Lỗi khi chụp khung hình.', false);
+                setStatusText(_t('Lỗi khi chụp khung hình.'), false);
             }
         });
 
@@ -10122,8 +10175,8 @@
                     const b64 = await blobToBase64(blob);
                     const res = await window.desktopEnv.saveFrameImage(b64, name);
                     if (res && res.canceled) return; // user huỷ hộp thoại lưu -> giữ modal để thử lại
-                    if (res && res.error) { showToast('Lưu ảnh thất bại: ' + (res.detail || res.error), { type: 'error' }); return; }
-                    if (res && res.path) setStatusText('Đã lưu ảnh: ' + res.path, false);
+                    if (res && res.error) { showToast(_t('Lưu ảnh thất bại: {error}', { error: res.detail || res.error }), { type: 'error' }); return; }
+                    if (res && res.path) setStatusText(_t('Đã lưu ảnh: {path}', { path: res.path }), false);
                 } else {
                     const a = document.createElement('a');
                     a.href = URL.createObjectURL(blob);
@@ -10132,20 +10185,20 @@
                     a.click();
                     a.remove();
                     setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-                    setStatusText('Đã tải ảnh về máy.', false);
+                    setStatusText(_t('Đã tải ảnh về máy.'), false);
                 }
             } catch (error) {
                 console.warn('save frame failed', error);
-                showToast('Lưu ảnh thất bại: ' + (error?.message || error), { type: 'error' });
+                showToast(_t('Lưu ảnh thất bại: {error}', { error: error?.message || error }), { type: 'error' });
                 return;
             }
             if (addToProject && window.EditingRuntime && EditingRuntime.addCapturedImageToProject) {
                 try {
                     await EditingRuntime.addCapturedImageToProject(blob, name);
-                    setStatusText('Đã lưu ảnh & thêm vào tệp phương tiện dự án.', false);
+                    setStatusText(_t('Đã lưu ảnh & thêm vào tệp phương tiện dự án.'), false);
                 } catch (error) {
                     console.warn('add captured image to project failed', error);
-                    showToast('Thêm vào dự án thất bại: ' + (error?.message || error), { type: 'error' });
+                    showToast(_t('Thêm vào dự án thất bại: {error}', { error: error?.message || error }), { type: 'error' });
                 }
             }
             closeCaptureModal();
@@ -10615,8 +10668,8 @@
         const btn = document.getElementById('btnPlayPause');
         if (!btn) return;
         btn.innerHTML = video.paused
-            ? '<svg class="btn-ico"><use href="#ic-play"/></svg>Play'
-            : '<svg class="btn-ico"><use href="#ic-pause"/></svg>Pause';
+            ? '<svg class="btn-ico"><use href="#ic-play"/></svg>' + _t('Phát')
+            : '<svg class="btn-ico"><use href="#ic-pause"/></svg>' + _t('Tạm dừng');
     }
 
     function waitForVideoEvent(eventName, timeoutMs = 900) {
@@ -10637,7 +10690,7 @@
         const retries = Number.isFinite(options.retries) ? options.retries : 2;
 
         if (!video || !video.src) {
-            setStatusText("Chưa có video để phát", false);
+            setStatusText(_t("Chưa có video để phát"), false);
             return false;
         }
 
@@ -10677,7 +10730,7 @@
         }
 
         console.warn('safePlay failed:', lastError);
-        setStatusText("Không thể phát video", false);
+        setStatusText(_t("Không thể phát video"), false);
         syncPlayPauseButton();
         return false;
     }
@@ -10723,37 +10776,90 @@
     syncPlayPauseButton();
 
     // --- ZOOMIING TIMELINE CONTROLLER ---
+    /* ===== THU PHÓNG TIMELINE (viết lại 2026-09-27) =====
+     * zoomScale = số px cho 1 giây. Ba lỗi của bản cũ, người dùng báo với phim 39 phút:
+     *  1. `zoomScale = parseInt(slider.value)`: mức vừa khung của phim dài là số LẺ < 1
+     *     (1546 px / 2365 s = 0,65) -> parseInt ra 0 -> mọi block dồn về một điểm khi bấm
+     *     "Thu phóng vừa khung".
+     *  2. Thanh kéo TUYẾN TÍNH từ 0,65 tới 600 px/s: cả dải hay dùng (0,65-30) nằm gọn trong
+     *     ~5% đầu thanh, nhích một pixel là zoom nhảy vọt -> "khó kiểm soát".
+     *  3. Mức vừa khung chỉ tính MỘT LẦN lúc nạp video, theo bề rộng lúc đó và thời lượng
+     *     NGUỒN chứ không phải thời lượng timeline.
+     * Nay thanh kéo là vị trí LOG 0..ZOOM_SLIDER_STEPS: mỗi đoạn kéo bằng nhau = nhân/chia
+     * zoom cùng một hệ số, như Premiere. Mức vừa khung tính LẠI mỗi lần cần, từ bề rộng đang
+     * thấy (trừ cột nhãn lane ở Editing), thời lượng timeline và vị trí playhead (xem
+     * timelineZoomRange). Số đọc = vị trí trên thanh (0-100%). */
+    const ZOOM_SLIDER_STEPS = 1000;
+    const ZOOM_MAX_PX_PER_SEC = 600;
     const zoomSlider = document.getElementById('zoomSlider');
+    zoomSlider.min = '0';
+    zoomSlider.max = String(ZOOM_SLIDER_STEPS);
+    zoomSlider.step = '1';
+
+    /* Playhead GHIM GIỮA khung nhìn, nên "thấy trọn timeline" nghĩa là [0, playhead] vừa nửa
+       TRÁI (trừ cột nhãn lane) và [playhead, cuối] vừa nửa PHẢI. `fit` = mức đó ở playhead
+       hiện tại (nút "Thu phóng vừa khung"); `min` = mức đó ở trường hợp xấu nhất (playhead ở
+       cuối timeline), để thanh kéo luôn với tới được mức thấy trọn dù playhead ở đâu. */
+    const ZOOM_FIT_EDGE_PX = 16;
+    function timelineZoomRange() {
+        const outer = document.getElementById('timelineTrackOuter');
+        const rail = (currentMode === 'FINAL' && currentStepId === 'step4') ? TL_LANE_RAIL_W : 0;
+        const half = Math.max(1, (outer?.clientWidth || 0) / 2);
+        const leftRoom = Math.max(1, half - rail - ZOOM_FIT_EDGE_PX);
+        const rightRoom = Math.max(1, half - ZOOM_FIT_EDGE_PX);
+        const duration = Math.max(1, Number(getTimelineDuration()) || Number(videoDuration) || 1);
+        const t = Math.max(0, Math.min(duration, Number(getCurrentTimelineTime()) || 0));
+        const min = Math.max(0.01, Math.min(leftRoom, rightRoom) / duration);
+        const fit = Math.max(min, Math.min(t > 0 ? leftRoom / t : Infinity, duration - t > 0 ? rightRoom / (duration - t) : Infinity));
+        return { fit: Number.isFinite(fit) ? fit : min, min, max: Math.max(ZOOM_MAX_PX_PER_SEC, min * 5) };
+    }
+    function zoomToSliderPos(zoom, range = timelineZoomRange()) {
+        const span = Math.log(range.max / range.min);
+        if (!(span > 0)) return 0;
+        const pos = (Math.log(Math.max(range.min, Math.min(range.max, zoom)) / range.min) / span) * ZOOM_SLIDER_STEPS;
+        return Math.round(pos);
+    }
+    function sliderPosToZoom(pos, range = timelineZoomRange()) {
+        const t = Math.max(0, Math.min(1, Number(pos) / ZOOM_SLIDER_STEPS));
+        return range.min * Math.pow(range.max / range.min, t);
+    }
+    /* Đồng bộ VỊ TRÍ thanh + số đọc theo zoomScale, KHÔNG đổi zoom. Gọi cả khi bề rộng hay
+       thời lượng timeline đổi (updateTimelineLayout): cùng một zoomScale nhưng mức vừa khung
+       đã khác thì thanh phải nằm chỗ khác. */
+    function syncZoomReadout() {
+        const range = timelineZoomRange();
+        const pos = String(zoomToSliderPos(zoomScale, range));
+        if (zoomSlider.value !== pos) zoomSlider.value = pos;
+        const readout = document.getElementById('zoomReadout');
+        // Số đọc = VỊ TRÍ trên thanh (0% thu nhỏ hết cỡ, 100% phóng to hết cỡ). Tỉ số so với
+        // một mức mốc thì vô nghĩa ở thang log: phim 39 phút ở 10 px/s đã là "4015%".
+        if (readout) readout.textContent = `${Math.round((Number(pos) / ZOOM_SLIDER_STEPS) * 100)}%`;
+    }
+    /* Đường ghi zoom DUY NHẤT của nút −/+/Fit và thanh kéo. Phát 'input' để các listener
+       phụ (thước DOM của Editing) chạy như khi người dùng kéo thanh. */
+    function setTimelineZoom(next) {
+        const range = timelineZoomRange();
+        const clamped = Math.max(range.min, Math.min(range.max, Number(next) || range.fit));
+        if (Math.abs(clamped - zoomScale) < 1e-6) { syncZoomReadout(); return; }
+        zoomScale = clamped;
+        syncZoomReadout();
+        updateTimelineLayout();
+        zoomSlider.dispatchEvent(new CustomEvent('input', { bubbles: true, detail: { fromCode: true } }));
+    }
     zoomSlider.addEventListener('input', (e) => {
-        zoomScale = parseInt(e.target.value);
+        if (e.detail?.fromCode) return;   // setTimelineZoom đã đặt zoomScale
+        zoomScale = sliderPosToZoom(e.target.value);
+        syncZoomReadout();
         updateTimelineLayout();
     });
-
-    /* Nút −/+/Fit và số đọc được cho cụm Thu phóng (Đợt UI/UX Pro).
-       CHỈ ghi zoomSlider.value rồi phát 'input' -> đi qua ĐÚNG handler ở trên, không nhân
-       bản một đường tính zoom thứ hai. 'Fit' = về min, và min chính là mức vừa-khung mà
-       app tự đặt lại mỗi lần 'loadedmetadata' (min = bề rộng viewport / thời lượng). */
-    function setZoomSliderValue(next) {
-        const min = Number(zoomSlider.min) || 20;
-        const max = Number(zoomSlider.max) || 600;
-        const clamped = Math.min(max, Math.max(min, Math.round(next)));
-        if (String(clamped) === String(zoomSlider.value)) return;
-        zoomSlider.value = String(clamped);
-        zoomSlider.dispatchEvent(new Event('input', { bubbles: true }));
-    }
     function nudgeZoom(factor) {
-        setZoomSliderValue((Number(zoomSlider.value) || 100) * factor);
-    }
-    function syncZoomReadout() {
-        const readout = document.getElementById('zoomReadout');
-        if (readout) readout.textContent = `${Math.round(Number(zoomSlider.value) || 100)}%`;
+        setTimelineZoom(zoomScale * factor);
     }
     document.getElementById('btnZoomIn')?.addEventListener('click', () => nudgeZoom(1.5));
     document.getElementById('btnZoomOut')?.addEventListener('click', () => nudgeZoom(1 / 1.5));
     document.getElementById('btnZoomFit')?.addEventListener('click', () => {
-        setZoomSliderValue(Number(zoomSlider.min) || 20);
+        setTimelineZoom(timelineZoomRange().fit);
     });
-    zoomSlider.addEventListener('input', syncZoomReadout);
     syncZoomReadout();
 
     function updateTimelineLayout() {
@@ -10762,6 +10868,8 @@
         const timelineDuration = getTimelineDuration();
         const sidePadding = getTimelineSidePaddingPx();
         trackContainer.style.width = `${Math.max(1, (timelineDuration * zoomScale) + (sidePadding * 2))}px`;
+        // Thời lượng hay bề rộng khung nhìn đổi thì mức vừa khung đổi -> thanh zoom phải dời.
+        syncZoomReadout();
 
         if (timelineRenderer) {
             const viewportWidth = timelineOuter ? timelineOuter.clientWidth : trackContainer.clientWidth;
@@ -10775,7 +10883,11 @@
             drawTimelineSegments(globalRawSegments, 'RAW');
         } else if (currentMode === 'MAPPED') {
             drawTimelineSegments(globalMappedChunks, 'MAPPED');
-        } else if (currentMode === 'FINAL') {
+        } else if (currentMode === 'FINAL' && currentStepId !== 'step4') {
+            /* Ở Editing (step4) KHÔNG vẽ: renderEditingTimeline (chạy ngay sau hàm này qua bản
+               vá của editing-runtime) tự dựng #segmentsTrack. Vẽ ở đây là xoá sạch
+               `innerHTML` — mất luôn block mà lượt dựng Editing định tái dùng — rồi dựng một
+               lớp block kiểu cũ chỉ để bị xoá lại ngay. */
             drawTimelineSegments(latestTimeline, 'FINAL');
         }
         updatePlayhead();
@@ -10840,14 +10952,12 @@
 	        // Tự động fit video vào màn hình — CHỈ khi nạp nguồn mới, không phải mỗi lần
 	        // đổi LQ/HQ (đổi chất lượng mà nhảy mức zoom timeline là mất chỗ đang làm).
 	        if (!isSwitchingPreviewProxy) {
-	            const outerWidth = document.getElementById('timelineTrackOuter').clientWidth;
-	            zoomScale = Math.max(10, outerWidth / (videoDuration || 1));
-
-	            const slider = document.getElementById('zoomSlider');
-	            slider.min = (outerWidth / (videoDuration || 1)).toFixed(2);
-	            slider.max = Math.max(600, zoomScale * 5);
-	            slider.value = zoomScale;
-	            syncZoomReadout();   // chỉ đồng bộ NHÃN, không đổi zoom
+	            // Mức khởi đầu giữ như cũ: vừa khung, nhưng không dưới 10 px/s (phim dài mà
+	            // vừa khung thì block chỉ còn vài pixel). Dải của thanh zoom tự tính theo
+	            // timelineZoomRange() nên không ghi min/max ở đây nữa.
+	            const range = timelineZoomRange();
+	            zoomScale = Math.min(range.max, Math.max(10, range.fit));
+	            syncZoomReadout();   // chỉ đồng bộ thanh + nhãn, không đổi zoom
 	        }
 
 	        updateTimelineLayout();
@@ -10863,10 +10973,10 @@
         const btn = document.getElementById('btnPreviewCuts');
         if (!btn) return;
         if (isPreviewing) {
-            btn.innerHTML = '<svg class="btn-ico"><use href="#ic-stop"/></svg>Dừng Preview';
+            btn.innerHTML = '<svg class="btn-ico"><use href="#ic-stop"/></svg>' + _t('Dừng xem trước');
             btn.style.background = "var(--danger)";
         } else {
-            btn.innerHTML = '<svg class="btn-ico"><use href="#ic-film"/></svg>Xem trước (Preview Cuts)';
+            btn.innerHTML = '<svg class="btn-ico"><use href="#ic-film"/></svg>' + _t('Xem trước (Preview Cuts)');
             btn.style.background = "var(--primary)";
         }
     }
@@ -10879,7 +10989,7 @@
         }
         
         let chunks = currentMode === 'MAPPED' ? globalMappedChunks.filter(c => c.is_selected) : latestTimeline;
-        if (!chunks || chunks.length === 0) { showToast("Chưa có đoạn nào được chọn!", { type: 'warning' }); return; }
+        if (!chunks || chunks.length === 0) { showToast(_t("Chưa có đoạn nào được chọn!"), { type: 'warning' }); return; }
         
         setPreviewModeActive(true);
 
@@ -11119,10 +11229,9 @@
                     const centerPx = timelineOuter.scrollLeft + (timelineOuter.clientWidth / 2);
                     const centerTime = Math.max(0, Math.min(getTimelineDuration(), pxToTimelineTime(centerPx)));
                     
-                    const slider = document.getElementById('zoomSlider');
-                    zoomScale = Math.max(parseFloat(slider.min), Math.min(parseFloat(slider.max), newZoom));
-                    slider.value = zoomScale;
-                    syncZoomReadout();   // chỉ đồng bộ NHÃN, không đổi zoom
+                    const range = timelineZoomRange();
+                    zoomScale = Math.max(range.min, Math.min(range.max, newZoom));
+                    syncZoomReadout();   // chỉ đồng bộ thanh + nhãn, không đổi zoom
 
                     updateTimelineLayout();
 
@@ -11320,7 +11429,7 @@
         const centerTime = pxToTimelineTime(timelineOuter.scrollLeft + halfView);
         const factor = (!force && e.altKey) ? FINE_SCRUB_FACTOR : 1;
         const rawTime = Math.max(0, Math.min(total,
-            centerTime + ((pointerXInOuter - halfView) * factor) / Math.max(1, Number(zoomScale) || 100)));
+            centerTime + ((pointerXInOuter - halfView) * factor) / Math.max(0.01, Number(zoomScale) || 100)));
         /* THỨ TỰ: BẮT DÍNH TRƯỚC, LƯỚI KHUNG SAU.
            Mốc bắt dính (mép clip, keyframe) là số thực bất kỳ, không nhất thiết rơi đúng
            mép khung; làm tròn nó sẽ đẩy ra khỏi mép clip tới nửa khung -> bấm đúng chỗ cắt
@@ -11500,9 +11609,9 @@
     let isStatusPolling = false;
     const CRAB_PAYLOAD_VERSION = 1;
     const MODE_TRANSCRIPT_TITLES = {
-        RAW: 'Transcript Thô (Space to Play)',
-        MAPPED: 'Rà soát so khớp kịch bản',
-        FINAL: 'Timeline cấu trúc Kịch bản',
+        RAW: _t('Bản bóc băng thô (Space để phát)'),
+        MAPPED: _t('Rà soát so khớp kịch bản'),
+        FINAL: _t('Timeline cấu trúc kịch bản'),
     };
 
     function isDesktopProjectEnv() {
@@ -11513,7 +11622,7 @@
      * Rỗng nghĩa là "chưa đặt": lúc đó lấy tên file .crab làm tên hiển thị, chưa lưu lần
      * nào thì hiện chỗ giữ chỗ. Tên này cũng là tên MẶC ĐỊNH của video xuất ra. */
     let projectName = '';
-    const UNTITLED_PROJECT_NAME = 'Dự án chưa lưu';
+    const UNTITLED_PROJECT_NAME = _t('Dự án chưa lưu');
 
     /* Cắt bỏ những gì không đặt được thành tên file (ký tự cấm của Windows/macOS, ký tự
      * điều khiển, dấu chấm cuối) — tên này đi thẳng vào tên .crab gợi ý và tên video xuất. */
@@ -11779,11 +11888,11 @@
 
     async function saveProject(saveAs = false) {
         if (!isDesktopProjectEnv()) {
-            showToast('Tính năng lưu dự án chỉ khả dụng trên bản desktop.', { type: 'warning' });
+            showToast(_t('Tính năng lưu dự án chỉ khả dụng trên bản desktop.'), { type: 'warning' });
             return;
         }
         if (isStatusPolling) {
-            setStatusText('Đang xử lý — đợi hoàn tất rồi lưu dự án.', true);
+            setStatusText(_t('Đang xử lý — đợi hoàn tất rồi lưu dự án.'), true);
             return;
         }
         try {
@@ -11817,10 +11926,10 @@
              * Hỏng ở đây không phải lỗi: proxy luôn dựng lại được. */
             saveProjectProxySidecar(result.path);
             touchRecentProject(result.path);   // KHÔNG await: ảnh đại diện không được làm chậm việc Lưu
-            setStatusText('Đã lưu dự án', false);
+            setStatusText(_t('Đã lưu dự án'), false);
         } catch (error) {
             console.error('saveProject failed:', error);
-            showToast('Lưu dự án thất bại: ' + (error?.message || error), { type: 'error' });
+            showToast(_t('Lưu dự án thất bại: {error}', { error: error?.message || error }), { type: 'error' });
         }
     }
 
@@ -11883,7 +11992,7 @@
             // CỐ Ý không xoá cờ projectDirty: bản auto save là bản sao, file dự án THẬT vẫn
             // chưa có thay đổi này. Xoá cờ là nói dối, và cảnh báo lúc thoát sẽ im lặng.
             const t = new Date(lastAutoSaveAt);
-            setStatusText(`Đã lưu tự động lúc ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`, false);
+            setStatusText(_t('Đã lưu tự động lúc {time}', { time: `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}` }), false);
         } catch (error) {
             console.warn('Auto save lỗi:', error);
         } finally {
@@ -11931,12 +12040,11 @@
             panel.setAttribute('aria-labelledby', 'relinkModalTitle');
             panel.innerHTML =
                 '<div class="ui-modal-head">'
-                + '<div class="ui-modal-title" id="relinkModalTitle">Không tìm thấy một số file media</div>'
-                + '<button type="button" class="ui-modal-close" data-relink-close aria-label="Huỷ mở dự án">'
+                + '<div class="ui-modal-title" id="relinkModalTitle">' + _t('Không tìm thấy một số tệp phương tiện') + '</div>'
+                + '<button type="button" class="ui-modal-close" data-relink-close aria-label="' + _t('Huỷ mở dự án') + '">'
                 + '<svg class="btn-ico" aria-hidden="true"><use href="#ic-x"/></svg></button>'
                 + '</div>'
-                + '<p class="ui-modal-desc">File nguồn của dự án đã bị di chuyển, đổi tên hoặc thay đổi nội dung. '
-                + 'Hãy tìm lại file để tiếp tục mở dự án.</p>';
+                + '<p class="ui-modal-desc">' + _t('File nguồn của dự án đã bị di chuyển, đổi tên hoặc thay đổi nội dung. Hãy tìm lại file để tiếp tục mở dự án.') + '</p>';
             const list = document.createElement('div');
             list.className = 'ui-modal-body';
             panel.appendChild(list);
@@ -11949,7 +12057,7 @@
             const btnCancel = document.createElement('button');
             btnCancel.type = 'button';
             btnCancel.className = 'btn btn-secondary';
-            btnCancel.textContent = 'Hủy mở dự án';
+            btnCancel.textContent = _t('Huỷ mở dự án');
             const btnContinue = document.createElement('button');
             btnContinue.type = 'button';
             btnContinue.className = 'btn btn-primary';
@@ -11967,8 +12075,8 @@
                 const remaining = unresolvedRequiredCount();
                 btnContinue.disabled = remaining > 0;
                 btnContinue.textContent = remaining > 0
-                    ? `Còn ${remaining} video nguồn chưa tìm lại`
-                    : 'Tiếp tục mở dự án';
+                    ? _t('Còn {n} video nguồn chưa tìm lại', { n: remaining })
+                    : _t('Tiếp tục mở dự án');
             }
 
             problems.forEach((problem) => {
@@ -11976,13 +12084,13 @@
                 row.className = 'relink-row';
                 const info = document.createElement('div');
                 info.className = 'relink-info';
-                const reasonText = problem.reason === 'missing' ? 'Không tìm thấy file' : 'File đã thay đổi — timeline có thể lệch';
+                const reasonText = problem.reason === 'missing' ? _t('Không tìm thấy file') : _t('File đã thay đổi — timeline có thể lệch');
                 const nameEl = document.createElement('div');
                 nameEl.className = 'relink-name';
-                nameEl.textContent = problem.name || '(không tên)';
+                nameEl.textContent = problem.name || _t('(không tên)');
                 const statusEl = document.createElement('div');
                 statusEl.className = 'relink-status';
-                statusEl.textContent = `${reasonText} · ${problem.path || 'không có đường dẫn gốc'}`;
+                statusEl.textContent = `${reasonText} · ${problem.path || _t('không có đường dẫn gốc')}`;
                 info.appendChild(nameEl);
                 info.appendChild(statusEl);
                 row.appendChild(info);
@@ -11990,13 +12098,13 @@
                 const btnLocate = document.createElement('button');
                 btnLocate.type = 'button';
                 btnLocate.className = 'btn btn-secondary btn-sm';
-                btnLocate.textContent = 'Tìm lại…';
+                btnLocate.textContent = _t('Tìm lại…');
                 btnLocate.addEventListener('click', async () => {
                     const picked = await window.desktopEnv.pickRelinkFile({ name: problem.name });
                     if (!picked) return;
                     state.relinks.set(problem.id, picked);
                     state.skipped.delete(problem.id);
-                    statusEl.textContent = `Đã chọn: ${picked}`;
+                    statusEl.textContent = _t('Đã chọn: {path}', { path: picked });
                     statusEl.classList.add('is-resolved');
                     refreshButtons();
                 });
@@ -12006,11 +12114,11 @@
                     const btnSkip = document.createElement('button');
                     btnSkip.type = 'button';
                     btnSkip.className = 'btn btn-ghost btn-sm';
-                    btnSkip.textContent = 'Bỏ qua';
+                    btnSkip.textContent = _t('Bỏ qua');
                     btnSkip.addEventListener('click', () => {
                         state.skipped.add(problem.id);
                         state.relinks.delete(problem.id);
-                        statusEl.textContent = 'Sẽ bỏ qua asset này khi mở dự án';
+                        statusEl.textContent = _t('Sẽ bỏ qua tài nguyên này khi mở dự án');
                         statusEl.classList.remove('is-resolved');
                         refreshButtons();
                     });
@@ -12163,7 +12271,7 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ kind, paths: items.map((i) => i.path) }),
             });
-            if (!res.ok) throw new Error(`Không thể nạp lại asset Editing (HTTP ${res.status}).`);
+            if (!res.ok) throw new Error(_t('Không thể nạp lại tài nguyên Editing (HTTP {status}).', { status: res.status }));
             const data = await res.json();
             const imported = data.assets || [];
             const bySourcePath = new Map(imported.map((a) => [a.source_path, a]));
@@ -12204,7 +12312,7 @@
         if (repaired.fixed <= 0) return;
         editingState.editingItems = repaired.items;
         console.log(`[overlay] cắt ${repaired.fixed} block dài quá video nguồn của nó`);
-        showToast(`${repaired.fixed} block trên lane overlay bị kéo dài quá video nguồn và đã được cắt về đúng độ dài.`, { type: 'warning' });
+        showToast(_t('{n} block trên lane overlay bị kéo dài quá video nguồn và đã được cắt về đúng độ dài.', { n: repaired.fixed }), { type: 'warning' });
     }
 
     function applyAssetPatchesToEditingState(editingState, patches, skippedAssetIds) {
@@ -12239,12 +12347,15 @@
         // Job + lựa chọn nguồn của panel Auto Subtitle nằm trong biến module: dự án cũ đóng
         // rồi mà không dọn thì dự án mới thừa hưởng cả thanh tiến trình lẫn danh sách phụ đề.
         window.AutoSubtitlePanel?.resetState?.();
+        window.LocalSubtitlePanel?.resetState?.();
+        window.DubbingPanel?.resetState?.();
         /* Sổ phụ đề của dự án VỪA ĐÓNG. Bình thường restoreHistoryState() ở cuối hàm đặt lại
          * khoá này (có phụ đề thì nạp, không có thì null), nhưng nó chỉ chạy `if (history)` —
          * một tệp .crab đời cũ KHÔNG có `history` thì sổ của dự án trước sống sót qua, và lượt
          * Lưu đầu tiên sẽ ghi phụ đề của dự án cũ ra .srt của dự án này. Dọn ở đây cho đường
          * mở dự án khớp với đường "Dự án mới" (xem resetProjectState ở editing-runtime.js). */
         window.EditingRuntime?.setSubtitleState?.(null);
+        window.EditingRuntime?.setSubtitleImports?.([]);   // bộ nhập từ tệp (Local Subtitle), cùng lý do
         undoStack = []; redoStack = []; updateUndoRedoButtons();
         stopPreviewProxyPolling();
         setPreviewModeActive(false);
@@ -12320,7 +12431,7 @@
                 });
                 if (!res.ok) {
                     const err = await res.json().catch(() => ({}));
-                    throw new Error(err.detail || `Lỗi nạp lại dự án (HTTP ${res.status}).`);
+                    throw new Error(err.detail || _t('Lỗi nạp lại dự án (HTTP {status}).', { status: res.status }));
                 }
                 reingest = await res.json();
                 /* Bảng đoạn của file VỪA nối: giữ lại thì lượt thêm/bớt video đầu tiên sau khi
@@ -12361,7 +12472,7 @@
                     ));
                     console.log(`[main-lane] căn lại ${history.latestTimeline.length}/${before} clip theo file vừa nối (lệch tối đa ${drift.toFixed(3)}s)`);
                     if (drift > 0.15) {
-                        showToast(`Lane chính đã được căn lại theo video nguồn (lệch tối đa ${drift.toFixed(2)}s so với lần lưu).`, { type: 'info' });
+                        showToast(_t('Lane chính đã được căn lại theo video nguồn (lệch tối đa {drift}s so với lần lưu).', { drift: drift.toFixed(2) }), { type: 'info' });
                     }
                 }
                 /* SỬA CLIP ĐÃ LỠ TRÀN SANG ĐOẠN CỦA VIDEO KHÁC.
@@ -12379,7 +12490,7 @@
                     if (repaired.fixed > 0) {
                         history.latestTimeline = repaired.rows;
                         console.log(`[main-lane] cắt ${repaired.fixed} clip tràn khỏi video nguồn của nó`);
-                        showToast(`${repaired.fixed} clip trên lane chính đã được nắn về đúng ranh giới video nguồn của nó.`, { type: 'warning' });
+                        showToast(_t('{n} clip trên lane chính đã được nắn về đúng ranh giới video nguồn của nó.', { n: repaired.fixed }), { type: 'warning' });
                     }
                 }
                 await scanDesktopSourcePaths(relink.sourcePaths);
@@ -12449,7 +12560,7 @@
         updateProjectTitle();
         touchRecentProject(filePath);   // mở cũng là "gần đây", không chỉ lưu
         undoStack = []; redoStack = []; updateUndoRedoButtons();
-        setStatusText('Đã mở dự án', false);
+        setStatusText(_t('Đã mở dự án'), false);
     }
 
     /* ĐÓNG GÓI DỰ ÁN — "Collect Files and Copy to New Location" của Premiere.
@@ -12466,23 +12577,23 @@
      * có quyền fs. */
     async function packageProject() {
         if (!isDesktopProjectEnv()) {
-            showToast('Đóng gói dự án chỉ khả dụng trên bản desktop.', { type: 'warning' });
+            showToast(_t('Đóng gói dự án chỉ khả dụng trên bản desktop.'), { type: 'warning' });
             return;
         }
         if (typeof window.desktopEnv?.packageProject !== 'function') {
-            showToast('Bản desktop đang chạy chưa có tính năng đóng gói — hãy khởi động lại ứng dụng.', { type: 'warning' });
+            showToast(_t('Bản desktop đang chạy chưa có tính năng đóng gói — hãy khởi động lại ứng dụng.'), { type: 'warning' });
             return;
         }
         if (isStatusPolling) {
-            setStatusText('Đang xử lý — đợi hoàn tất rồi đóng gói.', true);
+            setStatusText(_t('Đang xử lý — đợi hoàn tất rồi đóng gói.'), true);
             return;
         }
         try {
-            setStatusText('Đang chuẩn bị đóng gói dự án…', true);
+            setStatusText(_t('Đang chuẩn bị đóng gói dự án…'), true);
             const payload = await collectProjectPayload();
             const name = sanitizeProjectName(getProjectDisplayName())
                 || (payload.media.sources[0]?.name || 'Untitled').replace(/\.[^.]+$/, '');
-            setStatusText('Đang chép video của dự án… (có thể mất vài phút với dự án nặng)', true);
+            setStatusText(_t('Đang chép video của dự án… (có thể mất vài phút với dự án nặng)'), true);
             /* PHỤ ĐỀ ĐI CÙNG GÓI. Dựng lại .srt từ block đang có trên timeline NGAY TẠI ĐÂY
              * thay vì để main process chép tệp .srt cũ: tệp cũ có thể đã lệch với timeline
              * (sửa phụ đề xong bấm "Đóng gói" mà chưa Lưu) hoặc không còn trên đĩa (dự án
@@ -12496,8 +12607,8 @@
             const readyProxy = await fetchReadyPreviewProxy();
             const result = await window.desktopEnv.packageProject(
                 JSON.stringify(payload), name, subtitleSrt, readyProxy?.path || '');
-            if (!result || result.canceled) { setStatusText('Đã huỷ đóng gói.', false); return; }
-            if (result.error) throw new Error(result.detail || 'Đóng gói thất bại.');
+            if (!result || result.canceled) { setStatusText(_t('Đã huỷ đóng gói.'), false); return; }
+            if (result.error) throw new Error(result.detail || _t('Đóng gói thất bại.'));
             const missing = (result.missing || []).length;
             // Không có formatBytes ở renderer (nó là hàm của backend) — dự án nặng nên
             // MB/GB là đủ, không cần bậc nhỏ hơn.
@@ -12508,18 +12619,18 @@
             const libCopied = (result.library_copied || []).length;
             const libMissing = (result.library_missing || []).length;
             showToast(
-                `Đã đóng gói ${result.copied} tệp (${human}) vào "${result.project_dir}".`
-                + (libCopied ? ` ${libCopied} tài nguyên thư viện đã gói kèm — mở ở máy khác sẽ tự khôi phục.` : '')
-                + (libMissing ? ` ${libMissing} tài nguyên thư viện không còn trong library/ nên không gói được.` : '')
-                + (result.srt_path ? ' Phụ đề (.srt) đã gói kèm.' : '')
-                + (result.proxy_path ? ' Proxy xem trước đã gói kèm — mở lại không phải dựng lại.' : '')
-                + (missing ? ` ${missing} tệp không còn trên đĩa nên giữ nguyên đường dẫn cũ.` : ''),
+                _t('Đã đóng gói {n} tệp ({size}) vào "{dir}".', { n: result.copied, size: human, dir: result.project_dir })
+                + (libCopied ? ' ' + _t('{n} tài nguyên thư viện đã gói kèm — mở ở máy khác sẽ tự khôi phục.', { n: libCopied }) : '')
+                + (libMissing ? ' ' + _t('{n} tài nguyên thư viện không còn trong library/ nên không gói được.', { n: libMissing }) : '')
+                + (result.srt_path ? ' ' + _t('Phụ đề (.srt) đã gói kèm.') : '')
+                + (result.proxy_path ? ' ' + _t('Proxy xem trước đã gói kèm — mở lại không phải dựng lại.') : '')
+                + (missing ? ' ' + _t('{n} tệp không còn trên đĩa nên giữ nguyên đường dẫn cũ.', { n: missing }) : ''),
                 { type: (missing || libMissing) ? 'warning' : 'success' },
             );
-            setStatusText(`Đã đóng gói dự án: ${result.project_dir}`, false);
+            setStatusText(_t('Đã đóng gói dự án: {dir}', { dir: result.project_dir }), false);
         } catch (error) {
-            showToast('Đóng gói dự án thất bại: ' + (error?.message || error), { type: 'error' });
-            setStatusText('Đóng gói dự án thất bại.', false);
+            showToast(_t('Đóng gói dự án thất bại: {error}', { error: error?.message || error }), { type: 'error' });
+            setStatusText(_t('Đóng gói dự án thất bại.'), false);
         }
     }
 
@@ -12542,16 +12653,16 @@
             try { await window.EditingRuntime?.refreshLutCatalog?.(); } catch (_) { /* offline: giữ danh mục cũ */ }
         }
         if (restored.length) {
-            showToast(`Đã khôi phục ${restored.length} tài nguyên thư viện từ gói dự án vào thư viện của máy này.`,
+            showToast(_t('Đã khôi phục {n} tài nguyên thư viện từ gói dự án vào thư viện của máy này.', { n: restored.length }),
                 { type: 'success' });
         }
         const lost = missing.length + failed.length;
         if (lost) {
+            const lostList = `${[...missing, ...failed].slice(0, 3).join(', ')}${lost > 3 ? '…' : ''}`;
             showToast(
-                `${lost} tài nguyên thư viện của dự án không có trên máy này và không có trong gói`
-                + (failed.length ? ' (hoặc không ghi được vào thư mục library/)' : '')
-                + `: ${[...missing, ...failed].slice(0, 3).join(', ')}${lost > 3 ? '…' : ''}. `
-                + 'Block dùng chúng sẽ không có nguồn.',
+                failed.length
+                    ? _t('{n} tài nguyên thư viện của dự án không có trên máy này và không có trong gói (hoặc không ghi được vào thư mục library/): {list}. Block dùng chúng sẽ không có nguồn.', { n: lost, list: lostList })
+                    : _t('{n} tài nguyên thư viện của dự án không có trên máy này và không có trong gói: {list}. Block dùng chúng sẽ không có nguồn.', { n: lost, list: lostList }),
                 { type: 'warning' },
             );
         }
@@ -12560,26 +12671,26 @@
     async function openProjectFromResult(result) {
         if (!result || result.canceled) return;
         if (result.error === 'unsupported_version') {
-            showToast(`Tệp dự án này được lưu bởi phiên bản CrabbyCut mới hơn (định dạng v${result.version}). Hãy cập nhật ứng dụng.`, { type: 'warning' });
+            showToast(_t('Tệp dự án này được lưu bởi phiên bản CrabbyCut mới hơn (định dạng v{version}). Hãy cập nhật ứng dụng.', { version: result.version }), { type: 'warning' });
             return;
         }
         if (result.error) {
-            showToast('Tệp dự án bị hỏng hoặc không đọc được.', { type: 'error' });
+            showToast(_t('Tệp dự án bị hỏng hoặc không đọc được.'), { type: 'error' });
             return;
         }
         let payload;
         try {
             payload = JSON.parse(result.payloadJson);
         } catch (_) {
-            showToast('Tệp dự án bị hỏng hoặc không đọc được.', { type: 'error' });
+            showToast(_t('Tệp dự án bị hỏng hoặc không đọc được.'), { type: 'error' });
             return;
         }
         if ((payload.format_version || 0) > CRAB_PAYLOAD_VERSION) {
-            showToast('Tệp dự án này được lưu bởi phiên bản CrabbyCut mới hơn. Hãy cập nhật ứng dụng.', { type: 'warning' });
+            showToast(_t('Tệp dự án này được lưu bởi phiên bản CrabbyCut mới hơn. Hãy cập nhật ứng dụng.'), { type: 'warning' });
             return;
         }
         const hasWork = projectDirty || globalRawSegments.length > 0 || projectVideoLibrary.length > 0;
-        if (hasWork && !confirm('Mở dự án sẽ thay thế công việc hiện tại. Tiếp tục?')) return;
+        if (hasWork && !confirm(_t('Mở dự án sẽ thay thế công việc hiện tại. Tiếp tục?'))) return;
 
         const relink = await verifyAndRelinkMedia(payload.media || {});
         if (!relink) return;
@@ -12590,14 +12701,14 @@
             await performProjectLoad(payload, relink, result.path);
         } catch (error) {
             console.error('openProject failed:', error);
-            showToast('Mở dự án thất bại: ' + (error?.message || error), { type: 'error' });
+            showToast(_t('Mở dự án thất bại: {error}', { error: error?.message || error }), { type: 'error' });
             window.location.reload();
         }
     }
 
     async function triggerOpenProject() {
         if (!isDesktopProjectEnv()) {
-            showToast('Tính năng mở dự án chỉ khả dụng trên bản desktop.', { type: 'warning' });
+            showToast(_t('Tính năng mở dự án chỉ khả dụng trên bản desktop.'), { type: 'warning' });
             return;
         }
         const result = await window.desktopEnv.openProjectDialog();
@@ -12680,16 +12791,15 @@
             panel.setAttribute('aria-labelledby', 'leaveModalTitle');
             panel.innerHTML =
                 '<div class="ui-modal-head">'
-                + '<div class="ui-modal-title" id="leaveModalTitle">Dự án còn thay đổi chưa lưu</div>'
-                + '<button type="button" data-leave="cancel" class="ui-modal-close" aria-label="Huỷ">'
+                + '<div class="ui-modal-title" id="leaveModalTitle">' + _t('Dự án còn thay đổi chưa lưu') + '</div>'
+                + '<button type="button" data-leave="cancel" class="ui-modal-close" aria-label="' + _t('Huỷ') + '">'
                 + '<svg class="btn-ico" aria-hidden="true"><use href="#ic-x"/></svg></button>'
                 + '</div>'
-                + '<p class="ui-modal-desc">Rời khỏi dự án sẽ dọn dữ liệu tạm (nguồn đã nhập, bản dựng ảnh). '
-                + 'Bạn muốn lưu lại trước không?</p>'
+                + '<p class="ui-modal-desc">' + _t('Rời khỏi dự án sẽ dọn dữ liệu tạm (nguồn đã nhập, bản dựng ảnh). Bạn muốn lưu lại trước không?') + '</p>'
                 + '<div class="ui-modal-foot">'
-                + '<button type="button" data-leave="cancel" class="btn btn-secondary">Huỷ</button>'
-                + '<button type="button" data-leave="discard" class="btn btn-secondary" style="color: var(--danger);">Không lưu</button>'
-                + '<button type="button" data-leave="save" class="btn btn-primary">Lưu</button>'
+                + '<button type="button" data-leave="cancel" class="btn btn-secondary">' + _t('Huỷ') + '</button>'
+                + '<button type="button" data-leave="discard" class="btn btn-secondary" style="color: var(--danger);">' + _t('Không lưu') + '</button>'
+                + '<button type="button" data-leave="save" class="btn btn-primary">' + _t('Lưu') + '</button>'
                 + '</div>';
             const lastFocused = document.activeElement;
             const close = (answer) => {
@@ -12720,7 +12830,7 @@
     // true = được phép rời đi. Dùng chung cho nút Trang chủ, "Tạo dự án mới" và mở dự án gần đây.
     async function ensureSavedBeforeLeaving() {
         if (!projectDirty) return true;
-        if (!isDesktopProjectEnv()) return confirm('Dự án còn thay đổi chưa lưu và bản web không lưu được. Vẫn tiếp tục?');
+        if (!isDesktopProjectEnv()) return confirm(_t('Dự án còn thay đổi chưa lưu và bản web không lưu được. Vẫn tiếp tục?'));
         const answer = await askSaveBeforeLeave();
         if (answer === 'cancel') return false;
         if (answer === 'save') {
@@ -12757,7 +12867,7 @@
         const note = document.getElementById('homeRailNote');
         if (!isDesktopProjectEnv() || !window.desktopEnv.listRecentProjects) {
             homeRecentItems = [];
-            if (note) note.textContent = 'Bản web: mở và lưu dự án cần bản desktop.';
+            if (note) note.textContent = _t('Bản web: mở và lưu dự án cần bản desktop.');
             renderHomeRecents();
             return;
         }
@@ -12777,6 +12887,10 @@
         if (!grid || !empty) return;
         const q = String(document.getElementById('homeRecentSearch')?.value || '').trim().toLowerCase();
         const items = q ? homeRecentItems.filter((it) => String(it.name || '').toLowerCase().includes(q)) : homeRecentItems;
+        const txtMissing = _t('Không tìm thấy tệp');
+        const txtRemoveTitle = _t('Gỡ khỏi danh sách (không xoá tệp)');
+        const txtRemoveLabel = _t('Gỡ khỏi danh sách');
+        const txtProject = _t('Dự án');
         grid.innerHTML = items.map((it) => {
             const thumb = it.thumb_data_url
                 ? `<div class="home-card-thumb"><img src="${it.thumb_data_url}" alt=""></div>`
@@ -12784,10 +12898,10 @@
             const sub = `${formatRecentWhen(it.touched_at)}${it.size_bytes ? ` · ${(it.size_bytes / 1024).toFixed(0)} KB` : ''}`;
             return `<div class="home-card ${it.exists ? '' : 'is-missing'}" data-home-open="${escapeHtmlText(it.id)}" title="${escapeHtmlText(it.path)}">
                 ${thumb}
-                ${it.exists ? '' : '<span class="home-card-badge">Không tìm thấy tệp</span>'}
-                <button type="button" class="home-card-remove" data-home-remove="${escapeHtmlText(it.id)}" title="Gỡ khỏi danh sách (không xoá tệp)" aria-label="Gỡ khỏi danh sách"><svg class="btn-ico" aria-hidden="true"><use href="#ic-x"/></svg></button>
+                ${it.exists ? '' : `<span class="home-card-badge">${txtMissing}</span>`}
+                <button type="button" class="home-card-remove" data-home-remove="${escapeHtmlText(it.id)}" title="${txtRemoveTitle}" aria-label="${txtRemoveLabel}"><svg class="btn-ico" aria-hidden="true"><use href="#ic-x"/></svg></button>
                 <div class="home-card-meta">
-                    <div class="home-card-name">${escapeHtmlText(it.name || 'Dự án')}</div>
+                    <div class="home-card-name">${escapeHtmlText(it.name || txtProject)}</div>
                     <div class="home-card-sub">${escapeHtmlText(sub)}</div>
                 </div>
             </div>`;
@@ -12800,14 +12914,14 @@
             const filtered = homeRecentItems.length > 0;
             empty.innerHTML = filtered
                 ? '<span class="empty-state-ico"><svg class="btn-ico" aria-hidden="true"><use href="#ic-zoom"/></svg></span>'
-                    + '<div class="empty-state-title">Không có dự án nào khớp</div>'
-                    + '<p class="empty-state-desc">Thử một từ khoá khác, hoặc xoá ô tìm kiếm để xem lại toàn bộ danh sách.</p>'
+                    + '<div class="empty-state-title">' + _t('Không có dự án nào khớp') + '</div>'
+                    + '<p class="empty-state-desc">' + _t('Thử một từ khoá khác, hoặc xoá ô tìm kiếm để xem lại toàn bộ danh sách.') + '</p>'
                 : '<span class="empty-state-ico"><svg class="btn-ico" aria-hidden="true"><use href="#ic-film"/></svg></span>'
-                    + '<div class="empty-state-title">Chưa có dự án nào</div>'
-                    + '<p class="empty-state-desc">Tạo một dự án trống để vào thẳng giao diện dựng, hoặc mở tệp .crab có sẵn trên máy.</p>'
+                    + '<div class="empty-state-title">' + _t('Chưa có dự án nào') + '</div>'
+                    + '<p class="empty-state-desc">' + _t('Tạo một dự án trống để vào thẳng giao diện dựng, hoặc mở tệp .crab có sẵn trên máy.') + '</p>'
                     + '<div class="empty-state-cta">'
                     + '<button type="button" class="btn btn-primary" data-home-empty-new>'
-                    + '<svg class="btn-ico" aria-hidden="true"><use href="#ic-plus"/></svg>Tạo dự án mới</button>'
+                    + '<svg class="btn-ico" aria-hidden="true"><use href="#ic-plus"/></svg>' + _t('Tạo dự án mới') + '</button>'
                     + '</div>';
         }
     }
@@ -12816,7 +12930,7 @@
         const item = homeRecentItems.find((it) => it.id === id);
         if (!item) return;
         if (!item.exists) {
-            if (confirm(`Không tìm thấy tệp:\n${item.path}\n\nGỡ khỏi danh sách? (CHỈ gỡ khỏi danh sách, KHÔNG xoá tệp trên máy)`)) {
+            if (confirm(_t('Không tìm thấy tệp:\n{path}\n\nGỡ khỏi danh sách? (CHỈ gỡ khỏi danh sách, KHÔNG xoá tệp trên máy)', { path: item.path }))) {
                 await window.desktopEnv.removeRecentProject(item.id);
                 await refreshHomeRecents();
             }
@@ -12867,7 +12981,7 @@
             if (removeBtn) {
                 event.stopPropagation();
                 const item = homeRecentItems.find((it) => it.id === removeBtn.dataset.homeRemove);
-                if (item && confirm(`Gỡ "${item.name}" khỏi danh sách dự án gần đây?\n\nTệp .crab trên máy KHÔNG bị xoá.`)) {
+                if (item && confirm(_t('Gỡ "{name}" khỏi danh sách dự án gần đây?\n\nTệp .crab trên máy KHÔNG bị xoá.', { name: item.name }))) {
                     await window.desktopEnv.removeRecentProject(item.id);
                     await refreshHomeRecents();
                 }
@@ -12887,6 +13001,29 @@
         if (!isDesktopProjectEnv()) return;
         window.desktopEnv.onOpenProjectFile?.((filePath) => { openProjectByPath(filePath); });
         updateProjectTitle();
+    })();
+
+    /* ===== ĐỔI NGÔN NGỮ GIAO DIỆN =====
+     * Ngôn ngữ chốt lúc nạp trang (xem static/js/i18n.js) nên đổi = tải lại cửa sổ. Tải lại
+     * làm mất trạng thái trong bộ nhớ -> hỏi Lưu như khi rời dự án, rồi MỞ LẠI đúng tệp .crab
+     * đang làm sau khi tải xong để người dùng quay về chỗ cũ. Trả false nếu người dùng huỷ. */
+    const REOPEN_AFTER_RELOAD_KEY = 'crab.reopenAfterReload';
+    window.reloadForLanguageChange = async function reloadForLanguageChange() {
+        if (!await ensureSavedBeforeLeaving()) return false;
+        try {
+            if (currentProjectPath) sessionStorage.setItem(REOPEN_AFTER_RELOAD_KEY, currentProjectPath);
+        } catch (_) { /* không có sessionStorage -> chỉ mất bước mở lại */ }
+        window.location.reload();
+        return true;
+    };
+    (function reopenProjectAfterReload() {
+        let target = '';
+        try {
+            target = sessionStorage.getItem(REOPEN_AFTER_RELOAD_KEY) || '';
+            sessionStorage.removeItem(REOPEN_AFTER_RELOAD_KEY);
+        } catch (_) { return; }
+        // 'load': cùng lý do như refreshHomeRecents — editing-runtime.js nạp SAU khối này.
+        if (target) window.addEventListener('load', () => { openProjectByPath(target); });
     })();
 
     /* ===== DỰ ÁN TRỐNG: EDITING LÀ ĐIỂM BẮT ĐẦU =====
@@ -12985,6 +13122,8 @@
         window.EditingRuntime?.resetRetouchCaches?.();
         window.EditingRuntime?.resetProjectState?.();
         window.AutoSubtitlePanel?.resetState?.();   // cùng lý do như openProjectFromResult
+        window.LocalSubtitlePanel?.resetState?.();
+        window.DubbingPanel?.resetState?.();
 
         undoStack = []; redoStack = []; updateUndoRedoButtons();
         setPreviewModeActive(false);
@@ -12998,9 +13137,10 @@
                  * trong Explorer, nó giữ file để dựng thumbnail). Dự án mới vẫn dùng được,
                  * nhưng phải NÓI RA — im lặng thì người dùng tưởng temp đã sạch. */
                 if (leftovers.length) {
-                    showToast(`Còn ${leftovers.length} mục trong temp_uploads chưa xoá được (đang bị chương trình khác giữ): `
-                        + `${leftovers.slice(0, 3).map((x) => x.name).join(', ')}${leftovers.length > 3 ? '…' : ''}`,
-                        { type: 'warning' });
+                    showToast(_t('Còn {n} mục trong temp_uploads chưa xoá được (đang bị chương trình khác giữ): {list}', {
+                        n: leftovers.length,
+                        list: `${leftovers.slice(0, 3).map((x) => x.name).join(', ')}${leftovers.length > 3 ? '…' : ''}`,
+                    }), { type: 'warning' });
                 }
             } catch (_) { /* backend chưa lên thì vẫn vào được Editing */ }
         }
@@ -13027,7 +13167,7 @@
         if (refReview) refReview.value = '';
         projectFlowMode = 'editing-first';
         renderWordLevelTranscript([], 'FINAL');   // <- đặt currentMode = 'FINAL'
-        document.getElementById('transcriptTitle').innerText = 'Lane chính';
+        document.getElementById('transcriptTitle').innerText = _t('Lane chính');
         renderProjectVideoLibrary();
 
         currentProjectPath = null;
@@ -13037,7 +13177,7 @@
         updateProjectTitle();
         showStep('step4');
         document.getElementById('btnExportVideo').disabled = true;
-        setStatusText('Dự án trống — bấm "Nhập" ở tab Tệp phương tiện, rồi kéo video xuống lane chính (hoặc bấm "+" trên thẻ).', false);
+        setStatusText(_t('Dự án trống — bấm "Nhập" ở tab Tệp phương tiện, rồi kéo video xuống lane chính (hoặc bấm "+" trên thẻ).'), false);
         return true;
     };
 
@@ -13166,7 +13306,7 @@
      * Nhánh lỗi vẫn executeUndo() được: bước gần nhất trên stack chính là thao tác đang dở. */
     window.rebuildMainLane = async function rebuildMainLane({ appendPaths = [], history = true } = {}) {
         if (mainLaneRebuildInFlight) {
-            setStatusText('Đang dựng lane chính — đợi lượt hiện tại xong đã.', false);
+            setStatusText(_t('Đang dựng lane chính — đợi lượt hiện tại xong đã.'), false);
             return false;
         }
         /* `known === null` = lane chính hiện tại do LUỒNG LỌC sinh ra: row của nó không
@@ -13175,9 +13315,7 @@
         const known = window.MainLane.concatSourcesFromRows(latestTimeline);
         const mustRebuildAll = known === null && latestTimeline.length > 0;
         if (mustRebuildAll && !confirm(
-            'Lane chính hiện là kết quả "Lọc video theo kịch bản".\n\n'
-            + 'Thêm video vào lane chính sẽ DỰNG LẠI TOÀN BỘ lane chính từ các video nguồn '
-            + '(mất các đoạn đã lọc). Overlay giữ nguyên.\n\nTiếp tục?')) {
+            _t('Lane chính hiện là kết quả "Lọc video theo kịch bản".\n\nThêm video vào lane chính sẽ DỰNG LẠI TOÀN BỘ lane chính từ các video nguồn (mất các đoạn đã lọc). Overlay giữ nguyên.\n\nTiếp tục?'))) {
             return false;
         }
         const oldSources = known || mainConcatCache.sources.slice();
@@ -13213,7 +13351,7 @@
             });
             if (!response.ok) {
                 const detail = await response.json().catch(() => ({}));
-                throw new Error(detail.detail || `Nối video thất bại (HTTP ${response.status}).`);
+                throw new Error(detail.detail || _t('Nối video thất bại (HTTP {status}).', { status: response.status }));
             }
             const data = await response.json();
             /* BẢNG ĐOẠN MỚI đến từ BACKEND: nó vừa nối xong nên biết chính xác file nào
@@ -13226,7 +13364,7 @@
                 : window.MainLane.segmentTableFromDurations(
                     mainLaneSourceEntries(sources, await probeDurations(sources)),
                 );
-            if (!newSegments.length) throw new Error('Không đọc được thời lượng của video nguồn.');
+            if (!newSegments.length) throw new Error(_t('Không đọc được thời lượng của video nguồn.'));
 
             // .webm bị MÃ HOÁ LẠI khi nối (xem shouldNormalizeForConcat ở backend) nên
             // thời lượng lệch vài ms so với bản gốc -> mọi phép dời đều sai. Thà dựng lại
@@ -13252,7 +13390,7 @@
                 segments: [],
                 videoVersion: data.video_version,
                 transcriptMode: 'FINAL',                     // KHÔNG để rơi về 'RAW' — xem hàm đó
-                transcriptTitle: 'Lane chính',
+                transcriptTitle: _t('Lane chính'),
                 fallbackDurationOverride: newSegments[newSegments.length - 1]?.end || 0,
             });
 
@@ -13274,8 +13412,8 @@
             updateTimelineLayout();
             syncAutoSfxAvailability();
             setStatusText(hasWebm
-                ? `Lane chính: ${latestTimeline.length} clip. Nguồn .webm phải chuẩn hoá nên lane chính được dựng lại từ đầu.`
-                : `Lane chính: ${latestTimeline.length} clip.`, false);
+                ? _t('Lane chính: {n} clip. Nguồn .webm phải chuẩn hoá nên lane chính được dựng lại từ đầu.', { n: latestTimeline.length })
+                : _t('Lane chính: {n} clip.', { n: latestTimeline.length }), false);
             // Auto-Reframe KHÔNG tự chạy khi thêm video: mặc định tắt, chỉ chạy khi người
             // dùng chủ động bấm nút Auto-Reframe (xem setAutoReframeEnabled).
             return true;
@@ -13301,7 +13439,7 @@
      * lên qua trình duyệt (không có path) không đi đường này được. */
     window.addSourcePathsToMainLane = async function addSourcePathsToMainLane(paths) {
         if (!isDesktopVideoEnv()) {
-            showToast('Thêm video vào lane chính cần bản desktop: file phải có đường dẫn thật trên máy để nối lại.', { type: 'warning' });
+            showToast(_t('Thêm video vào lane chính cần bản desktop: file phải có đường dẫn thật trên máy để nối lại.'), { type: 'warning' });
             return false;
         }
         const wanted = Array.from(new Set((paths || []).filter(Boolean)));
@@ -13314,8 +13452,8 @@
         const fresh = wanted.filter((p) => !onLane.has(p));
         if (!fresh.length) {
             setStatusText(wanted.length === 1
-                ? 'Video này đã có trên lane chính.'
-                : 'Những video này đã có trên lane chính.', false);
+                ? _t('Video này đã có trên lane chính.')
+                : _t('Những video này đã có trên lane chính.'), false);
             return false;
         }
         // Chỉ quét đường dẫn sổ nguồn CHƯA biết: scanDesktopSourcePaths() nối thêm vào thư
@@ -13325,7 +13463,7 @@
         if (toScan.length) await scanDesktopSourcePaths(toScan);
         const added = fresh.filter((p) => projectVideoLibrary.some((item) => item.source_path === p));
         if (!added.length) {
-            setStatusText('Không đọc được video nào trong số đã chọn.', false);
+            setStatusText(_t('Không đọc được video nào trong số đã chọn.'), false);
             return false;
         }
         return await window.rebuildMainLane({ appendPaths: added });
@@ -13605,13 +13743,13 @@
             if (data.status === "success") {
                 latestEdl = data.edl || latestEdl;
                 latestXml = data.timeline_xml || latestXml;
-                setStatusText("Timeline đã được cập nhật", false);
+                setStatusText(_t("Timeline đã được cập nhật"), false);
             } else {
-                throw new Error(data.detail || "Không thể cập nhật timeline");
+                throw new Error(data.detail || _t("Không thể cập nhật timeline"));
             }
         } catch (error) {
             console.error("refreshFinalArtifactsFromTimeline failed:", error);
-            setStatusText(`Lỗi cập nhật timeline: ${error.message}`, false);
+            setStatusText(_t('Lỗi cập nhật timeline: {error}', { error: error.message }), false);
         }
     }
 
@@ -13628,10 +13766,10 @@
                đang vướng, kèm số liệu, để còn biết đường xử lý. */
             const dur = Math.max(0, Number(item.end) - Number(item.start));
             const reason = splitTime == null
-                ? `clip chỉ dài ${dur.toFixed(2)}s, không đủ chỗ cho một nhát cắt`
-                : `mốc cắt ${splitTime.toFixed(2)}s quá sát mép clip [${Number(item.start).toFixed(2)}s – ${Number(item.end).toFixed(2)}s]`;
-            setStatusText(`Không cắt được: ${reason}`, false);
-            window.showToast?.(`Không cắt được: ${reason}.`, { type: 'warn', duration: 6000 });
+                ? _t('clip chỉ dài {dur}s, không đủ chỗ cho một nhát cắt', { dur: dur.toFixed(2) })
+                : _t('mốc cắt {time}s quá sát mép clip [{start}s – {end}s]', { time: splitTime.toFixed(2), start: Number(item.start).toFixed(2), end: Number(item.end).toFixed(2) });
+            setStatusText(_t('Không cắt được: {reason}', { reason }), false);
+            window.showToast?.(_t('Không cắt được: {reason}.', { reason }), { type: 'warn', duration: 6000 });
             return false;
         }
 
@@ -13658,7 +13796,7 @@
 	        const splitTime = findNearestSplitBoundary(item, requestedTime, options);
 	        const splitItems = splitTime == null ? null : buildSplitTimelineItems(item, splitTime, { allowEmptyText: true });
 	        if (!splitItems) {
-	            setStatusText("Không thể cắt đoạn quá ngắn", false);
+	            setStatusText(_t("Không thể cắt đoạn quá ngắn"), false);
 	            return false;
 	        }
 
@@ -13668,7 +13806,7 @@
 	        renderWordLevelTranscript(globalMappedChunks, 'MAPPED');
 	        updateTimelineLayout();
 	        syncScriptHighlightAndTrim();
-	        setStatusText("Đã cắt đoạn Match Script", false);
+	        setStatusText(_t("Đã cắt đoạn Match Script"), false);
 	        return true;
 	    }
 
@@ -13716,7 +13854,7 @@
         updateTimelineLayout();
         syncScriptHighlightAndTrim();
         refreshFinalArtifactsFromTimeline();
-        setStatusText(`Đã chuyển block #${from + 1} → vị trí #${to + 1}`, false);
+        setStatusText(_t('Đã chuyển block #{from} → vị trí #{to}', { from: from + 1, to: to + 1 }), false);
         return true;
     }
 
@@ -13772,22 +13910,18 @@
         const hasScript = !!currentReferenceScriptText().trim();
         btn.disabled = !(inTimeline && blockCount > 1 && hasScript);
         if (!inTimeline) {
-            btn.title = 'Sắp xếp theo kịch bản chuẩn — chỉ dùng được ở giai đoạn Timeline';
+            btn.title = _t('Sắp xếp theo kịch bản chuẩn — chỉ dùng được ở giai đoạn Timeline');
             return;
         }
         if (blockCount <= 1) {
-            btn.title = `Sắp xếp theo kịch bản chuẩn — cần ít nhất 2 block trên timeline (đang có ${blockCount}).`;
+            btn.title = _t('Sắp xếp theo kịch bản chuẩn — cần ít nhất 2 block trên timeline (đang có {n}).', { n: blockCount });
             return;
         }
         if (!hasScript) {
-            btn.title = 'Sắp xếp theo kịch bản chuẩn — chưa có kịch bản chuẩn.'
-                + ' Thêm ở bước Upload, hoặc tab "Kịch bản" của Editing.';
+            btn.title = _t('Sắp xếp theo kịch bản chuẩn — chưa có kịch bản chuẩn. Thêm ở bước Tải lên, hoặc tab "Kịch bản" của Editing.');
             return;
         }
-        btn.title = `Sắp xếp theo kịch bản chuẩn — bóc băng lại ${blockCount} block để lấy mốc từng từ,`
-            + ' rồi xếp cho khớp trình tự kịch bản (câu Hook quay ở giữa video sẽ lên đầu).'
-            + ' Block chứa nhiều câu được cắt theo biên từ. Có bảng xem trước trước khi áp dụng.'
-            + ' Lần đầu mất vài giây để bóc băng, các lần sau dùng cache.';
+        btn.title = _t('Sắp xếp theo kịch bản chuẩn — bóc băng lại {n} block để lấy mốc từng từ, rồi xếp cho khớp trình tự kịch bản (câu Hook quay ở giữa video sẽ lên đầu). Block chứa nhiều câu được cắt theo biên từ. Có bảng xem trước trước khi áp dụng. Lần đầu mất vài giây để bóc băng, các lần sau dùng cache.', { n: blockCount });
     }
 
     /* Gửi KHOẢNG THỜI GIAN của từng block; backend tự lấy mốc từng từ.
@@ -13851,14 +13985,14 @@
      * đường duy nhất, không có cách nào lệch. */
     async function computeReorderPlan() {
         const api = window.ScriptReorder;
-        if (!api) throw new Error('Chưa nạp được static/js/script-reorder.js.');
+        if (!api) throw new Error(_t('Chưa nạp được static/js/script-reorder.js.'));
         const sentences = scriptReorderSentences();
-        if (!sentences.length) throw new Error('Kịch bản chuẩn không có câu nào.');
+        if (!sentences.length) throw new Error(_t('Kịch bản chuẩn không có câu nào.'));
         if (!Array.isArray(latestTimeline) || latestTimeline.length < 2) {
-            throw new Error('Cần ít nhất 2 block trên timeline để sắp xếp.');
+            throw new Error(_t('Cần ít nhất 2 block trên timeline để sắp xếp.'));
         }
 
-        setStatusText('Đang lấy mốc từng từ và so khớp với kịch bản chuẩn...', true);
+        setStatusText(_t('Đang lấy mốc từng từ và so khớp với kịch bản chuẩn…'), true);
         const data = await fetchReorderAlignment();
         const asr = {
             source: String(data.word_source || ''),
@@ -13931,32 +14065,28 @@
 
         const warnings = [];
         if (summary.unmatchedPieceCount) {
-            warnings.push(`${summary.unmatchedPieceCount} block không khớp câu nào trong kịch bản`
-                + ' — đã giữ lại và dồn về cuối timeline để bạn tự quyết.');
+            warnings.push(_t('{n} block không khớp câu nào trong kịch bản — đã giữ lại và dồn về cuối timeline để bạn tự quyết.', { n: summary.unmatchedPieceCount }));
         }
         if (summary.splitBlockCount) {
-            warnings.push(`${summary.splitBlockCount} block chứa nhiều câu nên bị cắt nhỏ theo biên từ.`);
+            warnings.push(_t('{n} block chứa nhiều câu nên bị cắt nhỏ theo biên từ.', { n: summary.splitBlockCount }));
         }
         for (const dup of summary.duplicateSentences) {
-            warnings.push(`Câu ${dup.scriptIndex + 1} có ${dup.count} đoạn trên timeline (nhiều lần đọc)`
-                + ' — đã xếp liền nhau, bạn tự xoá đoạn không muốn giữ.');
+            warnings.push(_t('Câu {index} có {count} đoạn trên timeline (nhiều lần đọc) — đã xếp liền nhau, bạn tự xoá đoạn không muốn giữ.', { index: dup.scriptIndex + 1, count: dup.count }));
         }
         if (summary.missingSentences.length) {
-            const preview = summary.missingSentences.slice(0, 8).map((index) => index + 1).join(', ');
-            warnings.push(`${summary.missingSentences.length} câu kịch bản không có đoạn nào trên timeline`
-                + ` (câu ${preview}${summary.missingSentences.length > 8 ? '…' : ''}).`);
+            const preview = summary.missingSentences.slice(0, 8).map((index) => index + 1).join(', ')
+                + (summary.missingSentences.length > 8 ? '…' : '');
+            warnings.push(_t('{n} câu kịch bản không có đoạn nào trên timeline (câu {list}).', { n: summary.missingSentences.length, list: preview }));
         }
         const weak = ordered.filter((entry) => entry.scriptIndex >= 0
             && Number.isFinite(entry.tokenCoverage) && entry.tokenCoverage < 0.6).length;
         if (weak) {
-            warnings.push(`${weak} đoạn khớp yếu (lời nói lệch nhiều so với kịch bản) — cột "Nói thật"`
-                + ' trong bảng cho biết máy nghe được gì, kiểm lại những dòng có nhãn "khớp yếu".');
+            warnings.push(_t('{n} đoạn khớp yếu (lời nói lệch nhiều so với kịch bản) — cột "Nói thật" trong bảng cho biết máy nghe được gì, kiểm lại những dòng có nhãn "khớp yếu".', { n: weak }));
         }
         /* hasTimelineBlocks() là cờ rẻ (editingItems.length > 0); getHistoryState() thì
          * deep-clone cả tracks/items/assets — quá đắt chỉ để đếm. */
         if (window.EditingRuntime?.hasTimelineBlocks?.()) {
-            warnings.push('Có lớp overlay ở Editing đặt theo thời gian sequence'
-                + ' — đổi thứ tự lane chính sẽ làm chúng lệch, cần rà lại ở giai đoạn Editing.');
+            warnings.push(_t('Có lớp overlay ở Editing đặt theo thời gian sequence — đổi thứ tự lane chính sẽ làm chúng lệch, cần rà lại ở giai đoạn Editing.'));
         }
 
         const changed = ordered.some((entry, position) => entry.seq !== position) || summary.splitBlockCount > 0;
@@ -13976,17 +14106,17 @@
         const summary = document.createElement('div');
         summary.className = 'reorder-summary';
         const stats = [
-            ['Block', `${plan.summary.blockCount} → ${plan.summary.pieceCount}`],
-            ['Câu kịch bản', `${plan.summary.matchedSentenceCount}/${plan.summary.sentenceCount} đã có đoạn`],
-            ['Block bị cắt', String(plan.summary.splitBlockCount)],
-            ['Block lạc', String(plan.summary.unmatchedPieceCount)],
-            ['Mốc từ', plan.asr.source === 'retranscribed'
-                ? `bóc băng lại cả video (${plan.asr.wordCount} từ)`
-                : `bản bóc băng hiện có (${plan.asr.wordCount} từ)`],
+            [_t('Block'), `${plan.summary.blockCount} → ${plan.summary.pieceCount}`],
+            [_t('Câu kịch bản'), _t('{matched}/{total} đã có đoạn', { matched: plan.summary.matchedSentenceCount, total: plan.summary.sentenceCount })],
+            [_t('Block bị cắt'), String(plan.summary.splitBlockCount)],
+            [_t('Block lạc'), String(plan.summary.unmatchedPieceCount)],
+            [_t('Mốc từ'), plan.asr.source === 'retranscribed'
+                ? _t('bóc băng lại cả video ({n} từ)', { n: plan.asr.wordCount })
+                : _t('bản bóc băng hiện có ({n} từ)', { n: plan.asr.wordCount })],
         ];
         for (const [label, value] of stats) {
             const cell = document.createElement('span');
-            cell.append(document.createTextNode(`${label}: `));
+            cell.append(document.createTextNode(_t('{label}: ', { label })));
             const strong = document.createElement('b');
             strong.textContent = value;
             cell.appendChild(strong);
@@ -14011,7 +14141,7 @@
         table.className = 'reorder-table';
         const head = document.createElement('thead');
         const headRow = document.createElement('tr');
-        for (const label of ['# mới', '# cũ', 'Câu kịch bản', 'Nói thật (vừa bóc băng)', 'Nguồn', 'Ghi chú']) {
+        for (const label of [_t('# mới'), _t('# cũ'), _t('Câu kịch bản'), _t('Nói thật (vừa bóc băng)'), _t('Nguồn'), _t('Ghi chú')]) {
             const cell = document.createElement('th');
             cell.textContent = label;
             headRow.appendChild(cell);
@@ -14030,6 +14160,11 @@
             return value.length > max ? `${value.slice(0, max)}…` : value;
         };
 
+        const txtNoSentence = _t('(không khớp câu nào)');
+        const txtNoSpeech = _t('(không nghe ra từ nào)');
+        const txtLost = _t('lạc');
+        const txtCut = _t('đã cắt');
+        const txtDup = _t('nhiều lần đọc');
         const tbody = document.createElement('tbody');
         plan.ordered.forEach((entry, position) => {
             const row = document.createElement('tr');
@@ -14055,7 +14190,7 @@
                 sentCell.appendChild(number);
                 sentCell.append(document.createTextNode(clip(sentence, 78)));
             } else {
-                sentCell.append(document.createTextNode('(không khớp câu nào)'));
+                sentCell.append(document.createTextNode(txtNoSentence));
             }
             row.appendChild(sentCell);
 
@@ -14063,7 +14198,7 @@
             // đối chiếu được sai khác giữa video và kịch bản.
             const spokenCell = document.createElement('td');
             spokenCell.className = 'rr-spoken';
-            spokenCell.textContent = clip(entry.spoken, 78) || '(không nghe ra từ nào)';
+            spokenCell.textContent = clip(entry.spoken, 78) || txtNoSpeech;
             row.appendChild(spokenCell);
 
             const timeCell = document.createElement('td');
@@ -14078,11 +14213,11 @@
                 flag.textContent = text;
                 flagCell.appendChild(flag);
             };
-            if (!sentence) addFlag('is-lost', 'lạc');
-            if (entry.wasCut) addFlag('is-cut', 'đã cắt');
-            if (sentence && (seenSentence.get(Number(entry.scriptIndex)) || 0) > 1) addFlag('is-dup', 'nhiều take');
+            if (!sentence) addFlag('is-lost', txtLost);
+            if (entry.wasCut) addFlag('is-cut', txtCut);
+            if (sentence && (seenSentence.get(Number(entry.scriptIndex)) || 0) > 1) addFlag('is-dup', txtDup);
             if (sentence && Number.isFinite(entry.tokenCoverage) && entry.tokenCoverage < 0.6) {
-                addFlag('is-weak', `khớp yếu ${Math.round(entry.tokenCoverage * 100)}%`);
+                addFlag('is-weak', _t('khớp yếu {pct}%', { pct: Math.round(entry.tokenCoverage * 100) }));
             }
             row.appendChild(flagCell);
             tbody.appendChild(row);
@@ -14163,8 +14298,9 @@
         refreshFinalArtifactsFromTimeline();
         markProjectDirty();
         const cut = plan.summary.splitBlockCount;
-        setStatusText(`Đã sắp ${plan.summary.pieceCount} block theo kịch bản`
-            + (cut ? ` (cắt nhỏ ${cut} block)` : ''), false);
+        setStatusText(cut
+            ? _t('Đã sắp {n} block theo kịch bản (cắt nhỏ {cut} block)', { n: plan.summary.pieceCount, cut })
+            : _t('Đã sắp {n} block theo kịch bản', { n: plan.summary.pieceCount }), false);
         return true;
     }
 
@@ -14177,19 +14313,19 @@
         try {
             const plan = await computeReorderPlan();
             if (!plan.changed) {
-                showToast('Timeline đã đúng trình tự kịch bản — không có gì phải sắp lại.', { type: 'info' });
-                setStatusText('Timeline đã đúng trình tự kịch bản', false);
+                showToast(_t('Timeline đã đúng trình tự kịch bản — không có gì phải sắp lại.'), { type: 'info' });
+                setStatusText(_t('Timeline đã đúng trình tự kịch bản'), false);
                 return;
             }
-            setStatusText('Xem trước thứ tự mới rồi bấm Áp dụng.', false);
+            setStatusText(_t('Xem trước thứ tự mới rồi bấm Áp dụng.'), false);
             openReorderModal(plan);
         } catch (error) {
             /* KHÔNG có đường tụt hạng. Bản đầu tụt về "tin nhãn script_index sẵn có" và chính
              * nó gây ra "sai hoàn toàn" trên dự án thật. Lỗi thì báo ra, timeline giữ nguyên. */
             console.error('computeReorderPlan failed', error);
-            showToast(`${error.message || 'Không tính được thứ tự theo kịch bản.'}`
-                + ' Timeline giữ nguyên, chưa đổi gì.', { type: 'error', duration: 9000 });
-            setStatusText('Không sắp xếp được — timeline giữ nguyên', false);
+            showToast(`${error.message || _t('Không tính được thứ tự theo kịch bản.')}`
+                + ' ' + _t('Timeline giữ nguyên, chưa đổi gì.'), { type: 'error', duration: 9000 });
+            setStatusText(_t('Không sắp xếp được — timeline giữ nguyên'), false);
         } finally {
             stopStatusPolling();
             reorderBusy = false;
@@ -14419,7 +14555,7 @@
 	        if (!block) {
 	            const onTop = e.target?.className && typeof e.target.className === 'string'
 	                ? e.target.className.split(/\s+/)[0] : e.target?.tagName?.toLowerCase();
-	            window.showToast?.(`Dao cắt: chưa trúng block nào (con trỏ đang ở trên "${onTop || '?'}").`, { type: 'warn', duration: 6000 });
+	            window.showToast?.(_t('Dao cắt: chưa trúng block nào (con trỏ đang ở trên "{target}").', { target: onTop || '?' }), { type: 'warn', duration: 6000 });
 	            return;
 	        }
         e.preventDefault();
@@ -14445,7 +14581,7 @@
 	        if (!item) {
 	            /* Toast chứ không phải setStatusText: thanh trạng thái bị lượt vẽ lại ngay sau
 	               đó ghi đè, người dùng không kịp đọc. Toast tự tắt nhưng đủ lâu để đọc. */
-	            window.showToast?.(`Dao cắt hỏng: block giữ số thứ tự ${Number.isFinite(index) ? index : '?'} nhưng timeline chỉ có ${source?.length ?? 0} đoạn (timeline chưa vẽ lại).`, { type: 'error', duration: 8000 });
+	            window.showToast?.(_t('Dao cắt hỏng: block giữ số thứ tự {index} nhưng timeline chỉ có {count} đoạn (timeline chưa vẽ lại).', { index: Number.isFinite(index) ? index : '?', count: source?.length ?? 0 }), { type: 'error', duration: 8000 });
 	            return;
 	        }
 
@@ -14721,7 +14857,7 @@
         if (!btn) return;
         btn.classList.toggle('is-active', isSnappingEnabled);
         btn.setAttribute('aria-pressed', String(isSnappingEnabled));
-        btn.title = isSnappingEnabled ? 'Bắt dính playhead: BẬT' : 'Bắt dính playhead: TẮT';
+        btn.title = isSnappingEnabled ? _t('Bắt dính playhead: BẬT') : _t('Bắt dính playhead: TẮT');
         btn.innerHTML = `<svg><use href="#${isSnappingEnabled ? 'ic-snap' : 'ic-snap-off'}"/></svg>`;
     }
     document.getElementById('btnToggleSnap').addEventListener('click', () => setSnappingEnabled(!isSnappingEnabled));
@@ -14912,7 +15048,7 @@
 
             const meta = document.createElement('div');
             meta.className = 'paragraph-meta';
-            meta.innerHTML = `<span>⏱️ ${item.start.toFixed(2)}s - ${item.end.toFixed(2)}s</span> <span>Đoạn #${pIndex + 1}</span>`;
+            meta.innerHTML = `<span>⏱️ ${item.start.toFixed(2)}s - ${item.end.toFixed(2)}s</span> <span>${_t('Đoạn #{n}', { n: pIndex + 1 })}</span>`;
             pDiv.appendChild(meta);
 
             const wrap = document.createElement('div');
@@ -15077,7 +15213,7 @@
     // --- PIPELINE TRUYỀN TẢI HỆ THỐNG API ---
     function startStatusPolling() {
         isStatusPolling = true;
-        setStatusText("Đang xử lý...", true);
+        setStatusText(_t("Đang xử lý..."), true);
         statusInterval = setInterval(async () => {
             try { 
                 const res = await fetch(`${API_BASE}/status`); const data = await res.json();
@@ -15088,7 +15224,7 @@
     function stopStatusPolling() {
         isStatusPolling = false;
         clearInterval(statusInterval);
-        setStatusText("Sẵn sàng", false);
+        setStatusText(_t("Sẵn sàng"), false);
     }
 
     function getTimelineFallbackDurationFromSegments(segments) {
@@ -15236,10 +15372,10 @@
         btn.classList.toggle('is-pending', wantProxy && !onProxy);
         btn.textContent = onProxy ? 'LQ' : 'HQ';
         btn.title = onProxy
-            ? 'Chất lượng Preview: Proxy (LQ)'
+            ? _t('Chất lượng xem trước: Proxy (LQ)')
             : (wantProxy
-                ? 'Chất lượng Preview: Gốc (HQ) — proxy chưa sẵn sàng'
-                : 'Chất lượng Preview: Gốc (HQ)');
+                ? _t('Chất lượng xem trước: Gốc (HQ) — proxy chưa sẵn sàng')
+                : _t('Chất lượng xem trước: Gốc (HQ)'));
         btn.setAttribute('aria-label', btn.title);
     }
 
@@ -15361,7 +15497,7 @@
         segments,
         videoVersion,
         transcriptMode = 'RAW',
-        transcriptTitle = 'Transcript Thô (Space to Play)',
+        transcriptTitle = _t('Bản bóc băng thô (Space để phát)'),
         fallbackDurationOverride = null,
     }) {
         stopPreviewProxyPolling();
@@ -15406,7 +15542,7 @@
             return { usedFallback: false, retryUsed: false };
         }
 
-        setStatusText("Video preview nạp chậm, đang thử lại...", true);
+        setStatusText(_t("Video xem trước nạp chậm, đang thử lại…"), true);
         const retryToken = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
         const retryUrl = `/temp_uploads/temp_input.mp4?v=${encodeURIComponent(retryToken)}`;
         const retryAttempt = await attemptLoadTranscribedVideo(retryUrl, 7000);
@@ -15417,7 +15553,7 @@
         }
 
         hydrateUi(fallbackDuration);
-        setStatusText("Preview video lỗi, đang dùng timeline tạm", false);
+        setStatusText(_t("Video xem trước lỗi, đang dùng timeline tạm"), false);
         return { usedFallback: true, retryUsed: true };
     }
 
@@ -15426,13 +15562,13 @@
 	        const desktopSourcePaths = getSelectedDesktopSourcePaths();
 	        const refScript = isRetranscribe ? document.getElementById('refScriptReview').value : document.getElementById('refScriptInput').value;
 	        if ((files.length === 0 && desktopSourcePaths.length === 0) || !refScript.trim()) {
-	            showToast("Thiếu tệp video hoặc nội dung kịch bản gốc!", { type: 'warning' });
+	            showToast(_t("Thiếu tệp video hoặc nội dung kịch bản gốc!"), { type: 'warning' });
 	            return;
 	        }
         if (isWindowsAsrRuntime()) {
             const modelInfo = getSelectedAsrModelInfo();
             if (!modelInfo || modelInfo.available !== true) {
-                showToast("Model ASR Windows chưa sẵn sàng. Hãy cài model trước khi bóc băng.", { type: 'warning' });
+                showToast(_t("Model ASR Windows chưa sẵn sàng. Hãy cài model trước khi bóc băng."), { type: 'warning' });
                 return;
             }
         }
@@ -15453,7 +15589,7 @@
         const btn = document.getElementById(btnId);
         const originalText = btn.innerText;
         btn.disabled = true;
-        btn.innerText = "⏳ Đang xử lý...";
+        btn.innerText = "⏳ " + _t("Đang xử lý...");
 
         startStatusPolling();
         try {
@@ -15475,7 +15611,7 @@
                 : await fetch(transcribeEndpoint, { method: "POST", body: formData });
             
             if (!response.ok) {
-                let errDetail = `Server error ${response.status}`;
+                let errDetail = _t('Lỗi máy chủ {status}', { status: response.status });
                 try {
                     const errData = await response.json();
                     errDetail = errData.detail || errDetail;
@@ -15502,11 +15638,11 @@
                 });
                 showStep('step1');
             } else {
-                throw new Error(data.detail || "Lỗi không xác định");
+                throw new Error(data.detail || _t("Lỗi không xác định"));
             }
-        } catch (error) { 
+        } catch (error) {
             console.error(error);
-            showToast("Lỗi: " + error.message, { type: 'error' }); 
+            showToast(_t('Lỗi: {error}', { error: error.message }), { type: 'error' });
         } 
         finally { 
             stopStatusPolling(); 
@@ -15536,12 +15672,12 @@
         const btn = document.getElementById('btnFilterLLM');
         const originalText = btn.innerText;
         btn.disabled = true;
-        btn.innerText = "⏳ Đang tính toán...";
+        btn.innerText = "⏳ " + _t("Đang tính toán...");
 
         startStatusPolling();
         try {
             const response = await fetch(`${API_BASE}/filter`, { method: "POST", body: formData });
-            if (!response.ok) throw new Error("Lỗi HTTP: " + response.status);
+            if (!response.ok) throw new Error(_t('Lỗi HTTP: {status}', { status: response.status }));
             const data = await response.json();
             if (data.status === "success") {
                 pinnedTakes = {};   // lượt lọc mới -> bỏ mọi chốt tay của lượt trước
@@ -15550,7 +15686,7 @@
             } else {
                 throw new Error(data.detail);
             }
-        } catch (error) { console.error(error); showToast("Xử lý dữ liệu thất bại: " + error.message, { type: 'error' }); } 
+        } catch (error) { console.error(error); showToast(_t('Xử lý dữ liệu thất bại: {error}', { error: error.message }), { type: 'error' }); }
         finally { 
             stopStatusPolling(); 
             btn.disabled = false;
@@ -15561,13 +15697,13 @@
     document.getElementById('btnBackToReview').addEventListener('click', () => {
         showStep('step1');
         renderWordLevelTranscript(globalRawSegments, 'RAW');
-        document.getElementById('transcriptTitle').innerText = "Transcript Thô (Space to Play)";
+        document.getElementById('transcriptTitle').innerText = _t("Bản bóc băng thô (Space để phát)");
         drawWaveform();
     });
 
     document.getElementById('btnApplyAndReorder').addEventListener('click', async () => {
         const pickedChunks = globalMappedChunks.filter(c => c.is_selected);
-        if(pickedChunks.length === 0) { showToast("Vui lòng tick chọn ít nhất một phân đoạn!", { type: 'warning' }); return; }
+        if(pickedChunks.length === 0) { showToast(_t("Vui lòng tích chọn ít nhất một phân đoạn!"), { type: 'warning' }); return; }
 
         /* Mẩu ĐẶT SÁT CẠNH NHAU gộp thành MỘT block khi sang Timeline.
          *
@@ -15612,12 +15748,12 @@
 
 	                renderWordLevelTranscript(latestTimeline, 'FINAL');
                     selectTimelineClip(selectedTimelineClipIndex);
-	                document.getElementById('transcriptTitle').innerText = "Timeline cấu trúc Kịch bản";
+	                document.getElementById('transcriptTitle').innerText = _t("Timeline cấu trúc kịch bản");
 	                document.getElementById('btnExportVideo').disabled = false;
                     // Gộp là thay đổi IM LẶNG về số block — phải nói ra, nếu không người dùng
                     // tick 12 mẩu rồi thấy 8 block và tưởng mất đoạn.
                     if (finalChunks.length < pickedChunks.length) {
-                        showToast(`Đã gộp ${pickedChunks.length} phân đoạn liền kề thành ${finalChunks.length} block.`,
+                        showToast(_t('Đã gộp {n} phân đoạn liền kề thành {blocks} block.', { n: pickedChunks.length, blocks: finalChunks.length }),
                             { type: 'info' });
                     }
                     /* Luồng lọc đã nối lại temp_input.mp4 từ bộ nguồn ĐÃ TÍCH, theo thứ tự
@@ -15629,7 +15765,7 @@
                     mainConcatCache = { sources: getSelectedDesktopSourcePaths(), order: 'sorted' };
 	                showStep('step3');
             }
-        } catch (error) { showToast("Đồng bộ Timeline thất bại.", { type: 'error' }); } 
+        } catch (error) { showToast(_t("Đồng bộ timeline thất bại."), { type: 'error' }); }
         finally { stopStatusPolling(); }
     });
 
@@ -15653,13 +15789,13 @@
         const wentThroughFilter = (globalRawSegments || []).length > 0 || (globalMappedChunks || []).length > 0;
         projectFlowMode = wentThroughFilter ? 'script-filter' : 'editing-first';
         showStep('step4');
-        setStatusText('Đã quay lại Editing — chưa lọc gì cả.', false);
+        setStatusText(_t('Đã quay lại Editing — chưa lọc gì cả.'), false);
     });
 
     document.getElementById('btnBackToMatch').addEventListener('click', () => {
         showStep('step2');
         renderWordLevelTranscript(globalMappedChunks, 'MAPPED');
-        document.getElementById('transcriptTitle').innerText = "Rà soát so khớp kịch bản";
+        document.getElementById('transcriptTitle').innerText = _t("Rà soát so khớp kịch bản");
         document.getElementById('btnExportVideo').disabled = true;
     });
 
@@ -15683,7 +15819,7 @@
     async function performVideoExport() {
         if (!latestTimeline || latestTimeline.length === 0) return;
         if (videoExportInFlight) {
-            setStatusText('Đang xuất video — vui lòng đợi lượt hiện tại xong.', true);
+            setStatusText(_t('Đang xuất video — vui lòng đợi lượt hiện tại xong.'), true);
             return;
         }
         videoExportInFlight = true;
@@ -15837,7 +15973,7 @@
         if (!response.ok) {
             let detail = '';
             try { detail = (await response.json()).detail || ''; } catch (_) {}
-            throw new Error(detail || "Render xuất video thất bại.");
+            throw new Error(detail || _t("Xuất video thất bại."));
         }
         const a = document.createElement("a");
         a.href = URL.createObjectURL(await response.blob());
@@ -15848,7 +15984,7 @@
         // lớn — không ai bắt, UI im lặng và người dùng chỉ thấy "render lỗi" không rõ vì sao.
         } catch (error) {
             console.error('Export error:', error);
-            showToast(error && error.message ? error.message : 'Render xuất video thất bại.', { type: 'error' });
+            showToast(error && error.message ? error.message : _t('Xuất video thất bại.'), { type: 'error' });
         } finally {
             videoExportInFlight = false;
             stopStatusPolling();
@@ -15884,7 +16020,7 @@
         performVideoExport();
     });
 </script>
-<script src="/static/js/editing-runtime.js?v=lumen-p4"></script>
+<script src="/static/js/editing-runtime.js?v=lumen-p5-lsub"></script>
 <script src="/static/js/perf-runtime.js"></script>
 <!-- Dụng cụ đo hiệu năng (Giai đoạn 0). Nạp SAU perf-runtime.js vì nó bọc chính những
      hàm toàn cục mà perf-runtime gán đè; nạp trước là bọc phải bản cũ. Lúc tắt nó chỉ

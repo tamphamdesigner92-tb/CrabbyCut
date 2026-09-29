@@ -14,14 +14,32 @@
  * ngoại lệ chưa bắt ở bước cài gói giết luôn cả cửa sổ đang báo tiến độ.
  */
 'use strict';
+const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const { BrowserWindow, ipcMain, shell } = require('electron');
 
 const RuntimePaths = require('../scripts/runtime_paths.js');
+const I18nMain = require('./i18n-main');
+const { _t } = I18nMain;
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const SETUP_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'setup_runtime.js');
+
+/* NGÔN NGỮ CHO setup.html. Cửa sổ này chạy TRƯỚC khi có backend nên không có injectI18n của
+ * server.js: setup-preload.js hỏi đồng bộ (sendSync) lúc nạp trang, nhận { locale, dict } rồi
+ * setup.html tự nạp ../static/js/i18n.js và dịch. Gửi NGUYÊN từ điển của ngôn ngữ đó — lọc
+ * theo khoá của setup là phải giữ thêm một danh sách khoá, lệch với setup.html là mất chữ. */
+function setupI18nPayload() {
+  const locale = I18nMain.refresh();
+  let dict = {};
+  if (locale !== 'vi') {
+    try {
+      dict = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'static', 'i18n', `${locale}.json`), 'utf8'));
+    } catch (_) { /* thiếu từ điển -> tiếng Việt */ }
+  }
+  return { locale, dict };
+}
 
 function createSetupWindow() {
   return new BrowserWindow({
@@ -31,7 +49,7 @@ function createSetupWindow() {
     maximizable: false,
     fullscreenable: false,
     backgroundColor: '#08090c',
-    title: 'Thiết lập CrabbyCut',
+    title: _t('Thiết lập CrabbyCut'),
     icon: path.join(__dirname, '..', 'build', 'icon.ico'),
     autoHideMenuBar: true,
     webPreferences: {
@@ -116,7 +134,7 @@ function runSetupWindow(options = {}) {
           send('setup:event', {
             type: 'done',
             ok: false,
-            error: `Tiến trình thiết lập dừng đột ngột (mã ${code}).`,
+            error: _t('Tiến trình thiết lập dừng đột ngột (mã {code}).', { code }),
             log_path: RuntimePaths.setupLogPath(),
           });
         }
@@ -125,6 +143,10 @@ function runSetupWindow(options = {}) {
     };
 
     const handlers = {
+      // Đồng bộ (preload gọi sendSync lúc nạp trang) — phải đăng ký TRƯỚC win.loadFile.
+      'setup:i18n': (event) => {
+        try { event.returnValue = setupI18nPayload(); } catch (_) { event.returnValue = { locale: 'vi', dict: {} }; }
+      },
       'setup:start': () => { startSetup(); },
       'setup:retry': () => { startSetup(); },
       'setup:open-log': () => { shell.openPath(RuntimePaths.setupLogPath()); },

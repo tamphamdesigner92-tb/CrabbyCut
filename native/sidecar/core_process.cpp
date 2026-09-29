@@ -668,6 +668,23 @@ int CommandPreprocessAudio(int argc, char** argv) {
   return 0;
 }
 
+/* LỚP ĐIỀU CHỈNH THỨ k >= 1 khi nhiều lớp XẾP CHỒNG trên cùng một block (2026-09-25).
+ * Lớp thứ 0 vẫn nằm ở các field adjustLayer… / adjLayer… cũ của block; các lớp phía TRÊN nó
+ * nằm ở đây, theo đúng thứ tự áp (dưới -> trên). Cùng ý nghĩa từng field với lớp 0 — xem
+ * ColorAdjustChain. Backend phát chúng thành `adj_layer<k>_*` + `adj_layer_count`
+ * (normalizeAdjustLayerFields). Trước đây chỉ có MỘT lớp: lớp dưới của hai lớp chồng nhau
+ * (vd. LUT có keyframe cường độ nằm dưới một LUT tĩnh) mất trắng trong bản xuất. */
+struct ExtraAdjustLayer {
+  std::string filters;
+  std::string eqContrastExpr;
+  std::string eqBrightnessExpr;
+  std::string eqSaturationExpr;
+  std::string filtersPost;
+  std::string lutAPath;
+  std::string lutBPath;
+  std::string lutMixExpr;
+};
+
 struct ExportInterval {
   int index = 0;
   int scriptIndex = -1;
@@ -762,6 +779,7 @@ struct ExportInterval {
   std::string adjustLayerLutAPath;
   std::string adjustLayerLutBPath;
   std::string adjustLayerLutMixExpr;
+  std::vector<ExtraAdjustLayer> extraAdjustLayers;   // lớp 1..n-1, xem ExtraAdjustLayer
   // Video overlay KHÔNG gắn nhãn ma trận màu (xem MediaColorUntagged). Chỉ overlay dùng.
   bool colorUntagged = false;
   std::string adjustLutAPath;
@@ -857,6 +875,7 @@ struct ExportOverlay {
   std::string adjustLayerLutAPath;
   std::string adjustLayerLutBPath;
   std::string adjustLayerLutMixExpr;
+  std::vector<ExtraAdjustLayer> extraAdjustLayers;   // lớp 1..n-1, xem ExtraAdjustLayer
   // Video overlay KHÔNG gắn nhãn ma trận màu (xem MediaColorUntagged). Chỉ overlay dùng.
   bool colorUntagged = false;
   std::string adjustLutAPath;
@@ -1368,6 +1387,37 @@ void BuildTimelineFrameGrid(std::vector<ExportInterval>& intervals, const std::s
   }
 }
 
+std::vector<ExtraAdjustLayer> ReadExtraAdjustLayers(const std::string& obj) {
+  std::vector<ExtraAdjustLayer> out;
+  const int count = static_cast<int>(ExtractDoubleFieldOr(obj, "adj_layer_count", 1.0));
+  for (int k = 1; k < std::min(count, 8); k++) {
+    const std::string p = "adj_layer" + std::to_string(k) + "_";
+    ExtraAdjustLayer layer;
+    layer.filters = ExtractJsonStringField(obj, p + "filters", "");
+    layer.eqContrastExpr = ExtractJsonStringField(obj, p + "eq_contrast_expr", "");
+    layer.eqBrightnessExpr = ExtractJsonStringField(obj, p + "eq_brightness_expr", "");
+    layer.eqSaturationExpr = ExtractJsonStringField(obj, p + "eq_saturation_expr", "");
+    layer.filtersPost = ExtractJsonStringField(obj, p + "filters_post", "");
+    layer.lutAPath = ExtractJsonStringField(obj, p + "lut_a_path", "");
+    layer.lutBPath = ExtractJsonStringField(obj, p + "lut_b_path", "");
+    layer.lutMixExpr = ExtractJsonStringField(obj, p + "lut_mix_expr", "");
+    out.push_back(layer);
+  }
+  return out;
+}
+
+bool ExtraAdjustLayersTimeVarying(const std::vector<ExtraAdjustLayer>& layers) {
+  for (const auto& layer : layers) {
+    if (layer.filters.find("LOCALT") != std::string::npos
+        || layer.filtersPost.find("LOCALT") != std::string::npos
+        || !layer.eqContrastExpr.empty() || !layer.eqBrightnessExpr.empty()
+        || !layer.eqSaturationExpr.empty() || !layer.lutMixExpr.empty()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool ReadExportPayload(
   const std::string& path,
   const std::string& cliPreset,
@@ -1476,6 +1526,7 @@ bool ReadExportPayload(
     item.adjustLayerLutAPath = ExtractJsonStringField(objects[i], "adj_layer_lut_a_path", "");
     item.adjustLayerLutBPath = ExtractJsonStringField(objects[i], "adj_layer_lut_b_path", "");
     item.adjustLayerLutMixExpr = ExtractJsonStringField(objects[i], "adj_layer_lut_mix_expr", "");
+    item.extraAdjustLayers = ReadExtraAdjustLayers(objects[i]);
     item.adjustLutAPath = ExtractJsonStringField(objects[i], "adj_lut_a_path", "");
     item.adjustLutBPath = ExtractJsonStringField(objects[i], "adj_lut_b_path", "");
     item.adjustLutMixExpr = ExtractJsonStringField(objects[i], "adj_lut_mix_expr", "");
@@ -1552,6 +1603,7 @@ bool ReadExportPayload(
       overlay.adjustLayerLutAPath = ExtractJsonStringField(overlayObjects[i], "adj_layer_lut_a_path", "");
       overlay.adjustLayerLutBPath = ExtractJsonStringField(overlayObjects[i], "adj_layer_lut_b_path", "");
       overlay.adjustLayerLutMixExpr = ExtractJsonStringField(overlayObjects[i], "adj_layer_lut_mix_expr", "");
+      overlay.extraAdjustLayers = ReadExtraAdjustLayers(overlayObjects[i]);
       overlay.adjustLutAPath = ExtractJsonStringField(overlayObjects[i], "adj_lut_a_path", "");
       overlay.adjustLutBPath = ExtractJsonStringField(overlayObjects[i], "adj_lut_b_path", "");
       overlay.adjustLutMixExpr = ExtractJsonStringField(overlayObjects[i], "adj_lut_mix_expr", "");
@@ -1910,6 +1962,23 @@ void AppendColorAdjustFilters(std::ofstream& script, const std::string& filters,
   script << "[" << tag << "o]null";
 }
 
+// Nối chuỗi màu của các lớp 1..n-1 SAU lớp 0, đúng thứ tự áp. Tag riêng từng lớp: tag đặt tên
+// nhãn nhánh (split/lut3d/blend@…) — trùng tag giữa hai lớp là hỏng cả filtergraph.
+void AppendExtraAdjustLayers(std::ofstream& script, double start,
+                             const std::vector<ExtraAdjustLayer>& layers, const std::string& tagBase) {
+  for (size_t k = 0; k < layers.size(); k++) {
+    const auto& layer = layers[k];
+    const std::string tag = tagBase + "k" + std::to_string(k + 1) + "_";
+    AppendColorAdjustFilters(script,
+                             ColorAdjustChain(start, layer.filters, layer.eqContrastExpr,
+                                              layer.eqBrightnessExpr, layer.eqSaturationExpr,
+                                              layer.filtersPost, layer.lutAPath, layer.lutBPath,
+                                              layer.lutMixExpr, tag),
+                             "", "");
+  }
+}
+
+
 /* MẶT NẠ CẮT HÌNH của block: nhân mặt nạ vào ALPHA của luồng.
  *
  * ĐƠN GIẢN HƠN AppendColorAdjustFilters vì không phải phủ lại lên nhánh gốc — mặt nạ kia
@@ -2057,6 +2126,7 @@ void WriteClipVideoFilters(
                                             item.adjustLayerLutBPath, item.adjustLayerLutMixExpr,
                                             "adjl" + idx + "_"),
                            "", "");
+  AppendExtraAdjustLayers(script, 0.0, item.extraAdjustLayers, "adjl" + idx + "_");
   AppendVideoMaskFilter(script, item.videoMaskPath, "vmc" + idx + "_");
   if (!clipDynTransform) {
     script << ",scale=max(2\\,ceil(iw*" << FfmpegDouble(scaleValue) << "/2)*2)"
@@ -2227,7 +2297,8 @@ bool IntervalIsTimeVarying(const ExportInterval& item) {
    * block như vậy là nửa sau chạy lại từ t=0 và cửa sổ thời gian rơi sai chỗ. */
   const auto hasLocalT = [](const std::string& s) { return s.find("LOCALT") != std::string::npos; };
   if (hasLocalT(item.adjustLayerFilters) || hasLocalT(item.adjustFilters)
-      || hasLocalT(item.adjustFiltersPost) || hasLocalT(item.adjustLayerFiltersPost)) {
+      || hasLocalT(item.adjustFiltersPost) || hasLocalT(item.adjustLayerFiltersPost)
+      || ExtraAdjustLayersTimeVarying(item.extraAdjustLayers)) {
     return true;
   }
   return HasAnyExpr({&item.animXExpr, &item.animYExpr, &item.animSxExpr, &item.animSyExpr,
@@ -2247,7 +2318,7 @@ bool OverlayIsTimeVarying(const ExportOverlay& overlay) {
   if (overlay.animInDur > 0.001 || overlay.animOutDur > 0.001) return true;
   if (!overlay.adjustLayerFilters.empty() || !overlay.adjLayerEqContrastExpr.empty()
       || !overlay.adjLayerEqBrightnessExpr.empty() || !overlay.adjLayerEqSaturationExpr.empty()
-      || !overlay.adjustLayerLutMixExpr.empty()) return true;
+      || !overlay.adjustLayerLutMixExpr.empty() || !overlay.extraAdjustLayers.empty()) return true;
   return HasAnyExpr({&overlay.animXExpr, &overlay.animYExpr, &overlay.animSxExpr,
                      &overlay.animSyExpr, &overlay.animRotExpr, &overlay.kfXExpr,
                      &overlay.kfYExpr, &overlay.kfScaleExpr, &overlay.kfRotExpr,
@@ -2580,6 +2651,7 @@ void WriteVisualOverlayFilter(
                                             overlay.adjustLayerLutBPath, overlay.adjustLayerLutMixExpr,
                                             "adjlo" + id + "_"),
                            "", "");
+  AppendExtraAdjustLayers(script, start, overlay.extraAdjustLayers, "adjlo" + id + "_");
   AppendVideoMaskFilter(script, overlay.videoMaskPath, "vmo" + id + "_");
   if (!overlayDynTransform) {
     script << ",scale=max(2\\,ceil(iw*" << FfmpegDouble(scaleValue) << "/2)*2)"

@@ -8545,7 +8545,7 @@ không gian NGUỒN của mặt nạ/landmark retouch sẽ dời từ khung nố
 
 ## Auto Subtitle — phụ đề tự động từ audio timeline (Windows, 2026-09-13)
 
-Nhóm **Âm thanh → Auto Subtitle**: bóc băng thứ đang nghe thấy trên timeline bằng chính
+Nhóm **Văn bản → Auto Subtitle** (trước 2026-09-26 nằm ở tab Âm thanh — xem mục "Local Subtitle"): bóc băng thứ đang nghe thấy trên timeline bằng chính
 Whisper của ứng dụng, rồi rải thành block phụ đề — kiểu Auto Captions của CapCut. Kèm
 thanh tiến trình thật và một tệp `.srt` ghi cạnh tệp `.crab`.
 
@@ -8596,7 +8596,8 @@ POST /api/subtitles/transcribe  → job nền, trả job_id ngay
        ▼
 GET /api/subtitles/jobs/:id  (panel poll 700 ms, vẽ thanh tiến trình)
        ▼
-cuesFromSegments()  →  chunkSpansForScene()   (luật chia phụ đề, xem lệch #2 bên dưới)
+cuesFromSegments()  →  dựng câu từ MỐC TỪNG TỪ (mục "Chia phụ đề theo câu" bên dưới);
+                       segment không có mốc từ → chunkSpansForScene() (xem lệch #2)
        ▼
 applyCuesToTimeline()  →  ER.addTextItem() trong một batch lịch sử (Ctrl+Z hoàn tác cả bộ)
        ▼
@@ -8711,6 +8712,120 @@ khoá được gì. Sửa một block trên timeline, hoặc đổi ngôn ngữ 
 trượt đúng lúc nó phải trượt. Thiếu mã ngôn ngữ trong khoá thì đổi từ "vi" sang "ja" rồi bấm
 "Tạo lại phụ đề" sẽ TRÚNG cache của lượt trước và trả về nguyên bản tiếng cũ — hỏng im lặng,
 trông y như model bóc sai.
+
+### Chia phụ đề theo câu (2026-09-27)
+
+Người dùng báo phụ đề tự động "quá dài, không chia theo câu, hiện cả chỗ không có thoại".
+Nguyên nhân nằm ở ASR: sidecar Windows chạy faster-whisper `BatchedInferencePipeline`, và
+chế độ này trả **một segment cho cả khối VAD ~30 giây lời nói**, bỏ qua khoảng lặng ở giữa.
+Dự án thật (phim 39 phút): 35 segment, segment đầu 13,55s → 151,78s, 100 từ, bắc qua khoảng
+lặng 53 giây → phụ đề cũ dài 66 giây gộp ba câu. Mốc TỪNG TỪ thì đúng, nên
+`cuesFromSegments` (auto-subtitle.js) dựng lại câu từ mốc từ — không đổi sidecar, không phải
+bóc băng lại (cache cũ vẫn dùng được, "Tạo lại phụ đề" là ra cách chia mới).
+
+Luật (theo mặc định Create Captions của Premiere Pro; người dùng chọn):
+
+| Hằng | Giá trị | Ý nghĩa |
+| --- | --- | --- |
+| `CAPTION_MAX_CHARS` / `_CJK` | 42 / 16 | ký tự mỗi dòng (zh/ja/ko dùng 16) |
+| `CAPTION_MAX_LINES` | 2 | dòng mỗi phụ đề |
+| `CAPTION_PAUSE_SEC` | 0,8 | khoảng lặng giữa hai từ đủ để tách phụ đề |
+| `CAPTION_MIN_SEC` | 1,2 | giữ tối thiểu, **không bao giờ lấn phụ đề sau** |
+| `CAPTION_CHAIN_GAP_SEC` | 0,2 | hở nhỏ hơn thì nối liền, khỏi nháy |
+
+Ngoài ra: ngắt ở dấu kết câu (trừ viết tắt `Mr.`/`Dr.`…); câu dài chia nhiều phụ đề cân nhau,
+ưu tiên ngắt sau dấu phẩy; từ trơ bị tách bởi khoảng lặng (Whisper đặt lệch mốc) được gộp vào
+câu sau; token nối (`non` + `-transferable`, `99` + `.9%`) dính vào từ trước. Dòng còn phải
+vừa bề rộng textbox — đo bằng `EditingRuntime.textFitsOneLine` (cùng `magicWrap` với
+`addTextItem`), và `applyCuesToTimeline` truyền `keepLineBreaks` để block giữ đúng cách
+xuống dòng đã xếp. Kết quả trên dự án thật: 134 → 509 phụ đề, dài nhất 66s → 4,5s.
+
+**`addTextItem({ defer: true })` trước đây KHÔNG defer**: nó gọi `selectEditingItem` →
+`setPrimaryItemSelection` → `renderAll()`, tức mỗi block một lượt vẽ lại inspector kèm toàn
+bộ thumbnail mẫu văn bản/hoạt ảnh (~52 ms/block). Nay defer chỉ ghi trạng thái chọn; 58 phụ
+đề: 4,8 s → 0,38 s.
+
+### Hiệu năng timeline khi có nhiều block phụ đề (2026-09-27)
+
+Người dùng báo preview giật khi có phụ đề, "cực kỳ lag" với phụ đề song ngữ (742 block).
+Đo trong Electron (CPU profile qua `--remote-debugging-port`): khi phát, main thread bị chặn
+bởi long task 800–1000 ms nối liền, 6 giây phát vẽ được 2 khung, 67/163 khung video rớt; 85%
+CPU nằm trong `renderEditingTimeline`. Hai lỗi chồng nhau:
+
+1. **Cuộn timeline = dựng lại cả timeline.** Handler 'scroll' của `#timelineTrackOuter` trong
+   perf-runtime.js đánh dấu `timelineVisual`, mà ở Editing cờ đó chạy `renderEditingTimeline`
+   (xoá trắng rồi dựng mọi block). Khi phát, timeline tự cuộn theo playhead → dựng lại MỖI
+   KHUNG. Nay ở step4 cuộn không đánh dấu nữa: block đặt theo toạ độ nội dung, thước DOM và
+   canvas sóng âm đã có listener 'scroll' riêng. RAW/MAPPED giữ nguyên (Pixi cull theo viewport).
+2. **O(n²) layout trong vòng dựng block.** `timelineX` → `timelineTimeToPx` →
+   `getTimelineSidePaddingPx` đọc `clientWidth` mỗi lần gọi; block vừa append làm layout bẩn
+   nên mỗi lượt đọc là một lượt layout cả trang. Nay lề được chốt một lần cho cả lượt dựng
+   (`timelineXPadLock`): một lượt dựng 742 block ~900 ms → ~145 ms (phần còn lại là layout
+   DOM thật của 742 block, chỉ còn trả khi sửa/chọn, không trả khi phát).
+
+A/B cùng phiên, 3 lượt × 5 giây: hành vi cũ 34–37 khung, p50 183 ms, rớt 95/127 khung video;
+sau sửa 266–276 khung, p50 16,7 ms, rớt 0/121. Thêm: `activeOverlayTransition` (chạy mỗi
+khung) thoát sớm khi không block nào mang `transition`, khỏi gom + sắp xếp cả danh sách.
+
+> **Đo trong pane trình duyệt của Claude Code cho số layout SAI**: một lượt layout ở đó tốn
+> ~5 ms tỉ lệ với số block (cây accessibility bật), trong Electron chỉ 0,1 ms. Đo hiệu năng
+> renderer phải trong Electron: chạy backend thử ở cổng riêng, `BACKEND_PORT=<cổng>
+> electron . --remote-debugging-port=9333` (Electron coi đó là backend ngoài), rồi điều khiển
+> bằng CDP (`Runtime.evaluate`, `Profiler.start/stop`). Người dùng đang mở CrabbyCut thì
+> khoá một-phiên-bản chặn bản thử: thêm `--user-data-dir=<thư mục riêng>` (tách luôn autosave
+> + dự án gần đây khỏi dữ liệu thật). Cửa sổ bị che/màn hình tắt thì rAF = 0 khung; thêm
+> `--disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows
+> --disable-renderer-backgrounding` để đo được mà không phải ghim cửa sổ lên trên.
+> Trace (`Tracing.start`, category `devtools.timeline`) mới thấy Layout/Paint/Layerize —
+> CPU profile gộp hết vào "(program)".
+
+### Cuộn / zoom timeline với nhiều block + nút "Thu phóng vừa khung" (2026-09-27, đợt 2)
+
+Người dùng báo: cuộn và zoom timeline giật khi có nhiều phụ đề, thanh zoom "khó kiểm soát",
+bấm "Thu phóng vừa khung" thì timeline co hẳn về một điểm. Đo trên dự án thử giống thật
+(phim 39 phút, 1.117 block phụ đề song ngữ).
+
+**"Vừa khung" co về một điểm = `parseInt`.** Handler thanh zoom ghi
+`zoomScale = parseInt(slider.value)`; mức vừa khung của phim dài là số lẻ < 1
+(1546 px / 2365 s = 0,65) nên ra **0**. Phim ngắn (vừa khung ≥ 1 px/s) không bao giờ gặp.
+Kèm theo: thanh kéo TUYẾN TÍNH 0,65 → 600 px/s (dải hay dùng nằm trong ~5% đầu thanh), và mức
+vừa khung chỉ tính một lần lúc nạp video. Nay (index.html, khối "THU PHÓNG TIMELINE"):
+- thanh là vị trí **log** 0..1000 (`sliderPosToZoom` / `zoomToSliderPos`);
+- `timelineZoomRange()` tính lại mỗi lần cần. Playhead ghim giữa khung nên "thấy trọn" =
+  [0, playhead] vừa nửa trái (trừ cột nhãn lane) và [playhead, cuối] vừa nửa phải;
+  `min` = trường hợp xấu nhất (playhead ở cuối);
+- `setTimelineZoom()` là đường ghi duy nhất của nút −/+/Fit; số đọc = vị trí trên thanh;
+- 9 chỗ `Math.max(1, zoomScale)` (kéo block, snap, keyframe, thước) hạ sàn xuống 0,01 —
+  trước đây zoom < 1 không tồn tại nên không ai thấy chúng sai.
+
+**Ảo hoá block** (`computeTimelineRenderWindow`, editing-runtime.js): chỉ dựng block overlay
+trong khung nhìn ± ½ bề rộng khung (block đang chọn/đang kéo luôn dựng); cuộn ra ngoài vùng
+đã dựng thì `scheduleTimelineWindowCheck` dựng lại. Zoom rất nhỏ thì block tự nó hẹp hơn
+8 px (mức tối thiểu) mà bắt đầu bên trong block vừa vẽ trên cùng lane bị bỏ. Nút chuyển
+cảnh / ô thả lọc theo cùng khung nhìn (phụ đề nối liền nhau = hàng trăm điểm cắt).
+
+**Tái dùng block giữa các lượt dựng** (`timelineBlockSignature`): trùng chữ ký (loại, nhãn,
+trạng thái lane, magic fill) và cùng object item thì chỉ đổi left/top/width/height. 393 block:
+dựng mới 74 ms → tái dùng 24 ms. Không tái dùng block đang chọn/kéo và block media (dải
+thumbnail chia ô theo bề rộng). `updateTimelineLayout` gốc bỏ `drawTimelineSegments` ở step4 —
+nó `innerHTML = ''` đúng cái track mà lượt dựng Editing định tái dùng.
+
+**Bớt layout bị ép / phần tử thừa:** thước dùng khung nhìn và lề đã chốt của lượt dựng
+(không đọc lại `scrollLeft`/`clientWidth` sau khi DOM vừa đổi), lượt vẽ thước đã lên lịch
+bỏ qua nếu thước vừa được vẽ; block hẹp < 24 px không có nhãn chữ; tay cầm resize ẩn bằng
+`visibility` thay vì `opacity: 0` (opacity < 1 = thêm nút hiệu ứng + paint chunk mỗi block —
+long task khi kéo zoom giảm ~một nửa).
+
+| 1.117 block, 3 lượt | Trước | Sau |
+| --- | --- | --- |
+| Kéo thanh zoom 2 s (60 sự kiện) | xử lý 5 sự kiện, khung p95 433 ms | 35–40 sự kiện, p95 83–100 ms |
+| Cuộn bánh xe 2 s | p50 33 ms, 11–24 long task | p50/p95 16,7/16,8 ms, 0 long task |
+| Phát 5 s × 3 mốc | (đợt 1) 60 fps | 60 fps, 0/120 khung rớt, 0 long task |
+| Một lượt `renderEditingTimeline` | 321 ms | 24–26 ms (~400 block trong khung) |
+
+Kéo zoom vẫn còn long task ~70–100 ms ở mức zoom thấp (~200 block trong khung đổi bề rộng
+cùng lúc → style + layout + paint). Hướng tiếp nếu cần: trong lúc đang kéo thì scaleX bằng
+transform rồi mới dựng thật khi thả.
 
 ## Auto Subtitle đa ngôn ngữ — menu ngôn ngữ, font CJK, đồng bộ phụ đề (2026-09-14)
 
@@ -8879,6 +8994,110 @@ bằng mắt.
 **"Lưu thành" sang thư mục khác** đã đúng sẵn: `writeSrtFile` chạy SAU khi
 `currentProjectPath` đổi, nên `.srt` được ghi cạnh `.crab` MỚI. Bản `.srt` cũ ở thư mục cũ
 được giữ nguyên — đúng ngữ nghĩa "Lưu thành" là CHÉP, dự án cũ phải còn nguyên vẹn.
+
+## Local Subtitle — nhập tệp phụ đề có sẵn, nhiều bộ song song (2026-09-26)
+
+Hai việc theo yêu cầu người dùng: (1) **Auto Subtitle dời từ tab Âm thanh sang tab Văn bản**
+(thứ nó sinh ra là block văn bản); (2) subtab mới **Văn bản → Local Subtitle** nhập tệp phụ đề
+có sẵn và khớp lên timeline — kiểu "Import captions" của Premiere / "Local captions" của CapCut.
+Đọc hai mục Auto Subtitle phía trên trước.
+
+| Tệp | Vai trò |
+| --- | --- |
+| `static/js/subtitle-formats.js` | Hàm thuần: nhận diện định dạng, đọc cue, dọn cue chồng nhau, đoán bảng mã, đoán ngôn ngữ để chọn font |
+| `static/js/local-subtitle.js` | Panel + đặt block lên timeline (`applyImport`), xoá/xuất từng bộ |
+| `static/js/editing-runtime.js` | `subtitleImports` (sổ các bộ nhập), các hàm phụ đề nhận thêm `setId` |
+| `tests/scripts/subtitle_import.js` | `npm run test:subtitle-import` |
+
+### Định dạng hỗ trợ
+
+`.srt`, `.vtt`, `.ass/.ssa`, `.xml/.ttml/.dfxp` (Timed Text — đúng loại `.xml` mà Premiere xuất
+phụ đề), `.lrc`, `.sbv`. NỘI DUNG quyết định trước, đuôi tệp chỉ để phân xử (`.txt` chứa SRT hay
+`.srt` thực ra là WebVTT đều gặp). `.xml` dạng `xmeml`/`fcpxml` là XML DỰ ÁN của NLE, không phải
+phụ đề → báo lỗi có hướng dẫn thay vì im lặng ra 0 câu. TTML đọc bằng regex chứ không DOMParser:
+test chạy được bằng node trần, và XML lệch chuẩn nhẹ không làm cả lượt nhập chết.
+
+Bẫy từng định dạng (đều có test):
+- SRT `,5` là 500 ms (phần lẻ có bao nhiêu chữ số là bấy nhiêu phần của giây), không phải 5 ms.
+- ASS: trường Text đứng cuối và được chứa dấu phẩy → chỉ tách đúng (số trường − 1) dấu phẩy.
+  Khối `{\p1}…{\p0}` là lệnh vẽ vector, không phải chữ.
+- TTML: khung hình theo `ttp:frameRate` (+ `frameRateMultiplier`), tick theo `ttp:tickRate`;
+  xuống dòng thật trong mã nguồn XML là thụt lề, chỉ `<br/>` mới là xuống dòng.
+- LRC chỉ có mốc bắt đầu: câu kéo tới mốc câu sau; dòng rỗng có mốc = dấu hết câu;
+  `[offset:+500]` = hiện lời SỚM hơn 500 ms.
+
+Bảng mã: BOM → UTF-16 không BOM (byte 0 ở vị trí lẻ) → UTF-8 nghiêm → hạ xuống Windows-1258 và
+BÁO trong panel (tệp .srt tiếng Việt đời cũ).
+
+### Bốn quyết định
+
+**1. Mỗi tệp là MỘT BỘ riêng — nhiều bộ song song** (người dùng chọn, 2026-09-26, để làm được
+phụ đề song ngữ; giống mỗi tệp caption là một track riêng ở Premiere). Lựa chọn bị loại: "nhập
+thì thay bộ cũ" — ít việc hơn nhưng không làm được song ngữ.
+
+Cách lưu: bộ Auto Subtitle GIỮ khoá cũ `subtitleState`; các bộ nhập nằm ở khoá MỚI
+`subtitleImports` (mảng) trong `getHistoryState()`. Không dời `subtitleState` vào mảng vì ba thứ
+đã dựng trên giao ước "một bộ tự động ⇄ `<Tên dự án>.srt` cạnh `.crab`": lượt Lưu, Đóng gói
+(`electron/project-package.js` đọc thẳng `editingState.subtitleState`), và nhánh macOS mở cùng
+`.crab`. Nhờ vậy dự án cũ mở lên không phải di trú gì; bản ứng dụng cũ mở dự án mới chỉ mất SỔ
+của các bộ nhập (block vẫn còn, là text thường).
+
+Mọi hàm phụ đề của runtime (`subtitleCuesFromItems`, `removeSubtitleItems`,
+`subtitleStyleSyncEnabled`, `setSubtitleStyleSync`) nhận thêm `setId`: **bỏ trống = bộ Auto
+Subtitle** (nơi gọi cũ không phải sửa), truyền id = đúng bộ đó. `isSubtitleItem` /
+`subtitleSyncTargets` tra theo BỘ CHỨA block (`subtitleSetOfItem`).
+
+**2. "Đồng bộ các subtitle" theo TỪNG BỘ.** Kéo bộ tiếng Anh lên trên mà bộ tiếng Việt chạy theo
+là mất đúng thứ người dùng muốn. Hàng "Đồng bộ" ở Thuộc tính đọc/ghi cờ của bộ chứa block đang
+chọn và ghi rõ tên bộ.
+
+**3. Mốc trong tệp = mốc timeline, tính từ đầu timeline** — CapCut và Premiere (mặc định) cùng
+làm vậy nên không hỏi. Ô "Bắt đầu từ" thêm lựa chọn "Vị trí playhead" của Premiere (00:00 của tệp
+đặt tại playhead). KHÔNG quy đổi qua các điểm cắt của lane chính: tệp phụ đề chỉ biết mốc của MỘT
+video, không NLE nào đoán việc đó, đoán sai là lệch im lặng. Timecode phát sóng (câu đầu ≥
+01:00:00 và nằm sau cuối timeline) được trừ số giờ tròn và báo lại. Câu nằm HẲN ngoài timeline bị
+bỏ (để lọt thì `resolveNewItemPlacement` dồn chúng về sát mép cuối thành một đống); câu tràn qua
+cuối bị cắt ngắn — cả hai đều được đếm và báo.
+
+**4. Không có hai cue chồng nhau trong một bộ** (`tidyCues`; Premiere cũng cấm caption chồng
+nhau trên một track). `.srt` làm tròn ms chồng nhau vài chục ms ở mọi chỗ chuyển câu, mà block
+chồng mốc bị đẩy sang lane mới → timeline thành cái thang. Chồng một chút = cắt đuôi câu trước;
+bắt đầu cách nhau < 0,25 s = gộp thành một block nhiều dòng. Không câu chữ nào bị mất.
+
+### Những thứ khác
+
+- Kiểu chữ = kiểu phụ đề của Auto Subtitle (`subtitleTextStyle`), font chọn theo CHỮ VIẾT đoán
+  từ nội dung (có kana → Nhật, Hangul → Hàn, chỉ Hán tự → Trung). Định dạng riêng trong tệp (màu /
+  vị trí `.ass`, `<font>` của `.srt`) bị bỏ, giữ chữ + mốc.
+- Một cue = một block, KHÔNG cắt theo luật ≤ 2 dòng của Auto Subtitle, và GIỮ xuống dòng của tệp:
+  `addTextItem(..., { keepLineBreaks: true })` → `defaultTextPlacementFor` gói TỪNG DÒNG riêng
+  (magicWrap coi `\n` như dấu cách). Nơi gọi cũ không truyền cờ nên không đổi hành vi.
+- Nhập lại ĐÚNG tệp cùng tên (không phân biệt hoa/thường) → THAY bộ cũ, giữ id + vị trí + cờ đồng
+  bộ. Tệp khác tên → bộ mới.
+- Mỗi tệp nhập = một bước Ctrl+Z (`beginHistoryBatch`). Chọn nhiều tệp / kéo thả nhiều tệp một
+  lượt thì mỗi tệp một bộ.
+- "Xuất .srt" của một bộ luôn HỎI chỗ lưu (`saveSubtitleSrt('', …)`): `<Tên dự án>.srt` cạnh
+  `.crab` là chỗ của bộ Auto Subtitle, ghi bộ nhập vào đó là đè mất nó. Bộ nhập KHÔNG tự ghi `.srt`
+  khi Lưu dự án — tệp gốc của người dùng mới là nguồn.
+- Hai bộ cùng thời điểm đều neo đáy khung nên chồng hình lên nhau (Premiere cũng vậy); bật
+  "Đồng bộ" thì kéo một block là cả bộ đi theo.
+- Vòng đời: "Dự án mới" (`resetProjectState`) và "Mở dự án" (`setSubtitleImports([])` trong
+  index.html, cho `.crab` đời cũ không có `history`) dọn cả `subtitleImports`.
+
+### Đã kiểm trên giao diện thật (browser, TEMP riêng)
+
+| Kiểm | Kết quả |
+| --- | --- |
+| Kéo thả `demo.vi.srt` + `demo.en.vtt` một lượt | 2 bộ, mỗi bộ một lane (V1/V2), đúng mốc |
+| Câu chồng 20 ms + câu ở 00:25 trên timeline 20 s | cắt đuôi 1 câu, bỏ 1 câu, panel báo cả hai |
+| Cue 2 dòng | block giữ đúng 2 dòng của tệp |
+| Ctrl+Z / Ctrl+Y | mỗi tệp một bước, sổ `subtitleImports` đi theo |
+| `getHistoryState` → `restoreHistoryState` | bộ nhập còn nguyên (tên, số block, cờ đồng bộ) |
+
+```
+npm run test:subtitle-import  bộ đọc 6 định dạng + bảng mã + cue chồng nhau + đặt lên timeline
+                              + nhiều bộ song song (chạy THẬT khối hàm của editing-runtime.js)
+```
 
 ## Đóng gói dự án — bảng đoạn lane chính bị bỏ sót (2026-09-14)
 
@@ -9474,4 +9693,96 @@ KHÔNG có LUT, từ 5s mới hiện rồi giảm. Biểu thức trộn vẫn đ
 (sendcmd) thì ra nhánh DƯỚI — như opacity 0 — trong khi `all_opacity=1` tĩnh và 0.9999 đều
 đúng (đo: lệnh 1 -> 141 = nguồn, lệnh 0.9999 -> 119 = nhánh trên). Sửa: file lệnh gửi
 `min(<mix>,0.99999)` (lệch < 0.003/255). Test: `test:export-color` ca 5.
+
+## Lớp Điều chỉnh xếp chồng, lane riêng cho lớp mới, lane chính thấp hơn (2026-09-26, đợt 6)
+
+Port từ `CrabbyCut_Private` nhánh `CrabbyCut_v2.0.4`: commit `0a0cf02` (trọn) và một phần `aa127e6`.
+
+**1. Lane chính 78 -> 62px** (`LANE_HEIGHTS.main`). Hàng tên lane vẫn hiện (ngưỡng `>= 40`).
+
+**2. Lớp Điều chỉnh mới vào lane RIÊNG, kiểu CapCut.** `addAdjustmentLayer` bỏ luật "lấy cứng
+lane Điều chỉnh đầu tiên" (lớp thứ hai nằm ĐÈ lên lớp thứ nhất cùng lane), đi chung
+`trackForNewItemAtRange('adjust', 0, total)` với mọi block khác: còn lane trống cả khoảng thì
+dùng, hết chỗ thì tạo lane mới NẰM TRÊN lane đang bị chiếm. `createTrack` đặt tên theo số NHỎ
+NHẤT chưa dùng (hết trùng "Điều chỉnh 2" khi dự án từng xoá lane). Dòng "Đang có N lớp Điều
+chỉnh" ở panel trái nay cập nhật theo `renderAll` (`refreshAdjustLayerCount`).
+
+**3. Nhiều lớp chồng nhau -> XẾP CHỒNG, dưới áp trước.** Luật cũ "MỘT lớp tại một thời điểm, lớp
+TRÊN CÙNG thắng" -> hai lớp cùng có LUT thì chỉ LUT lớp trên có mặt, ở CẢ preview lẫn bản xuất.
+- frontend: `activeAdjustmentLayers` / `activeAdjustmentLayerAdjustmentsList` (dưới -> trên) +
+  `applyAdjustmentLayers` (mỗi lớp một khoá renderer `<key>~adjlayer<k>` — dùng chung khoá là lớp
+  sau đọc-ghi đè lên canvas đang làm nguồn của nó) ở mọi đường vẽ: Pixi lane chính (index.html),
+  `drawMainClipLayer`, overlay, bake ảnh động, bake chuyển cảnh. `adjustLayerExportSpec` trả MẢNG
+  spec, mỗi lớp một cửa sổ `enable` và nhãn `_al<k>` riêng. `LAYER_FX_MAX` 6 -> 8.
+- backend: `normalizeAdjustLayerFields` nhận mảng (hoặc object cũ): lớp 0 = `adj_layer_*`, lớp k
+  = `adj_layer<k>_*`, kèm `adj_layer_count`. Tên phẳng vì bộ đọc JSON của sidecar tìm field theo
+  TÊN trong cả object.
+- sidecar: `ExtraAdjustLayer` + `ReadExtraAdjustLayers` + `AppendExtraAdjustLayers` (tag
+  `adjl<idx>_k<k>_`), tính cả vào `IntervalIsTimeVarying` / `OverlayIsTimeVarying`. Phải
+  `npm run build:sidecar` lại.
+- `logStatus` CHƯA TỪNG được định nghĩa trong server.js dù được gọi 7 chỗ (cả trong
+  `normalizeAdjustLayerFields`) -> mọi nhánh "bỏ riêng phần hỏng, xuất tiếp" ném ReferenceError.
+  Đã định nghĩa (chỉ log, không đè dòng trạng thái).
+- Test `export_color_output` ca 6: LUT keyframe (lớp dưới) + phơi sáng (lớp trên) cùng có mặt.
+- Đã kiểm trong trình duyệt: "Ửng hồng" (lane dưới) + "Bạc hà" (lane trên) trên nguồn xám 128 ->
+  preview 169,175,179 (chỉ lớp trên: 137,160,153); bản xuất qua `/api/export-video` 167,173,179,
+  file lệnh mang hai `.cube` khác nhau và `adj_layer_count=2`.
+
+**Phần của `aa127e6` KHÔNG port** (lần đồng bộ sau đừng tưởng là sót):
+- ~~Độ rộng panel theo cửa sổ~~ — ĐÃ PORT sau, theo yêu cầu riêng (xem mục "Panel trái / Thuộc
+  tính rộng theo cửa sổ" ở cuối đợt này).
+- `mainClipPlacement` nhân `mainClipFitScale` (miếng vá Retouch phóng to) — **ĐÃ ĐO, nhánh này
+  KHÔNG có lỗi đó, và hunk đó sẽ GÂY lỗi ngược lại** (xem mục ngay dưới). Chỉ port Ý của test
+  `main_lane_fit_geometry` mục 6, viết lại theo cấu trúc Windows.
+- `staleBackendModules` + chặn `/api/export-video` khi backend chạy mã cũ — công cụ cho lúc phát
+  triển, chưa kiểm hành vi trong bản đóng gói (đường dẫn module nằm trong app.asar).
+
+### Miếng vá Retouch "phóng to" của nhánh macOS: đo trên nhánh Windows (2026-09-26)
+
+**Vì sao hai nhánh khác nhau.** Nhánh macOS vẽ lane chính trên canvas theo cỡ TEXTURE (quy về
+`source_*`), nên thiếu hệ số vừa khung -> nguồn 1728x3072 trên sequence 1080x1920 vẽ to 1.6 lần;
+họ sửa bằng cách nhân `mainClipFitScale` vào `mainClipPlacement`. Nhánh Windows đã sửa CÙNG vấn
+đề từ 2026-09-09 (`16e575d`, v1.1.5-Win) theo đường khác: cỡ vẽ = `mainLaneFrameDrawSize` =
+khung nối × hệ số vừa khung, dùng chung cho `drawMainClipLayer` lẫn hộp cắt của
+`bakeRetouchSequence`. Hệ số đã nằm trong cỡ vẽ, nhân thêm ở phép đặt là nhân HAI lần.
+
+**Cách đo.** Nguồn tổng hợp 1728x3072 mỗi điểm ảnh mang toạ độ của nó (R = 255·x/W,
+G = 255·y/H), sequence 1080x1920, dự án dựng trong trình duyệt với server + thư mục tạm riêng.
+Landmark: chặn `fetch('/api/retouch/track')` trả `tests/fixtures/face_landmarks.json` cho mọi
+khung (không cần video có mặt người). Xuất A = tắt Retouch (toàn khung do sidecar), xuất B = bật
+"Mịn da" 100 (trên gradient gần như không đổi màu). Đo trong hộp vá: độ dốc dR/dx, dG/dy của B so
+với A (miếng vá phóng k lần thì độ dốc chia k) và |B − A|.
+
+| | hộp vá | hệ số phóng ước tính | \|B − A\| trong hộp |
+|---|---|---|---|
+| mã Windows hiện tại | 376x456 @ (220, 552) | x0.997 / y1.004 | TB 0.88, max 8 |
+| tạm áp hunk của `aa127e6` | 238x288 @ (339, 704) | x0.71 / y0.62 | TB 37.6, max 117 |
+
+(x0.71 chứ không đúng 0.625 vì dải mép mềm pha nền vào miếng vá, kéo độ dốc về phía 1.)
+Ngoài hộp |B − A| TB 0.16 ở cả hai lượt. Kết luận: KHÔNG port hunk đó.
+
+**Test khoá lại:** `main_lane_fit_geometry` mục 6 chạy chính `mainLaneFrameDrawSize` +
+`mainClipPlacement` + `layerPlacement` (editing-runtime.js) với các hàm hình học thật của
+index.html, đòi cỡ trên canvas = khung × fit × scale (864x1536 cho ca trên, scale 80%) và
+`place.sx` KHÔNG mang fit. Đã thử đột biến: bê hunk macOS -> test đỏ "được 540x960"; bỏ fit khỏi
+`mainLaneFrameDrawSize` (đúng lỗi macOS) -> đỏ "được 1382.4x2457.6".
+
+### Panel trái / Thuộc tính rộng theo cửa sổ (2026-09-26)
+
+Port 3 hunk CSS của `aa127e6`: `.sidebar-left` mặc định `clamp(288px, 27.5vw, 600px)`,
+`.sidebar-inspector` mặc định `clamp(356px, 23vw, 560px)` (cả `width` lẫn `flex-basis`). Resizer
+vẫn ghi đè bằng style inline và KHÔNG lưu lại, nên mỗi lần mở app đều về giá trị mặc định này.
+`lumen-skin.css` không đặt độ rộng panel (giống hệt bản macOS).
+
+Đo trong trình duyệt (viewport giả lập, dự án có clip + panel Thuộc tính đang mở):
+
+| cửa sổ | panel trái | panel Thuộc tính | ghi chú |
+|---|---|---|---|
+| 1200 (minWidth Electron) | 330 (trước 288) | 356 (như trước) | vùng giữa 435 (trước 477) |
+| 1600x960 (cỡ mở mặc định) | 440 (trước 288) | 368 (trước 356) | |
+| 1920 (phóng to) | 528 | 442 | |
+
+Kéo resizer trái ở 1920: 528 -> 384px, inline ghi đè đúng. **Còn tồn tại ở 1200:** mã thời gian
+của thanh điều khiển preview vốn đã chạm nút Play với panel 288px ("… / 00:00:06:"); panel 330px
+che thêm ("… / 00:00:"). Không có phần tử nào báo tràn (`scrollWidth`) — nút Play nằm đè lên chữ.
 

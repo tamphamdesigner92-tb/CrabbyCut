@@ -32,6 +32,9 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
     'use strict';
 
+    const _t = (typeof globalThis !== 'undefined' && globalThis._t)
+        || ((k, p) => (p ? String(k).replace(/\{(\w+)\}/g, (m, n) => (n in p ? p[n] : m)) : k));
+
     const LANDMARK_COUNT = 478;
 
     // ---------------------------------------------------------------------
@@ -98,19 +101,19 @@
     // đoán: 'warp' = biến dạng hình học, 'freq' = tách tần số, 'color' = màu cục bộ.
     // `range`: 'unit' = 0..100, 'signed' = -100..100.
     const PARAMS = [
-        { key: 'plump', name: 'Đầy đặn', kind: 'warp', range: 'unit', region: 'cheek' },
-        { key: 'even', name: 'Đều màu', kind: 'freq', range: 'unit', region: 'skin' },
-        { key: 'clearBlemishes', name: 'Xoá khuyết điểm', kind: 'freq', range: 'unit', region: 'skin' },
-        { key: 'sparkly', name: 'Da căng bóng', kind: 'freq', range: 'unit', region: 'skin' },
-        { key: 'dewrinkle', name: 'Xoá nếp nhăn', kind: 'freq', range: 'unit', region: 'skin' },
-        { key: 'facelift', name: 'Thon mặt', kind: 'warp', range: 'unit', region: 'jaw' },
-        { key: 'smooth', name: 'Mịn da', kind: 'freq', range: 'unit', region: 'skin' },
-        { key: 'smileLines', name: 'Nếp cười', kind: 'freq', range: 'unit', region: 'nasolabial' },
-        { key: 'brightEye', name: 'Sáng mắt', kind: 'color', range: 'unit', region: 'eye' },
-        { key: 'darkCircles', name: 'Quầng thâm', kind: 'color', range: 'unit', region: 'underEye' },
-        { key: 'whitening', name: 'Trắng da', kind: 'color', range: 'unit', region: 'skin' },
-        { key: 'whiteTeeth', name: 'Trắng răng', kind: 'color', range: 'unit', region: 'teeth' },
-        { key: 'clear', name: 'Nét căng', kind: 'freq', range: 'unit', region: 'skin' },
+        { key: 'plump', name: _t('Đầy đặn'), kind: 'warp', range: 'unit', region: 'cheek' },
+        { key: 'even', name: _t('Đều màu'), kind: 'freq', range: 'unit', region: 'skin' },
+        { key: 'clearBlemishes', name: _t('Xoá khuyết điểm'), kind: 'freq', range: 'unit', region: 'skin' },
+        { key: 'sparkly', name: _t('Da căng bóng'), kind: 'freq', range: 'unit', region: 'skin' },
+        { key: 'dewrinkle', name: _t('Xoá nếp nhăn'), kind: 'freq', range: 'unit', region: 'skin' },
+        { key: 'facelift', name: _t('Thon mặt'), kind: 'warp', range: 'unit', region: 'jaw' },
+        { key: 'smooth', name: _t('Mịn da'), kind: 'freq', range: 'unit', region: 'skin' },
+        { key: 'smileLines', name: _t('Nếp cười'), kind: 'freq', range: 'unit', region: 'nasolabial' },
+        { key: 'brightEye', name: _t('Sáng mắt'), kind: 'color', range: 'unit', region: 'eye' },
+        { key: 'darkCircles', name: _t('Quầng thâm'), kind: 'color', range: 'unit', region: 'underEye' },
+        { key: 'whitening', name: _t('Trắng da'), kind: 'color', range: 'unit', region: 'skin' },
+        { key: 'whiteTeeth', name: _t('Trắng răng'), kind: 'color', range: 'unit', region: 'teeth' },
+        { key: 'clear', name: _t('Nét căng'), kind: 'freq', range: 'unit', region: 'skin' },
     ];
 
     const PARAM_KEYS = PARAMS.map((p) => p.key);

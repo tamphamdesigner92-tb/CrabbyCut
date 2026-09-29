@@ -75,6 +75,19 @@ input[type="checkbox"]:checked { background-color: var(--primary); border-color:
     z-index: calc(var(--z-home) + 5);
 }
 .header-bar .app-logo { height: 17px; }
+/* Số phiên bản cạnh logo — chỉ ở Trang chủ (trong dự án nó nằm ở thanh trạng thái). */
+.app-version-badge {
+    display: none;
+    margin-left: var(--sp-4);
+    padding: 1px 6px;
+    border-radius: var(--r-xs);
+    background: var(--surface-3);
+    border: 1px solid var(--border-color);
+    color: var(--text-3);
+    font: var(--fw-medium) var(--fs-2xs)/1.4 var(--font-mono);
+    white-space: nowrap;
+}
+body.home-active .app-version-badge:not([hidden]) { display: inline-block; }
 
 .titlebar-home {
     background: transparent;
@@ -169,7 +182,80 @@ input[type="checkbox"]:checked { background-color: var(--primary); border-color:
     text-align: center;
     opacity: 1;
 }
-@media (max-width: 1100px) { .app-statusbar-right { display: none; } }
+/* Dồn khối phím tắt + số phiên bản sang phải (thanh có 3 con, space-between sẽ đặt khối
+   phím tắt vào GIỮA). */
+.app-statusbar-left { margin-right: auto; }
+.app-statusbar-version {
+    flex-shrink: 0;
+    padding-left: var(--sp-7);
+    border-left: 1px solid var(--border-color);
+    color: var(--text-3);
+    font: var(--fw-medium) var(--fs-2xs)/1.4 var(--font-mono);
+    white-space: nowrap;
+}
+body.home-active .app-statusbar-version { display: none; }
+/* Tải model AI lần đầu (model-download-status.js). Đứng TRƯỚC #statusText ở góc trái: người
+   dùng cần thấy nó ngay cả khi dòng trạng thái đang nói việc khác. */
+.app-model-download {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 0 0 auto;
+    padding-right: var(--sp-7);
+    border-right: 1px solid var(--border-color);
+    color: var(--text-2);
+    white-space: nowrap;
+}
+.app-model-download[hidden] { display: none; }
+.app-model-download-label { overflow: hidden; text-overflow: ellipsis; max-width: 30vw; }
+/* Đang tải thì dòng trạng thái thường nhường chỗ (co + "…"), không phải thanh tải. */
+.app-model-download:not([hidden]) + #statusText {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.app-model-download-bar {
+    position: relative;
+    flex: 0 0 120px;
+    height: 5px;
+    border-radius: 999px;
+    background: var(--surface-3);
+    overflow: hidden;
+}
+.app-model-download-fill {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 0;
+    border-radius: inherit;
+    background: var(--primary);
+    transition: width 0.4s ease;
+}
+/* Chưa biết tổng dung lượng -> dải chạy qua lại thay vì đứng ở 0%. */
+.app-model-download.is-indeterminate .app-model-download-fill {
+    width: 35%;
+    transition: none;
+    animation: app-model-download-slide 1.2s ease-in-out infinite;
+}
+@keyframes app-model-download-slide {
+    0% { left: -35%; }
+    100% { left: 100%; }
+}
+.app-model-download.is-error { color: var(--danger); }
+.app-model-download.is-error .app-model-download-fill { background: var(--danger); width: 100%; }
+.app-model-download.is-done .app-model-download-fill { background: var(--teal); }
+.app-model-download-meta { font: var(--fw-medium) var(--fs-2xs)/1.4 var(--font-mono); color: var(--text-3); }
+@media (prefers-reduced-motion: reduce) {
+    .app-model-download.is-indeterminate .app-model-download-fill { animation: none; width: 100%; opacity: 0.5; }
+}
+@media (max-width: 1100px) {
+    .app-statusbar-right { display: none; }
+    .app-statusbar-version { padding-left: 0; border-left: 0; }
+}
 
 /* Resizer: vùng bắt 6px giữ nguyên, chỉ vẽ một đường 1px ở giữa. */
 .resizer-x,

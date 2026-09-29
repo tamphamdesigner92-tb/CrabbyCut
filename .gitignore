@@ -4,6 +4,9 @@ asr_cache/
 asr_models/
 __pycache__/
 .venv/
+# Môi trường Python riêng của Lồng tiếng (npm run setup:tts) và kho model nếu đặt CRAB_TTS_MODEL_DIR vào đây.
+.venv-tts/
+tts_models/
 peaks_cache/
 test_temp/
 auto_sfx.txt/

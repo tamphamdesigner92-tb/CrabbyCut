@@ -40,57 +40,60 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
     'use strict';
 
+    const _t = (typeof globalThis !== 'undefined' && globalThis._t)
+        || ((k, p) => (p ? String(k).replace(/\{(\w+)\}/g, (m, n) => (n in p ? p[n] : m)) : k));
+
     const DUR_DEFAULT = 0.5; // thời lượng chuyển cảnh mặc định (giây)
     const DUR_MIN = 0.1;
     const DUR_MAX = 2.0;     // trần cứng; trần động còn bị kẹp bởi thời lượng 2 block
 
     // Nhóm danh mục (dùng làm sub-tab trong panel).
     const TRANSITION_CATEGORIES = [
-        { id: 'basic', label: 'Cơ bản' },
-        { id: 'motion', label: 'Chuyển động' },
-        { id: 'effect', label: 'Hiệu ứng' },
+        { id: 'basic', label: _t('Cơ bản') },
+        { id: 'motion', label: _t('Chuyển động') },
+        { id: 'effect', label: _t('Hiệu ứng') },
     ];
 
     // Danh mục hiệu ứng. `id` = tên transition của FFmpeg xfade (để export ánh xạ 1-1).
     // Thêm hiệu ứng mới = thêm 1 dòng ở đây + (nếu cần dáng vẽ riêng) 1 case trong compose().
     const TRANSITION_OPTIONS = [
         // --- Cơ bản ---
-        { id: 'fade', label: 'Mờ dần', category: 'basic' },
-        { id: 'fadeblack', label: 'Mờ qua đen', category: 'basic' },
-        { id: 'fadewhite', label: 'Mờ qua trắng', category: 'basic' },
-        { id: 'dissolve', label: 'Hoà tan', category: 'basic' },
+        { id: 'fade', label: _t('Mờ dần'), category: 'basic' },
+        { id: 'fadeblack', label: _t('Mờ qua đen'), category: 'basic' },
+        { id: 'fadewhite', label: _t('Mờ qua trắng'), category: 'basic' },
+        { id: 'dissolve', label: _t('Hoà tan'), category: 'basic' },
         // --- Chuyển động ---
-        { id: 'slideleft', label: 'Trượt trái', category: 'motion' },
-        { id: 'slideright', label: 'Trượt phải', category: 'motion' },
-        { id: 'slideup', label: 'Trượt lên', category: 'motion' },
-        { id: 'slidedown', label: 'Trượt xuống', category: 'motion' },
-        { id: 'wipeleft', label: 'Quét trái', category: 'motion' },
-        { id: 'wiperight', label: 'Quét phải', category: 'motion' },
-        { id: 'zoomin', label: 'Phóng to', category: 'motion' },
+        { id: 'slideleft', label: _t('Trượt trái'), category: 'motion' },
+        { id: 'slideright', label: _t('Trượt phải'), category: 'motion' },
+        { id: 'slideup', label: _t('Trượt lên'), category: 'motion' },
+        { id: 'slidedown', label: _t('Trượt xuống'), category: 'motion' },
+        { id: 'wipeleft', label: _t('Quét trái'), category: 'motion' },
+        { id: 'wiperight', label: _t('Quét phải'), category: 'motion' },
+        { id: 'zoomin', label: _t('Phóng to'), category: 'motion' },
         // Cùng CẤU TRÚC với 'zoomin' (hai lớp cùng đội khung, gặp nhau ở giữa) nhưng cú
         // đội mạnh hơn 2.4 lần và ảnh đổi SỚM hơn nhịp phóng, nên giữa vùng lúc nào cũng
         // có một bóng RẤT LỚN của cảnh sau đè lên cảnh trước — xem ECHO_* bên dưới.
-        { id: 'echoshift', label: 'Phóng chồng bóng', category: 'motion' },
+        { id: 'echoshift', label: _t('Phóng chồng bóng'), category: 'motion' },
         /* Bốn mẫu dưới đây dựng theo VIDEO MẪU trong "Effect Demo/Transition" (xem mục
          * "BỐN MẪU ĐO TỪ VIDEO" ở cuối file). Điểm chung: mỗi lớp đi theo một BẢNG SỐ ĐO
          * riêng (phóng / xoay / trượt) và ĐIỂM ĐỔI ẢNH nằm lệch khỏi giữa vùng. */
-        { id: 'spinslam', label: 'Xoay đập', category: 'motion' },
-        { id: 'stretchleft', label: 'Kéo giãn trái', category: 'motion' },
-        { id: 'zoomslide', label: 'Phóng trượt', category: 'motion' },
+        { id: 'spinslam', label: _t('Xoay đập'), category: 'motion' },
+        { id: 'stretchleft', label: _t('Kéo giãn trái'), category: 'motion' },
+        { id: 'zoomslide', label: _t('Phóng trượt'), category: 'motion' },
         // --- Hiệu ứng ---
-        { id: 'circleopen', label: 'Mở vòng tròn', category: 'effect' },
-        { id: 'circleclose', label: 'Đóng vòng tròn', category: 'effect' },
-        { id: 'pixelize', label: 'Vỡ hạt', category: 'effect' },
-        { id: 'radial', label: 'Toả tròn', category: 'effect' },
+        { id: 'circleopen', label: _t('Mở vòng tròn'), category: 'effect' },
+        { id: 'circleclose', label: _t('Đóng vòng tròn'), category: 'effect' },
+        { id: 'pixelize', label: _t('Vỡ hạt'), category: 'effect' },
+        { id: 'radial', label: _t('Toả tròn'), category: 'effect' },
         // 'swirl' KHÔNG có transition tương ứng trong xfade của FFmpeg (biến dạng theo bán
         // kính, xfade không làm được). Không sao: export đã luôn bake khung từ compose().
-        { id: 'swirl', label: 'Xoắn', category: 'effect' },
+        { id: 'swirl', label: _t('Xoắn'), category: 'effect' },
         // 'bokehswing' cũng KHÔNG có transition tương ứng trong xfade (xfade không rắc được
         // hạt sáng lên khung). Cùng lý do với 'swirl': export vốn đã bake khung từ compose().
-        { id: 'bokehswing', label: 'Bokeh đung đưa', category: 'effect' },
+        { id: 'bokehswing', label: _t('Bokeh đung đưa'), category: 'effect' },
         // 'flashrotate' xếp vào nhóm HIỆU ỨNG (không phải "Chuyển động") vì cái mắt bắt
         // được trước tiên là CÚ CHỚP TRẮNG; phần xoay/phóng chỉ là cái chở nó đi.
-        { id: 'flashrotate', label: 'Chớp sáng xoay', category: 'effect' },
+        { id: 'flashrotate', label: _t('Chớp sáng xoay'), category: 'effect' },
     ];
 
     const OPTION_BY_ID = TRANSITION_OPTIONS.reduce((m, o) => { m[o.id] = o; return m; }, {});

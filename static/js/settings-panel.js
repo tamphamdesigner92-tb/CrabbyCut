@@ -17,13 +17,14 @@
     const PANE_ASE = 'auto-sfx';
 
     const SECTIONS = [
-        { id: 'general', label: 'Chung', ready: true },
-        { id: 'shortcuts', label: 'Phím tắt', ready: true },
-        { id: 'autosave', label: 'Auto save', ready: true },
-        { id: 'preview', label: 'Xem trước', ready: true },
-        { id: PANE_ASE, label: 'Auto Sound Effects', ready: true },
-        { id: 'cache', label: 'Bộ nhớ đệm', ready: true },
-        { id: 'export', label: 'Xuất video', ready: false },
+        { id: 'general', label: _t('Chung'), ready: true },
+        { id: 'shortcuts', label: _t('Phím tắt'), ready: true },
+        { id: 'autosave', label: _t('Tự động lưu'), ready: true },
+        { id: 'preview', label: _t('Xem trước'), ready: true },
+        { id: PANE_ASE, label: _t('Auto Sound Effects'), ready: true },
+        { id: 'cache', label: _t('Bộ nhớ đệm'), ready: true },
+        { id: 'export', label: _t('Xuất video'), ready: false },
+        { id: 'about', label: _t('Về CrabbyCut'), ready: true },
     ];
 
     let draft = null;          // bản nháp đang sửa
@@ -129,7 +130,7 @@
 
     function chipHtml(label, act, groupId, member) {
         return `<span class="set-chip">${esc(label)}`
-            + `<button type="button" class="set-chip-x" data-set-act="${act}" data-group="${esc(groupId)}" data-member="${esc(member)}" aria-label="Bỏ ${esc(label)}">×</button>`
+            + `<button type="button" class="set-chip-x" data-set-act="${act}" data-group="${esc(groupId)}" data-member="${esc(member)}" aria-label="${esc(_t('Bỏ {name}', { name: label }))}">×</button>`
             + `</span>`;
     }
 
@@ -151,12 +152,12 @@
         <div class="set-card">
             <div class="set-card-head">
                 <input class="set-name" type="text" value="${esc(group.name)}" data-set-act="rename-${kind}" data-group="${esc(group.id)}">
-                <button type="button" class="set-x" data-set-act="del-${kind}-group" data-group="${esc(group.id)}" title="Xoá nhóm">×</button>
+                <button type="button" class="set-x" data-set-act="del-${kind}-group" data-group="${esc(group.id)}" title="${_t('Xoá nhóm')}">×</button>
             </div>
-            <div class="set-chips">${members.map((m) => chipHtml(isAnim ? labelForEffect(m) : labelForTransition(m), `del-${kind}-member`, group.id, m)).join('') || '<span class="set-empty">Chưa có hiệu ứng nào</span>'}</div>
+            <div class="set-chips">${members.map((m) => chipHtml(isAnim ? labelForEffect(m) : labelForTransition(m), `del-${kind}-member`, group.id, m)).join('') || `<span class="set-empty">${_t('Chưa có hiệu ứng nào')}</span>`}</div>
             <div class="set-add">
-                ${selectHtml(`data-set-pick="${kind}" data-group="${esc(group.id)}"`, free, '', free.length ? 'Chọn hiệu ứng…' : 'Đã dùng hết')}
-                <button type="button" class="set-btn" data-set-act="add-${kind}-member" data-group="${esc(group.id)}"${free.length ? '' : ' disabled'}>+ Thêm</button>
+                ${selectHtml(`data-set-pick="${kind}" data-group="${esc(group.id)}"`, free, '', free.length ? _t('Chọn hiệu ứng…') : _t('Đã dùng hết'))}
+                <button type="button" class="set-btn" data-set-act="add-${kind}-member" data-group="${esc(group.id)}"${free.length ? '' : ' disabled'}>${_t('+ Thêm')}</button>
             </div>
         </div>`;
     }
@@ -164,10 +165,10 @@
     function fileRowHtml(rel, category, act, groupId) {
         const missing = !fileExists(category, rel);
         return `<div class="set-file${missing ? ' is-missing' : ''}">
-            <button type="button" class="set-play" data-set-act="preview-file" data-file="${esc(rel)}" aria-label="Nghe thử">▶</button>
+            <button type="button" class="set-play" data-set-act="preview-file" data-file="${esc(rel)}" aria-label="${_t('Nghe thử')}">▶</button>
             <span class="set-file-name">${esc(baseName(rel))}</span>
-            ${missing ? '<span class="set-missing">thiếu file</span>' : ''}
-            <button type="button" class="set-x" data-set-act="${act}" data-group="${esc(groupId || '')}" data-member="${esc(rel)}" title="Bỏ khỏi nhóm">×</button>
+            ${missing ? `<span class="set-missing">${_t('thiếu file')}</span>` : ''}
+            <button type="button" class="set-x" data-set-act="${act}" data-group="${esc(groupId || '')}" data-member="${esc(rel)}" title="${_t('Bỏ khỏi nhóm')}">×</button>
         </div>`;
     }
 
@@ -179,24 +180,24 @@
         <div class="set-card">
             <div class="set-card-head">
                 <input class="set-name" type="text" value="${esc(group.name)}" data-set-act="rename-sfx" data-group="${esc(group.id)}">
-                <button type="button" class="set-x" data-set-act="del-sfx-group" data-group="${esc(group.id)}" title="Xoá nhóm">×</button>
+                <button type="button" class="set-x" data-set-act="del-sfx-group" data-group="${esc(group.id)}" title="${_t('Xoá nhóm')}">×</button>
             </div>
-            <div class="set-files">${(group.files || []).map((f) => fileRowHtml(f, 'sfxs', 'del-sfx-file', group.id)).join('') || '<span class="set-empty">Chưa có file nào</span>'}</div>
+            <div class="set-files">${(group.files || []).map((f) => fileRowHtml(f, 'sfxs', 'del-sfx-file', group.id)).join('') || `<span class="set-empty">${_t('Chưa có file nào')}</span>`}</div>
             <div class="set-add">
-                ${selectHtml(`data-set-pick="sfx" data-group="${esc(group.id)}"`, pool, '', pool.length ? 'Chọn file SFXs…' : 'Đã dùng hết')}
-                <button type="button" class="set-btn" data-set-act="add-sfx-file" data-group="${esc(group.id)}"${pool.length ? '' : ' disabled'}>+ Thêm</button>
+                ${selectHtml(`data-set-pick="sfx" data-group="${esc(group.id)}"`, pool, '', pool.length ? _t('Chọn file SFXs…') : _t('Đã dùng hết'))}
+                <button type="button" class="set-btn" data-set-act="add-sfx-file" data-group="${esc(group.id)}"${pool.length ? '' : ' disabled'}>${_t('+ Thêm')}</button>
             </div>
             <div class="set-row2">
-                <label>Canh theo
+                <label>${_t('Canh theo')}
                     ${selectHtml(`data-set-act="set-align" data-group="${esc(group.id)}"`, [
-                        { value: 'peak', label: 'Đỉnh sóng rơi đúng mốc' },
-                        { value: 'start', label: 'Đầu tiếng trùng đầu block' },
+                        { value: 'peak', label: _t('Đỉnh sóng rơi đúng mốc') },
+                        { value: 'start', label: _t('Đầu tiếng trùng đầu block') },
                     ], group.align)}
                 </label>
-                <label>Độ dài
+                <label>${_t('Độ dài')}
                     ${selectHtml(`data-set-act="set-fit" data-group="${esc(group.id)}"`, [
-                        { value: 'full', label: 'Giữ nguyên cả file' },
-                        { value: 'toEffect', label: 'Cắt theo độ dài hiệu ứng' },
+                        { value: 'full', label: _t('Giữ nguyên cả file') },
+                        { value: 'toEffect', label: _t('Cắt theo độ dài hiệu ứng') },
                     ], group.fit)}
                 </label>
             </div>
@@ -205,8 +206,8 @@
 
     function ruleRowHtml(rule, index) {
         const sources = [
-            ...cfg().animGroups.map((g) => ({ value: `anim:${g.id}`, label: `Hiệu ứng động — ${g.name}` })),
-            ...cfg().transGroups.map((g) => ({ value: `transition:${g.id}`, label: `Chuyển cảnh — ${g.name}` })),
+            ...cfg().animGroups.map((g) => ({ value: `anim:${g.id}`, label: _t('Hiệu ứng động — {name}', { name: g.name }) })),
+            ...cfg().transGroups.map((g) => ({ value: `transition:${g.id}`, label: _t('Chuyển cảnh — {name}', { name: g.name }) })),
         ];
         const sfxOpts = cfg().sfxGroups.map((g) => ({ value: g.id, label: g.name }));
         const th = rule.threshold;
@@ -216,16 +217,16 @@
                 ${selectHtml(`data-set-act="rule-source" data-index="${index}"`, sources, `${rule.source.kind}:${rule.source.group}`)}
                 <span class="set-arrow">→</span>
                 ${selectHtml(`data-set-act="rule-sfx" data-index="${index}"`, sfxOpts, rule.sfxGroup)}
-                <button type="button" class="set-x" data-set-act="del-rule" data-index="${index}" title="Xoá luật">×</button>
+                <button type="button" class="set-x" data-set-act="del-rule" data-index="${index}" title="${_t('Xoá luật')}">×</button>
             </div>
             <label class="set-th-toggle">
                 <input type="checkbox" data-set-act="rule-th-toggle" data-index="${index}"${th ? ' checked' : ''}>
-                Đổi nhóm theo độ dài hiệu ứng
+                ${_t('Đổi nhóm theo độ dài hiệu ứng')}
             </label>
             ${th ? `<div class="set-rule-th">
-                <span>nếu ≤</span>
+                <span>${_t('nếu ≤')}</span>
                 <input type="number" min="0.05" max="10" step="0.05" value="${th.maxDuration}" data-set-act="rule-th-dur" data-index="${index}">
-                <span>s dùng nhóm trên, ngược lại</span>
+                <span>${_t('s dùng nhóm trên, ngược lại')}</span>
                 ${selectHtml(`data-set-act="rule-th-else" data-index="${index}"`, sfxOpts, th.elseSfxGroup)}
             </div>` : ''}
         </div>`;
@@ -237,10 +238,10 @@
         const missing = !files.some((f) => f.value.toLowerCase() === String(rule.assetName).toLowerCase());
         return `
         <div class="set-rule set-rule-1line${missing ? ' is-missing' : ''}">
-            ${selectHtml(`data-set-act="el-name" data-index="${index}"`, missing ? [{ value: rule.assetName, label: `${rule.assetName} (thiếu file)` }, ...files] : files, rule.assetName)}
+            ${selectHtml(`data-set-act="el-name" data-index="${index}"`, missing ? [{ value: rule.assetName, label: _t('{name} (thiếu file)', { name: rule.assetName }) }, ...files] : files, rule.assetName)}
             <span class="set-arrow">→</span>
             ${selectHtml(`data-set-act="el-sfx" data-index="${index}"`, sfxOpts, rule.sfxGroup)}
-            <button type="button" class="set-x" data-set-act="del-element" data-index="${index}" title="Xoá dòng">×</button>
+            <button type="button" class="set-x" data-set-act="del-element" data-index="${index}" title="${_t('Xoá dòng')}">×</button>
         </div>`;
     }
 
@@ -260,52 +261,52 @@
             .filter((rel) => !c.musicFiles.some((f) => pathKey(f) === pathKey(rel)))
             .map((rel) => ({ value: rel, label: baseName(rel) }));
         return `
-        <p class="set-intro">Quy tắc tự điền tiếng động và nhạc nền. Sửa ở đây chỉ áp cho <b>lần chạy Auto Sound Effects tiếp theo</b>, không đổi các block đã điền.</p>
+        <p class="set-intro">${_t('Quy tắc tự điền tiếng động và nhạc nền. Sửa ở đây chỉ áp cho <b>lần chạy Auto Sound Effects tiếp theo</b>, không đổi các block đã điền.')}</p>
 
-        <section class="set-sec"><h4>1 · Nhóm hiệu ứng động</h4>
+        <section class="set-sec"><h4>${_t('1 · Nhóm hiệu ứng động')}</h4>
             ${c.animGroups.map((g) => memberGroupCardHtml(g, 'anim')).join('')}
-            <button type="button" class="set-btn" data-set-act="add-anim-group">+ Nhóm mới</button>
+            <button type="button" class="set-btn" data-set-act="add-anim-group">${_t('+ Nhóm mới')}</button>
         </section>
 
-        <section class="set-sec"><h4>2 · Nhóm hiệu ứng chuyển tiếp</h4>
+        <section class="set-sec"><h4>${_t('2 · Nhóm hiệu ứng chuyển tiếp')}</h4>
             ${c.transGroups.map((g) => memberGroupCardHtml(g, 'transition')).join('')}
-            <button type="button" class="set-btn" data-set-act="add-transition-group">+ Nhóm mới</button>
+            <button type="button" class="set-btn" data-set-act="add-transition-group">${_t('+ Nhóm mới')}</button>
         </section>
 
-        <section class="set-sec"><h4>3 · Nhóm SFXs</h4>
+        <section class="set-sec"><h4>${_t('3 · Nhóm SFXs')}</h4>
             ${c.sfxGroups.map((g) => sfxGroupCardHtml(g)).join('')}
-            <button type="button" class="set-btn" data-set-act="add-sfx-group">+ Nhóm mới</button>
+            <button type="button" class="set-btn" data-set-act="add-sfx-group">${_t('+ Nhóm mới')}</button>
         </section>
 
-        <section class="set-sec"><h4>4 · Nhạc nền [Mus]</h4>
+        <section class="set-sec"><h4>${_t('4 · Nhạc nền [Mus]')}</h4>
             <div class="set-card">
-                <div class="set-files">${c.musicFiles.map((f) => fileRowHtml(f, 'music', 'del-music-file', '')).join('') || '<span class="set-empty">Chưa có file nào — sẽ không thêm nhạc nền</span>'}</div>
+                <div class="set-files">${c.musicFiles.map((f) => fileRowHtml(f, 'music', 'del-music-file', '')).join('') || `<span class="set-empty">${_t('Chưa có file nào — sẽ không thêm nhạc nền')}</span>`}</div>
                 <div class="set-add">
-                    ${selectHtml('data-set-pick="music"', musicPool, '', musicPool.length ? 'Chọn file nhạc…' : 'Đã dùng hết')}
-                    <button type="button" class="set-btn" data-set-act="add-music-file"${musicPool.length ? '' : ' disabled'}>+ Thêm</button>
+                    ${selectHtml('data-set-pick="music"', musicPool, '', musicPool.length ? _t('Chọn file nhạc…') : _t('Đã dùng hết'))}
+                    <button type="button" class="set-btn" data-set-act="add-music-file"${musicPool.length ? '' : ' disabled'}>${_t('+ Thêm')}</button>
                 </div>
             </div>
         </section>
 
-        <section class="set-sec"><h4>5 · Element → nhóm SFXs</h4>
-            ${c.elementRules.map((r, i) => elementRowHtml(r, i)).join('') || '<span class="set-empty">Chưa có dòng nào</span>'}
-            <button type="button" class="set-btn" data-set-act="add-element">+ Thêm dòng</button>
+        <section class="set-sec"><h4>${_t('5 · Element → nhóm SFXs')}</h4>
+            ${c.elementRules.map((r, i) => elementRowHtml(r, i)).join('') || `<span class="set-empty">${_t('Chưa có dòng nào')}</span>`}
+            <button type="button" class="set-btn" data-set-act="add-element">${_t('+ Thêm dòng')}</button>
         </section>
 
-        <section class="set-sec"><h4>6 · Bảng luật ghép</h4>
-            ${c.rules.map((r, i) => ruleRowHtml(r, i)).join('') || '<span class="set-empty">Chưa có luật nào — Auto Sound Effects sẽ không điền gì</span>'}
-            <button type="button" class="set-btn" data-set-act="add-rule">+ Thêm luật</button>
+        <section class="set-sec"><h4>${_t('6 · Bảng luật ghép')}</h4>
+            ${c.rules.map((r, i) => ruleRowHtml(r, i)).join('') || `<span class="set-empty">${_t('Chưa có luật nào — Auto Sound Effects sẽ không điền gì')}</span>`}
+            <button type="button" class="set-btn" data-set-act="add-rule">${_t('+ Thêm luật')}</button>
         </section>
 
-        <section class="set-sec"><h4>7 · Số liệu</h4>
+        <section class="set-sec"><h4>${_t('7 · Số liệu')}</h4>
             <div class="set-nums">
-                ${numberRowHtml('Âm lượng SFX', 'sfxDb', c.levels.sfxDb, -60, 20, 0.5, 'dB')}
-                ${numberRowHtml('Âm lượng nhạc nền', 'musicDb', c.levels.musicDb, -60, 20, 0.5, 'dB')}
-                ${numberRowHtml('Cuối nhạc giảm xuống', 'musicFadeToDb', c.levels.musicFadeToDb, -60, 20, 0.5, 'dB')}
-                ${numberRowHtml('Thời gian giảm', 'musicFadeSec', c.levels.musicFadeSec, 0.1, 10, 0.1, 's')}
-                ${numberRowHtml('Đặt sớm hơn mốc (hiệu ứng động & Icon)', 'animLeadSec', c.levels.animLeadSec, 0, 3, 0.05, 's')}
+                ${numberRowHtml(_t('Âm lượng SFX'), 'sfxDb', c.levels.sfxDb, -60, 20, 0.5, 'dB')}
+                ${numberRowHtml(_t('Âm lượng nhạc nền'), 'musicDb', c.levels.musicDb, -60, 20, 0.5, 'dB')}
+                ${numberRowHtml(_t('Cuối nhạc giảm xuống'), 'musicFadeToDb', c.levels.musicFadeToDb, -60, 20, 0.5, 'dB')}
+                ${numberRowHtml(_t('Thời gian giảm'), 'musicFadeSec', c.levels.musicFadeSec, 0.1, 10, 0.1, 's')}
+                ${numberRowHtml(_t('Đặt sớm hơn mốc (hiệu ứng động & Icon)'), 'animLeadSec', c.levels.animLeadSec, 0, 3, 0.05, 's')}
             </div>
-            <p class="set-note">"Đặt sớm hơn mốc" đẩy đỉnh sóng của tiếng lên trước điểm kết thúc hiệu ứng vào — nghe ăn khớp hơn là trùng khít. KHÔNG áp cho điểm chuyển cảnh và nhóm canh theo đầu block (tiếng gõ phím).</p>
+            <p class="set-note">${_t('"Đặt sớm hơn mốc" đẩy đỉnh sóng của tiếng lên trước điểm kết thúc hiệu ứng vào — nghe ăn khớp hơn là trùng khít. KHÔNG áp cho điểm chuyển cảnh và nhóm canh theo đầu block (tiếng gõ phím).')}</p>
         </section>`;
     }
 
@@ -348,7 +349,7 @@
             const tip = used.length ? used.map((id) => S.commandById(id).label).join(' · ') : '';
             return `<button type="button" class="${cls.join(' ')}" style="flex:${size}" data-set-act="kb-key" data-code="${code}"${tip ? ` title="${esc(tip)}"` : ''}>${esc(label)}</button>`;
         }).join('')}</div>`).join('');
-        return `<div class="kb-mods">${modBtns}<span class="kb-hint">Bấm phím bổ trợ để xem lớp phím tắt · bấm một phím để lọc danh sách</span></div>
+        return `<div class="kb-mods">${modBtns}<span class="kb-hint">${_t('Bấm phím bổ trợ để xem lớp phím tắt · bấm một phím để lọc danh sách')}</span></div>
             <div class="kb-board">${rows}</div>`;
     }
 
@@ -360,7 +361,7 @@
         return `<div class="sc-row${clash ? ' is-clash' : ''}">
             <span class="sc-name">${esc(cmd.label)}</span>
             <button type="button" class="sc-key${capturing ? ' is-capturing' : ''}" data-set-act="sc-capture" data-cmd="${cmd.id}">
-                ${capturing ? 'Nhấn tổ hợp phím…' : (esc(S.formatCombo(combo)) || '<span class="sc-none">chưa gán</span>')}
+                ${capturing ? _t('Nhấn tổ hợp phím…') : (esc(S.formatCombo(combo)) || `<span class="sc-none">${_t('chưa gán')}</span>`)}
             </button>
         </div>`;
     }
@@ -385,25 +386,27 @@
             .map((k) => `<div class="sc-row is-fixed"><span class="sc-name">${esc(k.label)}</span><span class="sc-key is-fixed">${esc(k.display)}</span></div>`)
             .join('');
         const conflict = pendingConflict ? `<div class="sc-conflict" role="alert">
-            <span><b>${esc(S.formatCombo(pendingConflict.combo))}</b> đang được dùng cho
-            «${esc(pendingConflict.holders.map((id) => S.commandById(id).label).join('», «'))}».
-            Gán cho «${esc(S.commandById(pendingConflict.id).label)}» sẽ gỡ khỏi lệnh kia.</span>
-            <button type="button" class="set-btn" data-set-act="sc-conflict-ok">Gán đè</button>
-            <button type="button" class="set-btn" data-set-act="sc-conflict-cancel">Huỷ</button>
+            <span>${_t('<b>{combo}</b> đang được dùng cho «{holders}». Gán cho «{command}» sẽ gỡ khỏi lệnh kia.', {
+                combo: esc(S.formatCombo(pendingConflict.combo)),
+                holders: esc(pendingConflict.holders.map((id) => S.commandById(id).label).join('», «')),
+                command: esc(S.commandById(pendingConflict.id).label),
+            })}</span>
+            <button type="button" class="set-btn" data-set-act="sc-conflict-ok">${_t('Gán đè')}</button>
+            <button type="button" class="set-btn" data-set-act="sc-conflict-cancel">${_t('Huỷ')}</button>
         </div>` : '';
         return `
         <div class="sc-head">
-            <span class="sc-preset">Bộ phím: <b>${custom ? 'Tuỳ chỉnh' : 'Mặc định CrabbyCut'}</b></span>
-            <button type="button" class="set-btn" data-set-act="sc-reset">Khôi phục mặc định</button>
+            <span class="sc-preset">${_t('Bộ phím: <b>{name}</b>', { name: custom ? _t('Tuỳ chỉnh') : _t('Mặc định CrabbyCut') })}</span>
+            <button type="button" class="set-btn" data-set-act="sc-reset">${_t('Khôi phục mặc định')}</button>
         </div>
         ${keyboardHtml()}
         <div class="sc-search">
-            <input type="text" placeholder="Tìm lệnh hoặc phím…" value="${esc(keyFilter)}" data-set-act="sc-search">
-            ${pickedKeyCode ? `<button type="button" class="set-btn" data-set-act="sc-clear-pick">Bỏ lọc phím ${esc(S.keyLabel(pickedKeyCode))}</button>` : ''}
+            <input type="text" placeholder="${_t('Tìm lệnh hoặc phím…')}" value="${esc(keyFilter)}" data-set-act="sc-search">
+            ${pickedKeyCode ? `<button type="button" class="set-btn" data-set-act="sc-clear-pick">${_t('Bỏ lọc phím {key}', { key: esc(S.keyLabel(pickedKeyCode)) })}</button>` : ''}
         </div>
         <div class="sc-list">
-            ${groups || '<span class="set-empty">Không có lệnh nào khớp</span>'}
-            ${fixed ? `<div class="sc-group"><h5>Phím cố định (không đổi được)</h5>${fixed}</div>` : ''}
+            ${groups || `<span class="set-empty">${_t('Không có lệnh nào khớp')}</span>`}
+            ${fixed ? `<div class="sc-group"><h5>${_t('Phím cố định (không đổi được)')}</h5>${fixed}</div>` : ''}
         </div>
         ${conflict}`;
     }
@@ -417,74 +420,125 @@
 
     function generalPaneHtml() {
         const g = draft.general;
-        return `<p class="set-intro">Các thiết lập chung của ứng dụng.</p>
-        <section class="set-sec"><h4>Chỉnh sửa</h4>
-            <div class="set-nums">${numberRowHtml('Số bước Hoàn tác', 'undoSteps', g.undoSteps, 5, 100, 1, 'bước', 'undoSteps')}</div>
-            <p class="set-note">Càng nhiều bước càng tốn bộ nhớ: mỗi bước là một ảnh chụp toàn bộ timeline.</p>
+        // Tên ngôn ngữ luôn viết bằng CHÍNH ngôn ngữ đó (người lỡ chọn nhầm vẫn tìm được đường về).
+        const I = window.I18n;
+        const langOptions = [{ value: 'auto', label: _t('Theo hệ thống') }]
+            .concat((I ? I.SUPPORTED : ['vi']).map((code) => ({ value: code, label: I ? I.NATIVE_NAMES[code] : code })));
+        return `<p class="set-intro">${_t('Các thiết lập chung của ứng dụng.')}</p>
+        <section class="set-sec"><h4>${_t('Ngôn ngữ')}</h4>
+            <div class="set-row2">
+                <label>${_t('Ngôn ngữ giao diện')}
+                    ${selectHtml('data-set-act="language"', langOptions, g.language)}
+                </label>
+            </div>
+            <p class="set-note">${_t('Đổi ngôn ngữ cần tải lại giao diện. Dự án đang mở sẽ được mở lại sau khi tải.')}</p>
         </section>
-        <section class="set-sec"><h4>Timeline</h4>
-            ${checkboxRowHtml('Bật bắt dính playhead khi mở ứng dụng', 'snapDefault', g.snapDefault,
-                'Chỉ là trạng thái BAN ĐẦU — nút bắt dính trên thanh công cụ vẫn tắt/bật được bất cứ lúc nào.')}
+        <section class="set-sec"><h4>${_t('Chỉnh sửa')}</h4>
+            <div class="set-nums">${numberRowHtml(_t('Số bước Hoàn tác'), 'undoSteps', g.undoSteps, 5, 100, 1, _t('bước'), 'undoSteps')}</div>
+            <p class="set-note">${_t('Càng nhiều bước càng tốn bộ nhớ: mỗi bước là một ảnh chụp toàn bộ timeline.')}</p>
         </section>
-        <section class="set-sec"><h4>Nâng cao</h4>
-            ${checkboxRowHtml('Chế độ Nhà phát triển', 'devMode', g.devMode, 'Hiện overlay khung xương nhận diện ở bước Editing.')}
+        <section class="set-sec"><h4>${_t('Timeline')}</h4>
+            ${checkboxRowHtml(_t('Bật bắt dính playhead khi mở ứng dụng'), 'snapDefault', g.snapDefault,
+                _t('Chỉ là trạng thái BAN ĐẦU — nút bắt dính trên thanh công cụ vẫn tắt/bật được bất cứ lúc nào.'))}
+        </section>
+        <section class="set-sec"><h4>${_t('Nâng cao')}</h4>
+            ${checkboxRowHtml(_t('Chế độ Nhà phát triển'), 'devMode', g.devMode, _t('Hiện overlay khung xương nhận diện ở bước Editing.'))}
         </section>`;
     }
 
     function autosavePaneHtml() {
         const a = draft.autoSave;
-        return `<p class="set-intro">Auto save ghi <b>bản sao</b> có dấu thời gian vào thư mục <b>CrabbyCut Auto-Save</b> cạnh file dự án — <b>không bao giờ ghi đè</b> file .crab của bạn. Dự án chưa từng Lưu thì bản sao nằm trong thư mục dữ liệu của ứng dụng. Mở lại bằng Menu → “Mở bản lưu tự động…”.</p>
+        return `<p class="set-intro">${_t('Tự động lưu ghi <b>bản sao</b> có dấu thời gian vào thư mục <b>CrabbyCut Auto-Save</b> cạnh file dự án — <b>không bao giờ ghi đè</b> file .crab của bạn. Dự án chưa từng Lưu thì bản sao nằm trong thư mục dữ liệu của ứng dụng. Mở lại bằng Menu → “Mở bản lưu tự động…”.')}</p>
         <section class="set-sec">
-            ${checkboxRowHtml('Bật auto save', 'asEnabled', a.enabled)}
+            ${checkboxRowHtml(_t('Bật tự động lưu'), 'asEnabled', a.enabled)}
             <div class="set-nums">
-                ${numberRowHtml('Lưu mỗi', 'intervalMin', a.intervalMin, 1, 60, 1, 'phút', 'intervalMin')}
-                ${numberRowHtml('Giữ tối đa', 'keepVersions', a.keepVersions, 1, 50, 1, 'bản', 'keepVersions')}
+                ${numberRowHtml(_t('Lưu mỗi'), 'intervalMin', a.intervalMin, 1, 60, 1, _t('phút'), 'intervalMin')}
+                ${numberRowHtml(_t('Giữ tối đa'), 'keepVersions', a.keepVersions, 1, 50, 1, _t('bản'), 'keepVersions')}
             </div>
-            <p class="set-note">Quá số bản đặt ở đây thì bản cũ nhất bị xoá. Lượt lưu được hoãn lại khi đang phát preview hoặc backend đang xử lý, để không làm khựng hình.</p>
+            <p class="set-note">${_t('Quá số bản đặt ở đây thì bản cũ nhất bị xoá. Lượt lưu được hoãn lại khi đang phát xem trước hoặc backend đang xử lý, để không làm khựng hình.')}</p>
         </section>
-        <section class="set-sec"><h4>Khi thoát</h4>
-            ${checkboxRowHtml('Hỏi trước khi đóng nếu còn thay đổi chưa lưu', 'warnOnExit', a.warnOnExit)}
+        <section class="set-sec"><h4>${_t('Khi thoát')}</h4>
+            ${checkboxRowHtml(_t('Hỏi trước khi đóng nếu còn thay đổi chưa lưu'), 'warnOnExit', a.warnOnExit)}
         </section>`;
     }
 
     function previewPaneHtml() {
         const p = draft.preview;
-        return `<p class="set-intro">Ảnh hưởng tới khung xem trước, không ảnh hưởng bản xuất.</p>
-        <section class="set-sec"><h4>Chất lượng</h4>
+        return `<p class="set-intro">${_t('Ảnh hưởng tới khung xem trước, không ảnh hưởng bản xuất.')}</p>
+        <section class="set-sec"><h4>${_t('Chất lượng')}</h4>
             <div class="set-row2">
-                <label>Chất lượng khi mở ứng dụng
+                <label>${_t('Chất lượng khi mở ứng dụng')}
                     ${selectHtml('data-set-act="pvQuality"', [
-                        { value: 'proxy', label: 'Bản proxy (nhẹ, mượt)' },
-                        { value: 'original', label: 'Nguồn gốc (nét, nặng)' },
+                        { value: 'proxy', label: _t('Bản proxy (nhẹ, mượt)') },
+                        { value: 'original', label: _t('Nguồn gốc (nét, nặng)') },
                     ], p.defaultQuality)}
                 </label>
-                <label>Chất lượng vùng chuyển cảnh
+                <label>${_t('Chất lượng vùng chuyển cảnh')}
                     ${selectHtml('data-set-act="pvTransition"', [
-                        { value: 'auto', label: 'Tự động (hạ khi đang phát)' },
-                        { value: 'sharp', label: 'Luôn nét' },
+                        { value: 'auto', label: _t('Tự động (hạ khi đang phát)') },
+                        { value: 'sharp', label: _t('Luôn nét') },
                     ], p.transitionQuality)}
                 </label>
             </div>
-            <p class="set-note">“Tự động” dựng vùng chuyển cảnh ở độ phân giải khung xem trước khi đang phát rồi trả lại độ nét khi dừng. Chọn “Luôn nét” thì hiệu ứng <b>Xoắn</b> có thể giật, vì nó phải nắn từng điểm ảnh.</p>
+            <p class="set-note">${_t('“Tự động” dựng vùng chuyển cảnh ở độ phân giải khung xem trước khi đang phát rồi trả lại độ nét khi dừng. Chọn “Luôn nét” thì hiệu ứng <b>Xoắn</b> có thể giật, vì nó phải nắn từng điểm ảnh.')}</p>
         </section>
-        <section class="set-sec"><h4>Điều hướng</h4>
-            <div class="set-nums">${numberRowHtml('Phím ← / → nhảy', 'frameStep', p.frameStep, 1, 30, 1, 'khung', 'frameStep')}</div>
+        <section class="set-sec"><h4>${_t('Điều hướng')}</h4>
+            <div class="set-nums">${numberRowHtml(_t('Phím ← / → nhảy'), 'frameStep', p.frameStep, 1, 30, 1, _t('khung'), 'frameStep')}</div>
         </section>`;
     }
 
     function cachePaneHtml() {
-        if (!cacheUsage) return '<p class="set-intro">Đang đọc dung lượng…</p>';
+        if (!cacheUsage) return `<p class="set-intro">${_t('Đang đọc dung lượng…')}</p>`;
         const rows = cacheUsage.map((it) => `<div class="set-file">
-            <span class="set-file-name">${esc(it.label)}</span>
-            <span class="set-cache-size">${esc(it.human)} · ${it.files} tệp</span>
+            <span class="set-file-name">${esc(_t(it.label))}</span>
+            <span class="set-cache-size">${esc(it.human)} · ${_t('{n} tệp', { n: it.files })}</span>
             ${it.clearable
-                ? `<button type="button" class="set-btn" data-set-act="cache-clear" data-cache="${esc(it.id)}">Dọn</button>`
-                : '<span class="set-missing">chỉ đọc</span>'}
+                ? `<button type="button" class="set-btn" data-set-act="cache-clear" data-cache="${esc(it.id)}">${_t('Dọn')}</button>`
+                : `<span class="set-missing">${_t('chỉ đọc')}</span>`}
         </div>`).join('');
-        return `<p class="set-intro">Dữ liệu tạm sinh ra trong lúc làm việc.</p>
+        return `<p class="set-intro">${_t('Dữ liệu tạm sinh ra trong lúc làm việc.')}</p>
         <section class="set-sec"><div class="set-card"><div class="set-files">${rows}</div></div>
-            <p class="set-note"><b>Sóng âm</b> và <b>kết quả bóc băng</b> dọn được vì sinh lại được (chỉ mất thời gian chờ lần sau). <b>Dữ liệu dự án đang mở</b> chỉ đọc — đó là nguồn đã nhập, bản proxy và ảnh đã dựng của chính dự án bạn đang làm; xoá tay là mất dự án.</p>
+            <p class="set-note">${_t('<b>Sóng âm</b> và <b>kết quả bóc băng</b> dọn được vì sinh lại được (chỉ mất thời gian chờ lần sau). <b>Dữ liệu dự án đang mở</b> chỉ đọc — đó là nguồn đã nhập, bản proxy và ảnh đã dựng của chính dự án bạn đang làm; xoá tay là mất dự án.')}</p>
         </section>`;
+    }
+
+    /* ================= VỀ CRABBYCUT ================= */
+    /* Mọi con số / tên ở đây đến từ package.json qua window.AppInfo (xem static/js/app-info.js):
+     * nâng version hay đổi giấy phép ở package.json là mục này tự đúng, không có chỗ ghi cứng
+     * thứ hai để quên sửa. Chỉ câu về ngoại lệ NVIDIA là chữ cố định — nó là nội dung của
+     * LICENSE-EXCEPTION.md, package.json không có trường nào mang nó. */
+    function aboutPaneHtml() {
+        const info = window.AppInfo?.get?.();
+        if (!info) {
+            window.AppInfo?.load?.().then(() => { if (activeSection === 'about') render(); });
+            return `<p class="set-intro">${_t('Đang đọc thông tin phiên bản…')}</p>`;
+        }
+        const version = window.AppInfo.versionLabel(info.version);
+        const site = String(info.homepage || '').replace(/^https?:\/\//, '');
+        const row = (label, value) => (value ? `<dt>${esc(label)}</dt><dd>${value}</dd>` : '');
+        const runtime = info.electron
+            ? `Electron ${esc(info.electron)} · Chromium ${esc(String(info.chrome || '').split('.')[0])} · ${esc(info.arch || '')}`
+            : '';
+        const canUpdate = typeof window.desktopEnv?.checkForUpdates === 'function';
+        return `<div class="set-about-head">
+            <svg class="app-logo" viewBox="0 0 876.8 229.5" role="img" aria-label="CrabbyCut"><use href="#logo-crabbycut"/></svg>
+            <span class="set-about-ver">${esc(version)}</span>
+        </div>
+        <p class="set-intro">${_t('Ứng dụng dựng video tự động theo kịch bản.')}</p>
+        <section class="set-sec"><div class="set-card"><dl class="set-kv">
+            ${row(_t('Phiên bản'), esc(version))}
+            ${row(_t('Tác giả'), esc(info.author))}
+            ${row(_t('Giấy phép'), info.license ? `${esc(info.license)} <span class="set-kv-sub">${_t('· kèm ngoại lệ cho thư viện NVIDIA CUDA')}</span>` : '')}
+            ${row(_t('Mã nguồn'), esc(site))}
+            ${row(_t('Nền tảng'), runtime)}
+        </dl></div></section>
+        <div class="set-about-actions">
+            ${canUpdate ? `<button type="button" class="set-btn" data-set-act="about-update">${_t('Kiểm tra bản mới')}</button>` : ''}
+            <button type="button" class="set-btn" data-set-act="about-link" data-link="home">${_t('Trang dự án')}</button>
+            <button type="button" class="set-btn" data-set-act="about-link" data-link="issues">${_t('Báo lỗi')}</button>
+            <button type="button" class="set-btn" data-set-act="about-link" data-link="license">${_t('Giấy phép')}</button>
+        </div>
+        <p class="set-note">${_t('Phần mềm tự do, cung cấp nguyên trạng và không kèm bảo hành. Danh sách thành phần bên thứ ba ở tệp THIRD-PARTY-NOTICES.md đi kèm mã nguồn.')}</p>`;
     }
 
     function render() {
@@ -494,19 +548,20 @@
         // đang mở chỉ được đánh dấu bằng màu nền.
         const nav = SECTIONS.map((s) => `<button type="button" class="set-nav-item${s.id === activeSection ? ' is-active' : ''}"`
             + ` role="tab" aria-selected="${s.id === activeSection}" aria-controls="settingsPane"`
-            + `${s.ready ? '' : ' disabled title="Chưa có nội dung"'} data-set-nav="${s.id}">${esc(s.label)}</button>`).join('');
+            + `${s.ready ? '' : ` disabled title="${_t('Chưa có nội dung')}"`} data-set-nav="${s.id}">${esc(s.label)}</button>`).join('');
         const PANES = {
             general: generalPaneHtml,
             shortcuts: shortcutsPaneHtml,
             autosave: autosavePaneHtml,
             preview: previewPaneHtml,
             cache: cachePaneHtml,
+            about: aboutPaneHtml,
             [PANE_ASE]: asePaneHtml,
         };
         const pane = PANES[activeSection]
             ? PANES[activeSection]()
-            : '<p class="set-intro">Mục này chưa có nội dung.</p>';
-        host.innerHTML = `<div class="set-nav" role="tablist" aria-orientation="vertical" aria-label="Mục cài đặt">${nav}</div>`
+            : `<p class="set-intro">${_t('Mục này chưa có nội dung.')}</p>`;
+        host.innerHTML = `<div class="set-nav" role="tablist" aria-orientation="vertical" aria-label="${_t('Mục cài đặt')}">${nav}</div>`
             + `<div class="set-pane" id="settingsPane" role="tabpanel" tabindex="0">${pane}</div>`;
     }
 
@@ -530,13 +585,13 @@
 
     const ACTIONS = {
         'add-anim-group': () => {
-            cfg().animGroups.push({ id: nextGroupId(cfg().animGroups, 'a'), name: 'Nhóm mới', effects: [] });
+            cfg().animGroups.push({ id: nextGroupId(cfg().animGroups, 'a'), name: _t('Nhóm mới'), effects: [] });
         },
         'add-transition-group': () => {
-            cfg().transGroups.push({ id: nextGroupId(cfg().transGroups, 't'), name: 'Nhóm mới', transitions: [] });
+            cfg().transGroups.push({ id: nextGroupId(cfg().transGroups, 't'), name: _t('Nhóm mới'), transitions: [] });
         },
         'add-sfx-group': () => {
-            cfg().sfxGroups.push({ id: nextGroupId(cfg().sfxGroups, 'g'), name: 'Nhóm mới', files: [], align: 'peak', fit: 'full' });
+            cfg().sfxGroups.push({ id: nextGroupId(cfg().sfxGroups, 'g'), name: _t('Nhóm mới'), files: [], align: 'peak', fit: 'full' });
         },
         'add-anim-member': (el) => {
             const value = pickedValue('anim', el.dataset.group);
@@ -616,7 +671,7 @@
             pendingConflict = null;
         },
         'sc-reset': () => {
-            if (!window.confirm('Khôi phục toàn bộ phím tắt về mặc định?')) return false;
+            if (!window.confirm(_t('Khôi phục toàn bộ phím tắt về mặc định?'))) return false;
             keymapDraft = window.Shortcuts.defaultKeymap();
             capturingId = null;
             pendingConflict = null;
@@ -634,10 +689,29 @@
         'cache-clear': (el) => {
             const id = el.dataset.cache;
             const item = (cacheUsage || []).find((x) => x.id === id);
-            if (!item || !window.confirm(`Dọn "${item.label}" (${item.human})?\n\nDữ liệu này sẽ được sinh lại khi cần.`)) return false;
+            if (!item || !window.confirm(_t('Dọn "{name}" ({size})?\n\nDữ liệu này sẽ được sinh lại khi cần.', { name: _t(item.label), size: item.human }))) return false;
             fetch(`${API_BASE}/cache/clear`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }),
             }).then(() => loadCacheUsage()).catch((err) => alert(err.message || String(err)));
+            return false;
+        },
+
+        /* ---- Về CrabbyCut ---- */
+        'about-update': () => {
+            window.desktopEnv?.checkForUpdates?.().catch((err) => alert(err.message || String(err)));
+            return false;
+        },
+        /* Desktop: gửi KHOÁ cho main (main tự dựng URL — xem `open-project-link` ở main.js).
+           Bản web: mở tab mới từ homepage của package.json. */
+        'about-link': (el) => {
+            const key = el.dataset.link;
+            if (window.desktopEnv?.openProjectLink) {
+                window.desktopEnv.openProjectLink(key);
+                return false;
+            }
+            const home = String(window.AppInfo?.get?.()?.homepage || '');
+            const url = { home, issues: home && `${home}/issues`, license: home && `${home}/blob/main/LICENSE` }[key];
+            if (url && /^https:\/\//.test(url)) window.open(url, '_blank', 'noopener');
             return false;
         },
     };
@@ -679,6 +753,7 @@
         'undoSteps': (el) => { draft.general.undoSteps = Number(el.value); return false; },
         'snapDefault': (el) => { draft.general.snapDefault = el.checked; return false; },
         'devMode': (el) => { draft.general.devMode = el.checked; return false; },
+        'language': (el) => { draft.general.language = el.value; return false; },
         'asEnabled': (el) => { draft.autoSave.enabled = el.checked; return false; },
         'intervalMin': (el) => { draft.autoSave.intervalMin = Number(el.value); return false; },
         'keepVersions': (el) => { draft.autoSave.keepVersions = Number(el.value); return false; },
@@ -778,15 +853,25 @@
                 // Keymap giữ dạng ĐẦY ĐỦ trong lúc sửa (dễ tra), nhưng chỉ GHI phần khác
                 // mặc định — xem chú thích ở app-settings.js.
                 if (window.Shortcuts && keymapDraft) draft.shortcuts = window.Shortcuts.keymapOverrides(keymapDraft);
+                // So với ngôn ngữ ĐANG HIỆN (đã phân giải 'auto'), không so với giá trị cũ trong
+                // cài đặt: 'auto' -> 'en' trên Windows tiếng Anh là không đổi gì, khỏi tải lại.
+                const I = window.I18n;
+                const nextLocale = I ? I.resolve(draft.general.language,
+                    window.__CRAB_I18N__?.systemLocale || navigator.language) : null;
+                const languageChanged = !!I && nextLocale !== I.getLocale();
                 await AppSettings.save(draft);
                 close();
+                if (languageChanged && typeof window.reloadForLanguageChange === 'function'
+                    && window.confirm(_t('Đã lưu. Tải lại giao diện ngay để áp dụng ngôn ngữ mới?'))) {
+                    await window.reloadForLanguageChange();
+                }
             } catch (err) {
                 alert(err.message || String(err));
             }
         });
         document.getElementById('btnSettingsCancel')?.addEventListener('click', () => close());
         document.getElementById('btnSettingsReset')?.addEventListener('click', async () => {
-            if (!window.confirm('Khôi phục toàn bộ cài đặt về mặc định?')) return;
+            if (!window.confirm(_t('Khôi phục toàn bộ cài đặt về mặc định?'))) return;
             try {
                 const next = await AppSettings.reset();
                 draft = JSON.parse(JSON.stringify(next));

@@ -17,12 +17,34 @@
 'use strict';
 const http = require('http');
 const { app, dialog, shell } = require('electron');
+const { _t } = require('./i18n-main');
 
 let autoUpdater = null;
 try {
   ({ autoUpdater } = require('electron-updater'));
 } catch (error) {
   console.error('[updater] không nạp được electron-updater:', error.message);
+}
+
+/* TRANG RELEASES — đọc từ ĐÚNG cấu hình mà electron-builder dùng để phát hành
+ * (`build.publish[0]`), chứ không viết tay.
+ *
+ * LỖI ĐÃ TRẢ GIÁ: repo đổi tên `CrabbyCut_Windows` -> `CrabbyCut` ở bản 1.1.11,
+ * package.json được sửa nhưng URL viết tay ở đây thì không — nút "Xem có gì mới"
+ * dẫn tới một cái tên không còn tồn tại. Nó vẫn mở được nhờ GitHub chuyển hướng tên
+ * cũ, nên lỗi này KHÔNG bao giờ tự lộ ra; lần đổi tên sau là gãy hẳn.
+ *
+ * Hỏng thì lùi về trang chủ: thà mở trang gốc còn hơn ném lỗi giữa hộp thoại. */
+function releasesTagUrl(version) {
+  let owner = 'tamphamdesigner92-tb';
+  let repo = 'CrabbyCut';
+  try {
+    const publish = require('../package.json').build?.publish;
+    const github = (Array.isArray(publish) ? publish : [publish]).find((p) => p?.provider === 'github');
+    if (github?.owner) owner = github.owner;
+    if (github?.repo) repo = github.repo;
+  } catch (_) { /* giữ giá trị dự phòng */ }
+  return `https://github.com/${owner}/${repo}/releases/tag/v${version}`;
 }
 
 let checking = false;
@@ -76,11 +98,11 @@ async function promptInstall(win, info, backendOrigin) {
   if (await isBackendBusy(backendOrigin)) {
     await dialog.showMessageBox(win, {
       type: 'info',
-      title: 'Đang xuất video',
-      message: `Bản ${info.version} đã tải xong.`,
-      detail: 'CrabbyCut đang xuất video nên chưa thể khởi động lại.\n\n'
-        + 'Bản cập nhật sẽ được cài ở lần bạn mở lại ứng dụng.',
-      buttons: ['Đã hiểu'],
+      title: _t('Đang xuất video'),
+      message: _t('Bản {version} đã tải xong.', { version: info.version }),
+      detail: _t('CrabbyCut đang xuất video nên chưa thể khởi động lại.') + '\n\n'
+        + _t('Bản cập nhật sẽ được cài ở lần bạn mở lại ứng dụng.'),
+      buttons: [_t('Đã hiểu')],
     });
     /* Bật lại cờ cài-khi-thoát CHỈ ở nhánh này: người dùng đã biết có bản mới đang chờ,
      * nên cài lúc họ chủ động thoát không còn là chuyện bất ngờ. */
@@ -90,11 +112,11 @@ async function promptInstall(win, info, backendOrigin) {
 
   const { response } = await dialog.showMessageBox(win, {
     type: 'question',
-    title: 'Bản cập nhật đã sẵn sàng',
-    message: `CrabbyCut ${info.version} đã tải xong.`,
-    detail: 'Cài đặt bây giờ? Ứng dụng sẽ đóng lại và tự mở lại sau khi cài xong.\n\n'
-      + 'Dự án đang mở sẽ được hỏi lưu trước khi đóng.',
-    buttons: ['Cài đặt và khởi động lại', 'Để lần sau'],
+    title: _t('Bản cập nhật đã sẵn sàng'),
+    message: _t('CrabbyCut {version} đã tải xong.', { version: info.version }),
+    detail: _t('Cài đặt bây giờ? Ứng dụng sẽ đóng lại và tự mở lại sau khi cài xong.') + '\n\n'
+      + _t('Dự án đang mở sẽ được hỏi lưu trước khi đóng.'),
+    buttons: [_t('Cài đặt và khởi động lại'), _t('Để lần sau')],
     defaultId: 0,
     cancelId: 1,
   });
@@ -115,20 +137,18 @@ async function promptDownload(win, info, backendOrigin) {
   const size = info?.files?.[0]?.size;
   const { response } = await dialog.showMessageBox(win, {
     type: 'question',
-    title: 'Có bản CrabbyCut mới',
-    message: `CrabbyCut ${info.version} đã có.`,
-    detail: `Bạn đang dùng ${app.getVersion()}.`
-      + (size ? `\nDung lượng tải về: ${formatBytes(size)} (chỉ tải phần khác biệt nếu có thể).` : '')
-      + '\n\nTải về ngay? Bạn vẫn dùng ứng dụng bình thường trong lúc tải.',
-    buttons: ['Tải về', 'Để sau', 'Xem có gì mới'],
+    title: _t('Có bản CrabbyCut mới'),
+    message: _t('CrabbyCut {version} đã có.', { version: info.version }),
+    detail: _t('Bạn đang dùng {version}.', { version: app.getVersion() })
+      + (size ? '\n' + _t('Dung lượng tải về: {size} (chỉ tải phần khác biệt nếu có thể).', { size: formatBytes(size) }) : '')
+      + '\n\n' + _t('Tải về ngay? Bạn vẫn dùng ứng dụng bình thường trong lúc tải.'),
+    buttons: [_t('Tải về'), _t('Để sau'), _t('Xem có gì mới')],
     defaultId: 0,
     cancelId: 1,
   });
 
   if (response === 2) {
-    await shell.openExternal(
-      `https://github.com/tamphamdesigner92-tb/CrabbyCut_Windows/releases/tag/v${info.version}`,
-    );
+    await shell.openExternal(releasesTagUrl(info.version));
     return;
   }
   if (response !== 0) return;
@@ -142,11 +162,11 @@ async function promptDownload(win, info, backendOrigin) {
     log(`tải thất bại: ${error?.message || error}`);
     await dialog.showMessageBox(win, {
       type: 'error',
-      title: 'Không tải được bản cập nhật',
-      message: 'Không tải được bản cập nhật.',
+      title: _t('Không tải được bản cập nhật'),
+      message: _t('Không tải được bản cập nhật.'),
       detail: `${error?.message || error}\n\n`
-        + 'Kiểm tra kết nối mạng rồi thử lại, hoặc tải thủ công ở trang Releases.',
-      buttons: ['Đã hiểu'],
+        + _t('Kiểm tra kết nối mạng rồi thử lại, hoặc tải thủ công ở trang Releases.'),
+      buttons: [_t('Đã hiểu')],
     });
   }
 }
@@ -168,9 +188,9 @@ async function checkForUpdates(win, backendOrigin, { silent = true } = {}) {
       if (!silent) {
         await dialog.showMessageBox(win, {
           type: 'info',
-          title: 'Không có bản mới',
-          message: `Bạn đang dùng bản mới nhất (${app.getVersion()}).`,
-          buttons: ['Đóng'],
+          title: _t('Không có bản mới'),
+          message: _t('Bạn đang dùng bản mới nhất ({version}).', { version: app.getVersion() }),
+          buttons: [_t('Đóng')],
         });
       }
       return;
@@ -183,10 +203,10 @@ async function checkForUpdates(win, backendOrigin, { silent = true } = {}) {
     if (!silent) {
       await dialog.showMessageBox(win, {
         type: 'error',
-        title: 'Không kiểm tra được bản cập nhật',
-        message: 'Không kiểm tra được bản cập nhật.',
+        title: _t('Không kiểm tra được bản cập nhật'),
+        message: _t('Không kiểm tra được bản cập nhật.'),
         detail: String(error?.message || error),
-        buttons: ['Đã hiểu'],
+        buttons: [_t('Đã hiểu')],
       });
     }
   } finally {
