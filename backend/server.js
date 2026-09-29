@@ -79,6 +79,13 @@ const COLOR_LUT_BAKE_DIR = path.join(TEMP_DIR, 'color_luts');
 // Cache landmark khuôn mặt cho Retouch (xem retouchCachePath). Đặt trong TEMP_DIR nên
 // được dọn cùng dữ liệu tạm của dự án.
 const RETOUCH_CACHE_DIR = path.join(TEMP_DIR, 'retouch_faces');
+/* XOÁ LOGO BẰNG AI: miếng vá theo từng khung (xem backend/logo-ai.js). Đặt NGOÀI temp_uploads
+ * như proxy_cache: một lượt AI tốn vài phút, asset thư viện dùng lại qua nhiều dự án không được
+ * bắt chạy lại. Khoá gồm mtime+size của nguồn nên nguồn đổi là tự ra khoá mới; khoá lâu không
+ * dùng được dọn theo hạn (logoAi.pruneCache). */
+const LOGO_AI_CACHE_DIR = process.env.CRAB_LOGO_AI_CACHE_DIR
+  ? path.resolve(process.env.CRAB_LOGO_AI_CACHE_DIR)
+  : path.join(USER_DATA_ROOT, 'logo_ai_cache');
 // Mặt nạ (ảnh xám PNG) do frontend bake cho panel Điều chỉnh, dùng ở khâu export.
 const COLOR_MASK_DIR = path.join(TEMP_DIR, 'color_masks');
 // Chỗ trống của lut3d trong chuỗi filter màu (PHẢI khớp ColorAdjust.LUT3D_SLOT). Frontend
@@ -352,6 +359,7 @@ const subtitleJobs = require('./subtitle-jobs.js');
 /* LỒNG TIẾNG (tab Âm thanh) + SỔ TẢI MODEL AI cho thanh trạng thái — xem đầu hai tệp. */
 const ttsService = require('./tts-service.js');
 const modelDownloads = require('./model-downloads.js');
+const { createLogoAi } = require('./logo-ai.js');
 /* PYTHON SIDECAR: cùng lý do — phép chọn interpreter và env UTF-8 nằm ở MỘT chỗ
  * (scripts/python_command.js), dùng chung với npm script lẫn test. Trước đây mỗi
  * chỗ tự chép một bản và mỗi bản thiếu một mảnh khác nhau. */
@@ -4611,6 +4619,32 @@ function resolveRetouchSource(raw) {
   return resolved;
 }
 
+/* Model MI-GAN nằm cạnh runtime (%LOCALAPPDATA%\CrabbyCut\models) ở CẢ HAI đường chạy: tải một
+ * lần cho mọi dự án, và chạy từ mã nguồn cũng không làm bẩn thư mục repo bằng 28 MB nhị phân. */
+function logoAiModelDir() {
+  if (process.env.CRAB_LOGO_AI_MODEL_DIR) return path.resolve(process.env.CRAB_LOGO_AI_MODEL_DIR);
+  try {
+    const RuntimePaths = require(path.join(PROJECT_ROOT, 'scripts', 'runtime_paths.js'));
+    return path.join(RuntimePaths.appDataRoot(), 'models', 'logo_ai');
+  } catch (_) {
+    return path.join(USER_DATA_ROOT, 'models', 'logo_ai');
+  }
+}
+
+const logoAi = createLogoAi({
+  cacheDir: LOGO_AI_CACHE_DIR,
+  modelDir: logoAiModelDir(),
+  scriptPath: path.join(PROJECT_ROOT, 'asr', 'logo_inpaint_sidecar.py'),
+  runSidecar: (...args) => runPythonSidecar(...args),
+  resolveSource: resolveRetouchSource,
+  tempJsonPath,
+  setStatus: (message) => setStatus(message),
+  logStatus: (message) => logStatus(message),
+  t: (text, params) => _t(text, params),
+});
+// Dọn khoá quá hạn một lần sau khi khởi động — không chặn lúc mở app, không giữ tiến trình sống.
+setTimeout(() => { logoAi.pruneCache().catch(() => {}); }, 60000).unref();
+
 function retouchCachePath(videoPath, clips, options) {
   let stamp = '';
   try {
@@ -5142,6 +5176,15 @@ function normalizeVideoMaskFields(raw) {
 const LOGO_MODES = new Set(['delogo', 'blur', 'pixelate']);
 function normalizeLogoRemovalFields(raw) {
   if (!raw || typeof raw !== 'object') return {};
+  /* CHẾ ĐỘ AI: dán miếng vá của lượt `{ key, run }` — dir/vị trí/mốc đọc từ index TRÊN ĐĨA
+   * (logoAi.exportFields), không nhận đường dẫn nào của client. Lượt không dùng được (đã bị
+   * dọn, chưa xong) -> delogo trên cùng các hình chữ nhật frontend gửi kèm: thà logo được
+   * nội suy còn hơn bản xuất lộ nguyên logo mà không báo gì. */
+  if (raw.mode === 'ai') {
+    const ai = logoAi.exportFields(raw);
+    if (ai) return ai;
+    logStatus('[logo-ai] không dùng được miếng vá AI khi xuất — rơi về delogo');
+  }
   const mode = LOGO_MODES.has(raw.mode) ? raw.mode : 'delogo';
   const toInt = (v, lo, hi) => {
     const n = Math.round(Number(v));
@@ -7003,6 +7046,41 @@ function createApp() {
     }
   });
 
+  /* XOÁ LOGO BẰNG AI (tab Retouch > Xoá logo, chế độ 'ai') — xem backend/logo-ai.js.
+   *   POST /api/logo-ai/status   body = yêu cầu của MỘT block -> done | queued | running | none
+   *   POST /api/logo-ai/process  như trên nhưng xếp job nếu chưa có
+   *   GET  /api/logo-ai/job/:id  tiến độ; POST .../cancel huỷ
+   *   GET  /api/logo-ai/patch/:key/:run/:file  miếng vá PNG cho preview
+   * Nguồn đi qua CÙNG cổng an toàn với Retouch (resolveRetouchSource). */
+  const logoAiRoute = (run) => (req, res) => {
+    try {
+      res.json({ status: 'success', ...logoAi.request(req.body, { run }) });
+    } catch (error) {
+      if (error?.status === 400) return httpError(res, 400, error);
+      recordProjectError('logo_ai', error, { endpoint: req.path });
+      httpError(res, 500, error);
+    }
+  };
+  app.post('/api/logo-ai/status', logoAiRoute(false));
+  app.post('/api/logo-ai/process', logoAiRoute(true));
+  app.get('/api/logo-ai/job/:id', (req, res) => {
+    const view = logoAi.jobStatus(req.params.id);
+    if (!view) return httpError(res, 404, _t('Không tìm thấy job xoá logo.'));
+    res.json({ status: 'success', ...view });
+  });
+  app.post('/api/logo-ai/job/:id/cancel', (req, res) => {
+    const view = logoAi.cancel(req.params.id);
+    if (!view) return httpError(res, 404, _t('Không tìm thấy job xoá logo.'));
+    res.json({ status: 'success', ...view });
+  });
+  app.get('/api/logo-ai/patch/:key/:run/:file', (req, res) => {
+    const file = logoAi.patchPath(req.params.key, req.params.run, req.params.file);
+    if (!file) return res.status(404).end();
+    // Một miếng vá không bao giờ đổi nội dung (lượt mới = thư mục run mới) -> cache lâu.
+    res.set('Cache-Control', 'private, max-age=86400, immutable');
+    res.sendFile(file);
+  });
+
   app.post('/api/pose/track', async (req, res) => {
     try {
       const sourceVideoPath = path.join(TEMP_DIR, 'temp_input.mp4');
@@ -7489,6 +7567,7 @@ if (require.main === module) {
 // một lượt render (xem tests/scripts/retouch_export_pipeline.js).
 module.exports = {
   createApp, start, normalizeColorAdjustFields, normalizeVideoMaskFields, normalizeLogoRemovalFields, normalizeEditingPayload,
+  logoAi,
   // Xuất ra để test kiểm được cổng an toàn của /api/retouch/track mà không phải chạy
   // MediaPipe: đường "cho phép" nếu kiểm qua HTTP là sẽ khởi động sidecar thật.
   resolveRetouchSource,

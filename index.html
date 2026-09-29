@@ -15953,6 +15953,10 @@
                 acc += clipSequenceDuration(c);
             });
         }
+        // XOÁ LOGO BẰNG AI: block ở chế độ AI phải có miếng vá phủ đủ khoảng TRƯỚC khi dựng
+        // payload — logoRemovalExportPx (lane chính, ngay dưới) và exportPayload (overlay) chỉ
+        // đọc trạng thái đã có. Block chạy hỏng thì rơi về delogo, EditingRuntime báo ra.
+        await window.EditingRuntime?.ensureLogoAiForExport?.();
         const concatFrameForExport = mainConcatFrameSize();
         const timelineForExport = await Promise.all(latestTimeline.map(async (clip, index) => {
             /* VÙNG ẢNH THẬT gửi kèm từng block: backend đổi nó thành `fit_scale` cho sidecar

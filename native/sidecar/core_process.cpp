@@ -762,6 +762,12 @@ struct ExportInterval {
   // "x:y:w:h:p|..." do backend dựng lại từ số đã kẹp. Rỗng = không xoá. Xem AppendLogoRemovalFilters.
   std::string logoMode;
   std::string logoRects;
+  // XOÁ LOGO BẰNG AI: thư mục một lượt của backend/logo-ai.js (r{k}.ffconcat + miếng vá PNG),
+  // vị trí miếng vá "x:y|..." (pixel stream nguồn) và PTS nguồn của khung ĐẦU lượt đó.
+  // Có dir thì thay cho logoMode/logoRects. Xem AppendLogoAiFilters.
+  std::string logoAiDir;
+  std::string logoAiRects;
+  double logoAiT0 = 0.0;
   // KEYFRAME thông số màu: biểu thức theo thời gian cho `eq` (token LOCALT). Có giá trị
   // thì chuỗi adjustFilters KHÔNG chứa eq nữa — xem AppendColorAdjustEq.
   std::string adjEqContrastExpr;
@@ -864,6 +870,12 @@ struct ExportOverlay {
   // "x:y:w:h:p|..." do backend dựng lại từ số đã kẹp. Rỗng = không xoá. Xem AppendLogoRemovalFilters.
   std::string logoMode;
   std::string logoRects;
+  // XOÁ LOGO BẰNG AI: thư mục một lượt của backend/logo-ai.js (r{k}.ffconcat + miếng vá PNG),
+  // vị trí miếng vá "x:y|..." (pixel stream nguồn) và PTS nguồn của khung ĐẦU lượt đó.
+  // Có dir thì thay cho logoMode/logoRects. Xem AppendLogoAiFilters.
+  std::string logoAiDir;
+  std::string logoAiRects;
+  double logoAiT0 = 0.0;
   std::string adjEqContrastExpr;
   std::string adjEqBrightnessExpr;
   std::string adjEqSaturationExpr;
@@ -1792,6 +1804,9 @@ bool ReadExportPayload(
     item.videoMaskPath = ExtractJsonStringField(objects[i], "video_mask_path", "");
     item.logoMode = ExtractJsonStringField(objects[i], "logo_mode", "");
     item.logoRects = ExtractJsonStringField(objects[i], "logo_rects", "");
+    item.logoAiDir = ExtractJsonStringField(objects[i], "logo_ai_dir", "");
+    item.logoAiRects = ExtractJsonStringField(objects[i], "logo_ai_rects", "");
+    item.logoAiT0 = std::max(0.0, ExtractDoubleFieldOr(objects[i], "logo_ai_t0", 0.0));
     item.adjEqContrastExpr = ExtractJsonStringField(objects[i], "adj_eq_contrast_expr", "");
     item.adjEqBrightnessExpr = ExtractJsonStringField(objects[i], "adj_eq_brightness_expr", "");
     item.adjEqSaturationExpr = ExtractJsonStringField(objects[i], "adj_eq_saturation_expr", "");
@@ -1871,6 +1886,9 @@ bool ReadExportPayload(
       overlay.videoMaskPath = ExtractJsonStringField(overlayObjects[i], "video_mask_path", "");
       overlay.logoMode = ExtractJsonStringField(overlayObjects[i], "logo_mode", "");
       overlay.logoRects = ExtractJsonStringField(overlayObjects[i], "logo_rects", "");
+      overlay.logoAiDir = ExtractJsonStringField(overlayObjects[i], "logo_ai_dir", "");
+      overlay.logoAiRects = ExtractJsonStringField(overlayObjects[i], "logo_ai_rects", "");
+      overlay.logoAiT0 = std::max(0.0, ExtractDoubleFieldOr(overlayObjects[i], "logo_ai_t0", 0.0));
       overlay.adjEqContrastExpr = ExtractJsonStringField(overlayObjects[i], "adj_eq_contrast_expr", "");
       overlay.adjEqBrightnessExpr = ExtractJsonStringField(overlayObjects[i], "adj_eq_brightness_expr", "");
       overlay.adjEqSaturationExpr = ExtractJsonStringField(overlayObjects[i], "adj_eq_saturation_expr", "");
@@ -2362,6 +2380,45 @@ void AppendLogoRemovalFilters(std::ofstream& script, const std::string& mode,
   }
 }
 
+/* XOÁ LOGO BẰNG AI: dán các miếng vá đã vẽ sẵn (asr/logo_inpaint_sidecar.py) lên luồng nguồn.
+ *
+ * Mỗi vùng là MỘT chuỗi PNG theo đúng PTS của từng khung nguồn, đóng gói bằng `r{k}.ffconcat`
+ * (concat demuxer: mỗi ảnh hiện đúng tới khung sau, nguồn VFR vẫn đúng). Nạp bằng `movie=`
+ * như mặt nạ (xem AppendVideoMaskFilter) để khỏi đánh số lại input của overlay.
+ *
+ * KHỚP TỪNG KHUNG — lý do có tham số `timing`: concat ra PTS bắt đầu từ 0, `setpts=+t0` đưa nó
+ * về ĐÚNG trục PTS nguồn của `[N:v]`, rồi đi qua CHÍNH chuỗi trim/setpts/tốc độ/fps mà nhánh
+ * clip vừa đi (caller truyền nguyên chuỗi đó). Hai luồng cùng PTS vào cùng bộ lọc thì cùng
+ * khung ra — kể cả phép lùi nửa khung nguồn ở mép cắt và `fps=` lấy mẫu lại.
+ * `safe=0` vì danh sách khai `option framerate 90000` cho từng ảnh (timebase mịn — mặc định
+ * 1/25 của PNG làm tròn mọi mốc về lưới 25fps và lệch khung khi đổi tốc độ). Danh sách do
+ * chính sidecar Python sinh ra trong cache của backend, tên file tương đối.
+ * `eof_action=pass`: lượt AI ngắn hơn đoạn cần (không nên xảy ra — frontend chờ đủ trước khi
+ * xuất) thì lộ ảnh gốc, KHÔNG lặp mãi miếng vá cuối lên nền đã trôi đi.
+ * Kết thúc bằng `null` như AppendLogoRemovalFilters. */
+void AppendLogoAiFilters(std::ofstream& script, const std::string& dir, const std::string& rectsSpec,
+                         double t0, const std::string& timing, const std::string& tag) {
+  if (dir.empty()) return;
+  std::stringstream all(rectsSpec);
+  std::string part;
+  int k = 0;
+  while (k < 4 && std::getline(all, part, '|')) {
+    const size_t colon = part.find(':');
+    if (colon == std::string::npos) { k++; continue; }
+    const long x = std::strtol(part.c_str(), nullptr, 10);
+    const long y = std::strtol(part.c_str() + colon + 1, nullptr, 10);
+    const std::string list = FilterPath((fs::path(dir) / ("r" + std::to_string(k) + ".ffconcat")).string());
+    const std::string t = tag + std::to_string(k);
+    script << ",null[" << t << "b];\n";
+    script << "movie='" << list << "':format_name=concat:format_opts='safe=0'"
+           << ",setpts=PTS+" << FfmpegDouble(t0) << "/TB," << timing << ",format=rgba[" << t << "p];\n";
+    script << "[" << t << "b][" << t << "p]overlay=" << std::max(0L, x) << ":" << std::max(0L, y)
+           << ":eof_action=pass:format=auto[" << t << "o];\n";
+    script << "[" << t << "o]null";
+    k++;
+  }
+}
+
 /* MẶT NẠ CẮT HÌNH của block: nhân mặt nạ vào ALPHA của luồng.
  *
  * ĐƠN GIẢN HƠN AppendColorAdjustFilters vì không phải phủ lại lên nhánh gốc — mặt nạ kia
@@ -2608,15 +2665,17 @@ void WriteClipVideoFilters(
   trimStart = std::max(0.0, trimStart);
   // Input mang hình của clip này: 0, hoặc input riêng của dải nguồn chứa nó (xem PlanSourceRanges).
   const int videoInput = localIndex < g_clipVideoInput.size() ? g_clipVideoInput[localIndex] : 0;
-  script << "[" << videoInput << ":v]" << UntaggedColorFix(settings.sourceColorUntagged)
-         << "trim=start=" << FixedSeconds(trimStart) << ":end=" << FixedSeconds(trimEnd)
+  // Chuỗi THỜI GIAN của nhánh clip dựng thành chuỗi riêng: Xoá logo AI phải cho luồng miếng
+  // vá đi qua ĐÚNG chuỗi này (xem AppendLogoAiFilters).
+  std::ostringstream timing;
+  timing << "trim=start=" << FixedSeconds(trimStart) << ":end=" << FixedSeconds(trimEnd)
          << ",setpts=PTS-STARTPTS";
   // TỐC ĐỘ: nén/dãn trục thời gian TRƯỚC bước `fps=` — sau `fps=` thì khung đã bị
   // resample về lưới renderFps rồi, đổi PTS lúc đó là lặp/bỏ khung không đều.
   if (std::abs(item.speedRate - 1.0) >= 1e-4) {
-    script << ",setpts=PTS/" << FormatFilterNumber(item.speedRate);
+    timing << ",setpts=PTS/" << FormatFilterNumber(item.speedRate);
   }
-  script
+  timing
          // Chuẩn hoá nguồn về đúng lưới renderFps: nguồn VFR/lệch fps mà overlay
          // lên base CFR sẽ bị lặp/bỏ frame không đều (giật) ở khâu resample ngầm
          << ",fps=" << settings.renderFps;
@@ -2628,9 +2687,14 @@ void WriteClipVideoFilters(
   // thật dài thêm 1 khung và đẩy lệch mọi block phía sau.
   // Ngược lại, clip NGẮN hơn thì nền giữ đủ độ dài và overlay lặp khung cuối.
   if (item.renderFrames > 0) {
-    script << ",trim=end_frame=" << item.renderFrames;
+    timing << ",trim=end_frame=" << item.renderFrames;
   }
-  AppendLogoRemovalFilters(script, item.logoMode, item.logoRects, "logoc" + idx + "_");
+  script << "[" << videoInput << ":v]" << UntaggedColorFix(settings.sourceColorUntagged) << timing.str();
+  if (!item.logoAiDir.empty()) {
+    AppendLogoAiFilters(script, item.logoAiDir, item.logoAiRects, item.logoAiT0, timing.str(), "logoaic" + idx + "_");
+  } else {
+    AppendLogoRemovalFilters(script, item.logoMode, item.logoRects, "logoc" + idx + "_");
+  }
   // Clip lane chính đã setpts 0-based -> LOCALT trừ mốc 0.
   AppendColorAdjustFilters(script,
                            ColorAdjustChain(0.0, item.adjustFilters, item.adjEqContrastExpr,
@@ -3267,31 +3331,34 @@ void WriteVisualOverlayFilter(
 
   // Nén/dãn trục thời gian TRƯỚC khi dời về mốc tuyệt đối trên sequence: chia cả biểu
   // thức đã cộng `start` thì mốc bắt đầu của overlay cũng bị chia theo và lớp lệch chỗ.
-  const auto writeSetpts = [&]() {
+  const auto writeSetpts = [&](std::ostream& out) {
     if (std::abs(overlay.speedRate - 1.0) >= 1e-4 && !OverlayIsImageSequence(overlay)) {
-      script << "setpts=(PTS-STARTPTS)/" << FormatFilterNumber(overlay.speedRate)
+      out << "setpts=(PTS-STARTPTS)/" << FormatFilterNumber(overlay.speedRate)
              << "+" << FfmpegDouble(start) << "/TB";
     } else {
-      script << "setpts=PTS-STARTPTS+" << FfmpegDouble(start) << "/TB";
+      out << "setpts=PTS-STARTPTS+" << FfmpegDouble(start) << "/TB";
     }
   };
   // Ảnh tĩnh xử lý MỘT lần: trim/setpts dời ra sau `loop` ở cuối chuỗi (xem OverlayStillOnce).
   const bool stillOnce = OverlayStillOnce(overlay);
 
   script << "[" << inputIndex << ":v]" << UntaggedColorFix(overlay.colorUntagged);
+  // Chuỗi THỜI GIAN của overlay (trim + setpts), giữ riêng cho Xoá logo AI (xem AppendLogoAiFilters).
+  // Ảnh tĩnh xử lý một lần: không trim/setpts ở đây — dời ra sau `loop` (xem OverlayStillOnce).
+  std::ostringstream timing;
   if (stillOnce) {
-    script << "null";
+    // (trống)
   } else if (OverlayIsImageSequence(overlay)) {
     // Sequence hữu hạn đã đúng độ dài cửa sổ hoạt ảnh — không trim;
     // sau frame cuối overlay tự biến mất nhờ eof_action=pass
   } else if (!OverlayIsImageLike(overlay)) {
     // Độ dài NGUỒN = độ dài timeline × tốc độ (xem WriteOverlayAudioFilter).
     const double videoSourceSpan = overlay.duration * (overlay.speedRate > 0.0 ? overlay.speedRate : 1.0);
-    script << "trim=start=" << FixedSeconds(overlay.sourceStart) << ":duration=" << FixedSeconds(videoSourceSpan) << ",";
+    timing << "trim=start=" << FixedSeconds(overlay.sourceStart) << ":duration=" << FixedSeconds(videoSourceSpan) << ",";
   } else {
-    script << "trim=duration=" << FixedSeconds(overlay.duration) << ",";
+    timing << "trim=duration=" << FixedSeconds(overlay.duration) << ",";
   }
-  if (!stillOnce) writeSetpts();
+  if (!stillOnce) writeSetpts(timing);
   // KEYFRAME overlay (start tuyệt đối -> LOCALT = t-start). Có keyframe -> scale/rotate/
   // opacity biến thiên theo thời gian; vị trí lấy theo kf (cộng thêm offset hoạt ảnh nếu có).
   const bool overlayKf = HasKeyframeExpr(overlay.kfScaleExpr, overlay.kfRotExpr, overlay.kfOpacityExpr,
@@ -3301,8 +3368,15 @@ void WriteVisualOverlayFilter(
   const bool overlayDynTransform = overlayKf
     || HasAnimGeomExpr(overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr);
 
-  // Xoá logo: ngay sau setpts (hoặc sau `null` của ảnh tĩnh xử lý một lần — xoá MỘT lần), trước chuỗi màu.
-  AppendLogoRemovalFilters(script, overlay.logoMode, overlay.logoRects, "logoo" + id + "_");
+  // Ảnh tĩnh một lần: `null` (setpts ở cuối chuỗi); loại khác: trim + setpts của `timing`.
+  script << (stillOnce ? std::string("null") : timing.str());
+  // Xoá logo ngay sau setpts (ảnh tĩnh một lần: xoá MỘT lần), trước chuỗi màu. AI chỉ cho overlay
+  // VIDEO: ảnh tĩnh/chuỗi khung đã bake xoá logo ở frontend.
+  if (!overlay.logoAiDir.empty() && !OverlayIsImageLike(overlay) && !OverlayIsImageSequence(overlay)) {
+    AppendLogoAiFilters(script, overlay.logoAiDir, overlay.logoAiRects, overlay.logoAiT0, timing.str(), "logoaio" + id + "_");
+  } else {
+    AppendLogoRemovalFilters(script, overlay.logoMode, overlay.logoRects, "logoo" + id + "_");
+  }
   // Overlay giữ mốc tuyệt đối sau setpts -> LOCALT trừ timeline_start.
   AppendColorAdjustFilters(script,
                            ColorAdjustChain(start, overlay.adjustFilters, overlay.adjEqContrastExpr,
@@ -3384,7 +3458,7 @@ void WriteVisualOverlayFilter(
   }
   if (stillOnce) {
     script << ",loop=loop=-1:size=1,trim=duration=" << FixedSeconds(overlay.duration) << ",";
-    writeSetpts();
+    writeSetpts(script);
   }
   // Chuỗi khung: nối khung nhân bản ở đuôi thay cho eof_action=repeat (xem SequenceTailFrames).
   const int seqTail = SequenceTailFrames(overlay);
