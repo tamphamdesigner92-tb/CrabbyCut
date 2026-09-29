@@ -1,9 +1,8 @@
 # Kế hoạch: Xuất video CrabbyCut nhanh ≥ 2× trên Windows và macOS — sửa lệnh ffmpeg + tự build ffmpeg
 
-> **Trạng thái (cập nhật 2026-09-28, phiên 2): Bước 0 XONG — có dụng cụ đo, bộ so chất lượng và số nền. Việc tiếp theo: Bước 1 theo thứ tự mới ở "Kết quả Bước 0".** Lập ngày 2026-09-26, bắt đầu thi công 2026-09-27.
-> - 0A mục 1–5: commit `0508bd0` trên `main` của CrabbyCut, **chưa push**. 0A mục 6: đã port sang `CrabbyCut_Private`, **chưa commit** bên đó. Chưa dựng bộ cài, chưa phát hành (người dùng chọn).
-> - Bước 0 (phiên 2): mã đo nằm trong cây làm việc, **chưa commit** (xem "VIỆC TIẾP THEO").
-> - **Đã có lợi đầu tiên (chưa commit):** dự án phụ đề 4K 39 phút xuất 49,6 → 23,2 phút (seek theo batch, 1.1a); lượt xuất đầu của Bin Tom bỏ được 72,5/129 s (1.15); xuất trong app thôi bị preview giành CPU (1.17). 24/24 test export xanh trên Gyan 8.1.1.
+> **Trạng thái (cập nhật 2026-09-29, phiên 3): Bước 0 XONG; Bước 1 đã xong 1.15 (+ cache SDR), 1.1a, 1.16 (hỏi chỗ lưu trước, ghi thẳng ra đích), 1.17 (+ tắt tự phát khi mở dự án), 1.18, 1.3 và 1.5 (cả hai BẬT mặc định).** Lập ngày 2026-09-26, bắt đầu thi công 2026-09-27.
+> - 0A mục 1–5: commit `0508bd0`; Bước 0 + phần đầu Bước 1 (phiên 2): commit `5e5635a` — cả hai trên `main`, **chưa push**. 0A mục 6: đã port sang `CrabbyCut_Private`, **chưa commit** bên đó. Chưa dựng bộ cài, chưa phát hành (người dùng chọn).
+> - **Lợi đã có:** dự án phụ đề 4K 39 phút 49,6 → 23,2 phút (1.1a, trước 1.3); bản cắt 300 s 4K 191–196 s → 111–113 s với 1.3 (1,7×) → 81–91 s với 1.3 + 1.5 (~2,2×); Bin Tom 50–56 s → 39–40 s (1.3) → 29–35 s (1.3 + 1.5); trong app Bin Tom 129,2 s → 39,1 s; lượt xuất đầu của Bin Tom bỏ được 72,5/129 s (1.15). 25/25 test export xanh trên Gyan 8.1.1 (`npm run test:export-all`).
 > - Danh sách việc cho phiên sau: xem mục **"VIỆC TIẾP THEO"** ngay dưới khối này.
 > **Bổ sung 2026-09-27:**
 > - ca thật thứ hai (phụ đề song ngữ 39 phút, 4K AV1, xuất mất ~49 phút) kèm số đo;
@@ -19,11 +18,11 @@
 
 ## VIỆC TIẾP THEO (đọc đầu tiên khi mở phiên mới)
 
-**Trạng thái git lúc dừng (2026-09-29, phiên 2)** — kiểm lại bằng `git status` / `git log -3` trước khi làm:
+**Trạng thái git lúc dừng (2026-09-29, phiên 3)** — kiểm lại bằng `git status` / `git log -3` trước khi làm:
 
 | Repo | Trạng thái |
 |---|---|
-| `CrabbyCut` (`main`) | commit `0508bd0` = toàn bộ 0A, **chưa push**. Phiên 2 (Bước 0 + 1.15 + 1.1a + 1.17 + 1.5 tắt) **chưa commit**: `native/sidecar/core_process.cpp`, `backend/server.js`, `static/js/editing-runtime.js`, `index.html` (chỉ khối `performVideoExport`), `package.json`, `docs/KE_HOACH_TOI_UU_EXPORT_WIN.md`, `docs/APP_INTERNALS.md`, file mới `tests/scripts/bench_export.js`, `export_fidelity.js`, `export_hdr_asset_usage.js`, `export_batch_seek.js`, `export_yuv_composite.js`. Cây làm việc còn phần sửa dở **của người dùng**: `index.html` (màn chờ "Đang mở dự án…"), dòng cuối `static/i18n/en.json` và `zh.json`. Commit thì tách hunk, không gộp phần của người dùng |
+| `CrabbyCut` (`main`) | `0508bd0` = 0A; `5e5635a` = Bước 0 + 1.15 + 1.1a + 1.17 + 1.18 + 1.5 (tắt). Cả hai **chưa push**. Phiên 3 (1.3 + chữa màu mép 1.5 + ảnh tĩnh một lần): xem commit mới nhất. Cây làm việc còn phần sửa dở **của người dùng**: `index.html` (màn chờ "Đang mở dự án…", các hunk ngoài `performVideoExport`), dòng cuối `static/i18n/en.json` và `zh.json` — commit thì tách hunk, không gộp phần của người dùng |
 | `CrabbyCut_Private` (`CrabbyCut_v2.0.4`) | bản port 0A **chưa commit**, gồm 7 file: `native/sidecar/core_process.cpp`, `backend/server.js`, `backend/subtitle-jobs.js`, `package.json`, `tests/scripts/overlay_placement_contract.js`, `video_mask_export.js`, `video_animation_expr.js`, cộng file mới `tests/scripts/export_concat_video_overlay.js`. Còn 5 file khác người dùng đang sửa dở (`asr/…`, `shortvideo/sidecar.py`, `static/js/ai-video-panel.js`, `tts/server.py`, `progress.txt`) |
 
 **A. Khép lại Bước 0A** (người dùng tự làm, hoặc bảo làm):
@@ -46,16 +45,16 @@
 
 **B. Bước 0 — XONG (phiên 2).** Dụng cụ, bộ so chất lượng, số nền và kết luận ở mục "Kết quả Bước 0". Tóm tắt: filter là nút thắt (58–77% thời gian ffmpeg), 1B không cần làm.
 
-**C. Bước 1 — trạng thái (2026-09-29):**
+**C. Bước 1 — trạng thái (2026-09-29, phiên 3):**
 1. **1.15 chỉ hạ SDR asset có item dùng** — xong, test `test:export-hdr-asset-usage`. Bin Tom lượt đầu: bỏ được 72,5/129 s.
-2. **1.1a seek theo batch** (batch chỉ-hình) — xong, test `test:export-batch-seek` (framemd5 từng khung + tiếng từng byte, 3 bố cục). Bản cắt 300 s 4K: 207,9 → 184,4 s (−11%), bản xuất có/không seek **giống hệt từng gói**. **Bản 39 phút: 2.978,8 → 1.392,5 s (2,14×)**.
-3. **1.17 dừng preview khi xuất** — xong (`performVideoExport`). Còn câu hỏi cho người dùng: preview tự phát khi mở dự án (Pixi `autoPlay`).
-   - **1.18 dọn batch trung gian** sau khi ghép — xong (trước đây ~11,5 GB nằm lại trong thư mục tạm sau mỗi lượt xuất 39 phút).
-4. **1.5 ghép lớp phủ ở YUV** — mã xong, **tắt mặc định** vì mép chữ màu nhạt hơn (U −4,6 dB). Việc tiếp: đo trên Bin Tom bằng `export_fidelity.js`, chọn cách chữa (alpha bleeding khi bake PNG, hoặc gộp vào 1.11).
-5. **1.3 đường nhanh cho clip**: chưa làm. Phát hiện chặn: swscale đi thẳng YUV→YUV **không đổi ma trận màu**, nên cần `colorspace` hoặc phép dò theo khung (mục 1.3).
-6. Tiếp theo theo thứ tự ở "Cách làm chung" của Bước 1: 1.11 là mục lớn kế tiếp cho dự án phụ đề.
-- **Câu hỏi đang chờ người dùng:** (a) commit phiên 2 thế nào; (b) 1.15: giữ bản SDR ngoài `TEMP_DIR` để mở lại dự án không phải hạ lại; (c) 1.16: bỏ vòng tải file qua HTTP (hộp thoại lưu hiện trước/sau) — kèm lỗi rò: mỗi lượt xuất giữ một bản sao cỡ file xuất trong `blob_storage` tới khi tắt app (11 GB sau lượt 39 phút); (d) 1.17: tắt tự phát preview khi mở dự án (kéo theo sửa vị trí playhead khi mở).
-- `CrabbyCut_Private`: chưa port gì của phiên 2. Mục trung lập để port (M.2): phần đo (sidecar + backend + renderer), 1.15, 1.1a, 1.17.
+2. **1.1a seek theo batch** (batch chỉ-hình) — xong, test `test:export-batch-seek`. **Bản 39 phút: 2.978,8 → 1.392,5 s (2,14×)**, bản xuất giống hệt từng gói.
+3. **1.17 dừng preview khi xuất** — xong. **1.18 dọn batch trung gian** — xong.
+4. **1.3 đường nhanh YUV cho lane chính** — **xong, BẬT mặc định**. Test `test:export-fast-path`. Bin Tom 50–56 → 39–40 s; bản cắt 300 s 4K 191–196 → 111–113 s (1,7×). Bộ so 0.3 ĐẠT trên Bin Tom (gần bản chuẩn hơn: 40,3 → 45,1 dB). Chi tiết mục 1.3.
+5. **1.5 lớp phủ ở YUV** — **xong, BẬT mặc định** (người dùng nới tiêu chí (b), xem "Quyết định đã chốt"). Chữa màu mép (`AlphaWeightedYuva420`, chỉ ảnh tĩnh; đệm +4) và **ảnh tĩnh xử lý một lần** (`OverlayStillOnce`). Bộ so 0.3 trên Bin Tom ĐẠT: so bản chuẩn 40,3 → 52,5 dB. Env tắt: `CRABBYCUT_EXPORT_YUVCOMP=0`, `CRABBYCUT_EXPORT_ALPHACHROMA=0`, `CRABBYCUT_EXPORT_STILL1=0`.
+6. **1.15 cache SDR, 1.16 ghi thẳng ra đích, 1.17 tắt tự phát** — xong theo lựa chọn của người dùng (chi tiết ở từng mục). Test `test:export-output-path`; E2E Electron cho 1.16/1.17.
+7. Tiếp theo: 1.11 (cả track phụ đề thành một luồng) — micro-bench cho thấy trên nền 1.3 + 1.5 chỉ còn lợi ~20% ở batch 4K 49 lớp phủ (5,2 → 4,2 s cho 30 s phim), nhỏ hơn dự tính vì lane chính mới là khoản lớn. Cân nhắc đo lại bản 39 phút trước khi làm.
+- **Câu hỏi đang chờ người dùng:** không còn. Các câu (a)–(e) đã được trả lời 2026-09-29 (xem bảng "Quyết định đã chốt").
+- `CrabbyCut_Private`: chưa port gì của phiên 2–3. Mục trung lập để port (M.2): phần đo (sidecar + backend + renderer), 1.15, 1.1a, 1.17, 1.3, 1.5, ảnh tĩnh một lần.
 
 **Công cụ và dữ liệu có sẵn trên máy dev:**
 - Gyan 8.1.1 shared đã giải nén: `%TEMP%\claude\E--Dev-Windows-App-ffmpeg\30de9403-…\scratchpad\dl\gyan\ffmpeg-8.1.1-full_build-shared\bin`. Thư mục scratch có thể đã bị dọn; nếu mất thì tải lại theo `scripts/ffmpeg_pin.js` và kiểm SHA-256.
@@ -102,6 +101,10 @@
 | Độ phân giải xuất (2026-09-27) | Ô "Độ phân giải" trong hộp thoại xuất **có tác dụng thật** (Theo sequence / 1080p / 720p), không còn bị sequence đè (mục 1.12) |
 | Bộ nhớ đệm render (2026-09-27) | **Có**, kiểu "render cached images" của Resolve / "use previews" của Premiere. Làm **sau** các tối ưu chính (mục 1.13) |
 | macOS (2026-09-27) | Mac cũng **dùng bản ffmpeg ghim riêng** (không dựa vào Homebrew). Bỏ lượt xuất thứ hai khi lỗi treo đã được tránh. Người dùng tự chạy bộ đo trên máy Mac của họ (Bước M) |
+| Tiêu chí chất lượng (2026-09-29) | **Nới ngưỡng "PSNR mới/cũ ≥ 45 dB"**: được miễn khi bản mới gần bản chuẩn hơn bản cũ ≥ 1 dB. VMAF ≥ 95 và ngưỡng khung tệ nhất giữ nguyên. Lý do: 1.3 + 1.5 trên Bin Tom mới/cũ 43,5 dB nhưng so bản chuẩn 40,3 → 52,5 dB. Kéo theo: **1.5 bật mặc định** |
+| Lưu bản xuất (2026-09-29) | **Hỏi chỗ lưu TRƯỚC khi xuất**, như Premiere; ffmpeg ghi thẳng ra file đích — bỏ vòng tải file qua HTTP và bản sao trong `blob_storage` (mục 1.16) |
+| Preview khi mở dự án (2026-09-29) | **Không tự phát**; playhead đứng ở đầu clip đầu (mục 1.17) |
+| Bản hạ SDR (2026-09-29) | **Giữ trong cache có giới hạn** ngoài `TEMP_DIR` (kiểu `proxy_cache`, có trần và tự dọn), để mở lại dự án không phải hạ SDR lại (mục 1.15) |
 
 ## Chi phí đã xác định
 
@@ -393,7 +396,42 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
 - Mốc cuối của `enable`: hiện nay khung cuối của lớp phủ lúc có lúc mất, vì ảnh chạy 25 fps và framesync coi nó đã hết ở khung ảnh cuối + 1 tick (`framesync.c:238-266`). Khi đổi cách nạp ảnh, chốt mốc cuối theo lưới khung (`end − 0.5/renderFps`, đối xứng `seqEndTrim` `:2601-2608`) và thêm test biên.
 - Chữ đã được bake đúng cỡ hộp chữ (`editing-runtime.js:17437-17447`), không cần cắt khung bao.
 
-**1.3 Đường nhanh YUV cho clip lane chính "thường"** (#2, lợi lớn nhất đã đo). Env: `CRABBYCUT_EXPORT_FASTPATH=0`.
+**1.3 Đường nhanh YUV cho clip lane chính "thường"** (#2, lợi lớn nhất đã đo). Env: `CRABBYCUT_EXPORT_FASTPATH=0`. — **ĐÃ LÀM, BẬT mặc định (2026-09-29, phiên 3).**
+- **Đo trước khi làm (micro-bench, batch 0 của 9b, 30 s phim 4K, `-f null`, Gyan 8.1.1):**
+
+  | Đồ thị | Thời gian | khung/s |
+  |---|---|---|
+  | hiện nay (lane chính RGBA + 49 lớp phủ RGBA) | 16,5 s | 43 |
+  | **chỉ lane chính, chưa lớp phủ nào** (đường cũ) | 10,7 s | 67 |
+  | chỉ lane chính, đường nhanh | 3,9 s | 180 (sát trần giải mã AV1) |
+  | 1.5 (lớp phủ YUV) | 12,5 s | 57 |
+  | **1.3 + 1.5** | **5,2 s** | **138** |
+  | 1.3 + 1.11 (cả track phụ đề một luồng, giả lập) | 4,2 s | 171 |
+  | ghép 4:4:4 (để chữa màu mép) | 8,2–15 s | loại |
+
+  → Lane chính qua RGBA là khoản lớn nhất, lớn hơn cả chuỗi lớp phủ.
+- **Mã** (`core_process.cpp`): `ProbeMainSourceForFastPath` (một lần mỗi lượt xuất: cỡ, pix_fmt, color_space, chroma_location, xoay của `temp_input.mp4`), `MainLaneFastPlan`, nhánh `fast.ok` trong `WriteClipVideoFilters`. Sự kiện `timing` có `fast_clips` cho mỗi lượt ffmpeg.
+- **Điều kiện đã chốt:** nguồn YUV (không `yuva`), ma trận BT.709 (hoặc HD không nhãn đã được `UntaggedColorFix` gán BT.709), không xoay; clip không keyframe, hoạt ảnh, xoay, độ mờ < 100%, mặt nạ video, **lật** (hflip ở 4:2:0 đổi vị trí mẫu màu); `renderFrames > 0`. Nguồn BT.601 và SD không nhãn giữ đường cũ.
+- **Ba nhánh**, chọn theo toạ độ và chuỗi màu:
+  1. **YUV 4:2:0** (clip không chỉnh màu): `scale` → `pad` (khung đủ lớn, vị trí chẵn) → `crop exact`. Cắt lẻ mà clip tràn kín khung theo chiều đó → `scale` dời vị trí mẫu màu 1 điểm ảnh luma (`in/out_*_chr_pos`, +256) để sau phép cắt lẻ mẫu màu về đúng chỗ.
+  2. **4:4:4 rồi hạ 4:2:0**: đệm lẻ, cắt lẻ mà mép clip nằm trong khung, clip giữ nguyên cỡ bị cắt lẻ. Ở hai ca đầu, mẫu màu ở mép clip giáp nền đen phải là trung bình (đen, cột đầu clip) như đường cũ; mẹo dời mẫu màu thì lấy trọn màu đen (đo: kênh U 30,2 so với 32,3 dB của đường cũ). Ca cuối: swscale chép thẳng khi không co giãn và **bỏ qua** `chr_pos` (đo: hai bản y hệt).
+  3. **RGB** (clip có chuỗi màu): co giãn + đặt vị trí ở RGB, đổi sang YUV một lần ở cuối = đúng phép tính của đường cũ, chỉ bỏ nền `color` + `overlay`. Vì: (a) swscale vừa đổi RGB→YUV vừa co giãn thì đổi trước rồi mới co giãn, chỗ vọt/kẹp ở cạnh khác đường cũ (luma so bản chuẩn 47,8 so với 54,4 dB); (b) đường cũ kẹp gam RGB ngay sau chuỗi màu, giống preview (WebGL áp màu trên RGB) — giữ YUV nguyên vẹn thì vùng rất bão hoà khác preview. Test: `curves` ra **trùng từng bit** đường cũ.
+- **Số khung:** `tpad=stop=-1:stop_mode=clone` rồi `concat` với một dải đen `color`, rồi `trim=end_frame=N`. Kế hoạch cũ ghi `tpad … stop_mode=add` cho clip không có khung nào — **sai**: đầu vào rỗng thì `tpad add` cũng không ra khung nào (đã thử), mọi clip sau bị xô sớm lên. Clip ngắn thì tpad clone chạy mãi nên `concat` không bao giờ sang dải đen.
+- **Ba bẫy đã gặp:**
+  - `pad` làm tròn bề rộng **đầu vào** xuống số chẵn: cắt phần thấy được (có thể rộng lẻ) rồi mới đệm thì mất một cột ở mép clip → luôn **đệm trước, cắt sau** (clip đã scale luôn rộng chẵn).
+  - `180×1,1` tính bằng số thực = 198,00000000000003 → `ceil(·/2)*2` = 200, không phải 198. Đường cũ cũng tính vậy nên không lệch; nhưng muốn dựng ca "cắt lẻ" trong test thì phải tính bằng đúng phép đó (test ban đầu tưởng 110% cắt lẻ 9 px, thật ra cắt 10).
+  - Ma trận màu: như ghi chú dưới — chỉ BT.709.
+- **Test** `npm run test:export-fast-path` (đã vào chuỗi `npm test`): 13 clip (100%, phóng/thu, cắt/đệm lẻ từng chiều, dời âm, 100% toạ độ lẻ, clip dài quá nguồn, clip ngoài nguồn, eq, curves, lật) + nguồn BT.601 / SD không nhãn / HD không nhãn + ProRes. Dựng lại đồ thị cả hai đường ra FFV1 (`renderFromCommands`), so từng clip với bản chuẩn: mỗi mặt phẳng không kém đường cũ; vị trí (luma so bản chuẩn ≥ 45 dB); clip có chỉnh màu và clip rơi về đường cũ phải trùng đường cũ. **Đột biến** bỏ phép dời mẫu màu → test đỏ ở clip 105% (U 38,8 → 31,2 dB).
+- Kết quả test (so bản chuẩn, cũ → mới): mọi clip đường nhanh bằng hoặc hơn đường cũ ở cả Y/U/V; luma của clip không chỉnh màu trùng bản chuẩn (∞).
+- **A/B xen kẽ trên dự án thật** (phát lại, 2026-09-29; A = `CRABBYCUT_EXPORT_FASTPATH=0`, B = 1.3, C = 1.3 + `CRABBYCUT_EXPORT_YUVCOMP=1` chưa chữa màu mép):
+
+  | Fixture | A (cũ) | B (1.3) | C (1.3 + 1.5) |
+  |---|---|---|---|
+  | Bin Tom (3 lượt) | 56,4 / 51,3 / 49,6 s | 40,4 / 39,3 / 39,1 s | 30,8 / 28,8 / 28,7 s |
+  | Phụ đề 4K, cắt 300 s (2 lượt) | 195,7 / 190,7 s | 113,1 / 111,3 s (**1,7×**) | 83,4 / 84,1 s (**2,3×**) |
+
+- **Bộ so 0.3, Bin Tom, 1.3: ĐẠT** — mới/cũ PSNR 49,7 dB (tệ nhất 48,9), VMAF 97,6; so bản chuẩn: cũ 40,3 dB → mới 45,1 dB.
+- Ghi chú cũ, giữ để tra:
 - Điều kiện:
   - không keyframe, hoạt ảnh, xoay, opacity < 1 hay mặt nạ video (flip vẫn được);
   - **và** mọi độ dời crop/pad là số chẵn: 4:2:0 làm tròn toạ độ xuống số chẵn (`vf_pad.c:196-197`), còn đường RGBA đặt được ở mọi số nguyên (`vf_overlay.c:89-105`).
@@ -403,13 +441,20 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
   - Bản nối `-c copy` từ điện thoại có thể đổi `yuv420p/tv/bt709 ↔ yuvj420p/pc/bt470bg` giữa file ("Khám phá Hạ Long"), và phép dò extradata của 1.1a **không** bắt được chuyện đó (mp4 do ffmpeg nối không mang side data "New Extradata" dù SPS khác nhau — đã thử). Cần một phép dò riêng theo khung, hoặc dùng `colorspace` cho mọi nguồn không phải bản chuẩn hoá.
 - Giữ chắc số khung: `tpad=stop=-1:stop_mode=clone,tpad=stop=-1:stop_mode=add,trim=end_frame=N`. Một `tpad=stop_mode=clone` đơn không ra khung nào nếu clip cho 0 khung (`vf_tpad.c:180-183`); lúc đó mọi clip phía sau bị xô lệch. Nền `color` hiện nay là thứ đang giữ số khung (`:2051-2053`).
 
-**1.5 Ghép lớp phủ ở YUV** (#3). Env: `CRABBYCUT_EXPORT_YUVCOMP=1` — **đã viết mã, TẮT mặc định** (2026-09-28).
+**1.5 Ghép lớp phủ ở YUV** (#3). Env tắt: `CRABBYCUT_EXPORT_YUVCOMP=0` — **XONG, BẬT mặc định** (2026-09-29; viết mã 2026-09-28, chữa màu mép + bật ở phiên 3).
 - Đã làm (`WriteVisualOverlayFilter`, `YuvCompositeEnabled`): lớp phủ đứng yên, không xoay → chuỗi RGBA như cũ + `pad` 1 px trong suốt khi toạ độ lẻ + `scale=out_color_matrix=bt709:out_range=tv,format=yuva420p`, rồi `overlay=format=yuv420` ở toạ độ chẵn `trunc(X) − mod(trunc(X),2)`. Lớp phủ động/xoay vẫn ghép RGBA, kèm đổi về yuv420p BT.709 ngay sau nó.
 - Test `npm run test:export-yuv-composite`: 9 toạ độ (chẵn/lẻ/thập phân/âm) — khung bao luma trùng từng pixel với đường cũ và với `trunc((W−w)/2+dx)`; mọi `overlay` của chuỗi chính nhận `yuv420p` (trước: `rgba`); lớp phủ bán trong suốt PSNR mới/cũ 52,7 dB.
 - **Vì sao chưa bật: màu ở mép.** Đổi RGBA → yuva420p lấy trung bình màu của khối 2×2 gồm cả điểm ảnh trong suốt (canvas lưu chúng là đen), rồi `overlay` nhân thêm alpha trung bình → mép bị pha loãng hai lần. Đo (chữ vàng khử răng cưa trên nền xanh đậm, so bản chuẩn 4:4:4): U **41,6 dB** so với 46,1 dB của đường cũ; Y và V như nhau. Chữ trắng/nền đen (phụ đề mặc định) không bị vì màu trung tính. Ở toạ độ lẻ, cột mép đệm cũng bị nhạt một nửa.
   - `overlay=…:alpha=premultiplied` (sau `premultiply`) cho luma tệ hơn (39,3 dB); `unpremultiply` chỉ nhận yuva444p/gbrap, nên không có đường "trung bình có trọng số alpha" gọn bằng filter sẵn có.
   - Hướng chữa, cần đo: (a) renderer bake PNG với màu "tràn" vào điểm ảnh trong suốt (alpha bleeding) — lúc đó trung bình 2×2 gần đúng trọng số alpha; (b) 1.11 (cả track phụ đề thành một luồng) sẵn là chỗ bake lại PNG; (c) bản fork (2.4) thêm hạ mẫu có trọng số alpha.
   - Việc tiếp: đo 1.5 trên fixture thật bằng `export_fidelity.js` (Bin Tom có chữ màu) trước khi quyết.
+- **Đo trên Bin Tom (2026-09-29, phiên 3, trước khi chữa màu mép):** xuất 48,5 / 46,8 / 51,0 s → 37,7 / 36,2 / 38,6 s (−24%). Bộ so 0.3 **ĐẠT**: mới/cũ PSNR 49,6 dB, VMAF 97,6 (hai bản giống hệt nhau cho 97,86); **bản mới gần bản chuẩn hơn bản cũ: 45,1 so với 40,3 dB**, vì luồng chính không còn đi vòng YUV → RGB → YUV 8-bit. Khung biên tệ nhất 48,9 dB.
+- **Chữa màu mép (phiên 3):** `AlphaWeightedYuva420` — mẫu màu 4:2:0 của lớp phủ ẢNH = trung bình có trọng số alpha: `premultiply` → thu nửa cỡ (hộp 2×2, `flags=area`) → `unpremultiply`, ở 16-bit (8-bit thì vùng đục lệch 1 mức vì premultiply nhân (U−128)·a >> 8), rồi `mergeplanes` với luma + alpha đầy đủ. Đo lại ca chữ vàng: kênh U so bản chuẩn **41,6 → 44,8 dB** (đường cũ 46,1; phần còn lệch là nhân hạ mẫu hộp 2×2 so với nhân của swscale), luma và V như cũ. Thử `flags=bicubic`/`bilinear`: 43,7 dB. Lớp phủ video đục thì đổi thẳng như trước.
+- **Ảnh tĩnh xử lý một lần** (`OverlayStillOnce`, env tắt `CRABBYCUT_EXPORT_STILL1=0`, áp cho cả đường RGBA): input ảnh không còn `-loop 1 -t T` (25 khung/giây, mỗi khung giải mã PNG + scale + đổi màu lại từ đầu) mà là một khung, chuỗi xử lý chạy một lần, rồi `loop=loop=-1:size=1` + `trim` + `setpts`. Đã kiểm: dãy PTS y hệt `-loop 1` (34/34 khung). Chính việc này làm chuỗi chữa màu mép gần như không tốn gì.
+- **Bẫy của `overlay` lộ ra khi chữa màu mép:** ở cột/hàng mẫu màu CUỐI của lớp phủ, `overlay` yuv420 chỉ lấy alpha của điểm ảnh đầu cặp (`vf_overlay.c`, nhánh `k+1 < src_wp`), không lấy trung bình. Mẫu màu pha loãng của cách cũ vô tình che chuyện này; mẫu màu đúng trọng số thì lộ ra thành 1 cột màu tràn sang phải (test vị trí đỏ: hộp đỏ ở toạ độ lẻ rộng thêm 1 px trong bản mp4). Chữa: đệm `iw+4`/`ih+4` thay cho `+2` để cặp cuối luôn trong suốt hẳn.
+- Test `test:export-yuv-composite` thêm mục 4: đĩa vàng mép khử răng cưa (điểm trong suốt mang màu đen như canvas lưu) ở toạ độ lẻ, trên bản lossless của đồ thị, U/V quanh đĩa so với bản chuẩn **đã hạ về 4:2:0** (so ở 4:4:4 thì sai số hạ mẫu của cả hai bản lấn hết — đột biến vẫn xanh). Đo: đường cũ U 49,6 dB, chữa 46,3, trung bình thường (đột biến) 41,6 → ngưỡng "không kém đường cũ quá 4 dB". Phần lệch còn lại: `overlay` trộn mẫu màu theo alpha trung bình ngay ở 4:2:0, đường cũ ghép ở cỡ đầy đủ rồi mới hạ mẫu; đổi nhân hạ mẫu (area/bicubic/bilinear/lanczos, tách ngang-dọc) không thu hẹp được (tốt nhất 44,8 dB ở ca chữ vàng).
+- **Chi phí** (micro-bench, batch 4K 49 lớp phủ): 30 s phim 5,47 s → ảnh tĩnh một lần 5,02 s (RAM 1,6 → 0,96 GB) → + chữa màu mép 6,08 s; trên đủ batch 180 s: 27,4 → 28,3 s (+3%, chi phí cố định lúc khởi tạo ~20 ms mỗi lớp phủ), RAM 1,7 GB (ngang bản phát hành).
+- **Bin Tom, 1.3 + 1.5 (chưa chữa mép), bộ so 0.3: KHÔNG ĐẠT tiêu chí (b)** — PSNR mới/cũ 43,5 dB < 45, trong khi bản mới gần bản chuẩn hơn hẳn: **52,5 so với 40,3 dB** (+12,2); VMAF mới/cũ 97,2, khung tệ nhất 42,8 dB (≥ 38) đều đạt. Bản cũ cách bản chuẩn 40 dB (vòng YUV→RGB→YUV), nên bản nào chính xác hơn nhiều cũng buộc phải lệch khỏi bản cũ chừng ấy. Tiêu chí (b) nằm trong bảng đã chốt với người dùng → **hỏi người dùng** trước khi bật 1.5 mặc định.
 - `overlay=format=yuv420`, lớp phủ `format=yuva420p`, luồng chính giữ `yuv420p`. Có SIMD SSE4.1 `ff_overlay_row_20`.
 - Đã đo: `yuv444` chậm nhất (3,78 s), vì ffmpeg chọn `yuva444p` cho luồng chính nên mất SIMD (`x86/vf_overlay_init.c:43-46`).
 - Chuẩn hoá mỗi lớp phủ về `scale=out_color_matrix=bt709:out_range=tv` trước `overlay`. `overlay` ép một không gian màu, dải và kiểu alpha chung cho mọi đầu vào (`formats.c:1170-1216`), và từng kéo cả luồng chính theo ảnh JPEG (`:1657-1670`).
@@ -427,25 +472,30 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
 
 **1.10 (tuỳ số đo) Gộp chuỗi màu tĩnh thành một LUT** (bake `eq`+`colorbalance`+`curves`+`lut3d` → cube 33³). Kiểm bằng `test:color-adjust` + 0.3.
 
-**1.15 (mới, 2026-09-28) Chỉ hạ SDR cho video HDR mà item thật sự dùng.** — **đã làm**, chưa commit.
+**1.15 (mới, 2026-09-28) Chỉ hạ SDR cho video HDR mà item thật sự dùng.** — **xong** (commit `5e5635a`; cache lâu dài ở phiên 3).
 - **Phát hiện:** `sdrOverridesForEditingAssets` (`server.js`) mã hoá lại MỌI video HDR trong `editing_json.assets`, tức cả **thư viện** của dự án, gồm video nguồn lane chính mà dự án tự đăng ký làm asset "liên kết".
   - "Bin Tom - Tap 3": thư viện 13 asset, item chỉ dùng 3. Lượt xuất đầu mã hoá lại trọn `IMG_0827.MOV` (HEVC 10-bit HLG, 270 s): **72,5 s trong tổng 129 s**, cho một file không lớp phủ nào đọc.
   - Bản SDR nằm trong `TEMP_DIR/editing_assets/sdr/`, bị `/api/reset-project` xoá khi mở dự án, nên **mỗi phiên** trả giá lại một lần.
 - **Sửa:** chỉ xét asset có `items[].asset_id` trỏ tới. Đồ thị xuất không đổi (asset không có item thì không vào đồ thị). Test: `npm run test:export-hdr-asset-usage` (đột biến bỏ phép lọc → test đỏ).
-- Còn lại, **cần người dùng quyết** (chỗ lưu dữ liệu): giữ bản SDR ngoài `TEMP_DIR` (kiểu `proxy_cache`, có hạn dùng) để mở lại dự án không phải hạ SDR lại những asset thật sự dùng.
+- **Cache lâu dài — ĐÃ LÀM (2026-09-29, người dùng chọn "giữ trong cache có giới hạn"):** `SDR_CACHE_DIR` = `userData/sdr_cache/<khoá>/<tên>.mp4` (env test `CRAB_SDR_CACHE_DIR`), hạn 30 ngày, trần 20 GB (bỏ mục lâu không dùng nhất trước; lần dùng ghi vào tệp `last_used`, KHÔNG chạm mtime video vì sóng âm/proxy khoá theo mtime). Bản dùng thật vẫn phải nằm dưới `editing_assets/` (renderer nhận asset dự án bằng đường dẫn đó khi lưu .crab), nên cache ↔ `editing_assets` là **liên kết cứng** (khác ổ thì chép). Khoá thêm `SDR_CACHE_VERSION`. Dọn lúc khởi động và sau mỗi lần cất; có mục "Bản SDR của video HDR" trong Cài đặt → Bộ nhớ đệm. Test `test:export-hdr-asset-usage` thêm: mở lại dự án (xoá `editing_assets`) lấy bản SDR từ cache trong **4 ms** thay vì mã hoá lại; dọn theo trần và theo hạn; dọn cache không xoá bản đang dùng.
 
-**1.16 (mới, cần người dùng quyết) Bỏ vòng tải file qua HTTP sau khi xuất.**
+**1.16 (mới) Bỏ vòng tải file qua HTTP sau khi xuất.** — **xong** (phiên 3, người dùng chọn hỏi chỗ lưu trước).
 - Hiện nay: backend ghi `final_cut.mp4` → trình duyệt tải về thành Blob (`response.blob()`) → `<a download>` → Electron (không có handler `will-download`) hỏi chỗ lưu → ghi thêm một bản nữa.
 - Đo: tải vào Blob mất 4,4–8,8 s cho ~1,5 GB (bản cắt 300 s 4K); bản 39 phút 11,5 GB mất **63,6 s**. Bước ghi sau hộp thoại lưu **chưa đo** (bộ đo chặn cú click).
 - ⚠️ **Rò đĩa:** `performVideoExport` không bao giờ `URL.revokeObjectURL` Blob của bản xuất, nên Chromium giữ nó trong `<userData>/blob_storage` suốt phiên — đo trong profile của bộ đo sau lượt xuất 39 phút: **11 GB**. Trên máy người dùng: mỗi lượt xuất thêm một bản sao cỡ file xuất trong AppData tới khi tắt app. Chưa sửa: thu hồi URL khi hộp thoại lưu của Electron còn mở có thể làm hỏng lượt lưu, cần thử tay; bỏ hẳn vòng HTTP (hướng trên) thì hết luôn.
 - Hướng: renderer xin đường dẫn lưu qua hộp thoại của main process rồi main process `rename`/`copyFile` thẳng `final_cut.mp4`. Đổi thời điểm hiện hộp thoại lưu, nên hỏi trước.
+- **ĐÃ LÀM (2026-09-29, người dùng chọn "hỏi chỗ lưu trước khi xuất", như Premiere):**
+  - Bấm "Xuất video ngay" → hộp thoại lưu gốc (`export-pick-output` ở `electron/main.js`, nhớ thư mục lần trước trong phiên, mặc định cạnh tệp .crab) → render → ffmpeg ghi **thẳng** ra `<tên>.exporting.mp4` cạnh đích rồi đổi tên khi xong (hỏng giữa chừng không để lại tệp dở, tệp cũ còn nguyên tới lúc xong). Server trả JSON `{ path }`, renderer báo toast "Đã xuất video". Không còn tải file vào Blob, không còn bản sao trong `blob_storage`.
+  - **An toàn:** HTTP API không kiểm nguồn gọi, nên backend chỉ nhận `output_path` kèm HMAC của main process (khoá ngẫu nhiên mỗi phiên, qua env `CRAB_EXPORT_OUTPUT_SECRET` lúc spawn backend); sai chữ ký/sai đuôi → 400. Backend chạy ngoài Electron (không có khoá), trình duyệt, và `bench:export` (`performVideoExport({ pickOutput: false })`) đi đường tải về cũ.
+  - Test `test:export-output-path` (chữ ký đúng + thư mục tiếng Việt + đè tệp cũ; chữ ký giả; sai đuôi; không có đường dẫn). Kiểm E2E trong Electron thật với móc test `CRAB_TEST_EXPORT_OUTPUT_DIR` (bỏ hộp thoại): Bin Tom ghi thẳng ra đích, `download_ms = 0`, toast đúng; lượt xuất trong app 39,1 s (số nền 129,2 s).
 
-**1.17 (mới) Giao diện Electron ăn CPU trong lúc xuất.** — **đã làm phần chắc chắn**, chưa commit.
+**1.17 (mới) Giao diện Electron ăn CPU trong lúc xuất.** — **xong** (dừng preview khi xuất: `5e5635a`; tắt tự phát khi mở dự án: phiên 3).
 - Cùng payload, lượt xuất trong app chậm hơn lượt phát lại qua HTTP ~21–30%. CPU-giây của ffmpeg như nhau (~1.000 CPU-s cho batch 0 của bản cắt 300 s) mà thời gian thực 120 s so với 94 s; GPU SM 14,5% so với 5,4%.
 - **Nguyên nhân (CPU profile giữa lượt xuất bản 39 phút):** renderer bận 11,3/15 s. Gần hết là vòng phát preview: `startOverlayPreviewLoop` → `updateSequencePreviewTransform` + `renderPreviewOverlays`, `tick` của perf-runtime → `scrollTimelineToCurrentTime`, và ticker Pixi. Nghĩa là **preview đang phát suốt lúc xuất**. Electron trung bình 0,72 lõi.
 - **Vì sao preview đang phát:** `PIXI.Texture.from(this.videoEl)` (`index.html`, `SequencePixiPreviewRenderer.init`) tạo `VideoResource` với mặc định `autoPlay: true`; ở sự kiện `canplay` đầu tiên (mở dự án), `_onCanPlay` tự gọi `video.play()`. Có từ bản 1.1.8. Đã kiểm trong Electron: mở .crab xong, `currentTime` 0 → 17,8 s sau 8 s mà không ai bấm Phát.
 - **Đã sửa:** `performVideoExport` dừng preview trước khi xuất (`video.pause()`, nút Phát tự đồng bộ theo sự kiện `pause`, như nút Chụp khung hình).
 - **Chưa sửa, cần người dùng quyết:** tắt `autoPlay` của Pixi. Đã thử (`resourceOptions: { autoPlay: false }`): hết tự phát, nút Phát vẫn chạy. Nhưng nó lộ ra hai chỗ mà cú tự phát vẫn che: sau khi mở, preview đứng ở `currentTime` 0 (nguồn giây 0, nằm ngoài clip đầu 9,96 s của Bin Tom), và bộ đếm hiện "00:00:00:00 / 00:00:00:00". Đã hoàn lại, để xử lý chung với vị trí playhead khi mở dự án.
+- **ĐÃ LÀM (2026-09-29, người dùng chọn "tắt, playhead đứng ở đầu clip đầu"):** `PIXI.Texture.from(video, { resourceOptions: { autoPlay: false } })` + `parkPreviewAtSequenceStart()` cuối lượt mở dự án (dừng, `setVideoTimeFromTimelineTime(0)`, vẽ đồng hồ ngay — timeupdate của lượt tua tới trễ ~1,5 s+). Kiểm trong Electron thật (Bin Tom): đứng yên ở 9,96 s = đầu clip đầu suốt 5,5 s, đồng hồ "00:00:00:00 / 00:01:16:17" ngay 1,5 s sau khi mở, preview hiện đúng khung (ảnh chụp). Kèm theo: đổi sang proxy lúc đang dừng cũng thôi tự phát (Pixi gọi play() ở MỌI `canplay`).
 
 **1.18 (mới) Dọn batch trung gian sau khi ghép** — **đã làm**, chưa commit.
 - Sau lượt xuất nhiều batch, `<temp>/export_batches/` (to bằng chính bản xuất: ~11,5 GB ở dự án 4K 39 phút) nằm lại trong thư mục tạm của dự án tới lượt xuất sau. Nay `RemoveExportBatches` xoá ngay sau khi ghép cuối thành công, ở cả nhánh có lớp phủ lẫn nhánh 80 clip. `test:export-batch-seek` kiểm thư mục đã mất.
@@ -733,7 +783,7 @@ Nguồn:
    - Riêng "Ca thật 2" (phụ đề song ngữ 39 phút, 4K AV1) trên máy này: từ ~49 phút xuống **≤ 10 phút** khi xuất 4K; xuất 1080p (1.12) còn nhanh hơn.
    - Trên Mac: đo theo M.7.
 2. **Chất lượng**: `tests/scripts/export_fidelity.js` theo 0.3.
-3. **Hồi quy**: `npm run test:export`, `test:export-many-overlays`, `test:export-color`, `test:export-long-subtitles`, `test:sequence-fps`, `test:seam`, `test:frame-grid`, `test:overlay-placement`, `test:video-mask`, `test:video-anim`, `test:position-keyframe`, `test:color-adjust`, `test:adjust-layer`, `test:clip-speed`, `test:mixed-orientation`, `test:retouch-export`, `test:transition-frames`, `test:main-lane-concat`, `test:unicode-path`.
+3. **Hồi quy**: `npm run test:export`, `test:export-many-overlays`, `test:export-color`, `test:export-long-subtitles`, `test:sequence-fps`, `test:seam`, `test:frame-grid`, `test:overlay-placement`, `test:video-mask`, `test:video-anim`, `test:position-keyframe`, `test:color-adjust`, `test:adjust-layer`, `test:clip-speed`, `test:mixed-orientation`, `test:retouch-export`, `test:transition-frames`, `test:main-lane-concat`, `test:unicode-path`, cộng các test mới của Bước 1: `test:export-concat-video-overlay`, `test:auto-subtitle`, `test:export-hdr-asset-usage`, `test:export-batch-seek`, `test:export-yuv-composite`, `test:export-fast-path` — cả 25 test: `npm run test:export-all` (~15 phút; đưa thư mục FFmpeg ghim lên đầu PATH trước).
    - Chạy khi app/backend **đang tắt** (bẫy `core_c.node` EPERM).
    - Xong thì khôi phục `progress.txt`.
 4. **Máy không NVIDIA**: `FFMPEG_EXPORT_HW=0` + `CRABBYCUT_HWACCEL_DECODE=0` phải đúng và không chậm hơn số nền CPU; `d3d11va` thử được ngay trên máy này.

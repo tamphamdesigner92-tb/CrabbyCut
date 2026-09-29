@@ -417,7 +417,8 @@ async function recordInElectron() {
       };
       try {
         window.__crabLastExportTiming = null;
-        await performVideoExport();
+        // pickOutput: false — không có ai bấm hộp thoại lưu (mục 1.16); đi đường tải về cũ.
+        await performVideoExport({ pickOutput: false });
         return window.__crabLastExportTiming;
       } finally {
         HTMLAnchorElement.prototype.click = originalClick;

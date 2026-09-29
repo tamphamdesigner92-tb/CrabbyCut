@@ -54,10 +54,25 @@ function sourceCopiesInTemp() {
     }
 }
 
+/* Xoá có thử lại: sidecar vừa đọc xong temp_input.mp4 còn giữ handle một nhịp sau khi reingest
+ * trả về. Backend dùng rmSync({ maxRetries }) — chạy được trên Node 20 của Electron, nhưng Node 24
+ * (node chạy bài kiểm) BỎ QUA maxRetries khi gặp EPERM, nên phải tự lặp ở đây. */
+function rmWithRetry(target) {
+    for (let attempt = 0; ; attempt += 1) {
+        try {
+            fs.rmSync(target, { recursive: true, force: true });
+            return;
+        } catch (error) {
+            if (attempt >= 25 || !['EPERM', 'EBUSY'].includes(error.code)) throw error;
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 120);
+        }
+    }
+}
+
 // Dọn đúng như /api/reset-project làm trước khi mở một dự án.
 function wipeTempDir() {
     for (const name of fs.readdirSync(TEST_TEMP)) {
-        fs.rmSync(path.join(TEST_TEMP, name), { recursive: true, force: true });
+        rmWithRetry(path.join(TEST_TEMP, name));
     }
 }
 

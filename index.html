@@ -6288,7 +6288,12 @@
                 this.root.appendChild(this.app.view);
                 this.background = new PIXI.Graphics();
                 this.app.stage.addChild(this.background);
-                this.texture = PIXI.Texture.from(this.videoEl);
+                /* autoPlay: false — mặc định của Pixi 7 (`VideoResource`) là TỰ GỌI video.play() ở
+                   mỗi sự kiện `canplay`: mở dự án xong là preview tự chạy (có từ 1.1.8, không ai
+                   bấm Phát), và đổi sang proxy lúc đang dừng cũng tự chạy tiếp. Dừng yên như
+                   Premiere (người dùng chốt 2026-09-29, mục 1.17 của KE_HOACH_TOI_UU_EXPORT_WIN.md);
+                   playhead được đặt ở đầu sequence cuối lượt mở dự án (parkPreviewAtSequenceStart). */
+                this.texture = PIXI.Texture.from(this.videoEl, { resourceOptions: { autoPlay: false } });
                 this.sprite = new PIXI.Sprite(this.texture);
                 this.sprite.anchor.set(0.5);
                 this.app.stage.addChild(this.sprite);
@@ -9837,6 +9842,23 @@
         return Math.max(0, Math.min(getTimelineDuration(), bestTime));
     }
 
+    /* Mở dự án xong: dừng preview ở ĐẦU sequence, như Premiere. Trước đây việc này do cú tự phát
+       của Pixi làm hộ (xem SequencePixiPreviewRenderer.init) — phát từ giây 0 của nguồn, rồi
+       vòng timeupdate nhảy tới clip đầu. Tắt tự phát mà không đặt lại thì preview đứng ở giây 0
+       của NGUỒN (ngoài clip đầu, vd 9,96 s ở "Bin Tom") và đồng hồ hiện 00:00:00:00 / 00:00:00:00
+       vì chưa có timeupdate nào. Seek (kể cả tới đúng chỗ đang đứng) luôn bắn timeupdate. */
+    function parkPreviewAtSequenceStart() {
+        if (!(videoDuration > 0)) return;
+        if (!video.paused) video.pause();
+        setVideoTimeFromTimelineTime(0);
+        /* Vẽ đồng hồ NGAY: timeupdate của lượt tua chỉ tới khi trình duyệt giải mã xong khung đích
+           (đo trong Electron, Bin Tom: 1,5 s sau khi mở vẫn còn 00:00:00:00 / 00:00:00:00). Cùng
+           công thức với handler timeupdate. */
+        const displayTotal = currentMode === 'FINAL' ? getTimelineDuration() : videoDuration;
+        const clock = document.getElementById('timeDisplay');
+        if (clock) clock.innerText = `${formatTimecode(getDisplayClockTime())} / ${formatTimecode(displayTotal)}`;
+    }
+
     function setVideoTimeFromTimelineTime(timelineTime) {
         if (currentMode === 'FINAL') {
             // Seek theo vị trí SEQUENCE -> ghim luôn con trỏ clip tương ứng, để phát tiếp
@@ -12560,6 +12582,7 @@
         updateProjectTitle();
         touchRecentProject(filePath);   // mở cũng là "gần đây", không chỉ lưu
         undoStack = []; redoStack = []; updateUndoRedoButtons();
+        parkPreviewAtSequenceStart();
         setStatusText(_t('Đã mở dự án'), false);
     }
 
@@ -15816,10 +15839,34 @@
     // Phải khoá NGAY TỪ ĐẦU hàm, trước mọi việc nặng.
     let videoExportInFlight = false;
 
-    async function performVideoExport() {
+    /* CHỖ LƯU VIDEO XUẤT — hỏi TRƯỚC khi render, như Premiere (mục 1.16, người dùng chốt
+     * 2026-09-29). ffmpeg ghi thẳng ra đó: hết vòng tải cả file qua trình duyệt (11,5 GB mất 64 s)
+     * rồi ghi thêm một bản, hết bản sao trong blob_storage. Trả { path, ticket } | false (người
+     * dùng huỷ) | null (không có hộp thoại gốc: chạy trong trình duyệt, backend ngoài, hoặc
+     * `pickOutput: false` của bench:export) -> đường tải về cũ. */
+    async function pickVideoExportTarget(options) {
+        if (options?.pickOutput === false || !window.desktopEnv?.pickExportOutput) return null;
+        const codec = document.getElementById('exportCodec')?.value || 'h264';
+        const suggestedName = sanitizeProjectName(document.getElementById('exportFileName')?.value || '') || 'studio_final_cut';
+        const picked = await window.desktopEnv.pickExportOutput({
+            suggestedName,
+            ext: codec === 'prores' ? 'mov' : 'mp4',
+            projectPath: currentProjectPath || '',
+        });
+        if (picked?.canceled) return false;
+        return (picked?.path && picked?.ticket) ? picked : null;
+    }
+
+    async function performVideoExport(options = {}) {
         if (!latestTimeline || latestTimeline.length === 0) return;
         if (videoExportInFlight) {
             setStatusText(_t('Đang xuất video — vui lòng đợi lượt hiện tại xong.'), true);
+            return;
+        }
+        // Hộp thoại lưu gốc là modal nên không bấm Xuất lần hai được trong lúc nó mở.
+        const exportTarget = await pickVideoExportTarget(options);
+        if (exportTarget === false) {
+            setStatusText(_t('Đã huỷ xuất video.'), false);
             return;
         }
         videoExportInFlight = true;
@@ -15994,6 +16041,10 @@
             prebake: exportTiming.prebake,
         }));
         formData.append("client_started_at_ms", String(Date.now()));
+        if (exportTarget) {
+            formData.append('output_path', exportTarget.path);
+            formData.append('output_ticket', exportTarget.ticket);
+        }
 
         const requestClock = performance.now();
         const response = await fetch(`${API_BASE}/export-video`, { method: "POST", body: formData });
@@ -16005,12 +16056,24 @@
             throw new Error(detail || _t("Xuất video thất bại."));
         }
         try { exportTiming.server = JSON.parse(response.headers.get('X-Export-Timing') || 'null'); } catch (_) {}
+        exportTiming.report_path = response.headers.get('X-Project-Report-Path') || null;
+        // Đã ghi thẳng ra chỗ người dùng chọn: server trả JSON, không có gì để tải về.
+        if (exportTarget && (response.headers.get('content-type') || '').includes('application/json')) {
+            const written = await response.json();
+            exportTiming.download_ms = 0;
+            exportTiming.output_path = written?.path || exportTarget.path;
+            exportTiming.total_ms = Math.round(performance.now() - exportClock);
+            window.__crabLastExportTiming = exportTiming;
+            console.info('[export-timing]', exportTiming);
+            showToast(_t('Đã xuất video: {name}', { name: written?.name || exportTarget.path }), { type: 'success' });
+            setStatusText(_t('Đã lưu video vào {path}', { path: exportTiming.output_path }), false);
+            return;
+        }
         const downloadClock = performance.now();
         const exportBlob = await response.blob();
         exportTiming.download_ms = Math.round(performance.now() - downloadClock);
         exportTiming.output_bytes = exportBlob.size;
         exportTiming.total_ms = Math.round(performance.now() - exportClock);
-        exportTiming.report_path = response.headers.get('X-Project-Report-Path') || null;
         window.__crabLastExportTiming = exportTiming;
         console.info('[export-timing]', exportTiming);
         const a = document.createElement("a");

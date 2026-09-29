@@ -18,6 +18,9 @@ const projectRoot = path.resolve(__dirname, '..', '..');
 process.env.CRAB_TEMP_DIR = process.env.CRAB_TEMP_DIR
   || path.join(projectRoot, 'test_temp', 'export_hdr_asset_usage');
 const tempDir = path.resolve(process.env.CRAB_TEMP_DIR);
+// Cache bản SDR riêng của test — không ghi vào cache thật của người dùng (như CRAB_CONCAT_CACHE_DIR).
+process.env.CRAB_SDR_CACHE_DIR = path.join(tempDir, '..', 'export_hdr_asset_usage_sdr_cache');
+const sdrCacheDir = path.resolve(process.env.CRAB_SDR_CACHE_DIR);
 
 /* Clip ngắn GẮN NHÃN HLG/BT.2020 — sourceIsHdr chỉ đọc nhãn màu, nên không cần nội dung HDR
  * thật. 10-bit nếu libx264 của bản ffmpeg này có, không thì 8-bit (nhãn vẫn là thứ quyết định).
@@ -38,8 +41,15 @@ function sdrOutputs() {
   return fs.readdirSync(dir).flatMap((key) => fs.readdirSync(path.join(dir, key)));
 }
 
+function cacheEntries() {
+  if (!fs.existsSync(sdrCacheDir)) return [];
+  return fs.readdirSync(sdrCacheDir).flatMap((key) => fs.readdirSync(path.join(sdrCacheDir, key))
+    .filter((name) => name.endsWith('.mp4')));
+}
+
 async function main() {
   fs.rmSync(tempDir, { recursive: true, force: true });
+  fs.rmSync(sdrCacheDir, { recursive: true, force: true });
   const mediaDir = path.join(tempDir, 'library');
   fs.mkdirSync(mediaDir, { recursive: true });
   const usedPath = path.join(mediaDir, 'hdr_used.mp4');
@@ -47,7 +57,7 @@ async function main() {
   makeHdrClip(usedPath, 'red');
   makeHdrClip(unusedPath, 'blue');
 
-  const { sdrOverridesForEditingAssets } = require('../../backend/server');
+  const { sdrOverridesForEditingAssets, ensureSdrAsset, pruneSdrCache } = require('../../backend/server');
   const assets = [
     { id: 'asset_used', type: 'media_video', name: 'hdr_used.mp4', path: usedPath },
     { id: 'asset_unused', type: 'media_video', name: 'hdr_unused.mp4', path: unusedPath },
@@ -64,6 +74,32 @@ async function main() {
   assert.deepStrictEqual(sdrOutputs(), ['hdr_used.mp4'], 'KHÔNG được mã hoá lại video HDR mà không item nào dùng');
   console.log('  ok  thư viện 2 video HDR, item dùng 1 -> hạ SDR đúng 1 file');
 
+  /* 1b. Cache lâu dài (người dùng chốt 2026-09-29): bản SDR sống qua lần mở lại dự án.
+   * /api/reset-project xoá sạch temp_uploads -> giả lập bằng cách xoá editing_assets. Lượt sau
+   * phải lấy lại từ cache (cached: true) chứ không mã hoá lại. */
+  assert.deepStrictEqual(cacheEntries(), ['hdr_used.mp4'], 'bản SDR vừa dựng phải được cất vào cache lâu dài');
+  const firstBytes = fs.statSync(overrides.get(usedPath)).size;
+  fs.rmSync(path.join(tempDir, 'editing_assets'), { recursive: true, force: true });
+  const t0 = Date.now();
+  const again = await ensureSdrAsset(usedPath);
+  assert.ok(again.tonemapped && again.cached, `mở lại dự án phải lấy bản SDR từ cache, được ${JSON.stringify(again)}`);
+  assert.strictEqual(fs.statSync(again.path).size, firstBytes, 'bản lấy từ cache phải y hệt bản đã dựng');
+  assert.ok(again.path.replace(/\\/g, '/').includes('/editing_assets/sdr/'),
+    'bản dùng thật vẫn phải nằm dưới editing_assets/ (isTempEditingAssetRecord nhận asset dự án bằng đường dẫn đó)');
+  console.log(`  ok  mở lại dự án: lấy bản SDR từ cache sau ${Date.now() - t0} ms, không mã hoá lại`);
+
+  // 1c. Dọn cache: vượt trần thì bỏ; quá hạn thì bỏ. Bản đang dùng trong temp_uploads vẫn còn.
+  pruneSdrCache({ maxBytes: firstBytes * 10 });
+  assert.deepStrictEqual(cacheEntries(), ['hdr_used.mp4'], 'dưới trần dung lượng thì không được dọn');
+  pruneSdrCache({ maxBytes: 1 });
+  assert.deepStrictEqual(cacheEntries(), [], 'vượt trần dung lượng thì phải dọn');
+  assert.ok(fs.existsSync(again.path), 'dọn cache không được xoá bản đang dùng trong temp_uploads');
+  fs.rmSync(path.join(tempDir, 'editing_assets'), { recursive: true, force: true });
+  await ensureSdrAsset(usedPath);
+  pruneSdrCache({ ttlMs: -1 });
+  assert.deepStrictEqual(cacheEntries(), [], 'quá hạn dùng thì phải dọn');
+  console.log('  ok  dọn cache SDR theo trần dung lượng và hạn dùng');
+
   // 2. Không item nào dùng video -> không mã hoá gì, dù thư viện đầy video HDR.
   fs.rmSync(path.join(tempDir, 'editing_assets', 'sdr'), { recursive: true, force: true });
   const none = await sdrOverridesForEditingAssets({ tracks: [], items: [], assets });
@@ -72,6 +108,7 @@ async function main() {
   console.log('  ok  không item dùng video -> không hạ SDR file nào');
 
   fs.rmSync(tempDir, { recursive: true, force: true });
+  fs.rmSync(sdrCacheDir, { recursive: true, force: true });
   console.log('export hdr asset usage ok');
 }
 

@@ -9815,3 +9815,25 @@ Bốn điều số đo lật ra, dễ đoán sai nếu không đo:
 2. **Batch sau giải mã lại từ giây 0**: dự án 39 phút, batch 180 s đầu 135 s, batch cuối (24,8 s phim) 255 s. Sửa bằng seek theo batch (`BatchSeekSeconds`, chỉ batch chỉ-hình — AAC giải mã từ giữa file cho mẫu khác vài LSB): phát lại 2.978,8 → 1.392,5 s (2,14×), bản xuất giống hệt từng gói (đo trên bản cắt 300 s).
 3. **Lượt xuất đầu hạ SDR cả asset không dùng**: `sdrOverridesForEditingAssets` từng duyệt cả thư viện dự án; nay chỉ asset có item.
 4. **Preview tự phát sau khi mở dự án** (mặc định `autoPlay` của `PIXI.Texture.from(video)`), và vòng phát giành CPU với ffmpeg suốt lượt xuất (chậm 21–30%). `performVideoExport` nay dừng preview trước khi xuất; bản thân việc tự phát chưa sửa.
+
+## Xuất video: lane chính đi thẳng YUV, lớp phủ ở YUV (Bước 1, mục 1.3 + 1.5, 2026-09-29)
+
+**Đo ra khoản lớn nhất không nằm ở chuỗi lớp phủ mà ở LANE CHÍNH.** Batch 4K của dự án phụ đề (30 s phim, chỉ đồ thị filter): đồ thị cũ 43 khung/s; chỉ riêng lane chính theo đường cũ đã chỉ còn 67 khung/s, vì mỗi clip được dựng lên nền `color` đen ở RGBA rồi `overlay` rồi đổi về yuv420p — tức mọi khung phim đi YUV → RGBA → YUV ở cỡ sequence, kể cả clip 100% nằm giữa khung.
+
+**1.3 — đường nhanh** (`MainLaneFastPlan`, bật mặc định, tắt bằng `CRABBYCUT_EXPORT_FASTPATH=0`): `scale` → `pad` → `crop exact` ở yuv420p, không nền, không overlay. Chỉ khi nguồn là BT.709 (hoặc HD không nhãn đã được gán BT.709): swscale đi YUV → YUV **không đổi ma trận**, nên nguồn BT.601 phải giữ đường cũ. Ba nhánh:
+- toạ độ chẵn, hoặc cắt lẻ khi clip tràn kín khung: 4:2:0, với `scale` dời vị trí mẫu màu 1 điểm ảnh (`in/out_*_chr_pos` +256) để phép cắt lẻ không làm màu lệch nửa mẫu;
+- đệm lẻ / mép clip nằm ở cột lẻ / clip 100% cắt lẻ: đặt ở 4:4:4 rồi hạ về 4:2:0 (swscale bỏ qua `chr_pos` khi không co giãn; mẫu màu ở mép clip giáp nền đen phải là trung bình như đường cũ);
+- clip có chuỗi màu: co giãn + đặt vị trí ở RGB, đổi YUV một lần — đúng phép tính của đường cũ (kẹp gam RGB như preview WebGL), chỉ bỏ nền + overlay.
+Số khung chốt bằng `tpad` clone + `concat` với dải đen + `trim` (tpad `stop_mode=add` không ra khung nào khi đầu vào rỗng). `pad` làm tròn bề rộng ĐẦU VÀO xuống số chẵn → luôn đệm trước, cắt sau.
+
+**1.5 — lớp phủ ở YUV** (bật mặc định, tắt bằng `CRABBYCUT_EXPORT_YUVCOMP=0`; người dùng nới tiêu chí "PSNR mới/cũ ≥ 45 dB" cho ca bản mới gần bản chuẩn hơn hẳn — Bin Tom 40,3 → 52,5 dB): lớp phủ đứng yên đổi sang yuva420p, ghép `overlay=format=yuv420`.
+- Màu mép: phép đổi thẳng lấy trung bình 2×2 gồm cả điểm ảnh trong suốt (canvas lưu là đen) → mép chữ màu nhạt đi. `AlphaWeightedYuva420` tính mẫu màu theo trọng số alpha (premultiply → thu nửa cỡ → unpremultiply ở 16-bit, `mergeplanes` với luma/alpha đầy đủ). Chỉ cho ẢNH TĨNH (chạy một lần); chuỗi khung chữ động đổi thẳng — chữa ở từng khung làm Bin Tom chậm 13% mà không đổi chất lượng đo được.
+- `overlay` yuv420 ở cột/hàng mẫu màu CUỐI chỉ lấy alpha của điểm ảnh đầu cặp → đệm lớp phủ `+4` để cặp cuối luôn trong suốt.
+- `OverlayStillOnce` (bật mặc định, cả đường RGBA): ảnh tĩnh là input MỘT khung, xử lý một lần, `loop` lặp khung đã xử lý — thay cho `-loop 1` (25 khung/giây, mỗi khung giải mã PNG + đổi màu lại).
+
+Kết quả (phát lại, Ryzen 7 2700X + GTX 1060, Gyan 8.1.1): Bin Tom 49,6–56,4 s → 1.3: 39–40 s → 1.3 + 1.5: 29–35 s; phụ đề 4K cắt 300 s 191–196 s → 111–113 s → 81–91 s. Trong app, Bin Tom 129,2 s → 39,1 s (cộng 1.15/1.16/1.17).
+
+**Cùng đợt (người dùng chốt 2026-09-29):**
+- **Cache bản SDR** (`SDR_CACHE_DIR`, backend): bản hạ SDR của video HDR sống qua các lần mở dự án; `editing_assets/sdr/…` chỉ là liên kết cứng tới cache (renderer nhận asset dự án bằng đường dẫn dưới `editing_assets/`). Trần 20 GB, hạn 30 ngày, dọn được trong Cài đặt → Bộ nhớ đệm.
+- **Hỏi chỗ lưu TRƯỚC khi xuất**: `export-pick-output` (main) → ffmpeg ghi thẳng ra `<tên>.exporting.mp4` cạnh đích rồi đổi tên; server trả JSON. Backend chỉ nhận `output_path` có HMAC của main (khoá phiên qua env `CRAB_EXPORT_OUTPUT_SECRET`) — HTTP API không kiểm nguồn gọi. Hết vòng tải cả file vào Blob và bản sao trong `blob_storage`.
+- **Preview không tự phát khi mở dự án**: `PIXI.Texture.from(video, { resourceOptions: { autoPlay: false } })` + `parkPreviewAtSequenceStart()` (dừng ở đầu sequence, vẽ đồng hồ ngay). Test: `test:export-fast-path`, `test:export-yuv-composite`; cả bộ export: `npm run test:export-all`. Chi tiết, số đo từng ca và các bẫy: mục 1.3/1.5 của `docs/KE_HOACH_TOI_UU_EXPORT_WIN.md`.

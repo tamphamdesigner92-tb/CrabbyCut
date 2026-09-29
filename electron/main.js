@@ -5,6 +5,7 @@ const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron')
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { writeCrabFile, readCrabFile, fingerprintFile } = require('./crab-format');
 const {
@@ -71,6 +72,11 @@ let pendingOpenPath = null;
 let forceClose = false;
 let backendProcess = null;
 let isExternalBackend = false;
+/* Khoá ký đường dẫn lưu video xuất (mục 1.16 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md) — sinh mới
+ * mỗi phiên, chỉ main và backend DO MAIN SPAWN biết (qua env). Xem `export-pick-output` bên
+ * dưới và trustedExportOutputPath ở backend/server.js. */
+const EXPORT_OUTPUT_SECRET = crypto.randomBytes(32).toString('hex');
+let lastExportDir = '';
 let isQuitting = false;
 let shutdownInProgress = false;
 let signalShutdownInProgress = false;
@@ -141,6 +147,7 @@ function startBackendSidecar() {
     BACKEND_PORT: String(BACKEND_PORT),
     // Ngôn ngữ hệ điều hành cho cài đặt 'auto' — Node của backend không đọc được nó chắc chắn.
     CRAB_SYSTEM_LOCALE: I18nMain.systemLocale(),
+    CRAB_EXPORT_OUTPUT_SECRET: EXPORT_OUTPUT_SECRET,
   };
 
   if (!process.env.BACKEND_NODE) {
@@ -560,6 +567,41 @@ ipcMain.handle('save-frame-image', async (_event, { dataBase64, suggestedName })
     return { path: finalPath };
   } catch (error) {
     return { error: 'write_failed', detail: String(error?.message || error) };
+  }
+});
+
+/* CHỌN CHỖ LƯU VIDEO XUẤT — TRƯỚC khi render (mục 1.16, người dùng chốt 2026-09-29: như
+ * Premiere). ffmpeg ghi thẳng ra đó, không còn vòng tải file qua trình duyệt rồi ghi thêm một
+ * bản. Trả kèm `ticket` = HMAC của đường dẫn bằng khoá phiên: backend chỉ nhận đường dẫn có
+ * chữ ký đúng (HTTP API không kiểm nguồn gọi, xem trustedExportOutputPath ở backend/server.js).
+ * Backend chạy ngoài (không do main spawn, nên không có khoá) -> `unsupported`: renderer đi
+ * đường tải về cũ, khỏi hỏi chỗ lưu hai lần. Thư mục chọn lần trước được nhớ trong phiên. */
+ipcMain.handle('export-pick-output', async (_event, { suggestedName, ext, projectPath } = {}) => {
+  if (isExternalBackend) return { unsupported: true };
+  try {
+    const extension = ext === 'mov' ? 'mov' : 'mp4';
+    // CHỈ DÙNG CHO TEST (như CRAB_TEMP_DIR): bỏ hộp thoại gốc — CDP không bấm được nó.
+    const testDir = process.env.CRAB_TEST_EXPORT_OUTPUT_DIR;
+    if (testDir) {
+      const testPath = path.join(path.resolve(testDir), `${String(suggestedName || 'studio_final_cut')}.${extension}`);
+      return { path: testPath, ticket: crypto.createHmac('sha256', EXPORT_OUTPUT_SECRET).update(testPath).digest('hex') };
+    }
+    const baseDir = lastExportDir
+      || (projectPath ? path.dirname(String(projectPath)) : '')
+      || app.getPath('videos');
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: _t('Lưu video xuất'),
+      defaultPath: path.join(baseDir, `${String(suggestedName || 'studio_final_cut')}.${extension}`),
+      filters: [{ name: extension === 'mov' ? _t('Video QuickTime') : _t('Video MP4'), extensions: [extension] }],
+    });
+    if (result.canceled || !result.filePath) return { canceled: true };
+    let finalPath = result.filePath;
+    if (path.extname(finalPath).toLowerCase() !== `.${extension}`) finalPath += `.${extension}`;
+    lastExportDir = path.dirname(finalPath);
+    const ticket = crypto.createHmac('sha256', EXPORT_OUTPUT_SECRET).update(finalPath).digest('hex');
+    return { path: finalPath, ticket };
+  } catch (error) {
+    return { error: 'dialog_failed', detail: String(error?.message || error) };
   }
 });
 

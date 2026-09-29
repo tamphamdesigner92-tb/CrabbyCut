@@ -13,6 +13,11 @@
  *   2. CHUỖI CHÍNH KHÔNG CÒN RGBA: mọi `overlay` của chuỗi lớp phủ nhận luồng chính ở yuv420p
  *      (đọc từ -print_graphs_file khi CRABBYCUT_EXPORT_BENCH=1; ffmpeg < 8.0 thì bỏ qua mục này).
  *   3. MÀU GẦN NHƯ Y HỆT: lớp phủ bán trong suốt, PSNR mới/cũ ≥ 40 dB trên cả khung.
+ *   4. MÀU Ở MÉP: đĩa vàng mép khử răng cưa ở toạ độ lẻ, trên bản lossless của đồ thị
+ *      (renderFromCommands), U/V quanh đĩa so với bản chuẩn đã hạ về 4:2:0. Đo 2026-09-29: đường cũ
+ *      U 49,6 dB; trung bình có trọng số alpha (AlphaWeightedYuva420) 46,3; trung bình THƯỜNG (đột
+ *      biến) 41,6. Ngưỡng: không kém đường cũ quá 4 dB. Phần lệch còn lại là do `overlay` trộn
+ *      mẫu màu theo alpha trung bình ngay ở 4:2:0, còn đường cũ ghép ở cỡ đầy đủ rồi mới hạ mẫu.
  *
  * Chạy: npm run test:export-yuv-composite
  * ================================================================== */
@@ -20,6 +25,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { renderFromCommands } = require('./export_fidelity.js');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const TEST_DIR = path.join(ROOT, 'test_temp', 'export_yuv_composite');
@@ -69,24 +75,35 @@ function redBox(luma) {
   return { x0, y0, x1, y1 };
 }
 
-function writeTimeline(file, solidPng, halfPng) {
+// Đĩa vàng ở ô thời gian cuối (sau các ô vị trí), toạ độ lẻ; tâm theo công thức overlay RGBA.
+const DISC = 64;
+const DISC_POS = [3, 5];
+const DISC_SLOT = POSITIONS.length;
+
+function writeTimeline(file, solidPng, halfPng, discPng) {
   const overlays = POSITIONS.map(([dx, dy], i) => ({
     index: i, id: `ov_${i}`, type: 'media', asset_type: 'text_image', asset_path: solidPng,
     timeline_start: +(i * SLOT).toFixed(3), duration: 1, source_start: 0,
     position_x: dx, position_y: dy, scale: 100, opacity: 100,
     track_id: 'track_text_1', track_order: 0, muted: true, volume: 0, has_audio: false,
   }));
+  overlays.push({
+    index: POSITIONS.length + 1, id: 'ov_disc', type: 'media', asset_type: 'text_image', asset_path: discPng,
+    timeline_start: +(DISC_SLOT * SLOT).toFixed(3), duration: 1, source_start: 0,
+    position_x: DISC_POS[0], position_y: DISC_POS[1], scale: 100, opacity: 100,
+    track_id: 'track_text_1', track_order: 0, muted: true, volume: 0, has_audio: false,
+  });
   // Lớp phủ bán trong suốt, phủ suốt phim ở góc trên trái (toạ độ lẻ) — cho phép so màu.
   overlays.push({
     index: POSITIONS.length, id: 'ov_half', type: 'media', asset_type: 'text_image', asset_path: halfPng,
-    timeline_start: 0, duration: POSITIONS.length * SLOT, source_start: 0,
+    timeline_start: 0, duration: (POSITIONS.length + 1) * SLOT, source_start: 0,
     position_x: -101, position_y: -61, scale: 100, opacity: 100,
     track_id: 'track_text_2', track_order: 1, muted: true, volume: 0, has_audio: false,
   });
   fs.writeFileSync(file, JSON.stringify({
     version: 4,
     sequence: { width: W, height: H, fps: String(FPS) },
-    intervals: [{ index: 0, script_index: 0, text: 'c0', start: 0, end: POSITIONS.length * SLOT }],
+    intervals: [{ index: 0, script_index: 0, text: 'c0', start: 0, end: (POSITIONS.length + 1) * SLOT }],
     editingTracks: [
       { id: 'track_text_1', type: 'text', order: 0, visible: true },
       { id: 'track_text_2', type: 'text', order: 1, visible: true },
@@ -102,8 +119,28 @@ function exportOnce(source, timelineFile, output, yuv) {
     env: { ...process.env, FFMPEG_EXPORT_HW: '0', CRABBYCUT_EXPORT_YUVCOMP: yuv ? '1' : '0', CRABBYCUT_EXPORT_BENCH: '1' },
   });
   assert.strictEqual(r.status, 0, `xuất thất bại (yuv=${yuv}):\n${r.stdout}\n${r.stderr}`);
+  // Chép export_bench/ + filter script ra runs/<old|new> cho renderFromCommands (mục 4).
+  const runDir = path.join(TEST_DIR, 'runs', yuv ? 'new' : 'old');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.cpSync(path.join(TEST_DIR, 'export_bench'), path.join(runDir, 'export_bench'), { recursive: true });
+  for (const name of fs.readdirSync(TEST_DIR)) {
+    if (/^export_filter_batch_\d+\.txt$/.test(name)) fs.copyFileSync(path.join(TEST_DIR, name), path.join(runDir, name));
+  }
   const graphs = path.join(TEST_DIR, 'export_bench', 'batch_0000.graphs.json');
   return fs.existsSync(graphs) ? JSON.parse(fs.readFileSync(graphs, 'utf8')) : null;
+}
+
+/* PSNR của U và V trong một vùng, khung `frame`. So ở 4:2:0: bản chuẩn (4:4:4) được HẠ MẪU trước
+ * bằng swscale — so ở 4:4:4 thì sai số hạ mẫu mà cả hai bản đều có lấn hết phần pha loãng màu mép
+ * (đột biến bỏ trọng số alpha vẫn xanh). */
+function chromaPsnr(distorted, reference, frame, crop) {
+  const r = mustRun('ffmpeg', ['-v', 'info', '-i', distorted, '-i', reference, '-lavfi',
+    `[0:v]select=eq(n\\,${frame}),format=yuv420p,crop=${crop}[a];[1:v]select=eq(n\\,${frame}),format=yuv420p,crop=${crop}[b];[a][b]psnr`,
+    '-frames:v', '1', '-f', 'null', '-'], 'psnr màu mép');
+  const m = /u:([\d.]+|inf) v:([\d.]+|inf)/.exec(r.stderr || '');
+  assert.ok(m, `không đọc được PSNR:\n${r.stderr}`);
+  const n = (s) => (s === 'inf' ? Infinity : Number(s));
+  return { u: n(m[1]), v: n(m[2]) };
 }
 
 // Định dạng luồng CHÍNH ở đầu vào của từng `overlay` trên chuỗi lớp phủ (bỏ overlay clip-lên-nền).
@@ -126,7 +163,7 @@ function main() {
   }
   fs.rmSync(TEST_DIR, { recursive: true, force: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
-  const seconds = POSITIONS.length * SLOT;
+  const seconds = (POSITIONS.length + 1) * SLOT;
   const source = path.join(TEST_DIR, 'temp_input.mp4');
   mustRun('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', `color=c=black:size=${W}x${H}:rate=${FPS}:duration=${seconds}`,
     '-f', 'lavfi', '-i', `sine=frequency=440:duration=${seconds}`, '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
@@ -136,7 +173,13 @@ function main() {
   const halfPng = path.join(TEST_DIR, 'half.png');
   mustRun('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=64x36,format=rgba,colorchannelmixer=aa=0.5', '-frames:v', '1', halfPng], 'png bán trong suốt');
   const timelineFile = path.join(TEST_DIR, 'timeline.json');
-  writeTimeline(timelineFile, solidPng, halfPng);
+  const discPng = path.join(TEST_DIR, 'disc.png');
+  // Mép khử răng cưa 1,5 px; điểm ảnh trong suốt hẳn mang màu ĐEN như canvas lưu (đó chính là
+  // thứ làm phép hạ mẫu thường pha loãng màu mép).
+  const cov = `clip((${DISC / 2 - 4}-hypot(X-${DISC / 2 - 0.5},Y-${DISC / 2 - 0.5}))/1.5+0.5,0,1)`;
+  mustRun('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', `color=c=black@0:size=${DISC}x${DISC},format=rgba,`
+    + `geq=r='250*ceil(${cov})':g='210*ceil(${cov})':b='20*ceil(${cov})':a='255*${cov}'`, '-frames:v', '1', discPng], 'png đĩa vàng');
+  writeTimeline(timelineFile, solidPng, halfPng, discPng);
 
   const oldOut = path.join(TEST_DIR, 'old.mp4');
   const newOut = path.join(TEST_DIR, 'new.mp4');
@@ -173,6 +216,25 @@ function main() {
   const avg = !m ? NaN : (m[1] === 'inf' ? Infinity : Number(m[1]));
   assert.ok(avg >= 40, `PSNR mới/cũ ${avg} dB < 40`);
   console.log(`  ok  lớp phủ bán trong suốt: PSNR mới/cũ ${Number.isFinite(avg) ? avg.toFixed(2) : '∞'} dB`);
+
+  // 4. Màu ở mép đĩa vàng, trên bản lossless của đồ thị, so với bản chuẩn (đồ thị cũ ở 4:4:4).
+  const oldLossless = renderFromCommands(path.join(TEST_DIR, 'runs', 'old'));
+  const newLossless = renderFromCommands(path.join(TEST_DIR, 'runs', 'new'));
+  const gold = renderFromCommands(path.join(TEST_DIR, 'runs', 'old'), { gold: true });
+  const frame = Math.round((DISC_SLOT * SLOT + 0.5) * FPS);
+  const left = Math.trunc((W - DISC) / 2 + DISC_POS[0]);
+  const top = Math.trunc((H - DISC) / 2 + DISC_POS[1]);
+  // Vùng cắt chẵn (4:2:0): lùi về số chẵn gần nhất.
+  const x0 = (left - 4) & ~1;
+  const y0 = (top - 4) & ~1;
+  const crop = `${DISC + 8}:${DISC + 8}:${x0}:${y0}`;
+  const a = chromaPsnr(oldLossless, gold, frame, crop);
+  const b = chromaPsnr(newLossless, gold, frame, crop);
+  for (const plane of ['u', 'v']) {
+    assert.ok(b[plane] >= a[plane] - 4,
+      `màu mép kênh ${plane}: mới ${b[plane].toFixed(2)} dB, cũ ${a[plane].toFixed(2)} dB so bản chuẩn — mép bị pha loãng?`);
+  }
+  console.log(`  ok  màu mép đĩa vàng (toạ độ lẻ), so bản chuẩn cũ→mới: U ${a.u.toFixed(1)}→${b.u.toFixed(1)} V ${a.v.toFixed(1)}→${b.v.toFixed(1)} dB`);
 
   fs.rmSync(TEST_DIR, { recursive: true, force: true });
   console.log('export yuv composite ok');

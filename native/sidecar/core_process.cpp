@@ -926,6 +926,13 @@ struct ExportSettings {
   bool sourceColorUntagged = false;
   // Được phép seek vào giữa nguồn chính theo từng batch (xem BatchSeekSeconds/SourceSeekSafe).
   bool seekSafe = false;
+  // Đường nhanh YUV cho clip lane chính (mục 1.3, xem MainLaneFastPlan). Đo MỘT lần ở
+  // ProbeMainSourceForFastPath: cỡ khung nguồn, ma trận có phải BT.709 không, vị trí mẫu màu.
+  bool fastPathSource = false;
+  int sourceWidth = 0;
+  int sourceHeight = 0;
+  int sourceChromaH = 128;   // vị trí mẫu màu, đơn vị 1/256 điểm ảnh luma (như scale in_h_chr_pos)
+  int sourceChromaV = 128;
 };
 
 struct EncoderPlan {
@@ -1019,6 +1026,7 @@ struct ExportRunTiming {
   double sourceTo = 0.0;
   double sequenceDuration = 0.0;
   double seekTo = 0.0;   // 0 = không seek (giải mã nguồn từ giây 0)
+  size_t fastClips = 0;  // số clip lane chính đi đường nhanh YUV (mục 1.3)
   double runMs = 0.0;
   int exitCode = 0;
   bool cpuRetry = false;
@@ -1090,6 +1098,7 @@ std::string ExportTimingJson(const std::string& encoder) {
         << ",\"source_from\":" << run.sourceFrom << ",\"source_to\":" << run.sourceTo
         << ",\"sequence_duration\":" << run.sequenceDuration
         << ",\"seek_to\":" << run.seekTo
+        << ",\"fast_clips\":" << run.fastClips
         << std::setprecision(1)
         << ",\"run_ms\":" << run.runMs << ",\"exit\":" << run.exitCode
         << ",\"cpu_retry\":" << (run.cpuRetry ? "true" : "false") << "}";
@@ -1452,6 +1461,100 @@ bool MediaColorUntagged(const std::string& input) {
 
 std::string UntaggedColorFix(bool untagged) {
   return untagged ? "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709," : "";
+}
+
+/* ===== ĐƯỜNG NHANH YUV CHO CLIP LANE CHÍNH (mục 1.3, docs/KE_HOACH_TOI_UU_EXPORT_WIN.md) =====
+ *
+ * Đường cũ của mỗi clip: `color` đen cỡ sequence (RGBA) + clip đổi sang RGBA + `overlay` + đổi về
+ * yuv420p. Tức MỌI khung phim đi YUV -> RGBA -> YUV ở cỡ sequence, kể cả clip 100% nằm giữa
+ * khung — nơi kết quả chính là khung nguồn. Đo 2026-09-29 (batch 4K của dự án phụ đề, -f null):
+ * riêng lane chính 67 khung/s theo đường cũ, 180 khung/s theo đường nhanh (sát trần giải mã AV1).
+ *
+ * Đường nhanh: `scale` (cỡ cố định) -> `crop` phần tràn khung -> `pad` phần thiếu -> yuv420p.
+ * Ba điểm phải giữ cho bản xuất KHÔNG xê dịch so với đường cũ:
+ *  1. MA TRẬN MÀU: swscale đi thẳng YUV -> YUV KHÔNG đổi ma trận (đo: nguồn gắn nhãn BT.601 ra y
+ *     hệt từng bit), còn đường cũ đổi đúng vì YUV -> RGB đọc ma trận của khung. Nên chỉ dùng khi
+ *     nguồn là BT.709 (hoặc HD không nhãn, đã được UntaggedColorFix gán BT.709). Dải màu thì
+ *     swscale có đổi (pc -> tv), nên yuvj/pc vẫn đi được.
+ *     Nhãn dò theo LUỒNG (ffprobe), không theo từng khung: file nối mà đổi ma trận giữa chừng
+ *     (xem "Khám phá Hạ Long" ở ExportBatch) sẽ ra màu lệch ở đoạn đổi. Backend đã chặn phần lớn:
+ *     nguồn khác nhãn thì chuẩn hoá trước khi nối (probeConcatStreamSignature có color_space,
+ *     color_range, pix_fmt). Còn lại là một file tự đổi SPS giữa chừng — chưa gặp.
+ *  2. TOẠ ĐỘ LẺ: đường cũ đặt clip ở trunc((W-w)/2+posX) — số nguyên bất kỳ, vì overlay chạy ở
+ *     RGBA. Ở 4:2:0, cắt lệch một số lẻ điểm ảnh làm mẫu màu lệch nửa mẫu (crop `exact=1` cắt
+ *     mặt phẳng màu ở x>>1). Chữa: cho chính `scale` lấy mẫu màu dời một điểm ảnh luma
+ *     (`out_h/v_chr_pos` = vị trí nguồn + 256), để sau phép cắt lẻ mẫu màu về đúng chỗ. Đo trên
+ *     clip 4K phóng 101% (mép cắt dọc lẻ 9 px): U/V so bản chuẩn 60,5/58,4 dB khi không chữa,
+ *     65,5/64,9 dB khi chữa; đường cũ 54,8/53,9 dB.
+ *     ĐỆM ở toạ độ lẻ (clip nhỏ hơn khung) và clip GIỮ NGUYÊN CỠ bị cắt lẻ (swscale chép thẳng,
+ *     BỎ QUA chr_pos) thì đặt clip ở 4:4:4 rồi hạ về 4:2:0 — xem MainLaneFastPlan.
+ *  3. SỐ KHUNG: nền `color` là thứ đang chốt đúng renderFrames khung (overlay chạy tới input dài
+ *     nhất, clip ngắn thì lặp khung cuối). Thay bằng `tpad` clone (clip ngắn) + `concat` với một
+ *     dải đen (clip không ra khung nào) rồi `trim=end_frame` — xem WriteClipVideoFilters.
+ *  4. CHỈNH MÀU: clip có chuỗi màu co giãn + đặt vị trí ở RGB rồi đổi sang YUV một lần — đúng
+ *     phép tính của đường cũ (kẹp gam RGB như preview), chỉ bỏ nền + overlay. Xem MainLaneFastPlan.
+ * Ngoài đường nhanh: keyframe, hoạt ảnh, xoay, độ mờ < 100%, mặt nạ video, lật (hflip ở 4:2:0
+ * đổi vị trí mẫu màu), nguồn xoay, nguồn không BT.709. Env tắt: CRABBYCUT_EXPORT_FASTPATH=0. */
+bool MainLaneFastPathEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_FASTPATH");
+  if (!env) return true;
+  const std::string value = env;
+  return !(value == "0" || value == "false" || value == "off");
+}
+
+// Vị trí mẫu màu theo chroma_location của ffprobe, đơn vị như `in_h_chr_pos` của scale.
+// Không ghi -> "center", đúng như swscale tự hiểu (ff_sws_chroma_pos).
+void ChromaLocationPos(const std::string& loc, int& h, int& v) {
+  h = 128;
+  v = 128;
+  if (loc == "left") { h = 0; v = 128; }
+  else if (loc == "topleft") { h = 0; v = 0; }
+  else if (loc == "top") { h = 128; v = 0; }
+  else if (loc == "bottomleft") { h = 0; v = 256; }
+  else if (loc == "bottom") { h = 128; v = 256; }
+}
+
+void ProbeMainSourceForFastPath(const std::string& source, ExportSettings& settings) {
+  settings.fastPathSource = false;
+  if (!MainLaneFastPathEnabled()) return;
+  const std::string text = CommandOutput({
+    "ffprobe", "-v", "error",
+    "-select_streams", "v:0",
+    "-show_entries", "stream=width,height,pix_fmt,color_space,chroma_location"
+                     ":stream_tags=rotate:stream_side_data=rotation",
+    "-of", "default=nw=1",
+    source,
+  });
+  std::string pixFmt, space, chromaLoc;
+  long width = 0, height = 0;
+  bool rotated = false;
+  std::istringstream lines(text);
+  std::string line;
+  while (std::getline(lines, line)) {
+    while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back()))) line.pop_back();
+    const size_t eq = line.find('=');
+    if (eq == std::string::npos) continue;
+    const std::string key = line.substr(0, eq);
+    const std::string value = line.substr(eq + 1);
+    if (key == "pix_fmt") pixFmt = value;
+    else if (key == "color_space") space = value;
+    else if (key == "chroma_location") chromaLoc = value;
+    else if (key == "width") { try { width = std::stol(value); } catch (...) { width = 0; } }
+    else if (key == "height") { try { height = std::stol(value); } catch (...) { height = 0; } }
+    else if (key.find("rotat") != std::string::npos) {
+      double deg = 0.0;
+      try { deg = std::stod(value); } catch (...) { deg = 0.0; }
+      if (std::abs(deg) > 0.5) rotated = true;
+    }
+  }
+  // yuva*: đường cũ dựng alpha của nguồn lên nền đen, đường nhanh thì bỏ alpha -> không đi.
+  const bool yuv = pixFmt.rfind("yuv", 0) == 0 && pixFmt.rfind("yuva", 0) != 0;
+  const bool bt709 = space == "bt709" || settings.sourceColorUntagged;
+  if (!yuv || !bt709 || rotated || width <= 0 || height <= 0) return;
+  settings.sourceWidth = static_cast<int>(width);
+  settings.sourceHeight = static_cast<int>(height);
+  ChromaLocationPos(chromaLoc, settings.sourceChromaH, settings.sourceChromaV);
+  settings.fastPathSource = true;
 }
 
 // Nhịp khung của CHÍNH file nguồn (avg_frame_rate). 0.0 nếu không đọc được.
@@ -2145,6 +2248,134 @@ void AppendVideoMaskFilter(std::ofstream& script, const std::string& maskPath,
   script << "[" << tag << "vk]null";
 }
 
+/* Kế hoạch đường nhanh của một clip (xem khối chú thích ở MainLaneFastPathEnabled). `ok` = false
+ * -> clip đi đường cũ. `geometry` nối ngay sau chuỗi màu của clip, bắt đầu bằng dấu phẩy. */
+struct MainLaneFast {
+  bool ok = false;
+  std::string geometry;
+};
+
+// Số clip của lượt đang ghi đi đường nhanh — ghi vào số đo (ExportRunTiming::fastClips).
+static int g_fastClipCount = 0;
+
+// Clip có chuỗi màu nào (của chính nó, lớp Điều chỉnh, các lớp thêm) — xem MainLaneFastPlan.
+bool IntervalHasColorAdjust(const ExportInterval& item) {
+  return !item.adjustFilters.empty() || !item.adjustFiltersPost.empty() || !item.adjustMaskPath.empty()
+      || !item.adjEqContrastExpr.empty() || !item.adjEqBrightnessExpr.empty() || !item.adjEqSaturationExpr.empty()
+      || !item.adjustLutMixExpr.empty()
+      || !item.adjustLayerFilters.empty() || !item.adjustLayerFiltersPost.empty()
+      || !item.adjLayerEqContrastExpr.empty() || !item.adjLayerEqBrightnessExpr.empty()
+      || !item.adjLayerEqSaturationExpr.empty() || !item.adjustLayerLutMixExpr.empty()
+      || !item.extraAdjustLayers.empty();
+}
+
+MainLaneFast MainLaneFastPlan(const ExportInterval& item, const ExportSettings& settings,
+                              bool dynamicClip, double scaleValue, double opacityValue) {
+  MainLaneFast plan;
+  if (!settings.fastPathSource || dynamicClip) return plan;
+  if (item.renderFrames <= 0 || !(ParseFpsValue(settings.renderFps) > 0.0)) return plan;
+  if (std::abs(item.rotation) > 1e-6 || opacityValue < 0.999) return plan;
+  if (item.flipX || item.flipY || !item.videoMaskPath.empty()) return plan;
+  const int seqW = settings.width > 0 ? settings.width : 1920;
+  const int seqH = settings.height > 0 ? settings.height : 1080;
+  const int iw = settings.sourceWidth;
+  const int ih = settings.sourceHeight;
+  if (iw <= 0 || ih <= 0) return plan;
+
+  /* CÙNG PHÉP TÍNH với đường cũ, trên CÙNG con số đã in ra filter script (6 chữ số): cỡ
+   * `max(2,ceil(iw*s/2)*2)` và toạ độ `(W-w)/2+posX` mà overlay RGBA cắt về số nguyên bằng (int). */
+  const double s = std::stod(FfmpegDouble(scaleValue));
+  const int w = static_cast<int>(std::max(2.0, std::ceil(iw * s / 2) * 2));
+  const int h = static_cast<int>(std::max(2.0, std::ceil(ih * s / 2) * 2));
+  const int x = static_cast<int>((seqW - w) / 2.0 + std::stod(FfmpegDouble(item.positionX)));
+  const int y = static_cast<int>((seqH - h) / 2.0 + std::stod(FfmpegDouble(item.positionY)));
+  const bool chromaSubV = settings.codec != "prores";   // yuv420p; ProRes là yuv422p10le
+
+  /* Một chiều. ĐỆM TRƯỚC, CẮT SAU: clip (cỡ luôn chẵn) được đệm vào khung `len` ở vị trí `ox`,
+   * rồi cắt cửa sổ sequence từ `wx`. Không làm ngược lại (cắt phần thấy được rồi mới đệm): phần
+   * thấy được có thể rộng lẻ, mà `pad` làm tròn bề rộng ĐẦU VÀO xuống số chẵn -> mất một cột ở
+   * mép clip (đã mắc: clip 75% cắt lẻ bên trái, mép phải hụt 1 px). */
+  struct Axis {
+    int ox = 0, wx = 0, len = 0;
+    bool oddCrop = false, oddPad = false;
+  };
+  const auto axis = [](int size, int seq, int pos, bool subsampled, Axis& out) {
+    out.ox = std::max(0, pos);
+    out.wx = std::max(0, -pos);
+    out.len = std::max(out.ox + size, out.wx + seq);
+    if (out.len % 2) out.len += 1;   // `pad` cũng làm tròn cỡ RA xuống số chẵn
+    out.oddCrop = subsampled && (out.wx % 2) != 0;
+    out.oddPad = subsampled && (out.ox % 2) != 0;
+    // Phần clip nằm trong khung phải có ít nhất 2 điểm ảnh, không thì để đường cũ lo.
+    return std::min(out.ox + size, out.wx + seq) - std::max(out.ox, out.wx) >= 2;
+  };
+  /* CLIP CÓ CHỈNH MÀU -> co giãn + đặt vị trí ở RGB, đổi sang YUV một lần ở cuối. Tức là ĐÚNG
+   * phép tính của đường cũ, chỉ bỏ nền `color` + overlay RGBA:
+   *  - curves/lut3d/colorbalance… ra RGB; để swscale vừa đổi RGB -> YUV vừa co giãn thì nó đổi
+   *    TRƯỚC rồi mới co giãn, nên chỗ vọt/kẹp ở cạnh khác đường cũ (đo trên testsrc2 + curves,
+   *    luma so bản chuẩn 47,8 dB so với 54,4 dB khi co giãn ở RGB);
+   *  - chuỗi màu YUV (eq tăng bão hoà) thì đường cũ kẹp gam RGB ngay sau nó, giống preview
+   *    (WebGL áp màu trên RGB). Giữ YUV nguyên vẹn là bản xuất khác preview ở vùng rất bão hoà.
+   * RGB không hạ mẫu màu nên toạ độ lẻ nào cũng đúng. */
+  const bool rgbRoute = IntervalHasColorAdjust(item);
+  Axis ax, ay;
+  if (!axis(w, seqW, x, !rgbRoute, ax) || !axis(h, seqH, y, chromaSubV && !rgbRoute, ay)) return plan;
+  if (rgbRoute) {
+    std::ostringstream g;
+    g << ",scale=w=" << w << ":h=" << h << ",format=rgb24";
+    if (ax.len != w || ay.len != h || ax.ox != 0 || ay.ox != 0) {
+      g << ",pad=width=" << ax.len << ":height=" << ay.len
+        << ":x=" << ax.ox << ":y=" << ay.ox << ":color=black";
+    }
+    if (ax.wx != 0 || ay.wx != 0 || ax.len != seqW || ay.len != seqH) {
+      g << ",crop=w=" << seqW << ":h=" << seqH << ":x=" << ax.wx << ":y=" << ay.wx;
+    }
+    g << ",scale=out_color_matrix=bt709:out_range=tv";
+    plan.ok = true;
+    plan.geometry = g.str();
+    return plan;
+  }
+  /* Hai cách xử lý toạ độ lẻ:
+   *  - CẮT lẻ mà clip tràn kín khung theo chiều đó: `scale` dời mẫu màu 1 điểm ảnh luma
+   *    (chr_pos + 256) để sau `crop exact` mẫu màu về đúng chỗ. Rẻ, ở nguyên 4:2:0.
+   *  - ĐỆM lẻ, cắt lẻ mà mép clip nằm trong khung, và clip GIỮ NGUYÊN CỠ bị cắt lẻ: đặt clip ở 4:4:4 rồi mới hạ
+   *    về 4:2:0. Với phép đệm, mẫu màu ở mép clip giáp nền đen phải là trung bình (đen, cột đầu
+   *    của clip) — đường cũ ghép RGBA rồi hạ mẫu nên ra đúng vậy, còn mẫu đã dời thì lấy trọn
+   *    màu đen: đo (clip 80%, đệm lẻ cả hai chiều) kênh U so bản chuẩn 30,2 dB theo mẹo dời,
+   *    32,3 dB theo đường cũ. Clip giữ nguyên cỡ thì swscale chép thẳng và BỎ QUA chr_pos (đo:
+   *    hai bản y hệt). Ở 4:4:4 mọi toạ độ đều đúng; chỉ không đi vòng qua RGB như đường cũ. */
+  const bool sameSize = w == iw && h == ih;
+  /* Cắt lẻ mà clip KHÔNG phủ kín khung theo chiều đó: mép xa của clip (giáp nền đen) rơi vào
+   * cột lẻ -> cùng chuyện mép như phép đệm lẻ (đo: clip 75% cắt lẻ trái, kênh V 32,6 so với
+   * 33,3 dB của đường cũ). Mẹo dời mẫu màu chỉ dùng khi clip tràn kín khung. */
+  const bool edgeInsideX = ax.oddCrop && ax.ox + w < ax.wx + seqW;
+  const bool edgeInsideY = ay.oddCrop && ay.ox + h < ay.wx + seqH;
+  const bool full444 = ax.oddPad || ay.oddPad || edgeInsideX || edgeInsideY
+                       || ((ax.oddCrop || ay.oddCrop) && sameSize);
+  const bool shiftH = !full444 && ax.oddCrop;
+  const bool shiftV = !full444 && ay.oddCrop;
+
+  std::ostringstream g;
+  g << ",scale=w=" << w << ":h=" << h << ":out_color_matrix=bt709:out_range=tv";
+  if (shiftH) {
+    g << ":in_h_chr_pos=" << settings.sourceChromaH << ":out_h_chr_pos=" << (settings.sourceChromaH + 256);
+  }
+  if (shiftV) {
+    g << ":in_v_chr_pos=" << settings.sourceChromaV << ":out_v_chr_pos=" << (settings.sourceChromaV + 256);
+  }
+  if (full444) g << (settings.codec == "prores" ? ",format=yuv444p10le" : ",format=yuv444p");
+  if (ax.len != w || ay.len != h || ax.ox != 0 || ay.ox != 0) {
+    g << ",pad=width=" << ax.len << ":height=" << ay.len
+      << ":x=" << ax.ox << ":y=" << ay.ox << ":color=black";
+  }
+  if (ax.wx != 0 || ay.wx != 0 || ax.len != seqW || ay.len != seqH) {
+    g << ",crop=w=" << seqW << ":h=" << seqH << ":x=" << ax.wx << ":y=" << ay.wx << ":exact=1";
+  }
+  plan.ok = true;
+  plan.geometry = g.str();
+  return plan;
+}
+
 void WriteClipVideoFilters(
   std::ofstream& script,
   const ExportInterval& item,
@@ -2180,10 +2411,6 @@ void WriteClipVideoFilters(
     ? static_cast<double>(item.renderFrames) / renderFpsValue
     : duration;
 
-  script << "color=c=black:s=" << seqW << "x" << seqH
-         << ":d=" << FixedSeconds(baseDuration)
-         << ":r=" << settings.renderFps << "[base" << idx << "];\n";
-
   // KEYFRAME clip lane chính (0-based -> start=0). Có keyframe -> scale/rotate/opacity
   // biến thiên theo thời gian (AppendKfTransformFilters) thay cho tĩnh; vị trí lấy theo kf.
   const bool clipKf = HasKeyframeExpr(item.kfScaleExpr, item.kfRotExpr, item.kfOpacityExpr,
@@ -2192,6 +2419,15 @@ void WriteClipVideoFilters(
   // việc bỏ bước scale tĩnh phía trước format=rgba (nếu không thì scale HAI lần).
   const bool clipDynTransform = clipKf
     || HasAnimGeomExpr(item.animSxExpr, item.animSyExpr, item.animRotExpr);
+  // Đường nhanh YUV (mục 1.3): không nền `color`, không RGBA, không overlay.
+  const MainLaneFast fast = MainLaneFastPlan(item, settings, clipKf || clipDynTransform || clipHasAnim,
+                                             scaleValue, opacityValue);
+
+  if (!fast.ok) {
+    script << "color=c=black:s=" << seqW << "x" << seqH
+           << ":d=" << FixedSeconds(baseDuration)
+           << ":r=" << settings.renderFps << "[base" << idx << "];\n";
+  }
 
   /* CỬA SỔ CẮT PHẢI ĐỔI SANG TRỤC THỜI GIAN CỦA FILE NGUỒN, VÀ CẮT Ở GIỮA HAI KHUNG.
    *
@@ -2259,6 +2495,23 @@ void WriteClipVideoFilters(
                                             "adjl" + idx + "_"),
                            "", "");
   AppendExtraAdjustLayers(script, 0.0, item.extraAdjustLayers, "adjl" + idx + "_");
+  if (fast.ok) {
+    /* Chốt đúng renderFrames khung — việc nền `color` + overlay của đường cũ vẫn làm:
+     *  - clip ngắn hơn: `tpad` clone lặp khung cuối MÃI, nên `concat` không bao giờ sang đoạn 2;
+     *  - clip không nhả khung nào (mốc cắt ngoài nguồn): tpad hết ngay, `concat` sang dải đen.
+     *    `tpad=stop_mode=add` KHÔNG làm được việc này: đầu vào rỗng thì nó cũng không ra khung
+     *    nào (đã thử, Gyan 8.1.1) — lúc đó mọi clip phía sau bị xô sớm lên.
+     * Dải đen chỉ được kéo khung khi `concat` thật sự sang nó, nên ca thường không tốn gì. */
+    script << fast.geometry << ",setsar=1," << ClipPixelFormat(settings)
+           << ",tpad=stop=-1:stop_mode=clone[fc" << idx << "];\n";
+    script << "color=c=black:s=" << seqW << "x" << seqH
+           << ":d=" << FixedSeconds(baseDuration)
+           << ":r=" << settings.renderFps << "[fk" << idx << "];\n";
+    script << "[fc" << idx << "][fk" << idx << "]concat=n=2:v=1:a=0,trim=end_frame=" << item.renderFrames
+           << "[v" << idx << "];\n";
+    g_fastClipCount++;
+    return;
+  }
   AppendVideoMaskFilter(script, item.videoMaskPath, "vmc" + idx + "_");
   if (!clipDynTransform) {
     script << ",scale=max(2\\,ceil(iw*" << FfmpegDouble(scaleValue) << "/2)*2)"
@@ -2731,19 +2984,73 @@ void AppendFeatherAlpha(std::ofstream& script, int featherPx) {
  * kèm một phép đổi về yuv420p BT.709 NGAY sau nó để phần còn lại của chuỗi ở YUV.
  * ProRes (yuv422p10) giữ đường cũ.
  *
- * ⚠️ MẶC ĐỊNH TẮT — bật bằng CRABBYCUT_EXPORT_YUVCOMP=1. Vị trí đúng từng pixel, nhưng MÀU Ở MÉP
- * kém đường cũ: đổi RGBA -> yuva420p lấy trung bình màu của khối 2×2 GỒM CẢ điểm ảnh trong suốt
- * (màu đen), rồi `overlay` còn nhân thêm alpha trung bình, nên mép chữ màu bị pha loãng hai lần.
- * Đo 2026-09-28 (chữ vàng khử răng cưa trên nền xanh đậm, so bản chuẩn 4:4:4): kênh U 41,6 dB
- * so với 46,1 dB của đường cũ; luma như nhau. Chữ trắng/nền đen (phụ đề mặc định) không bị vì
- * màu trung tính. `alpha=premultiplied` của overlay làm luma tệ hơn (39,3 dB), còn
- * `unpremultiply` không nhận yuva420p. Xem mục 1.5 của kế hoạch. */
+ * BẬT MẶC ĐỊNH (người dùng chốt 2026-09-29), tắt bằng CRABBYCUT_EXPORT_YUVCOMP=0. Bản xuất gần bản
+ * chuẩn hơn hẳn (Bin Tom 52,5 so với 40,3 dB) nên lệch khỏi bản cũ quá ngưỡng "PSNR mới/cũ ≥ 45 dB"
+ * cũ — người dùng chọn nới ngưỡng đó cho trường hợp này (xem mục 1.5 của kế hoạch).
+ * MÀU Ở MÉP: đổi thẳng RGBA -> yuva420p lấy trung bình màu của khối 2×2 GỒM CẢ điểm ảnh trong suốt
+ * (màu đen) -> mép chữ màu bị pha loãng (chữ vàng: U 41,6 so với 46,1 dB của đường cũ). Đã chữa
+ * bằng AlphaWeightedYuva420 (44,8 dB). `alpha=premultiplied` của overlay làm luma tệ hơn
+ * (39,3 dB). */
 bool YuvCompositeEnabled(const ExportSettings& settings) {
   if (settings.codec == "prores") return false;
   const char* env = std::getenv("CRABBYCUT_EXPORT_YUVCOMP");
-  if (!env) return false;
+  if (!env) return true;
   const std::string value = env;
-  return value == "1" || value == "true" || value == "on";
+  return !(value == "0" || value == "false" || value == "off");
+}
+
+/* MÀU Ở MÉP KHI HẠ LỚP PHỦ CÓ ALPHA XUỐNG 4:2:0 (mục 1.5).
+ *
+ * `overlay` ở yuv420 trộn mẫu màu theo alpha TRUNG BÌNH của khối 2×2: kết quả = Ā·U + (1−Ā)·nền.
+ * Muốn bằng đường cũ (ghép RGBA ở cỡ đầy đủ rồi mới hạ mẫu) thì U của lớp phủ phải là trung bình
+ * CÓ TRỌNG SỐ ALPHA của khối: Σ aᵢUᵢ / Σ aᵢ. Phép đổi thẳng RGBA -> yuva420p thì lấy trung bình
+ * THƯỜNG, gồm cả điểm ảnh trong suốt (canvas lưu chúng là đen) -> mép chữ màu bị pha loãng hai lần.
+ * Chuỗi dưới tính đúng trọng số: premultiply -> thu nửa cỡ (hộp 2×2) -> unpremultiply, ở 16-bit để
+ * vùng đục không lệch 1 mức (premultiply 8-bit nhân (U−128)·a >> 8, tức ×255/256), rồi ghép với
+ * luma + alpha đầy đủ bằng `mergeplanes`. Đo (chữ vàng khử răng cưa trên nền xanh đậm, so bản
+ * chuẩn): kênh U 41,6 dB -> 44,8 dB (đường cũ 46,1; phần còn lệch là nhân hạ mẫu hộp 2×2 so với
+ * nhân của swscale). Luma và V như cũ. Lớp phủ VIDEO đục hoàn toàn thì không cần. */
+// Env tắt riêng cho phép chữa màu mép (A/B): CRABBYCUT_EXPORT_ALPHACHROMA=0.
+bool AlphaChromaEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_ALPHACHROMA");
+  if (!env) return true;
+  const std::string value = env;
+  return !(value == "0" || value == "false" || value == "off");
+}
+
+std::string AlphaWeightedYuva420(const std::string& tag) {
+  const std::string p = tag + "yp";
+  const std::string q = tag + "yq";
+  const std::string p8 = tag + "y8";
+  const std::string c8 = tag + "yc";
+  return ",split[" + p + "][" + q + "];\n"
+    "[" + p + "]scale=out_color_matrix=bt709:out_range=tv,format=yuva444p[" + p8 + "];\n"
+    "[" + q + "]scale=out_color_matrix=bt709:out_range=tv,format=yuva444p16le,premultiply=inplace=1"
+    ",scale=w=iw/2:h=ih/2:flags=area,unpremultiply=inplace=1,scale=sws_dither=none,format=yuva444p[" + c8 + "];\n"
+    "[" + p8 + "][" + c8 + "]mergeplanes=map0s=0:map0p=0:map1s=1:map1p=1:map2s=1:map2p=2:map3s=0:map3p=3"
+    ":format=yuva420p";
+}
+
+/* ẢNH TĨNH XỬ LÝ MỘT LẦN (mục 1.5; cùng ý với 1.7b). Env tắt: CRABBYCUT_EXPORT_STILL1=0.
+ *
+ * `-loop 1 -i ảnh.png` cho 25 khung/giây, và MỖI khung đi lại đủ: giải mã PNG, scale, format,
+ * pad, đổi màu… cho một tấm ảnh không hề đổi. Nay input chỉ ra đúng MỘT khung, chuỗi xử lý chạy
+ * một lần, rồi `loop=loop=-1:size=1` lặp khung đã xử lý (chỉ tăng tham chiếu, không chép), và
+ * trim/setpts dời ra sau đó. Đã kiểm: dãy PTS ra y hệt `-loop 1` (34/34 khung).
+ * Chỉ cho ảnh tĩnh THẬT: không hoạt ảnh/keyframe/lớp Điều chỉnh (OverlayIsTimeVarying), không
+ * chuỗi màu (biểu thức có thể mang LOCALT), không mặt nạ video (`movie=` + blend). */
+bool StillOnceEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_STILL1");
+  if (!env) return true;
+  const std::string value = env;
+  return !(value == "0" || value == "false" || value == "off");
+}
+
+bool OverlayStillOnce(const ExportOverlay& overlay) {
+  return StillOnceEnabled() && OverlayIsImageLike(overlay) && !OverlayIsImageSequence(overlay)
+      && !OverlayIsTimeVarying(overlay)
+      && overlay.adjustFilters.empty() && overlay.adjustFiltersPost.empty()
+      && overlay.adjustMaskPath.empty() && overlay.videoMaskPath.empty();
 }
 
 void WriteVisualOverlayFilter(
@@ -2773,8 +3080,23 @@ void WriteVisualOverlayFilter(
     : 0.0;
   const double end = overlay.timelineStart + std::max(0.05, overlay.duration - seqEndTrim);
 
+  // Nén/dãn trục thời gian TRƯỚC khi dời về mốc tuyệt đối trên sequence: chia cả biểu
+  // thức đã cộng `start` thì mốc bắt đầu của overlay cũng bị chia theo và lớp lệch chỗ.
+  const auto writeSetpts = [&]() {
+    if (std::abs(overlay.speedRate - 1.0) >= 1e-4 && !OverlayIsImageSequence(overlay)) {
+      script << "setpts=(PTS-STARTPTS)/" << FormatFilterNumber(overlay.speedRate)
+             << "+" << FfmpegDouble(start) << "/TB";
+    } else {
+      script << "setpts=PTS-STARTPTS+" << FfmpegDouble(start) << "/TB";
+    }
+  };
+  // Ảnh tĩnh xử lý MỘT lần: trim/setpts dời ra sau `loop` ở cuối chuỗi (xem OverlayStillOnce).
+  const bool stillOnce = OverlayStillOnce(overlay);
+
   script << "[" << inputIndex << ":v]" << UntaggedColorFix(overlay.colorUntagged);
-  if (OverlayIsImageSequence(overlay)) {
+  if (stillOnce) {
+    script << "null";
+  } else if (OverlayIsImageSequence(overlay)) {
     // Sequence hữu hạn đã đúng độ dài cửa sổ hoạt ảnh — không trim;
     // sau frame cuối overlay tự biến mất nhờ eof_action=pass
   } else if (!OverlayIsImageLike(overlay)) {
@@ -2784,6 +3106,7 @@ void WriteVisualOverlayFilter(
   } else {
     script << "trim=duration=" << FixedSeconds(overlay.duration) << ",";
   }
+  if (!stillOnce) writeSetpts();
   // KEYFRAME overlay (start tuyệt đối -> LOCALT = t-start). Có keyframe -> scale/rotate/
   // opacity biến thiên theo thời gian; vị trí lấy theo kf (cộng thêm offset hoạt ảnh nếu có).
   const bool overlayKf = HasKeyframeExpr(overlay.kfScaleExpr, overlay.kfRotExpr, overlay.kfOpacityExpr,
@@ -2793,14 +3116,6 @@ void WriteVisualOverlayFilter(
   const bool overlayDynTransform = overlayKf
     || HasAnimGeomExpr(overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr);
 
-  // Nén/dãn trục thời gian TRƯỚC khi dời về mốc tuyệt đối trên sequence: chia cả biểu
-  // thức đã cộng `start` thì mốc bắt đầu của overlay cũng bị chia theo và lớp lệch chỗ.
-  if (std::abs(overlay.speedRate - 1.0) >= 1e-4 && !OverlayIsImageSequence(overlay)) {
-    script << "setpts=(PTS-STARTPTS)/" << FormatFilterNumber(overlay.speedRate)
-           << "+" << FfmpegDouble(start) << "/TB";
-  } else {
-    script << "setpts=PTS-STARTPTS+" << FfmpegDouble(start) << "/TB";
-  }
   // Overlay giữ mốc tuyệt đối sau setpts -> LOCALT trừ timeline_start.
   AppendColorAdjustFilters(script,
                            ColorAdjustChain(start, overlay.adjustFilters, overlay.adjEqContrastExpr,
@@ -2863,20 +3178,34 @@ void WriteVisualOverlayFilter(
   const std::string posY = "(" + FfmpegDouble(overlay.positionY) + ")";
   if (yuvStatic) {
     // Đệm 1 px trong suốt ở mép trái/trên khi toạ độ gốc lẻ; `iw`/`ih` lúc này là cỡ lớp phủ
-    // mà nhánh RGBA cũ dùng làm `w`/`h`. Bề rộng dựng từ scale luôn chẵn nên iw+2 vẫn chẵn.
-    script << ",pad=w=iw+2:h=ih+2"
+    // mà nhánh RGBA cũ dùng làm `w`/`h`. Bề rộng dựng từ scale luôn chẵn nên iw+4 vẫn chẵn.
+    // +4 chứ không +2: ở CỘT/HÀNG MẪU MÀU CUỐI của lớp phủ, `overlay` yuv420 chỉ lấy alpha của
+    // điểm ảnh đầu cặp (vf_overlay: nhánh `k+1 < src_wp` sai ở mẫu cuối) chứ không lấy trung bình.
+    // Với mẫu màu có trọng số alpha, cặp cuối (đục, đệm trong suốt) thành màu đặc -> tràn 1 cột
+    // màu sang phải (đo: hộp đỏ ở toạ độ lẻ). Đệm dư để cặp cuối luôn trong suốt hẳn.
+    script << ",pad=w=iw+4:h=ih+4"
            << ":x='mod(trunc((" << seqW << "-iw)/2+" << posX << "),2)'"
            << ":y='mod(trunc((" << seqH << "-ih)/2+" << posY << "),2)'"
-           << ":color=black@0"
-           << ",scale=out_color_matrix=bt709:out_range=tv,format=yuva420p";
+           << ":color=black@0";
+    /* Ảnh tĩnh (có alpha): mẫu màu theo trung bình có trọng số alpha (xem AlphaWeightedYuva420)
+     * — chạy MỘT lần nhờ OverlayStillOnce nên gần như miễn phí. CHUỖI KHUNG (chữ động) thì đổi
+     * thẳng: chuỗi chữa màu 16-bit chạy lại ở từng khung. Đo 2026-09-29 trên Bin Tom (17 chuỗi
+     * khung chữ): áp cho cả chuỗi khung thì xuất 29–31 s -> 33–35 s (+13%) mà so bản chuẩn gần
+     * như không đổi (52,50 -> 52,53 dB). Video lớp phủ đục hoàn toàn nên cũng đổi thẳng. */
+    if (stillOnce && AlphaChromaEnabled()) script << AlphaWeightedYuva420("ov" + id);
+    else script << ",scale=out_color_matrix=bt709:out_range=tv,format=yuva420p";
+  }
+  if (stillOnce) {
+    script << ",loop=loop=-1:size=1,trim=duration=" << FixedSeconds(overlay.duration) << ",";
+    writeSetpts();
   }
   script << "[ov" << id << "];\n";
 
   script << inputLabel << "[ov" << id << "]overlay=";
   if (yuvStatic) {
-    // `w`/`h` ở đây là cỡ ĐÃ ĐỆM (+2). Toạ độ gốc trunc(...) trừ đi phần đệm trái/trên -> chẵn.
-    const std::string bx = "trunc((" + std::to_string(seqW) + "-(w-2))/2+" + posX + ")";
-    const std::string by = "trunc((" + std::to_string(seqH) + "-(h-2))/2+" + posY + ")";
+    // `w`/`h` ở đây là cỡ ĐÃ ĐỆM (+4). Toạ độ gốc trunc(...) trừ đi phần đệm trái/trên -> chẵn.
+    const std::string bx = "trunc((" + std::to_string(seqW) + "-(w-4))/2+" + posX + ")";
+    const std::string by = "trunc((" + std::to_string(seqH) + "-(h-4))/2+" + posY + ")";
     script << "x='" << bx << "-mod(" << bx << ",2)':y='" << by << "-mod(" << by << ",2)'";
   } else if (overlayKf || hasVideoAnim) {
     // Vị trí = tâm + kf/tĩnh + offset(t) hoạt ảnh. Bọc nháy đơn vì biểu thức có dấu phẩy.
@@ -3020,6 +3349,7 @@ bool WriteFilterScript(
   std::ofstream script(scriptPath);
   if (!script) return false;
   g_filterAuxDir = scriptPath.parent_path();   // file lệnh phụ (lutmix_*.cmd) nằm cạnh script
+  g_fastClipCount = 0;
   const double renderFpsValue = ParseFpsValue(settings.renderFps);
   for (size_t i = 0; i < count; i++) {
     const auto& item = intervals[offset + i];
@@ -3204,6 +3534,9 @@ void AppendOverlayInputArgs(
         "-start_number", "0",
         "-i", assetPath
       });
+    } else if (OverlayStillOnce(overlay)) {
+      // Một khung duy nhất; `loop` trong filter lặp lại khung đã xử lý (xem OverlayStillOnce).
+      cmd.insert(cmd.end(), {"-i", assetPath});
     } else if (OverlayIsImageLike(overlay)) {
       cmd.insert(cmd.end(), {
         "-loop", "1",
@@ -3320,6 +3653,7 @@ int ExportBatch(
   const bool bench = !g_exportBenchDir.empty();
   ExportRunTiming timing;
   timing.seekTo = seekTo;
+  timing.fastClips = static_cast<size_t>(g_fastClipCount);
   timing.mode = mode == FilterScriptMode::AudioOnly ? "audio"
               : (mode == FilterScriptMode::VideoOnly ? "video" : "full");
   timing.label = mode == FilterScriptMode::AudioOnly
@@ -3549,6 +3883,8 @@ int CommandExportVideo(int argc, char** argv) {
   if (settings.sourceColorUntagged) {
     Emit("progress", "Nguồn không gắn nhãn màu — đọc theo BT.709 cho khớp preview.");
   }
+  // Sau MediaColorUntagged: nguồn HD không nhãn được gán BT.709 nên cũng đi đường nhanh được.
+  ProbeMainSourceForFastPath(source, settings);
   for (auto& overlay : overlays) {
     if (overlay.type == "media" && !overlay.assetPath.empty()
         && !OverlayIsImageLike(overlay) && !OverlayIsImageSequence(overlay)) {

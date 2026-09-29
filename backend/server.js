@@ -122,6 +122,17 @@ const CONCAT_CACHE_DIR = process.env.CRAB_CONCAT_CACHE_DIR
  * điểm nối, cả khi xuất lẫn khi xem trước. Dùng lại là bản sửa không có tác dụng. */
 const CONCAT_CACHE_VERSION = 5;
 const CONCAT_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/* BẢN HẠ SDR CỦA VIDEO HDR (mục 1.15 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md, người dùng chốt
+ * 2026-09-29) — xem ensureSdrAsset. Cùng lý do đặt ngoài temp_uploads như các cache trên: bản
+ * trong temp_uploads mất ở mỗi lần mở dự án, và hạ SDR lại một file 270 s là 72,5 s (Bin Tom).
+ * CRAB_SDR_CACHE_DIR chỉ dùng cho TEST (như CRAB_CONCAT_CACHE_DIR). Mỗi mục cỡ bằng video gốc
+ * nên có TRẦN dung lượng ngoài hạn dùng: vượt trần thì bỏ mục lâu không dùng nhất trước. */
+const SDR_CACHE_DIR = process.env.CRAB_SDR_CACHE_DIR
+  ? path.resolve(process.env.CRAB_SDR_CACHE_DIR)
+  : path.join(USER_DATA_ROOT, 'sdr_cache');
+const SDR_CACHE_VERSION = 1;   // tăng khi ĐỔI chuỗi tonemap/mã hoá bản SDR -> khoá cũ hết hiệu lực
+const SDR_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const SDR_CACHE_MAX_BYTES = 20 * 1024 * 1024 * 1024;
 const LIBRARY_CATEGORIES = { video: 'Video', elements: 'Elements', sfxs: 'SFXs', music: 'Music' };
 // Cài đặt ứng dụng (bảng Cài đặt trong Menu). Đặt ở gốc dự án — KHÔNG phải dữ liệu runtime
 // như temp_uploads/peaks_cache — để cấu hình đi theo thư mục dự án và sao lưu được.
@@ -2444,7 +2455,7 @@ async function ensureSdrAsset(filePath, { label = '' } = {}) {
   if (!sourceIsHdr(resolved)) return { path: resolved, tonemapped: false };
   let stat;
   try { stat = fs.statSync(resolved); } catch (_) { return { path: resolved, tonemapped: false }; }
-  const key = sha1Text(`${resolved}|${stat.size}|${stat.mtimeMs}`).slice(0, 24);
+  const key = sha1Text(`v${SDR_CACHE_VERSION}|${resolved}|${stat.size}|${stat.mtimeMs}`).slice(0, 24);
   const dir = path.join(EDITING_ASSET_DIR, 'sdr', key);
   fs.mkdirSync(dir, { recursive: true });
   const base = path.basename(resolved, path.extname(resolved));
@@ -2452,12 +2463,21 @@ async function ensureSdrAsset(filePath, { label = '' } = {}) {
   if (fs.existsSync(output) && fs.statSync(output).size > 0) {
     return { path: output, tonemapped: true, reused: true };
   }
+  // Mở lại dự án: bản SDR đã có trong cache lâu dài -> liên kết vào editing_assets, không mã hoá lại.
+  if (sdrCacheRestore(key, base, output)) {
+    return { path: output, tonemapped: true, reused: true, cached: true };
+  }
   /* MỘT lượt dựng cho mỗi file, dù có bao nhiêu bên hỏi cùng lúc. Bấm Xuất trong khi preview
    * đang dựng cùng asset đó là hai tiến trình ffmpeg ghi vào ĐÚNG một đường dẫn — file ra hỏng
    * mà không bên nào báo lỗi. Bên đến sau chờ chung kết quả của bên đầu. */
   const inflight = sdrAssetInflight.get(output);
   if (inflight) return inflight;
-  const job = buildSdrAsset(resolved, output, label);
+  // Bản hỏng (0 byte) có thể là liên kết cứng tới cache: gỡ liên kết trước, đừng để ffmpeg ghi đè tại chỗ.
+  fs.rmSync(output, { force: true });
+  const job = buildSdrAsset(resolved, output, label).then((result) => {
+    if (result.tonemapped && !result.reused) sdrCacheStore(key, base, output);
+    return result;
+  });
   sdrAssetInflight.set(output, job);
   try {
     return await job;
@@ -2467,6 +2487,93 @@ async function ensureSdrAsset(filePath, { label = '' } = {}) {
 }
 
 const sdrAssetInflight = new Map();
+
+/* ---- CACHE LÂU DÀI CỦA BẢN SDR (SDR_CACHE_DIR, mục 1.15) ----
+ * Bản dùng thật vẫn phải nằm DƯỚI editing_assets/ (xem khối chú thích của ensureSdrAsset); cache
+ * chỉ là chỗ nó sống sót qua /api/reset-project. Hai bên là LIÊN KẾT CỨNG của cùng một file khi
+ * chung ổ (không tốn thêm đĩa, không chép), khác ổ thì chép. Vì là cùng một file nên KHÔNG BÊN
+ * NÀO ĐƯỢC GHI ĐÈ TẠI CHỖ — ensureSdrAsset chỉ dựng vào đường dẫn chưa có file.
+ * Lần dùng gần nhất ghi vào tệp `last_used` trong thư mục khoá, KHÔNG chạm mtime của video: sóng
+ * âm/proxy khoá theo (path|size|mtime), đổi mtime là trượt sạch cache của chúng. */
+function sdrCacheEntry(key, base) {
+  return path.join(SDR_CACHE_DIR, key, `${base}.mp4`);
+}
+
+function linkOrCopyFile(src, dst) {
+  try {
+    fs.linkSync(src, dst);
+    return 'link';
+  } catch (_) {
+    fs.copyFileSync(src, dst);
+    return 'copy';
+  }
+}
+
+function markSdrCacheUsed(key) {
+  try { fs.writeFileSync(path.join(SDR_CACHE_DIR, key, 'last_used'), String(Date.now()), 'utf8'); } catch (_) { /* chỉ mất thứ tự LRU */ }
+}
+
+function sdrCacheRestore(key, base, output) {
+  const entry = sdrCacheEntry(key, base);
+  try {
+    if (!fs.existsSync(entry) || fs.statSync(entry).size <= 0) return false;
+    fs.rmSync(output, { force: true });
+    linkOrCopyFile(entry, output);
+    markSdrCacheUsed(key);
+    return true;
+  } catch (error) {
+    console.log(`[sdr-cache] không lấy được bản trong cache: ${error?.message || error}`);
+    return false;
+  }
+}
+
+function sdrCacheStore(key, base, output) {
+  try {
+    const entry = sdrCacheEntry(key, base);
+    fs.mkdirSync(path.dirname(entry), { recursive: true });
+    fs.rmSync(entry, { force: true });
+    linkOrCopyFile(output, entry);
+    markSdrCacheUsed(key);
+    pruneSdrCache();
+  } catch (error) {
+    console.log(`[sdr-cache] không ghi được cache: ${error?.message || error}`);
+  }
+}
+
+/* Dọn: mục quá hạn dùng, mục rỗng, rồi nếu tổng vượt trần thì bỏ mục lâu không dùng nhất trước.
+ * Mỗi mục một try riêng: trên Windows, file đang được ffmpeg/preview đọc thì xoá ném EBUSY —
+ * bỏ qua mục đó, lượt dọn sau sẽ lấy. */
+function pruneSdrCache({ maxBytes = SDR_CACHE_MAX_BYTES, ttlMs = SDR_CACHE_TTL_MS } = {}) {
+  let keys = [];
+  try { keys = fs.readdirSync(SDR_CACHE_DIR); } catch (_) { return; }
+  const now = Date.now();
+  const entries = [];
+  for (const key of keys) {
+    const dir = path.join(SDR_CACHE_DIR, key);
+    try {
+      const st = fs.statSync(dir);
+      if (!st.isDirectory()) { fs.rmSync(dir, { force: true }); continue; }
+      let used = st.mtimeMs;
+      try { used = fs.statSync(path.join(dir, 'last_used')).mtimeMs; } catch (_) { /* thiếu -> theo thư mục */ }
+      let bytes = 0;
+      let videos = 0;
+      for (const name of fs.readdirSync(dir)) {
+        if (!name.endsWith('.mp4')) continue;
+        videos += 1;
+        bytes += fs.statSync(path.join(dir, name)).size;
+      }
+      if (!videos || now - used > ttlMs) { fs.rmSync(dir, { recursive: true, force: true }); continue; }
+      entries.push({ dir, used, bytes });
+    } catch (_) { /* bỏ qua mục này */ }
+  }
+  entries.sort((a, b) => b.used - a.used);
+  let total = 0;
+  for (const entry of entries) {
+    total += entry.bytes;
+    if (total <= maxBytes) continue;
+    try { fs.rmSync(entry.dir, { recursive: true, force: true }); } catch (_) { /* bỏ qua */ }
+  }
+}
 
 async function buildSdrAsset(resolved, output, label) {
   const name = label || path.basename(resolved);
@@ -2514,7 +2621,8 @@ async function buildSdrAsset(resolved, output, label) {
  * của dự án, gồm cả video nguồn lane chính mà dự án tự đăng ký làm asset "liên kết". Đo
  * 2026-09-28 trên "Bin Tom - Tap 3": thư viện 13 asset, item chỉ dùng 3, vậy mà lượt xuất đầu
  * mã hoá lại trọn `IMG_0827.MOV` (HEVC 10-bit HLG, 270 s) mất 72,5 s trong tổng 129 s — cho một
- * file không lớp phủ nào đọc. Bản SDR nằm trong TEMP_DIR nên mở lại dự án là trả giá lại. */
+ * file không lớp phủ nào đọc. Bản SDR của asset được dùng thì nay sống qua các lần mở dự án nhờ
+ * SDR_CACHE_DIR (xem sdrCacheRestore). */
 async function sdrOverridesForEditingAssets(rawEditing) {
   const overrides = new Map();
   const raw = parseOptionalJsonObject(rawEditing);
@@ -6342,6 +6450,9 @@ function createApp() {
     proxy: { dir: PROXY_CACHE_DIR, label: () => _t('Proxy LQ xem trước'), clearable: true },
     asr: { dir: ASR_CACHE_DIR, label: () => _t('Kết quả bóc băng'), clearable: true },
     concat: { dir: CONCAT_CACHE_DIR, label: () => _t('Bản đã nối của dự án'), clearable: true },
+    // Dọn được: lượt xuất/xem trước sau tự hạ SDR lại. Bản đang dùng trong dự án mở vẫn còn
+    // (liên kết cứng trong temp_uploads) — xoá mục cache chỉ gỡ một liên kết.
+    sdr: { dir: SDR_CACHE_DIR, label: () => _t('Bản SDR của video HDR'), clearable: true },
     /* Model lồng tiếng (F5 ~1,4 GB, VieNeu ~0,9 GB): dọn được — lượt lồng tiếng sau tự tải lại
      * (có thanh tiến trình). Tệp đang được server TTS nạp dở thì Windows không cho xoá, bỏ qua. */
     tts_models: { dir: ttsService.modelDir(), label: () => _t('Mô hình lồng tiếng'), clearable: true },
@@ -6986,6 +7097,51 @@ function createApp() {
     }
   });
 
+  /* GHI THẲNG RA CHỖ NGƯỜI DÙNG CHỌN (mục 1.16, người dùng chốt 2026-09-29: hỏi chỗ lưu TRƯỚC khi
+   * xuất, như Premiere). Trước đây: ghi TEMP_DIR/final_cut.mp4 -> trình duyệt tải cả file vào
+   * Blob (11,5 GB mất 64 s) -> hộp thoại lưu -> ghi thêm một bản; Blob không bao giờ được thu hồi
+   * nên mỗi lượt để lại một bản sao cỡ file xuất trong blob_storage tới khi tắt app.
+   *
+   * VÌ SAO CÓ CHỮ KÝ: HTTP API này không kiểm nguồn gọi, nên nhận đường dẫn tuỳ ý qua đó là cho
+   * mọi trang web đang mở trên máy ghi được file vào chỗ bất kỳ. Đường dẫn chỉ được nhận khi đi
+   * kèm HMAC do main process ký (hộp thoại lưu gốc, electron/main.js `export-pick-output`) bằng
+   * khoá ngẫu nhiên của phiên, truyền cho backend qua env lúc spawn. Backend chạy ngoài Electron
+   * (npm run backend:dev) thì không có khoá -> bỏ qua output_path, đi đường tải về cũ. */
+  const EXPORT_OUTPUT_SECRET = String(process.env.CRAB_EXPORT_OUTPUT_SECRET || '');
+
+  function exportOutputTicket(filePath) {
+    return crypto.createHmac('sha256', EXPORT_OUTPUT_SECRET).update(String(filePath)).digest('hex');
+  }
+
+  // null = không có đường dẫn (đi đường tải về). Có mà sai chữ ký/sai đuôi -> ném lỗi 400.
+  function trustedExportOutputPath(body, codec) {
+    const target = String(body?.output_path || '');
+    if (!target || !EXPORT_OUTPUT_SECRET) return null;
+    const ticket = Buffer.from(String(body?.output_ticket || ''), 'utf8');
+    const expected = Buffer.from(exportOutputTicket(target), 'utf8');
+    if (ticket.length !== expected.length || !crypto.timingSafeEqual(ticket, expected)) {
+      const error = new Error(_t('Đường dẫn lưu video không hợp lệ.'));
+      error.status = 400;
+      throw error;
+    }
+    const wantExt = codec === 'prores' ? '.mov' : '.mp4';
+    if (!path.isAbsolute(target) || path.extname(target).toLowerCase() !== wantExt
+      || !fs.existsSync(path.dirname(target))) {
+      const error = new Error(_t('Đường dẫn lưu video không hợp lệ.'));
+      error.status = 400;
+      throw error;
+    }
+    return target;
+  }
+
+  // Ghi vào tệp tạm CẠNH tệp đích rồi đổi tên khi xong: xuất hỏng giữa chừng thì không để lại
+  // một tệp dở mang đúng tên người dùng chọn, và tệp cũ (nếu ghi đè) còn nguyên tới lúc xong.
+  // Đổi tên trong cùng thư mục là tức thì, kể cả với tệp 11 GB.
+  function exportPartPath(target) {
+    const ext = path.extname(target);
+    return path.join(path.dirname(target), `${path.basename(target, ext)}.exporting${ext}`);
+  }
+
   app.post('/api/export-video', transitionFrameUpload.array('transition_frames', TRANSITION_FRAME_LIMIT), async (req, res) => {
     // KHOÁ MỘT LƯỢT XUẤT: mọi lượt xuất đều ghi vào CÙNG một đường dẫn
     // (TEMP_DIR/final_cut.mp4). Hai lượt chạy song song sẽ ghi đè nhau giữa lúc đang viết ->
@@ -7009,6 +7165,7 @@ function createApp() {
     };
     res.on('close', releaseExportLock);
     let exportSettingsForError = null;
+    let userOutputPath = null;   // chỗ người dùng chọn (mục 1.16); null = đường tải về cũ
     // Khung vùng chuyển cảnh đã được multer ghi ra đĩa trước khi vào handler; tra theo TÊN
     // mà frontend đặt (chính là tên trong seq.frame_files).
     const transitionFrameFiles = new Map(
@@ -7066,6 +7223,7 @@ function createApp() {
         '30',
       );
       exportSettingsForError = exportSettings;
+      userOutputPath = trustedExportOutputPath(req.body, exportSettings.codec);
       // Chốt màu asset overlay TRƯỚC khi dựng payload: xem sdrOverridesForEditingAssets.
       // Khâu này có thể mã hoá lại TOÀN BỘ một video HDR làm lớp phủ ngay trong lượt xuất
       // (chưa có trong cache) — đo riêng để không bị đổ oan cho ffmpeg của sidecar.
@@ -7091,7 +7249,8 @@ function createApp() {
         settings: exportSettings,
       })), 'utf8');
       const outputName = exportOutputName(exportSettings);
-      const outputPath = path.join(TEMP_DIR, outputName);
+      const outputPath = userOutputPath ? exportPartPath(userOutputPath) : path.join(TEMP_DIR, outputName);
+      if (userOutputPath) await fsp.rm(outputPath, { force: true });
       const clientStartedAt = parseClientStartedAtMs(req.body.client_started_at_ms);
       const renderStartedAt = clientStartedAt || Date.now();
       const serverRenderStartedAt = Date.now();
@@ -7153,9 +7312,11 @@ function createApp() {
         sidecar_timing: sidecarTiming,
         duration_ms: Math.max(0, Date.now() - renderStartedAt),
         server_duration_ms: Math.max(0, Date.now() - serverRenderStartedAt),
-        output_path: outputPath,
+        output_path: userOutputPath || outputPath,
         ended_at: new Date().toISOString(),
       };
+      // Tệp tạm cạnh đích -> đúng tên người dùng chọn (fs.rename ghi đè tệp cũ nếu có).
+      if (userOutputPath) await fsp.rename(outputPath, userOutputPath);
       projectMetrics.activity = true;
       const reportPath = await writeProjectReport('export_success');
       setStatus(_t('Đã hoàn tất cắt dựng video.'));
@@ -7163,11 +7324,16 @@ function createApp() {
       // Cho frontend (và bench:export) ghép với phần đo phía trình duyệt: JSON toàn số + nhãn
       // ASCII nên an toàn làm giá trị header.
       res.setHeader('X-Export-Timing', JSON.stringify({ ...serverTiming, sidecar: sidecarTiming }));
-      res.download(outputPath, outputName);
+      if (userOutputPath) {
+        res.json({ status: 'success', path: userOutputPath, name: path.basename(userOutputPath) });
+      } else {
+        res.download(outputPath, outputName);
+      }
     } catch (error) {
       recordProjectError('export', error, { endpoint: '/api/export-video', exportSettings: exportSettingsForError });
       setStatus(_t('Lỗi khi xuất video hoàn chỉnh!'));
-      httpError(res, 500, error);
+      if (userOutputPath) await fsp.rm(exportPartPath(userOutputPath), { force: true }).catch(() => {});
+      httpError(res, Number(error?.status) || 500, error);
     } finally {
       // Khung đã materialize thì đã được RENAME đi; đây là dọn phần còn sót (chuỗi bị bỏ).
       cleanupTransitionFrameUploads();
@@ -7181,6 +7347,7 @@ function start() {
   cleanGeneratedTextAssets(); // dọn PNG sequence hoạt ảnh còn sót từ phiên trước
   prunePeaksCache();          // dọn cache sóng âm quá hạn + file .tmp/.raw của job bị kill
   pruneConcatCache();         // dọn bản đã nối quá hạn (mỗi mục là một file vài trăm MB)
+  pruneSdrCache();            // dọn bản hạ SDR quá hạn / vượt trần dung lượng
   pruneAssetProxyCache();     // dọn proxy LQ quá hạn + file .part.mp4 của job bị kill
   const app = createApp();
   const server = http.createServer(app);
@@ -7260,4 +7427,6 @@ module.exports = {
   parseTqdmBytes,
   // Test khoá "chỉ hạ SDR asset CÓ item dùng" (mục 1.15) mà không phải dựng cả lượt xuất.
   sdrOverridesForEditingAssets,
+  ensureSdrAsset,
+  pruneSdrCache,
 };

@@ -13,7 +13,8 @@
  *       nhưng ghép ở yuv444p10 — không hạ mẫu màu, không vòng qua RGB 8-bit — ra FFV1 lossless.
  *       10-bit 4:4:4 là mức cao nhất `overlay` hỗ trợ (vf_overlay.c không có định dạng 16-bit).
  *       Hai bản cùng đổi sang gbrp16le bằng CÙNG ma trận BT.709/tv rồi mới đo PSNR.
- *   (b) MỚI SO VỚI CŨ: VMAF ≥ 95, PSNR ≥ 45 dB, và KHÔNG khung nào PSNR < 38 dB.
+ *   (b) MỚI SO VỚI CŨ: VMAF ≥ 95, PSNR ≥ 45 dB, và KHÔNG khung nào PSNR < 38 dB. Ngưỡng PSNR 45 dB
+ *       được MIỄN khi bản mới gần bản chuẩn hơn bản cũ ≥ 1 dB (người dùng chốt 2026-09-29).
  *   (c) cùng số khung, cùng thời lượng.
  *   (d) khung ở mọi điểm nối lane chính và khung đầu/cuối của mọi lớp phủ (±1 khung) được liệt
  *       kê riêng: mất một khung phụ đề ở 4K làm PSNR của đúng khung đó tụt xuống ~24 dB, trong
@@ -376,7 +377,7 @@ function main() {
   console.log('  (b) PSNR/SSIM mới so với cũ ...');
   const nvso = compare(newIn.video, oldIn.video, workDir, 'new_vs_old', 'yuv');
   result.checks.new_vs_old = { ...nvso, per_frame_psnr: undefined };
-  if (nvso.psnr_db < 45) result.failures.push(`(b) PSNR mới/cũ ${nvso.psnr_db} dB < 45`);
+  // PSNR mới/cũ ≥ 45 dB xét SAU (a) — xem khối "(b) nới" bên dưới.
   if (nvso.psnr_min_db < 38) result.failures.push(`(b) khung tệ nhất ${nvso.psnr_min_db} dB < 38 (khung ${nvso.worst_frames[0].frame})`);
   if (opts.vmaf) {
     console.log(`  (b) VMAF (n_subsample=${opts.vmafSubsample}) ...`);
@@ -413,6 +414,21 @@ function main() {
     result.checks.gold = { skipped: 'không có --gold / --gold-from' };
   }
 
+  /* (b) nới — người dùng chốt 2026-09-29 (mục 1.5 của kế hoạch): ngưỡng "PSNR mới/cũ ≥ 45 dB" BỎ
+   * khi bản mới gần bản chuẩn hơn bản cũ RÕ RỆT (≥ GOLD_GAIN_DB). Lý do: bản cũ tự nó cách bản
+   * chuẩn ~40 dB (vòng YUV -> RGB -> YUV 8-bit), nên một thay đổi chính xác hơn nhiều buộc phải
+   * lệch khỏi bản cũ chừng ấy — Bin Tom với 1.3 + 1.5: mới/cũ 43,5 dB, còn so bản chuẩn 40,3 ->
+   * 52,5 dB. VMAF ≥ 95 và ngưỡng khung tệ nhất vẫn giữ nguyên. Không có bản chuẩn thì vẫn đòi 45. */
+  const GOLD_GAIN_DB = 1;
+  const goldGain = result.checks.gold && Number.isFinite(result.checks.gold.delta_db) ? result.checks.gold.delta_db : null;
+  if (nvso.psnr_db < 45) {
+    if (goldGain !== null && goldGain >= GOLD_GAIN_DB) {
+      result.checks.new_vs_old.psnr_waived = `bản mới gần bản chuẩn hơn ${goldGain} dB (≥ ${GOLD_GAIN_DB})`;
+    } else {
+      result.failures.push(`(b) PSNR mới/cũ ${nvso.psnr_db} dB < 45`);
+    }
+  }
+
   result.checks.audio = oldIn.audio && newIn.audio
     ? audioCompare(oldIn.audio, newIn.audio, workDir)
     : { available: false };
@@ -423,7 +439,8 @@ function main() {
   const c = result.checks;
   console.log('');
   console.log(`  khung: cũ ${pOld.frames} / mới ${pNew.frames} · thời lượng ${pOld.duration} / ${pNew.duration}`);
-  console.log(`  mới/cũ: PSNR ${c.new_vs_old.psnr_db} dB (tệ nhất ${c.new_vs_old.psnr_min_db}) · SSIM ${c.new_vs_old.ssim}${c.vmaf ? ` · VMAF ${c.vmaf.vmaf} (min ${c.vmaf.vmaf_min})` : ''}`);
+  console.log(`  mới/cũ: PSNR ${c.new_vs_old.psnr_db} dB (tệ nhất ${c.new_vs_old.psnr_min_db}) · SSIM ${c.new_vs_old.ssim}${c.vmaf ? ` · VMAF ${c.vmaf.vmaf} (min ${c.vmaf.vmaf_min})` : ''}`
+    + (c.new_vs_old.psnr_waived ? ` · miễn ngưỡng 45 dB: ${c.new_vs_old.psnr_waived}` : ''));
   if (c.boundaries) console.log(`  khung biên: ${c.boundaries.count} khung, tệ nhất ${c.boundaries.worst[0].psnr} dB (${c.boundaries.worst[0].why})`);
   if (c.gold.old) console.log(`  so bản chuẩn: cũ ${c.gold.old.psnr_db} dB · mới ${c.gold.new.psnr_db} dB (Δ ${c.gold.delta_db})`);
   if (c.audio.available) console.log(`  tiếng: ${c.audio.identical ? 'giống hệt' : `khác, lệch tối đa ${c.audio.max_abs_diff}`}`);
