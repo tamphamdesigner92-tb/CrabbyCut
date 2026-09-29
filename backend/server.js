@@ -847,6 +847,64 @@ function mediaVideoInfo(filePath) {
   }
 }
 
+/* Đặc tính của `temp_input.mp4` cho báo cáo export (Bước 0.1, KE_HOACH_TOI_UU_EXPORT_WIN.md):
+ * thời gian export phụ thuộc trước hết vào việc giải mã CÁI GÌ — H.264 8-bit đã chuẩn hoá
+ * (~600 khung/s ở 1080p) khác xa AV1 4K được `-c copy` (~238 khung/s, ăn ~12 lõi). Không có
+ * mấy dòng này thì hai báo cáo "chậm" không so được với nhau. */
+function exportSourceSummary(filePath) {
+  const text = commandText('ffprobe', [
+    '-v', 'error',
+    '-select_streams', 'v:0',
+    '-show_entries', 'stream=codec_name,profile,pix_fmt,width,height,avg_frame_rate,nb_frames,color_transfer:stream_tags=rotate:stream_side_data=rotation',
+    '-of', 'json',
+    filePath,
+  ], 5000);
+  try {
+    const stream = (JSON.parse(text || '{}').streams || [])[0] || {};
+    let rotation = parseFfprobeRotation(stream?.tags?.rotate);
+    if (rotation === null) {
+      for (const sideData of (stream?.side_data_list || [])) {
+        rotation = parseFfprobeRotation(sideData?.rotation);
+        if (rotation !== null) break;
+      }
+    }
+    return {
+      codec: [stream.codec_name, stream.profile].filter(Boolean).join(' ') || null,
+      pix_fmt: stream.pix_fmt || null,
+      size: stream.width && stream.height ? `${stream.width}x${stream.height}` : null,
+      fps: parseFfprobeRate(stream.avg_frame_rate)?.text || null,
+      frames: Number(stream.nb_frames) || null,
+      rotation: rotation || 0,
+      color_transfer: stream.color_transfer || null,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+/* GHI LẠI NGUYÊN PAYLOAD CỦA MỘT LƯỢT XUẤT (Bước 0.2, chỉ dành cho dev): bật bằng
+ * `CRABBYCUT_EXPORT_CAPTURE_DIR=<thư mục>`. tests/scripts/bench_export.js vẽ trước MỘT lần
+ * trong Electron thật, rồi phát lại đúng FormData này nhiều lượt để đo phần server/ffmpeg —
+ * không phải bake lại hàng nghìn PNG chữ cho mỗi lượt. Khung chuyển cảnh phải CHÉP ngay ở
+ * đầu handler: normalizeEditingPayload sẽ rename chúng đi chỗ khác. */
+function captureExportRequest(req, dir) {
+  const framesDir = path.join(dir, 'frames');
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(framesDir, { recursive: true });
+  const fields = {};
+  for (const [key, value] of Object.entries(req.body || {})) {
+    if (typeof value === 'string') fields[key] = value;
+  }
+  const files = [];
+  for (const file of Array.isArray(req.files) ? req.files : []) {
+    const localName = `${files.length}_${path.basename(String(file.originalname || 'frame'))}`;
+    fs.copyFileSync(file.path, path.join(framesDir, localName));
+    files.push({ field: file.fieldname, originalname: file.originalname, mimetype: file.mimetype, file: localName });
+  }
+  fs.writeFileSync(path.join(dir, 'form.json'),
+    JSON.stringify({ captured_at: new Date().toISOString(), fields, files }), 'utf8');
+}
+
 function mediaHasAudio(filePath) {
   const text = commandText('ffprobe', [
     '-v', 'error',
@@ -1392,8 +1450,49 @@ async function writeProjectReport(reason) {
   lines.push(reportLine(2, 'encoder', render?.encoder));
   lines.push(reportLine(2, 'audio_bitrate', render?.audio_bitrate));
   lines.push(reportLine(2, 'interval_count', render?.interval_count));
+  lines.push(reportLine(2, 'overlay_count', render?.overlay_count));
+  const renderSeq = render?.sequence;
+  lines.push(reportLine(2, 'sequence', renderSeq?.width && renderSeq?.height
+    ? `${renderSeq.width}x${renderSeq.height} @ ${render?.render_fps || renderSeq.fps || '?'} fps` : null));
+  lines.push(reportLine(2, 'timeline_duration_sec', render?.timeline_duration_sec));
+  lines.push(reportLine(2, 'output_duration_sec', render?.output_duration_sec));
+  // Nguồn mà ffmpeg phải GIẢI MÃ (temp_input.mp4), không phải file người dùng thêm vào.
+  const renderSource = render?.source;
+  lines.push(reportLine(2, 'source_codec', renderSource?.codec));
+  lines.push(reportLine(2, 'source_format', renderSource
+    ? `${renderSource.size || '?'} ${renderSource.pix_fmt || '?'} ${renderSource.fps || '?'} fps rotate=${renderSource.rotation}${renderSource.color_transfer ? ` trc=${renderSource.color_transfer}` : ''}`
+    : null));
   lines.push(reportLine(2, 'duration_ms', render?.duration_ms));
   lines.push(reportLine(2, 'duration_human', formatDuration(render?.duration_ms)));
+  /* TÁCH THEO KHÂU (Bước 0.1, KE_HOACH_TOI_UU_EXPORT_WIN.md). `duration_ms` ở trên tính từ lúc
+   * trình duyệt BẮT ĐẦU tải lên, nên KHÔNG gồm bước vẽ trước (chữ, chuyển cảnh, retouch) —
+   * phần đó nằm ở `client_prebake_ms`. Bước tải về xảy ra sau khi báo cáo được ghi nên không
+   * có ở đây; bench:export đo nó phía trình duyệt. */
+  const clientTiming = render?.client_timing;
+  lines.push(reportLine(2, 'client_prebake_ms', clientTiming?.prebake_ms));
+  lines.push(reportLine(2, 'client_prebake_detail', clientTiming?.prebake));
+  const serverTiming = render?.server_timing;
+  lines.push(reportLine(2, 'upload_ms', serverTiming?.upload_ms));
+  lines.push(reportLine(2, 'sdr_overrides_ms', serverTiming?.sdr_overrides_ms));
+  lines.push(reportLine(2, 'normalize_ms', serverTiming?.normalize_ms));
+  lines.push(reportLine(2, 'prepare_ms', serverTiming?.prepare_ms));
+  lines.push(reportLine(2, 'sidecar_ms', serverTiming?.sidecar_ms));
+  lines.push(reportLine(2, 'verify_ms', serverTiming?.verify_ms));
+  const sidecarTiming = render?.sidecar_timing;
+  lines.push(reportLine(2, 'sidecar_probe_ms', sidecarTiming?.probe_ms));
+  lines.push(reportLine(2, 'sidecar_plan_ms', sidecarTiming?.plan_ms));
+  lines.push(reportLine(2, 'sidecar_concat_ms', sidecarTiming?.concat_ms));
+  const sidecarRuns = Array.isArray(sidecarTiming?.runs) ? sidecarTiming.runs : [];
+  lines.push(reportLine(2, 'ffmpeg_run_count', sidecarTiming ? sidecarRuns.length : null));
+  for (const run of sidecarRuns) {
+    /* `source_to` = lượt này giải mã nguồn tới đâu: từ `seek` (seek theo batch, mục 1.1) hoặc
+     * từ giây 0 nếu không seek — khi đó batch càng về sau càng đắt dù cùng độ dài. */
+    lines.push(reportLine(3, run.label,
+      `${run.mode} run_ms=${run.run_ms} intervals=${run.intervals} overlays=${run.overlays} `
+      + `seq_sec=${run.sequence_duration} source=${run.source_from}..${run.source_to}`
+      + `${run.seek_to ? ` seek=${run.seek_to}` : ''}`
+      + `${run.cpu_retry ? ' cpu_retry' : ''}${run.exit ? ` exit=${run.exit}` : ''}`));
+  }
   lines.push(reportLine(2, 'output_path', render?.output_path));
   lines.push(reportEndTag(1, 'EXPORT'));
   lines.push('');
@@ -2409,12 +2508,22 @@ async function buildSdrAsset(resolved, output, label) {
  * Vì sao vẫn cần dù preview đã đổi sang bản SDR: dự án mở lại từ .crab mang theo `path` đã lưu
  * (trỏ file HDR gốc), và người dùng có thể bấm Xuất mà chưa hề chạm vào block overlay nào —
  * lúc đó không có gì kích hoạt đường preview. File giao khách thì không được phép sai màu, nên
- * chốt lại ở đây. Asset đã có bản SDR từ trước thì bước này chỉ là một lần tra đĩa. */
+ * chốt lại ở đây. Asset đã có bản SDR từ trước thì bước này chỉ là một lần tra đĩa.
+ *
+ * CHỈ ASSET CÓ ITEM TRỎ TỚI (mục 1.15, KE_HOACH_TOI_UU_EXPORT_WIN.md). `assets` là cả THƯ VIỆN
+ * của dự án, gồm cả video nguồn lane chính mà dự án tự đăng ký làm asset "liên kết". Đo
+ * 2026-09-28 trên "Bin Tom - Tap 3": thư viện 13 asset, item chỉ dùng 3, vậy mà lượt xuất đầu
+ * mã hoá lại trọn `IMG_0827.MOV` (HEVC 10-bit HLG, 270 s) mất 72,5 s trong tổng 129 s — cho một
+ * file không lớp phủ nào đọc. Bản SDR nằm trong TEMP_DIR nên mở lại dự án là trả giá lại. */
 async function sdrOverridesForEditingAssets(rawEditing) {
   const overrides = new Map();
   const raw = parseOptionalJsonObject(rawEditing);
   const assets = Array.isArray(raw.assets) ? raw.assets : [];
+  const usedAssetIds = new Set((Array.isArray(raw.items) ? raw.items : [])
+    .map((item) => String(item?.asset_id || ''))
+    .filter(Boolean));
   for (const asset of assets) {
+    if (!usedAssetIds.has(String(asset?.id || ''))) continue;
     const assetPath = String(asset?.path || '');
     if (!assetPath) continue;
     if (editingAssetKindForPath(assetPath) !== 'media_video') continue;
@@ -6905,7 +7014,19 @@ function createApp() {
     const transitionFrameFiles = new Map(
       (Array.isArray(req.files) ? req.files : []).map((file) => [String(file.originalname || ''), file.path]),
     );
+    /* MỐC THỜI GIAN TỪNG KHÂU (Bước 0.1). Handler chạy SAU khi multer đã nhận xong toàn bộ
+     * body (kể cả khung chuyển cảnh), nên `handlerStartedAt − client_started_at_ms` chính là
+     * thời gian tải lên — hai mốc cùng một đồng hồ vì frontend và backend chạy chung máy. */
+    const handlerStartedAt = Date.now();
+    const stageMs = {};
+    const timeStage = async (key, work) => {
+      const started = Date.now();
+      try { return await work(); } finally { stageMs[key] = Date.now() - started; }
+    };
     try {
+      if (process.env.CRABBYCUT_EXPORT_CAPTURE_DIR) {
+        await timeStage('capture_ms', () => captureExportRequest(req, process.env.CRABBYCUT_EXPORT_CAPTURE_DIR));
+      }
       setStatus(_t('Đang chuẩn bị cắt video theo timeline đã lọc...'));
       const sourceVideoPath = path.join(TEMP_DIR, 'temp_input.mp4');
       if (!fs.existsSync(sourceVideoPath)) {
@@ -6946,14 +7067,17 @@ function createApp() {
       );
       exportSettingsForError = exportSettings;
       // Chốt màu asset overlay TRƯỚC khi dựng payload: xem sdrOverridesForEditingAssets.
-      const sdrAssetOverrides = await sdrOverridesForEditingAssets(req.body.editing_json || {});
-      const editingPayload = normalizeEditingPayload(
+      // Khâu này có thể mã hoá lại TOÀN BỘ một video HDR làm lớp phủ ngay trong lượt xuất
+      // (chưa có trong cache) — đo riêng để không bị đổ oan cho ffmpeg của sidecar.
+      const sdrAssetOverrides = await timeStage('sdr_overrides_ms',
+        () => sdrOverridesForEditingAssets(req.body.editing_json || {}));
+      const editingPayload = await timeStage('normalize_ms', () => normalizeEditingPayload(
         req.body.editing_json || {},
         timelineDurationFromIntervals(exportIntervals),
         parseFpsValue(exportSettings.render_fps),
         transitionFrameFiles,
         sdrAssetOverrides,
-      );
+      ));
       const timelineFile = path.join(TEMP_DIR, 'export_timeline.json');
       await fsp.writeFile(timelineFile, JSON.stringify(jsonSafe({
         version: editingPayload.overlays.length ? 4 : 3,
@@ -6968,9 +7092,11 @@ function createApp() {
       })), 'utf8');
       const outputName = exportOutputName(exportSettings);
       const outputPath = path.join(TEMP_DIR, outputName);
-      const renderStartedAt = parseClientStartedAtMs(req.body.client_started_at_ms) || Date.now();
+      const clientStartedAt = parseClientStartedAtMs(req.body.client_started_at_ms);
+      const renderStartedAt = clientStartedAt || Date.now();
       const serverRenderStartedAt = Date.now();
-      const sidecarEvents = await runSidecar([
+      stageMs.prepare_ms = serverRenderStartedAt - handlerStartedAt;
+      const sidecarEvents = await timeStage('sidecar_ms', () => runSidecar([
         'export-video',
         sourceVideoPath,
         outputPath,
@@ -6978,7 +7104,7 @@ function createApp() {
         TEMP_DIR,
         exportSettings.resolution,
         exportSettings.fps,
-      ]);
+      ]));
       /* CHỐT CHẶN: FILE XUẤT RA PHẢI DÀI ĐÚNG BẰNG TIMELINE.
        *
        * ffmpeg có thể kết thúc với mã 0 mà vẫn NUỐT MẤT phần cuối phim: chỉ cần nguồn đổi
@@ -6991,7 +7117,7 @@ function createApp() {
        * Ngưỡng rộng tay (nửa giây hoặc 2%) vì lưới khung và phần đệm của bộ mã hoá luôn làm
        * lệch vài khung; chỉ báo lỗi khi THIẾU, dài hơn thì không có gì để mất. */
       const expectedDuration = timelineDurationFromIntervals(exportIntervals);
-      const actualDuration = mediaDurationSeconds(outputPath);
+      const actualDuration = await timeStage('verify_ms', () => mediaDurationSeconds(outputPath));
       const allowedShortfall = Math.max(0.5, expectedDuration * 0.02);
       if (Number.isFinite(actualDuration) && expectedDuration > 0
         && actualDuration < expectedDuration - allowedShortfall) {
@@ -7001,12 +7127,30 @@ function createApp() {
         );
       }
       const encoderEvent = sidecarEvents.find((evt) => String(evt?.message || '').startsWith('Export encoder:'));
+      // Sự kiện `timing` của sidecar (xem ExportTimingJson trong core_process.cpp). Sidecar
+      // cũ không phát nó -> null, báo cáo chỉ thiếu phần chi tiết.
+      const timingEvent = sidecarEvents.find((evt) => evt?.type === 'timing');
+      let sidecarTiming = null;
+      try { sidecarTiming = timingEvent ? JSON.parse(timingEvent.message) : null; } catch (_) { /* bỏ qua */ }
+      const clientTiming = parseOptionalJsonObject(req.body.client_timing_json);
+      const sourceSummary = exportSourceSummary(sourceVideoPath);
+      const serverTiming = {
+        upload_ms: clientStartedAt ? Math.max(0, handlerStartedAt - clientStartedAt) : null,
+        ...stageMs,
+        server_ms: Date.now() - handlerStartedAt,
+      };
       projectMetrics.export = {
         ...exportSettings,
         encoder: encoderEvent ? String(encoderEvent.message).replace(/^Export encoder:\s*/, '') : null,
         sequence: jsonSafe(sequenceSettings),
         interval_count: exportIntervals.length,
         overlay_count: editingPayload.overlays.length,
+        timeline_duration_sec: expectedDuration,
+        output_duration_sec: actualDuration,
+        source: sourceSummary,
+        client_timing: clientTiming && Object.keys(clientTiming).length ? clientTiming : null,
+        server_timing: serverTiming,
+        sidecar_timing: sidecarTiming,
         duration_ms: Math.max(0, Date.now() - renderStartedAt),
         server_duration_ms: Math.max(0, Date.now() - serverRenderStartedAt),
         output_path: outputPath,
@@ -7016,6 +7160,9 @@ function createApp() {
       const reportPath = await writeProjectReport('export_success');
       setStatus(_t('Đã hoàn tất cắt dựng video.'));
       res.setHeader('X-Project-Report-Path', reportPath);
+      // Cho frontend (và bench:export) ghép với phần đo phía trình duyệt: JSON toàn số + nhãn
+      // ASCII nên an toàn làm giá trị header.
+      res.setHeader('X-Export-Timing', JSON.stringify({ ...serverTiming, sidecar: sidecarTiming }));
       res.download(outputPath, outputName);
     } catch (error) {
       recordProjectError('export', error, { endpoint: '/api/export-video', exportSettings: exportSettingsForError });
@@ -7111,4 +7258,6 @@ module.exports = {
   flattenSessionWords, sliceWordsByBlocks, sessionWordsCoverBlocks,
   // Thanh trạng thái "Đang tải model": test khoá phép đọc thanh tqdm theo byte.
   parseTqdmBytes,
+  // Test khoá "chỉ hạ SDR asset CÓ item dùng" (mục 1.15) mà không phải dựng cả lượt xuất.
+  sdrOverridesForEditingAssets,
 };

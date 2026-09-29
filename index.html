@@ -15823,11 +15823,23 @@
             return;
         }
         videoExportInFlight = true;
+        /* Dừng preview trước khi xuất: vòng phát (Pixi + overlay + cuộn timeline, ~60 Hz) giành
+         * CPU/GPU với ffmpeg vốn đã bão hoà CPU. Đo 2026-09-28 (bản cắt 300 s 4K): cùng payload,
+         * lượt xuất khi preview đang phát chậm hơn ~21–30%. Nút Play tự đồng bộ theo sự kiện
+         * 'pause', giống nút Chụp khung hình. */
+        if (video && !video.paused) video.pause();
         const exportTopBtn = document.getElementById('btnExportVideo');
         const exportStepBtn = document.getElementById('btnExportFromStep4');
         if (exportTopBtn) exportTopBtn.disabled = true;
         if (exportStepBtn) exportStepBtn.disabled = true;
         startStatusPolling();
+        /* ĐO TỪNG KHÂU (Bước 0.1, docs/KE_HOACH_TOI_UU_EXPORT_WIN.md). Mốc gửi lên server
+         * (`client_started_at_ms`) chỉ bắt đầu từ lúc TẢI LÊN, nên con số trong báo cáo dự án
+         * chưa bao giờ gồm bước vẽ trước (PNG chữ, chuỗi khung hoạt ảnh/chuyển cảnh/retouch).
+         * `prebake` đi kèm FormData để vào báo cáo; bản đầy đủ (cả tải về) nằm ở
+         * `window.__crabLastExportTiming` cho bench:export đọc. */
+        const exportClock = performance.now();
+        const exportTiming = { started_at_ms: Date.now(), prebake: {} };
         try {
         const formData = new FormData();
         latestTimeline = normalizeTimelineTransforms(latestTimeline);
@@ -15931,17 +15943,26 @@
             return out;
         }));
         formData.append("timeline_json", JSON.stringify(timelineForExport));
+        exportTiming.prebake.main_lane_ms = Math.round(performance.now() - exportClock);
         if (window.EditingRuntime?.exportPayload) {
             // Chuỗi khung của vùng chuyển cảnh đi RIÊNG thành các phần file nhị phân, KHÔNG
             // nhét vào editing_json: nhét vào thì JSON.stringify vượt trần chuỗi của V8
             // (~536MB) ngay khi có vài chuyển cảnh full-res -> "lỗi render" không rõ nguyên
             // nhân. Xem khối "ĐÓNG GÓI CHUỖI KHUNG CHUYỂN CẢNH KHI EXPORT" ở editing-runtime.js.
             const transitionFrames = [];
+            const payloadClock = performance.now();
             const editingJson = await window.EditingRuntime.exportPayload({
                 fps: effectiveFps,
                 collectFile: (name, blob) => transitionFrames.push([name, blob]),
+                timing: exportTiming.prebake,
             });
-            formData.append("editing_json", JSON.stringify(editingJson));
+            exportTiming.prebake.editing_payload_ms = Math.round(performance.now() - payloadClock);
+            const serializeClock = performance.now();
+            const editingJsonText = JSON.stringify(editingJson);
+            exportTiming.prebake.serialize_ms = Math.round(performance.now() - serializeClock);
+            exportTiming.prebake.editing_json_bytes = editingJsonText.length;
+            exportTiming.prebake.transition_frame_files = transitionFrames.length;
+            formData.append("editing_json", editingJsonText);
             for (const [name, blob] of transitionFrames) formData.append("transition_frames", blob, name);
         }
 
@@ -15967,16 +15988,33 @@
         formData.append("sequence_settings", JSON.stringify(sequencePayload));
         formData.append("export_preset", exportResolution);
         formData.append("export_fps", exportFps);
+        exportTiming.prebake_ms = Math.round(performance.now() - exportClock);
+        formData.append("client_timing_json", JSON.stringify({
+            prebake_ms: exportTiming.prebake_ms,
+            prebake: exportTiming.prebake,
+        }));
         formData.append("client_started_at_ms", String(Date.now()));
 
+        const requestClock = performance.now();
         const response = await fetch(`${API_BASE}/export-video`, { method: "POST", body: formData });
+        // Tải lên + toàn bộ phía server (chờ tới khi có header phản hồi).
+        exportTiming.request_ms = Math.round(performance.now() - requestClock);
         if (!response.ok) {
             let detail = '';
             try { detail = (await response.json()).detail || ''; } catch (_) {}
             throw new Error(detail || _t("Xuất video thất bại."));
         }
+        try { exportTiming.server = JSON.parse(response.headers.get('X-Export-Timing') || 'null'); } catch (_) {}
+        const downloadClock = performance.now();
+        const exportBlob = await response.blob();
+        exportTiming.download_ms = Math.round(performance.now() - downloadClock);
+        exportTiming.output_bytes = exportBlob.size;
+        exportTiming.total_ms = Math.round(performance.now() - exportClock);
+        exportTiming.report_path = response.headers.get('X-Project-Report-Path') || null;
+        window.__crabLastExportTiming = exportTiming;
+        console.info('[export-timing]', exportTiming);
         const a = document.createElement("a");
-        a.href = URL.createObjectURL(await response.blob());
+        a.href = URL.createObjectURL(exportBlob);
         a.download = `${exportFileName}.${exportCodec === 'prores' ? 'mov' : 'mp4'}`;
         a.click();
         // Bake khung chuyển cảnh (nặng, nhiều phút) NẰM TRONG try này: trước đây nó ở ngoài
@@ -15984,6 +16022,7 @@
         // lớn — không ai bắt, UI im lặng và người dùng chỉ thấy "render lỗi" không rõ vì sao.
         } catch (error) {
             console.error('Export error:', error);
+            window.__crabLastExportTiming = { ...exportTiming, error: String(error?.message || error) };
             showToast(error && error.message ? error.message : _t('Xuất video thất bại.'), { type: 'error' });
         } finally {
             videoExportInFlight = false;

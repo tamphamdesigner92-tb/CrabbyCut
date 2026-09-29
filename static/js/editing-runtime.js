@@ -19365,6 +19365,22 @@
     async function exportPayload(options = {}) {
         const exportFps = clamp(Number(options.fps) || 30, 10, 60);
         const collectFile = typeof options.collectFile === 'function' ? options.collectFile : null;
+        /* ĐO VẼ TRƯỚC THEO LOẠI (Bước 0.1, docs/KE_HOACH_TOI_UU_EXPORT_WIN.md): performVideoExport
+           truyền `options.timing` để biết phần chờ trước khi tải lên nằm ở chữ, chuỗi khung
+           hoạt ảnh, retouch hay chuyển cảnh — ngưỡng 30% của nhánh 1B đo trên chính các số này. */
+        const timingSink = options.timing && typeof options.timing === 'object' ? options.timing : null;
+        const timingMs = {};
+        const timingCount = {};
+        const timed = async (key, work) => {
+            if (!timingSink) return work();
+            const started = performance.now();
+            try {
+                return await work();
+            } finally {
+                timingMs[key] = (timingMs[key] || 0) + performance.now() - started;
+                timingCount[key] = (timingCount[key] || 0) + 1;
+            }
+        };
         ensureMainTrack();
         editingItems.forEach((item) => {
             fixItemTrack(item);
@@ -19381,7 +19397,7 @@
             try {
                 const resolved = TextAnimations.resolveWindows(copy);
                 if (!resolved) return;
-                const seq = await renderer(copy, resolved, exportFps, ...args);
+                const seq = await timed('anim_seq', () => renderer(copy, resolved, exportFps, ...args));
                 if (seq) copy.animation_render = { fps: exportFps, seq };
             } catch (error) {
                 console.warn('Animation pre-render error:', error);
@@ -19397,7 +19413,7 @@
                 if (bakeDensity > 1) {
                     copy.transform.scale = clampTransformValue('scale', Number(copy.transform.scale) / bakeDensity);
                 }
-                const rendered = await renderTextItemToPng(copy, null, bakeDensity);
+                const rendered = await timed('text_png', () => renderTextItemToPng(copy, null, bakeDensity));
                 if (rendered) {
                     copy.rendered_text_png = rendered.dataUrl;
                     copy.rendered_text_width = rendered.width;
@@ -19410,7 +19426,7 @@
                    vẫn gửi kèm để backend có chỗ rơi về nếu bake thất bại. */
                 if (itemIsTextTemplate(copy)) {
                     try {
-                        const seq = await renderTextTemplateSequence(copy, exportFps, bakeDensity);
+                        const seq = await timed('anim_seq', () => renderTextTemplateSequence(copy, exportFps, bakeDensity));
                         if (seq) copy.animation_render = { fps: exportFps, seq };
                     } catch (error) {
                         console.warn('Text template pre-render error:', error);
@@ -19419,7 +19435,7 @@
                     await attachAnim(copy, renderTextAnimationSequence);
                 }
             } else if (copy?.type === 'shape') {
-                const rendered = await renderShapeItemToPng(copy);
+                const rendered = await timed('shape_png', () => renderShapeItemToPng(copy));
                 if (rendered) {
                     copy.rendered_shape_png = rendered.dataUrl;
                     copy.rendered_shape_width = rendered.width;
@@ -19433,12 +19449,12 @@
                 const imgAsset = findAsset(copy.asset_id);
                 // RETOUCH cho ảnh tĩnh: bake MỘT LẦN (ảnh không đổi theo thời gian) rồi
                 // dùng cho cả hai đường bên dưới.
-                const rtStill = await retouchedStillCanvas(copy, imgAsset);
+                const rtStill = await timed('retouch', () => retouchedStillCanvas(copy, imgAsset));
                 await attachAnim(copy, renderImageAnimationSequence, imgAsset, rtStill);
                 // Không có hoạt ảnh -> attachAnim không sinh gì, mà retouch thì không diễn
                 // đạt được bằng filter FFmpeg. Đẩy ảnh đã retouch qua đường chuỗi khung.
                 if (!copy.animation_render && rtStill) {
-                    const seq = await bakeRetouchedStillSeq(copy, rtStill, exportFps, collectFile);
+                    const seq = await timed('retouch', () => bakeRetouchedStillSeq(copy, rtStill, exportFps, collectFile));
                     if (seq) copy.animation_render = { fps: exportFps, seq, color_source: 'raw' };
                 }
             } else if (copy?.type === 'media' && itemIsVideoMedia(copy)) {
@@ -19472,18 +19488,18 @@
                 && (!copy.animation_render || copy.animation_render.color_source === 'raw')) {
                 // Overlay: chuỗi filter chạy trên stream của asset ở kích thước GỐC của nó
                 const fxAsset = findAsset(copy.asset_id);
-                const spec = await colorAdjustExportSpec(copy.adjustments, copy.keyframes, {
+                const spec = await timed('color', () => colorAdjustExportSpec(copy.adjustments, copy.keyframes, {
                     frameHeight: Number(fxAsset?.height) || 0,
                     frameWidth: Number(fxAsset?.width) || 0,
                     label: `i${copy.id}`,
                     fps: exportFps,
                     duration: Number(copy.duration) || 1,
-                });
+                }));
                 if (spec) copy.color_adjust = spec;
                 // LỚP ĐIỀU CHỈNH: chuỗi màu THỨ HAI, nối SAU chuỗi của chính block.
                 // Sidecar áp nó NGOÀI nhánh mặt nạ của block (xem adj_post_filters),
                 // vì mặt nạ là của block chứ không phải của lớp.
-                const layerSpec = await adjustLayerExportSpec(
+                const layerSpec = await timed('color', () => adjustLayerExportSpec(
                     Number(copy.timeline_start) || 0,
                     (Number(copy.timeline_start) || 0) + (Number(copy.duration) || 0), {
                         frameHeight: Number(fxAsset?.height) || 0,
@@ -19491,7 +19507,7 @@
                         label: `i${copy.id}`,
                         fps: exportFps,
                         target: copy,
-                    });
+                    }));
                 if (layerSpec) copy.color_adjust_layer = layerSpec;
             }
             // MẶT NẠ CẮT HÌNH — ĐỘC LẬP với chỉnh màu (block có thể có mặt nạ mà không
@@ -19509,13 +19525,20 @@
         // GĐ5: bake RETOUCH lane chính. Đặt TRƯỚC hai khối chuyển cảnh vì overlay vẽ theo
         // thứ tự mảng: trong vùng chuyển cảnh thì khung tổng hợp của chuyển cảnh mới đúng,
         // nên nó phải nằm TRÊN miếng vá retouch.
-        await appendRetouchItems(items, exportFps, collectFile);
+        await timed('retouch', () => appendRetouchItems(items, exportFps, collectFile));
         // Miếng vá Retouch cho media overlay VIDEO. Cùng ràng buộc thứ tự với lane chính.
-        await appendOverlayRetouchItems(items, exportFps, collectFile);
+        await timed('retouch', () => appendOverlayRetouchItems(items, exportFps, collectFile));
         // GĐ4: bake vùng chuyển cảnh OVERLAY -> item image-sequence + trim 2 item gốc (khớp preview).
-        await appendOverlayTransitionItems(items, exportFps, collectFile);
+        await timed('transition', () => appendOverlayTransitionItems(items, exportFps, collectFile));
         // GĐ4: bake vùng chuyển cảnh LANE CHÍNH (full-res) -> overlay image-sequence trên track_main.
-        await appendMainTransitionItems(items, exportFps, collectFile);
+        await timed('transition', () => appendMainTransitionItems(items, exportFps, collectFile));
+        if (timingSink) {
+            for (const [key, ms] of Object.entries(timingMs)) {
+                timingSink[`${key}_ms`] = Math.round(ms);
+                timingSink[`${key}_calls`] = timingCount[key];
+            }
+            timingSink.item_count = items.length;
+        }
         return {
             version: 5,
             tracks,

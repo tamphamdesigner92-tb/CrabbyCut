@@ -9786,3 +9786,32 @@ Kéo resizer trái ở 1920: 528 -> 384px, inline ghi đè đúng. **Còn tồn 
 của thanh điều khiển preview vốn đã chạm nút Play với panel 288px ("… / 00:00:06:"); panel 330px
 che thêm ("… / 00:00:"). Không có phần tử nào báo tràn (`scrollWidth`) — nút Play nằm đè lên chữ.
 
+## Đo thời gian xuất video — dụng cụ và số nền (Bước 0, 2026-09-28)
+
+Kế hoạch đầy đủ, quyết định và bảng tách khâu: `docs/KE_HOACH_TOI_UU_EXPORT_WIN.md`, mục "Kết quả Bước 0".
+Mục này chỉ ghi những gì cần biết khi đọc báo cáo hoặc đo lại.
+
+**Báo cáo dự án (`reports/report_project_*.txt`, khối EXPORT) giờ tách theo khâu:**
+- `client_prebake_ms` (+ `client_prebake_detail`: `text_png`, `anim_seq`, `retouch`, `color`, `transition`, `serialize`…): phần vẽ trước trong renderer. `duration_ms` cũ bắt đầu từ lúc TẢI LÊN nên chưa bao giờ gồm phần này.
+- `upload_ms`, `sdr_overrides_ms` (hạ SDR asset HDR ngay trong lượt xuất), `normalize_ms`, `prepare_ms`, `sidecar_ms`, `verify_ms`.
+- `sidecar_probe_ms` / `sidecar_plan_ms` / `sidecar_concat_ms` và **một dòng cho mỗi lượt ffmpeg**: `run_ms`, số clip/lớp phủ, `source=a..b` (khoảng nguồn được giải mã), `seek=` (nếu batch được seek).
+- `source_codec` / `source_format` của `temp_input.mp4` — thứ ffmpeg thật sự giải mã (AV1 4K `-c copy` và H.264 đã chuẩn hoá chênh nhau ~2,5× tốc độ giải mã).
+- Bước tải file về renderer xảy ra SAU khi báo cáo được ghi, nên không có ở đây.
+
+**Sidecar:** sự kiện `timing` luôn phát (JSON trong `message`). `CRABBYCUT_EXPORT_BENCH=1` giữ filter script và ghi `<temp>/export_bench/` (`*.cmd.json`, log FFREPORT có dòng `bench:`, `-progress`, `-print_graphs_file`).
+
+**Đo lại:** `npm run bench:export -- --crab <dự án> [--cut 300] [--runs 3] [--split]` (Electron thật một lượt, rồi phát lại payload); `node tests/scripts/export_fidelity.js` cho tiêu chí chất lượng. Chạy A/B xen kẽ, không chạy dồn một phía: số trôi ~20% trong một giờ vì máy nóng.
+
+**Số nền** (Ryzen 7 2700X + GTX 1060, Gyan 8.1.1, NVENC; giây):
+
+| Dự án | Nguồn giải mã | Trong app | Vẽ trước | Hạ SDR | ffmpeg hình | Ghép + tải về | Phát lại (trung vị) |
+|---|---|---|---|---|---|---|---|
+| Bin Tom - Tap 3 (76,6 s, 19 lớp phủ) | H.264 1080×1920 | 129,2 | 7,1 | 72,5 | 44,3 | 0,5 | 42,4 |
+| Phụ đề 4K, cắt 300 s (100 phụ đề) | AV1 3840×1646 | 248,4 | 0,8 | 0 | 228,5 | 11,1 | 204,5 |
+| Phụ đề 4K, 39 phút (1.116 phụ đề) | AV1 3840×1646 | 3.334,9 | 6,5 | 0,1 | 3.147,7 | 130,0 | (xem kế hoạch) |
+
+Bốn điều số đo lật ra, dễ đoán sai nếu không đo:
+1. **Filter chứ không phải encode** là nút thắt: 58–77% thời gian ffmpeg, NVENC chỉ 5–10%.
+2. **Batch sau giải mã lại từ giây 0**: dự án 39 phút, batch 180 s đầu 135 s, batch cuối (24,8 s phim) 255 s. Sửa bằng seek theo batch (`BatchSeekSeconds`, chỉ batch chỉ-hình — AAC giải mã từ giữa file cho mẫu khác vài LSB): phát lại 2.978,8 → 1.392,5 s (2,14×), bản xuất giống hệt từng gói (đo trên bản cắt 300 s).
+3. **Lượt xuất đầu hạ SDR cả asset không dùng**: `sdrOverridesForEditingAssets` từng duyệt cả thư viện dự án; nay chỉ asset có item.
+4. **Preview tự phát sau khi mở dự án** (mặc định `autoPlay` của `PIXI.Texture.from(video)`), và vòng phát giành CPU với ffmpeg suốt lượt xuất (chậm 21–30%). `performVideoExport` nay dừng preview trước khi xuất; bản thân việc tự phát chưa sửa.
