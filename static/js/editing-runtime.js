@@ -5885,7 +5885,7 @@
                 `${item.id}@${Math.round(seamSource * 100)}@${seamUrl}`, seamUrl, seamSource);
             // Khung seam là ảnh THÔ của asset -> xoá logo ở đây, không thì logo nháy lại
             // đúng trong vùng chuyển cảnh. (Lớp 'live' là canvas fx đã xoá sẵn.)
-            if (drawable) drawable = logoRemovedDrawable(drawable, drawable.width, drawable.height, item, `seam:${item.id}:${mode}`);
+            if (drawable) drawable = logoRemovedDrawable(drawable, drawable.width, drawable.height, item, `seam:${item.id}:${mode}`, seamSource);
             if (drawable) return { drawable, w0: sz.width, h0: sz.height };
             return null;
         }
@@ -8490,8 +8490,10 @@
     /* Đưa một khung qua Xoá logo, trả canvas trong pool (theo `key`) hoặc CHÍNH `drawable`
      * khi không có gì để làm. Cùng hợp đồng với retouchedDrawable: không bao giờ trả null.
      * Chỉ đọc/ghi pixel TRONG các vùng (getImageData cỡ vùng) — phần còn lại của khung đi
-     * đường drawImage của GPU, nên mỗi khung chỉ tốn vài ms dù nguồn 4K. */
-    function logoRemovedDrawable(drawable, texW, texH, clip, key) {
+     * đường drawImage của GPU, nên mỗi khung chỉ tốn vài ms dù nguồn 4K.
+     * `sourceTime` = giây NGUỒN của khung (trục của block) — chỉ chế độ 'ai' cần: miếng vá
+     * được chọn theo đúng PTS khung nguồn. */
+    function logoRemovedDrawable(drawable, texW, texH, clip, key, sourceTime = 0) {
         if (logoCompareOff || !drawable || !logoActive(clip)) return drawable;
         const w = Math.round(texW);
         const h = Math.round(texH);
@@ -8499,6 +8501,9 @@
         const cfg = LogoRemoval.normalize(clip.logo_removal);
         const rects = LogoRemoval.exportRects(cfg, logoContentRect(clip, w, h), w, h);
         if (!rects.length) return drawable;
+        // AI: miếng vá của khung này (mảng theo vùng; phần tử null = chưa nạp xong). Chưa xử lý
+        // xong thì cả mảng null -> mọi vùng vẽ tạm bằng delogo bên dưới.
+        const ai = cfg.mode === 'ai' ? logoAiPatchesAt(clip, sourceTime) : null;
         let entry = logoFxPool.get(key);
         if (!entry) {
             if (logoFxPool.size >= LOGO_FX_MAX) logoFxPool.delete(logoFxPool.keys().next().value);
@@ -8512,15 +8517,26 @@
         if (canvas.height !== h) canvas.height = h;
         ctx.clearRect(0, 0, w, h);
         try { ctx.drawImage(drawable, 0, 0, w, h); } catch (_) { return drawable; }
-        for (const r of rects) {
+        rects.forEach((r, k) => {
+            const patch = ai && ai.patches[k];
+            if (patch) {
+                // Miếng vá theo pixel NGUỒN của lượt AI -> quy sang pixel texture (proxy LQ nhỏ
+                // hơn nguồn). Viền mềm của miếng vá lo phần giáp ranh.
+                const kx = w / ai.width;
+                const ky = h / ai.height;
+                try {
+                    ctx.drawImage(patch.img, patch.box.x * kx, patch.box.y * ky, patch.box.w * kx, patch.box.h * ky);
+                    return;
+                } catch (_) { /* ảnh hỏng -> delogo */ }
+            }
             // Nới 1px: delogo lấy mẫu ở hàng/cột NGAY NGOÀI vùng (xem delogoRgba).
             const bw = r.w + 2;
             const bh = r.h + 2;
             let img;
-            try { img = ctx.getImageData(r.x - 1, r.y - 1, bw, bh); } catch (_) { return drawable; }
+            try { img = ctx.getImageData(r.x - 1, r.y - 1, bw, bh); } catch (_) { return; }
             LogoRemoval.applyRectRgba(img.data, bw, { x: 1, y: 1, w: r.w, h: r.h, p: r.p }, cfg.mode);
             ctx.putImageData(img, r.x - 1, r.y - 1);
-        }
+        });
         return canvas;
     }
 
@@ -8538,7 +8554,7 @@
         if (window.Retouch && clip?.retouch && !Retouch.isIdentity(clip.retouch)) {
             out = retouchedDrawable(out, texW, texH, clip, sourceTime, aspect) || out;
         }
-        return logoRemovedDrawable(out, texW, texH, clip, `logo:${key || 'default'}`);
+        return logoRemovedDrawable(out, texW, texH, clip, `logo:${key || 'default'}`, sourceTime);
     }
 
     /* Spec cho sidecar: hình chữ nhật PIXEL trên stream mà chuỗi filter chạy trên đó
@@ -8547,7 +8563,367 @@
         if (!logoActive(clip) || !(frameW > 0) || !(frameH > 0)) return null;
         const cfg = LogoRemoval.normalize(clip.logo_removal);
         const rects = LogoRemoval.exportRects(cfg, logoContentRect(clip, frameW, frameH), frameW, frameH);
-        return rects.length ? { mode: cfg.mode, rects } : null;
+        if (!rects.length) return null;
+        if (cfg.mode === 'ai') {
+            // Lượt AI phủ đúng khoảng của block -> sidecar dán miếng vá của lượt đó (backend
+            // đọc thư mục/vị trí từ index trên đĩa). `rects` đi kèm là đường lùi delogo của
+            // backend nếu lượt đã bị dọn. Chưa có lượt -> delogo luôn từ đây.
+            const st = logoAiStateFor(clip);
+            if (st && st.state === 'done' && st.index && !st.index.still) {
+                return { mode: 'ai', key: st.key, run: st.run, rects };
+            }
+            return { mode: 'delogo', rects };
+        }
+        return { mode: cfg.mode, rects };
+    }
+
+    // ---- XOÁ LOGO BẰNG AI (chế độ 'ai') ----
+    //
+    // Miếng vá do backend/logo-ai.js + asr/logo_inpaint_sidecar.py (mô hình MI-GAN) vẽ sẵn theo
+    // đúng PTS từng khung nguồn. Ở đây: dựng YÊU CẦU cho một block (nguồn + vùng pixel + khoảng
+    // nguồn), theo dõi job, nạp miếng vá PNG theo thời điểm nguồn để logoRemovedDrawable dán.
+    // Chưa có miếng vá (chưa xử lý / đang chạy / vừa sửa vùng) -> vẽ tạm bằng delogo trên CÙNG
+    // vùng, và panel nói rõ là đang xem tạm.
+    //
+    // KHOẢNG NGUỒN nới LOGO_AI_RANGE_PAD mỗi đầu: kéo dài block một chút không phải chạy lại,
+    // và mép cắt lùi nửa khung của sidecar xuất vẫn nằm trong vùng đã vẽ.
+    const LOGO_AI_RANGE_PAD = 0.25;
+    const LOGO_AI_POLL_MS = 700;
+    const LOGO_AI_IMG_MAX = 240;      // miếng vá đã giải mã giữ trong bộ nhớ (LRU)
+    const LOGO_AI_PREFETCH = 12;      // số khung nạp trước quanh playhead
+    const logoAiStates = new Map();   // chữ ký yêu cầu -> trạng thái (xem logoAiApply)
+    const logoAiImages = new Map();   // url -> { img, ready, failed, promise }
+    let logoAiPollTimer = null;
+    let logoAiRedrawQueued = false;
+
+    function logoAiRequest(clip) {
+        if (!clip || !window.LogoRemoval) return null;
+        const cfg = LogoRemoval.normalize(clip.logo_removal);
+        if (cfg.mode !== 'ai' || !cfg.enabled || !cfg.regions.length) return null;
+        let frameW = 0;
+        let frameH = 0;
+        let sourcePath = '';
+        let still = false;
+        let start = 0;
+        let end = 0;
+        if (clip.type === 'media') {
+            const asset = findAsset(clip.asset_id);
+            if (!asset || !asset.path) return null;
+            frameW = Number(asset.width) || 0;
+            frameH = Number(asset.height) || 0;
+            sourcePath = asset.path;
+            if (!itemIsVideoMedia(clip)) {
+                still = true;
+            } else {
+                start = Number(clip.source_start) || 0;
+                end = start + Math.max(0.05, itemSourceSpan(clip));
+            }
+        } else {
+            // Lane chính: nguồn là file nối (backend mặc định temp_input.mp4), trục = giây nguồn.
+            const frame = typeof mainConcatFrameSize === 'function' ? mainConcatFrameSize() : null;
+            frameW = Number(frame?.width) || 0;
+            frameH = Number(frame?.height) || 0;
+            start = Number(clip.start) || 0;
+            end = Number(clip.end) || 0;
+        }
+        if (!(frameW > 0 && frameH > 0)) return null;
+        const rects = LogoRemoval.exportRects(cfg, logoContentRect(clip, frameW, frameH), frameW, frameH)
+            .map(({ x, y, w, h }) => ({ x, y, w, h }));
+        if (!rects.length) return null;
+        if (!still) {
+            start = Math.max(0, start - LOGO_AI_RANGE_PAD);
+            end += LOGO_AI_RANGE_PAD;
+            if (!(end > start + 0.05)) return null;
+        }
+        const body = {
+            source_path: sourcePath, still,
+            frame_w: Math.round(frameW), frame_h: Math.round(frameH), rects,
+            start: Math.round(start * 1000) / 1000, end: Math.round(end * 1000) / 1000,
+        };
+        return { body, sig: JSON.stringify(body) };
+    }
+
+    // Trạng thái AI của MỘT block (đồng bộ). Lần đầu gặp chữ ký thì hỏi backend nền xem đã có
+    // lượt nào phủ khoảng này chưa (mở lại dự án, block khác cùng nguồn đã chạy trước).
+    function logoAiStateFor(clip) {
+        const req = logoAiRequest(clip);
+        if (!req) return null;
+        let st = logoAiStates.get(req.sig);
+        if (!st) {
+            st = { state: 'checking', progress: 0 };
+            logoAiStates.set(req.sig, st);
+            logoAiFetch(req, false);
+        }
+        return st;
+    }
+
+    function logoAiApply(st, data) {
+        st.state = String(data.state || 'none');
+        st.progress = Number(data.progress) || 0;
+        if (data.job_id) st.jobId = data.job_id;
+        if (data.key) st.key = data.key;
+        st.error = data.error || '';
+        if (st.state === 'done') {
+            st.run = data.run;
+            st.index = data.index;
+            st.progress = 1;
+        }
+        if (st.state === 'queued' || st.state === 'running') logoAiEnsurePoll();
+    }
+
+    async function logoAiFetch(req, run) {
+        let st = logoAiStates.get(req.sig);
+        if (!st) {
+            st = { state: 'checking', progress: 0 };
+            logoAiStates.set(req.sig, st);
+        }
+        try {
+            const resp = await fetch(`${API_BASE}/logo-ai/${run ? 'process' : 'status'}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(req.body),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+            logoAiApply(st, data);
+        } catch (error) {
+            st.state = 'error';
+            st.error = error.message;
+        }
+        logoAiChanged();
+        return st;
+    }
+
+    function logoAiEnsurePoll() {
+        if (logoAiPollTimer) return;
+        logoAiPollTimer = setInterval(logoAiPoll, LOGO_AI_POLL_MS);
+    }
+
+    async function logoAiPoll() {
+        const byJob = new Map();
+        logoAiStates.forEach((st) => {
+            if ((st.state === 'queued' || st.state === 'running') && st.jobId) {
+                if (!byJob.has(st.jobId)) byJob.set(st.jobId, []);
+                byJob.get(st.jobId).push(st);
+            }
+        });
+        if (!byJob.size) {
+            clearInterval(logoAiPollTimer);
+            logoAiPollTimer = null;
+            return;
+        }
+        const finishedKeys = new Set();
+        await Promise.all([...byJob].map(async ([jobId, list]) => {
+            try {
+                const resp = await fetch(`${API_BASE}/logo-ai/job/${encodeURIComponent(jobId)}`);
+                const data = await resp.json().catch(() => ({}));
+                if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+                list.forEach((st) => logoAiApply(st, data));
+                if (data.state === 'done') finishedKeys.add(data.key);
+            } catch (error) {
+                list.forEach((st) => { st.state = 'error'; st.error = error.message; });
+            }
+        }));
+        // Một lượt xong có thể phủ luôn block KHÁC cùng nguồn + vùng -> hỏi lại các block đó.
+        if (finishedKeys.size) {
+            logoAiStates.forEach((st, sig) => {
+                if (st.state !== 'done' && st.key && finishedKeys.has(st.key)) {
+                    logoAiFetch({ sig, body: JSON.parse(sig) }, false);
+                }
+            });
+        }
+        logoAiChanged();
+    }
+
+    // Có tiến triển -> thay ĐÚNG ô trạng thái AI của panel (không dựng lại cả inspector mỗi
+    // nhịp poll: đang kéo thanh trượt/gõ số ở ô khác thì bị cắt ngang) và vẽ lại preview.
+    function logoAiChanged() {
+        const box = document.querySelector('.ins-sec[data-ins-tab="retouch"][data-ins-sub="logo"] .logo-ai-box');
+        const cfg = box ? currentLogoRemoval() : null;
+        if (box && cfg && cfg.mode === 'ai') {
+            const tmp = document.createElement('div');
+            tmp.innerHTML = logoAiSectionHtml(retouchPrimaryTarget(), cfg).trim();
+            if (tmp.firstElementChild) box.replaceWith(tmp.firstElementChild);
+        }
+        logoAiRequestRedraw();
+    }
+
+    function logoAiRequestRedraw() {
+        if (logoAiRedrawQueued) return;
+        logoAiRedrawQueued = true;
+        window.requestAnimationFrame(() => {
+            logoAiRedrawQueued = false;
+            // Đang phát thì vòng vẽ tự lấy miếng vá ở khung kế — không dựng lại cả preview.
+            if (isMainPreviewPlaying()) return;
+            if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
+            else renderPreviewOverlays();
+        });
+    }
+
+    // Chỉ số khung của lượt AI đang HIỆN tại mốc nguồn `t`: khung cuối có PTS ≤ t (thẻ <video>
+    // đứng ở `currentTime` là đang hiện khung đó). Ngoài khoảng đã vẽ -> -1.
+    function logoAiFrameIndex(index, t) {
+        const times = index.times;
+        if (!times.length) return -1;
+        if (index.still) return 0;
+        const x = Number(t) + 0.002;
+        if (!(x >= times[0])) return -1;
+        let lo = 0;
+        let hi = times.length - 1;
+        while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (times[mid] <= x) lo = mid; else hi = mid - 1;
+        }
+        // Quá khung cuối hơn một nhịp khung -> ra khỏi vùng đã vẽ.
+        const step = times.length > 1 ? (times[times.length - 1] - times[0]) / (times.length - 1) : 0.04;
+        if (lo === times.length - 1 && x > times[lo] + step * 1.5) return -1;
+        return lo;
+    }
+
+    function logoAiPatchUrl(st, k, fileNo) {
+        return `${API_BASE}/logo-ai/patch/${st.key}/${st.run}/r${k}_${String(fileNo).padStart(6, '0')}.png`;
+    }
+
+    function logoAiLoadImage(url) {
+        let entry = logoAiImages.get(url);
+        if (entry) {
+            // LRU: dùng lại -> đưa về cuối.
+            logoAiImages.delete(url);
+            logoAiImages.set(url, entry);
+            return entry;
+        }
+        while (logoAiImages.size >= LOGO_AI_IMG_MAX) logoAiImages.delete(logoAiImages.keys().next().value);
+        const img = new Image();
+        img.decoding = 'async';
+        entry = { img, ready: false, failed: false };
+        entry.promise = new Promise((resolve) => {
+            img.onload = () => { entry.ready = true; logoAiRequestRedraw(); resolve(entry); };
+            img.onerror = () => {
+                entry.failed = true;
+                // Lượt có thể đã bị lượt lớn hơn thay thế và dọn -> hỏi lại trạng thái.
+                logoAiStates.forEach((st, sig) => {
+                    if (st.state === 'done' && url.includes(`/${st.run}/`)) {
+                        st.state = 'checking';
+                        logoAiFetch({ sig, body: JSON.parse(sig) }, false);
+                    }
+                });
+                resolve(entry);
+            };
+        });
+        img.src = url;
+        logoAiImages.set(url, entry);
+        return entry;
+    }
+
+    // URL miếng vá (mỗi vùng một cái) của khung tại mốc nguồn `t`, hoặc null.
+    function logoAiFrameUrls(st, t) {
+        const i = logoAiFrameIndex(st.index, t);
+        if (i < 0) return null;
+        return st.index.rects.map((r, k) => (Array.isArray(r.frames) && r.frames[i] !== undefined
+            ? logoAiPatchUrl(st, k, r.frames[i]) : null));
+    }
+
+    /* Miếng vá của block tại mốc nguồn `t` cho logoRemovedDrawable:
+     * { width, height, patches: [{ img, box } | null] } hoặc null (chưa có lượt AI phủ mốc
+     * này). Nạp nền các khung kế tiếp để lúc phát không hụt. */
+    function logoAiPatchesAt(clip, t) {
+        const st = logoAiStateFor(clip);
+        if (!st || st.state !== 'done' || !st.index || !st.run) return null;
+        const i = logoAiFrameIndex(st.index, t);
+        if (i < 0) return null;
+        const patches = st.index.rects.map((r, k) => {
+            const fileNo = Array.isArray(r.frames) ? r.frames[i] : undefined;
+            if (fileNo === undefined) return null;
+            const entry = logoAiLoadImage(logoAiPatchUrl(st, k, fileNo));
+            return entry.ready ? { img: entry.img, box: r.box } : null;
+        });
+        if (!st.index.still) {
+            const seen = new Set();
+            for (let j = i + 1; j < Math.min(st.index.times.length, i + 1 + LOGO_AI_PREFETCH); j++) {
+                st.index.rects.forEach((r, k) => {
+                    const n = r.frames?.[j];
+                    if (n === undefined || seen.has(`${k}:${n}`)) return;
+                    seen.add(`${k}:${n}`);
+                    logoAiLoadImage(logoAiPatchUrl(st, k, n));
+                });
+            }
+        }
+        return { width: Number(st.index.width) || 1, height: Number(st.index.height) || 1, patches };
+    }
+
+    /* CHỜ miếng vá của một mốc cho các đường BAKE lúc xuất (chuyển cảnh, miếng vá retouch,
+     * ảnh tĩnh): logoRemovedDrawable là hàm đồng bộ, miếng vá chưa nạp là nó vẽ tạm delogo —
+     * đúng cho preview (khung sau sẽ có), sai cho bản xuất (không có "khung sau"). */
+    async function logoAiPrepareAt(clip, t) {
+        if (!logoActive(clip) || LogoRemoval.normalize(clip.logo_removal).mode !== 'ai') return;
+        const st = logoAiStateFor(clip);
+        if (!st || st.state !== 'done' || !st.index) return;
+        const urls = logoAiFrameUrls(st, t);
+        if (!urls) return;
+        await Promise.all(urls.filter(Boolean).map((u) => logoAiLoadImage(u).promise));
+    }
+
+    function logoAiBlocks() {
+        const out = [];
+        (latestTimeline || []).forEach((clip) => { if (logoAiRequest(clip)) out.push(clip); });
+        editingItems.forEach((item) => { if (item.type === 'media' && logoAiRequest(item)) out.push(item); });
+        return out;
+    }
+
+    // Xin chạy AI cho các block (bấm nút, chọn chế độ AI, hoặc trước khi xuất).
+    async function startLogoAi(blocks) {
+        const reqs = [];
+        const seen = new Set();
+        blocks.forEach((b) => {
+            const req = logoAiRequest(b);
+            if (!req || seen.has(req.sig)) return;
+            seen.add(req.sig);
+            const st = logoAiStates.get(req.sig);
+            if (st && (st.state === 'done' || st.state === 'queued' || st.state === 'running')) return;
+            reqs.push(req);
+        });
+        await Promise.all(reqs.map((req) => logoAiFetch(req, true)));
+    }
+
+    async function cancelLogoAi(blocks) {
+        const jobs = new Set();
+        blocks.forEach((b) => {
+            const st = logoAiStateFor(b);
+            if (st && st.jobId && (st.state === 'queued' || st.state === 'running')) jobs.add(st.jobId);
+        });
+        await Promise.all([...jobs].map((id) => fetch(`${API_BASE}/logo-ai/job/${encodeURIComponent(id)}/cancel`,
+            { method: 'POST' }).catch(() => null)));
+        await logoAiPoll();
+    }
+
+    /* TRƯỚC KHI XUẤT: mọi block đang ở chế độ AI phải có lượt phủ đủ khoảng — chạy (và CHỜ)
+     * những block còn thiếu, báo tiến độ qua `onStatus`. Block nào hỏng/bị huỷ thì bản xuất
+     * dùng delogo cho block đó (logoRemovalExportPx) và trả về số block ấy để caller báo ra. */
+    async function ensureLogoAiForExport(onStatus = null) {
+        const blocks = logoAiBlocks();
+        if (!blocks.length) return { failed: 0 };
+        blocks.forEach((b) => logoAiStateFor(b));
+        // Đợi các lượt "đang hỏi" trả lời trước khi quyết định có phải chạy không.
+        for (let i = 0; i < 100 && blocks.some((b) => logoAiStateFor(b)?.state === 'checking'); i++) {
+            await new Promise((r) => setTimeout(r, 50));
+        }
+        await startLogoAi(blocks);
+        for (;;) {
+            const states = blocks.map((b) => logoAiStateFor(b)).filter(Boolean);
+            const pending = states.filter((st) => ['checking', 'queued', 'running'].includes(st.state));
+            if (!pending.length) break;
+            const pct = Math.round(100 * states.reduce((a, st) => a + (st.state === 'done' ? 1 : (st.progress || 0)), 0)
+                / Math.max(1, states.length));
+            const msg = _t('Đang xoá logo bằng AI trước khi xuất… {pct}%', { pct });
+            if (typeof onStatus === 'function') onStatus(msg);
+            setEditingStatusText(msg);
+            await new Promise((r) => setTimeout(r, LOGO_AI_POLL_MS));
+        }
+        const failed = blocks.filter((b) => logoAiStateFor(b)?.state !== 'done').length;
+        if (failed) {
+            setEditingStatusText(_t('{n} block không xoá logo bằng AI được — bản xuất dùng nội suy từ viền cho các block đó.', { n: failed }));
+        }
+        return { failed };
     }
 
     function setLogoCompare(off) {
@@ -8611,8 +8987,13 @@
                             aria-label="${escapeHtml(_t('Xoá vùng {n}', { n: i + 1 }))}">✕</button>
                 </div>`).join('');
         const full = cfg.regions.length >= LogoRemoval.MAX_REGIONS;
-        const needsStrength = cfg.mode !== 'delogo';
+        const needsStrength = cfg.mode === 'blur' || cfg.mode === 'pixelate';
         const modeOpt = (value, label) => `<option value="${value}" ${cfg.mode === value ? 'selected' : ''}>${label}</option>`;
+        let hint = needsStrength
+            ? _t('Mức càng cao thì vùng logo càng mờ / ô khảm càng to.')
+            : _t('Vùng được lấp bằng màu của viền xung quanh — nên kéo khung RỘNG hơn logo một chút.');
+        let hintHtml = `<div class="adj-hint">${hint}</div>`;
+        if (cfg.mode === 'ai') hintHtml = logoAiSectionHtml(target, cfg);
         return `
             <div class="ins-sec" data-ins-tab="retouch" data-ins-sub="logo">
                 <div class="ins-sec-head">
@@ -8644,6 +9025,7 @@
                             ${modeOpt('delogo', _t('Nội suy từ viền (delogo)'))}
                             ${modeOpt('blur', _t('Làm mờ'))}
                             ${modeOpt('pixelate', _t('Khảm (pixel)'))}
+                            ${modeOpt('ai', _t('AI vẽ lại nền (MI-GAN)'))}
                         </select>
                     </div>
                 </div>
@@ -8654,10 +9036,64 @@
                     <input type="number" id="editingLogo_strengthNum" data-logo="1"
                            min="0" max="100" step="1" value="${cfg.strength}" ${needsStrength && target ? '' : 'disabled'}>
                 </div>
-                <div class="adj-hint">${needsStrength
-                    ? _t('Mức càng cao thì vùng logo càng mờ / ô khảm càng to.')
-                    : _t('Vùng được lấp bằng màu của viền xung quanh — nên kéo khung RỘNG hơn logo một chút.')}</div>
+                ${hintHtml}
             </div>`;
+    }
+
+    /* Ô trạng thái của chế độ AI: một dòng trạng thái, thanh tiến độ khi đang chạy, nút chạy /
+     * huỷ. Nói rõ khi preview đang xem TẠM bằng delogo — không thì người dùng tưởng AI chỉ
+     * làm được đến thế. */
+    function logoAiSectionHtml(target, cfg) {
+        const st = target && cfg.enabled && cfg.regions.length ? logoAiStateFor(target) : null;
+        let text = '';
+        let cls = '';
+        let pct = -1;
+        let runLabel = '';
+        let canCancel = false;
+        if (!target) {
+            text = _t('Chọn một block để xoá logo bằng AI.');
+        } else if (!cfg.enabled || !cfg.regions.length) {
+            text = _t('Bật Xoá logo và thêm vùng để xử lý bằng AI.');
+        } else if (!st) {
+            text = _t('Block này chưa xử lý AI được (thiếu nguồn hoặc kích thước khung).');
+            cls = 'is-error';
+        } else if (st.state === 'checking') {
+            text = _t('Đang kiểm tra kết quả AI đã có…');
+            cls = 'is-loading';
+        } else if (st.state === 'queued') {
+            text = _t('Đang chờ lượt xử lý AI…');
+            cls = 'is-loading';
+            pct = 0;
+            canCancel = true;
+        } else if (st.state === 'running') {
+            pct = Math.round((st.progress || 0) * 100);
+            text = _t('Đang xoá logo bằng AI… {pct}%', { pct });
+            cls = 'is-loading';
+            canCancel = true;
+        } else if (st.state === 'done') {
+            const n = st.index?.times?.length || 0;
+            text = st.index?.still ? _t('Đã xoá logo bằng AI.') : _t('Đã xoá logo bằng AI ({n} khung).', { n });
+            cls = 'is-ready';
+        } else if (st.state === 'error') {
+            text = _t('Xoá logo bằng AI lỗi: {error}', { error: st.error || '?' });
+            cls = 'is-error';
+            runLabel = _t('Thử lại');
+        } else {
+            text = st.state === 'canceled'
+                ? _t('Đã huỷ xử lý AI — preview đang xem tạm bằng nội suy từ viền.')
+                : _t('Chưa xử lý AI — preview đang xem tạm bằng nội suy từ viền.');
+            runLabel = _t('Xử lý bằng AI');
+        }
+        const buttons = [];
+        if (runLabel) buttons.push(`<button type="button" class="adj-mini-btn is-primary" id="editingLogoAiRun">${runLabel}</button>`);
+        if (canCancel) buttons.push(`<button type="button" class="adj-mini-btn" id="editingLogoAiCancel">${_t('Huỷ')}</button>`);
+        return `
+                <div class="logo-ai-box">
+                    <div class="adj-hint rt-status ${cls}">${escapeHtml(text)}</div>
+                    ${pct >= 0 ? `<div class="logo-ai-progress"><div style="width:${pct}%"></div></div>` : ''}
+                    ${buttons.length ? `<div class="logo-actions">${buttons.join('')}</div>` : ''}
+                    <div class="adj-hint">${_t('AI (MI-GAN) vẽ lại phần nền phía sau logo thay vì làm nhoè. Chạy nền trên máy của bạn; lần đầu tải mô hình ~28 MB. Mỗi giây video mất vài giây xử lý, cảnh đứng yên nhanh hơn nhiều.')}</div>
+                </div>`;
     }
 
     /* Ghi một control của panel Xoá logo. Cùng khuôn handleRetouchFieldInput. */
@@ -8682,6 +9118,9 @@
         if (id === 'editingLogoMode') {
             beginEdit();
             applyLogoRemoval((c) => { c.mode = LogoRemoval.MODES.includes(target.value) ? target.value : 'delogo'; });
+            // Chọn AI là ý định rõ ràng -> chạy luôn cho các block đang chọn (block chưa có
+            // vùng thì logoAiRequest trả null, không làm gì). Sửa vùng về sau thì bấm nút.
+            if (target.value === 'ai') startLogoAi(retouchTargets());
             refreshAdjustPanel();
             commit();
             return true;
@@ -8721,6 +9160,15 @@
         }
         if (t?.closest?.('#editingLogoDetect')) {
             detectLogoForSelection();
+            return true;
+        }
+        if (t?.closest?.('#editingLogoAiRun')) {
+            startLogoAi(retouchTargets());
+            refreshAdjustPanel();
+            return true;
+        }
+        if (t?.closest?.('#editingLogoAiCancel')) {
+            cancelLogoAi(retouchTargets());
             return true;
         }
         const del = t?.closest?.('[data-logo-delete]');
@@ -18752,7 +19200,8 @@
             const texW = base?.naturalWidth || base?.width || 0;
             const texH = base?.naturalHeight || base?.height || 0;
             if (!(texW > 0 && texH > 0)) return rt;
-            const out = logoRemovedDrawable(base, texW, texH, item, `still:${item.id}`);
+            await logoAiPrepareAt(item, 0);
+            const out = logoRemovedDrawable(base, texW, texH, item, `still:${item.id}`, 0);
             const canvas = document.createElement('canvas');
             canvas.width = texW;
             canvas.height = texH;
@@ -18974,7 +19423,8 @@
             // ảnh chụp ra là hình CHƯA cắt trong khi preview đã cắt. Khung mặt nạ =
             // kích thước TEXTURE, đúng khung mà syncSpriteMask dùng.
             const mainDrawable = videoMaskedDrawable(
-                colorAdjustedDrawable(logoRemovedDrawable(video, texW, texH, clip, `capture:${span.index}`),
+                colorAdjustedDrawable(logoRemovedDrawable(video, texW, texH, clip, `capture:${span.index}`,
+                    Number(video.currentTime) || 0),
                     texW, texH, effectiveAdjustments(clip, localT), `capture:${span.index}`),
                 texW, texH, clip.video_mask, `capcut:main:${span.index}`);
             drawLayer(mainDrawable, drawSize.width, drawSize.height, tr, anim);
@@ -19377,6 +19827,9 @@
             const { canvas: tmp, ctx: tctx } = bakeCanvas('mainCompose', seqW, seqH);
             // RETOUCH — cùng lý do như ở renderMainTransitionComposite: drawMainClipLayer
             // không tự retouch. Preview có mà export không là hai bên lệch nhau.
+            // Xoá logo AI: miếng vá của đúng hai mốc nguồn phải nạp xong TRƯỚC khi vẽ đồng bộ.
+            if (infoA) await logoAiPrepareAt(spanA.clip, srcTA);
+            if (infoB) await logoAiPrepareAt(spanB.clip, srcTB);
             const rtA = infoA && retouchTransitionLayer(infoA, spanA.clip, srcTA, 'A');
             const rtB = infoB && retouchTransitionLayer(infoB, spanB.clip, srcTB, 'B');
             const dA = (g) => { if (infoA) drawMainClipLayer(g, seqW, seqH, spanA, localA, rtA || infoA.drawable, infoA.texW, infoA.texH, true); };
@@ -19715,6 +20168,7 @@
             const srcT = times[k];
             // ĐÚNG hàm mà preview gọi -> không thể lệch với preview. Miếng vá phủ lên
             // [mainv] đã xoá logo, nên nó cũng phải xoá logo (sourceFxDrawable).
+            await logoAiPrepareAt(clip, srcT);
             const rt = sourceFxDrawable(frame, texW, texH, clip, srcT, texW / Math.max(1, texH), 'bakeRtMain');
             const { canvas: comp, ctx } = bakeCanvas('retouchSeq', seqW, seqH);
             if (fullFrame) { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, seqW, seqH); }
@@ -19935,6 +20389,7 @@
         let wrote = 0;
         await eachSourceFrame(asset.url, runTimes, async (frame, k, texW, texH) => {
             // ĐÚNG hàm mà preview gọi -> không thể lệch với preview (kể cả xoá logo).
+            await logoAiPrepareAt(item, runTimes[k]);
             const rt = sourceFxDrawable(frame, texW, texH, item, runTimes[k], texW / Math.max(1, texH), 'bakeRtOvl');
             const { canvas: comp, ctx } = bakeCanvas('rtOverlaySeq', seqW, seqH);
             // KHÔNG tô nền: ngoài hình lớp phải TRONG SUỐT (xem ghi chú PNG ở trên).
@@ -21599,6 +22054,13 @@
             .logo-actions .adj-mini-btn { flex: 1 1 0; justify-content: center; }
             .logo-actions .adj-mini-btn.is-active { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
             .logo-region-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+            .logo-ai-box { margin-top: 2px; }
+            .logo-ai-progress {
+                height: 4px; margin: 0 0 6px; border-radius: 2px; overflow: hidden;
+                background: rgba(255,255,255,0.1);
+            }
+            .logo-ai-progress > div { height: 100%; background: var(--primary); transition: width 0.3s ease; }
+            .logo-actions .adj-mini-btn.is-primary { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
             .logo-region-row { display: flex; align-items: stretch; gap: 4px; }
             .logo-region-pick {
                 flex: 1 1 auto; display: flex; justify-content: space-between; align-items: center;
@@ -24531,6 +24993,7 @@
         clipHasSourceFx,
         sourceFxDrawable,
         logoRemovalExportPx,
+        ensureLogoAiForExport,
         // index.html dựng payload cho clip lane chính -> cần cả spec export của lớp.
         adjustLayerExportSpec,
         // ỐNG HÚT MÀU của media overlay (lane chính có window.pickPreviewSourceColor).

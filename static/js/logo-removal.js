@@ -14,6 +14,11 @@
  *   'blur'     — làm mờ hộp 2 lượt (= `boxblur` power 2 của FFmpeg), mép phản xạ.
  *   'pixelate' — khảm: thu nhỏ trung bình theo ô rồi phóng lại kiểu láng giềng gần
  *                (= `scale=flags=area` rồi `scale=flags=neighbor`).
+ *   'ai'       — mô hình inpainting MI-GAN VẼ LẠI nền phía sau logo. Quá nặng để chạy theo
+ *                từng khung lúc xem/xuất nên là một LƯỢT XỬ LÝ TRƯỚC (asr/logo_inpaint_sidecar.py)
+ *                ra các miếng vá PNG theo đúng PTS từng khung nguồn; preview và sidecar xuất
+ *                cùng dán các miếng vá đó. Chưa xử lý xong thì mọi nơi rơi về 'delogo' trên
+ *                CÙNG hình chữ nhật (`fallbackMode`) — module này không biết gì về miếng vá.
  *
  * TOẠ ĐỘ VÙNG: tỉ lệ 0..1, gốc TRÊN-TRÁI, theo VÙNG ẢNH THẬT của block (lane chính:
  * vùng ảnh của clip trong khung nối; overlay: cả asset). Lưu tỉ lệ nên độc lập độ phân
@@ -34,7 +39,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
     'use strict';
 
-    const MODES = ['delogo', 'blur', 'pixelate'];
+    const MODES = ['delogo', 'blur', 'pixelate', 'ai'];
     const MAX_REGIONS = 4;
     // Cạnh nhỏ nhất của một vùng (tỉ lệ). Nhỏ hơn thì delogo không còn pixel bên trong.
     const MIN_REGION = 0.005;
@@ -156,6 +161,12 @@
 
     /* Danh sách hình chữ nhật cần xử lý trên khung W×H, kèm thông số pixel.
      * Trả [] khi không có gì để làm. Export gửi đúng mảng này cho backend. */
+    /* Chế độ công thức pixel dùng cho một cấu hình: 'ai' khi CHƯA có miếng vá thì xử lý như
+     * 'delogo' (cùng vùng, không cần tham số) — preview tạm và bản xuất dự phòng giống nhau. */
+    function fallbackMode(mode) {
+        return mode === 'ai' ? 'delogo' : (MODES.includes(mode) ? mode : 'delogo');
+    }
+
     function exportRects(cfg, content, frameW, frameH) {
         const c = normalize(cfg);
         if (!c.enabled || !c.regions.length) return [];
@@ -163,6 +174,7 @@
         c.regions.forEach((region) => {
             const px = regionToPixels(region, content, frameW, frameH);
             if (!px) return;
+            // 'ai' không có tham số: effectParamPx trả 0 như 'delogo'.
             out.push({ ...px, p: effectParamPx(c.mode, c.strength, px.w, px.h) });
         });
         return out;
@@ -286,6 +298,7 @@
      * `rect` toạ độ theo buffer: caller cắt vùng ra ImageData riêng thì truyền gốc 0,0. */
     function applyRectRgba(data, stride, rect, mode) {
         if (!rect) return;
+        mode = fallbackMode(mode);
         if (mode === 'blur') boxBlurRgba(data, stride, rect.x, rect.y, rect.w, rect.h, rect.p);
         else if (mode === 'pixelate') pixelateRgba(data, stride, rect.x, rect.y, rect.w, rect.h, rect.p);
         else delogoRgba(data, stride, rect.x, rect.y, rect.w, rect.h);
@@ -484,7 +497,7 @@
     return {
         MODES, MAX_REGIONS, MIN_REGION, FRAME_MARGIN, MIN_REGION_PX,
         defaultLogoRemoval, normalize, normalizeRegion, isActive, isEmpty,
-        regionToPixels, effectParamPx, exportRects,
+        regionToPixels, effectParamPx, exportRects, fallbackMode,
         delogoRgba, boxBlurRgba, pixelateRgba, applyRectRgba,
         rgbaToLuma, inCornerZone, detectLogoRegions, dilate,
     };

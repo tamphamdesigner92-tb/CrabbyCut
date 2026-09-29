@@ -16,6 +16,8 @@ dist/
 # không phải tài liệu dự án. Theo dõi nó thì mỗi máy lại làm bẩn cây làm việc một kiểu.
 docs/MOI_TRUONG_PYTHON.md
 proxy_cache/
+# Miếng vá của Xoá logo AI (backend/logo-ai.js) — cache, sinh lại được.
+logo_ai_cache/
 concat_cache/
 vendor/
 

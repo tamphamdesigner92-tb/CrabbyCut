@@ -99,6 +99,20 @@ const GROUPS = [
       { module: 'mediapipe', pip: 'mediapipe', source: 'asr/auto_reframe_sidecar.py:263' },
     ],
   },
+  {
+    id: 'logo_ai',
+    label: 'Xoá logo bằng AI',
+    trigger: 'Xoá logo bằng AI (MI-GAN)',
+    /* asr/logo_inpaint_sidecar.py import lười bên trong hàm: onnxruntime ở open_session(),
+     * cv2 + numpy ở process(). Model MI-GAN (28 MB) KHÔNG phải gói pip — sidecar tự tải nó
+     * vào thư mục models ở lần chạy đầu (xem backend/logo-ai.js -> MODEL). Trên Windows
+     * faster-whisper đã kéo onnxruntime về, nên máy đã cài ASR thì nhóm này gần như miễn phí. */
+    modules: [
+      { module: 'onnxruntime', pip: 'onnxruntime', source: 'asr/logo_inpaint_sidecar.py:open_session' },
+      { module: 'cv2', pip: 'opencv-contrib-python', source: 'asr/logo_inpaint_sidecar.py:process' },
+      { module: 'numpy', pip: 'numpy', source: 'asr/logo_inpaint_sidecar.py:process' },
+    ],
+  },
 ];
 
 /* Lọc theo nền tảng đang chạy. Không có `platforms` = cần ở mọi nền tảng. */

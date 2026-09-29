@@ -9835,3 +9835,47 @@ cú kéo = một undo.
 
 Test: `npm run test:logo-removal` (mô hình, khớp FFmpeg, nhận diện, backend, sidecar end-to-end cả
 lane chính lẫn overlay).
+
+### Chế độ AI — "AI vẽ lại nền (MI-GAN)" (2026-09-29)
+
+`mode: 'ai'`: mô hình inpainting **MI-GAN** (Picsart, MIT; ONNX "pipeline v2", 28 MB, ghim theo commit
++ SHA-256 ở `backend/logo-ai.js` → `MODEL`) VẼ LẠI nền phía sau logo. Đo trên máy dev (CPU,
+onnxruntime 1.29): 0,27 s/khung/vùng; LaMa chất lượng tương đương trên logo nhưng 1,07 s và 208 MB.
+Model tải ở lần đầu vào `%LOCALAPPDATA%\CrabbyCut\models\logo_ai` (có thanh tiến trình ở thanh trạng
+thái), nhóm Python `logo_ai` = onnxruntime + opencv + numpy.
+
+**Là một LƯỢT XỬ LÝ TRƯỚC, không phải công thức pixel:** `asr/logo_inpaint_sidecar.py` đọc TỪNG khung
+thật của đoạn nguồn (`-fps_mode passthrough`, PTS thật từ `showinfo`, crop sẵn trong ffmpeg), vẽ lại
+vùng, ghi miếng vá PNG RGBA (vùng + viền mềm 4–24 px) + `r{k}.ffconcat` + `index.json`
+(`times[]` theo TRỤC XUẤT, `rects[k].frames[i]` = số file miếng vá của khung i). Cảnh đứng yên (vành
+ngữ cảnh lệch TB < 2,2/255 so với khung vẽ gần nhất) DÙNG LẠI miếng vá → hết "sôi" và nhanh hơn.
+Nguồn HD không nhãn ma trận → gắn bt709 trước khi đổi RGB, CÙNG luật `MediaColorUntagged`.
+
+**Backend** (`backend/logo-ai.js`): khoá = nguồn + mtime/size + vùng pixel + khổ khung + model; cache
+`<USER_DATA>/logo_ai_cache/<khoá>/<run>/` (ngoài temp_uploads, khoá không dùng quá 30 ngày thì dọn — `CACHE_TTL_MS`).
+MỘT job tại một thời điểm; lượt có sẵn PHỦ khoảng xin thì trả ngay; khoảng chồng/sát (< 2 s) thì gộp,
+khoảng XA thì lượt riêng (không chạy AI cho quãng giữa không ai dùng). API: `POST /api/logo-ai/status|
+process`, `GET /api/logo-ai/job/:id`, `POST .../cancel`, `GET /api/logo-ai/patch/:key/:run/:file`. Nguồn
+qua cùng cổng an toàn với Retouch (`resolveRetouchSource`).
+
+**Preview** (`editing-runtime.js`, khối "XOÁ LOGO BẰNG AI"): `logoRemovedDrawable` nhận thêm `sourceTime`
+→ `logoAiPatchesAt` chọn khung cuối có PTS ≤ t, nạp PNG (LRU 240, nạp trước 12 khung) và vẽ theo tỉ lệ
+texture/nguồn (proxy LQ vẫn đúng chỗ). Chưa có miếng vá → delogo trên CÙNG vùng
+(`LogoRemoval.fallbackMode`), panel ghi rõ "đang xem tạm". Chọn chế độ AI là tự chạy; sửa vùng sau đó
+thì bấm "Xử lý bằng AI". Các đường BAKE (chuyển cảnh, miếng vá retouch, ảnh tĩnh) `await
+logoAiPrepareAt` trước khi vẽ đồng bộ.
+
+**Xuất:** `performVideoExport` chờ `ensureLogoAiForExport()` (chạy nốt block còn thiếu). Block đủ lượt
+gửi `logo_removal_px = { mode:'ai', key, run, rects }` → backend dựng `logo_ai_dir/rects/t0` TỪ INDEX
+TRÊN ĐĨA (lượt mất → delogo trên `rects`). Sidecar `AppendLogoAiFilters`: `movie=r{k}.ffconcat` →
+`setpts=+t0` → **đúng chuỗi trim/setpts/tốc độ/fps của nhánh clip** (dựng thành chuỗi `timing` dùng cho
+cả hai) → overlay `eof_action=pass`. Hai cái bẫy đã gặp:
+- crop LẺ trên nguồn 4:2:0 bị ffmpeg làm tròn cạnh → đọc pipe lệch byte, ảnh trượt và mất khung cuối →
+  hộp crop luôn CHẴN và kiểm cỡ khung qua `showinfo`.
+- concat lấy timebase 1/25 của PNG → mọi mốc bị làm tròn về lưới 25 fps, ở 1.5x miếng vá lệch khung
+  toàn đoạn → `.ffconcat` khai `option framerate 90000` cho từng ảnh, mở bằng `format_opts='safe=0'`.
+
+Test: `npm run test:logo-ai` — backend với bộ chạy giả; sidecar Python `CRAB_LOGO_AI_FAKE=1` (lấp bằng
+màu TB của khung, không cần model) trên nguồn ĐỔI MÀU MỖI KHUNG → dán lệch một khung là lộ ngay (có ca
+đối chứng cố tình lệch 1 khung phải đo ra > 30/255); CFR + VFR, 1x + 1.5x, lane chính + overlay; có model
+thì chạy thêm MI-GAN thật trên một ảnh.
