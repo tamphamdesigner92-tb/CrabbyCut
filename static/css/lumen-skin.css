@@ -478,9 +478,11 @@ body.home-active .app-statusbar-version { display: none; }
  * 5. Preview
  * ------------------------------------------------------------------- */
 .center-stage { background: var(--surface-1); }
-/* Viền khung bằng box-shadow, KHÔNG border: previewScale đọc frame.clientWidth. */
+/* Viền khung bằng box-shadow, KHÔNG border: previewScale đọc frame.clientWidth.
+ * KHÔNG bo góc (như CapCut): góc bo cắt mất 4 góc hình và lộ nền ở mép. */
 .sequence-preview-frame {
-    border-radius: var(--r-lg);
+    border: 0;
+    border-radius: 0;
     box-shadow: 0 0 0 1px var(--border-color), 0 25px 50px -12px rgba(0, 0, 0, 0.7);
 }
 .preview-control-bar { border-top-color: transparent; }

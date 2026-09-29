@@ -735,13 +735,16 @@
         .sequence-preview-shell.is-zoomed { overflow: auto; }
         /* Khung không được co lại theo vùng cuộn — nó phải giữ đúng cỡ đã tính. */
         .sequence-preview-shell > .sequence-preview-frame { flex: 0 0 auto; }
+        /* KHÔNG viền, KHÔNG bo góc (như CapCut): viền nằm TRONG khung nên ăn mất
+           0.67px mỗi bên ở màn hình 150% -> vùng vẽ lệch tỉ lệ sequence, và góc bo cắt mất
+           4 góc hình. Cả hai làm lộ nền (xanh cảnh báo trong suốt) ở mép hình. */
         .sequence-preview-frame {
             position: relative;
             overflow: hidden;
             background: #000;
-            border: 1px solid var(--white-a08);
+            border: 0;
             box-shadow: var(--sh-3);
-            border-radius: var(--r-md);
+            border-radius: 0;
         }
         .sequence-preview-frame.transparency-warning-active {
             background: #0AD500;
@@ -6345,6 +6348,17 @@
 
                 const payload = getSequencePayload();
 	                const previewScale = Math.min(frameW / payload.width, frameH / payload.height);
+	                /* Khung là số px NGUYÊN nên vẫn có thể lệch tỉ lệ sequence dưới 1px. Giãn
+	                 * sprite thêm đúng phần dư đó (≤ 0.3%, mắt không thấy) để hình vừa KHÍT khung —
+	                 * nếu không, mép hình rơi vào giữa pixel và nền (xanh cảnh báo trong suốt)
+	                 * lộ thành một vệt mảnh ở hai bên. Lệch từ 1.5px trở lên là khoảng trống
+	                 * THẬT (cảnh báo phải hiện) -> không giãn. */
+	                const edgeFit = (frame, seq) => {
+	                    const k = frame / Math.max(1e-6, seq * previewScale);
+	                    return (k > 1 && (frame - seq * previewScale) < 1.5) ? k : 1;
+	                };
+	                const edgeX = edgeFit(frameW, payload.width);
+	                const edgeY = edgeFit(frameH, payload.height);
 	                const activeIdx = getActivePreviewClipIndex();
 	                const activeClip = activeIdx >= 0 ? latestTimeline[activeIdx] : null;
 	                // KEYFRAME: transform hiệu dụng tại playhead (nội suy) trước khi áp anim delta.
@@ -6387,8 +6401,8 @@
 	                this.sprite.rotation = (transform.rotation + aRot) * Math.PI / 180;
 	                this.sprite.alpha = (transform.opacity / 100) * aOpacity;
 	                this.sprite.scale.set(
-	                    displayScale * clipScale * aSx * (transform.flip_x ? -1 : 1),
-	                    displayScale * clipScale * aSy * (transform.flip_y ? -1 : 1),
+	                    displayScale * clipScale * aSx * edgeX * (transform.flip_x ? -1 : 1),
+	                    displayScale * clipScale * aSy * edgeY * (transform.flip_y ? -1 : 1),
 	                );
 	                // ỐNG HÚT MÀU: lưu CHÍNH các con số vừa dùng để vẽ sprite, để phép
 	                // ánh xạ ngược (điểm bấm trên preview -> pixel NGUỒN) không bao giờ
@@ -6405,8 +6419,8 @@
 	                    cx: frameW / 2 + ((transform.position_x + aDx) * previewScale),
 	                    cy: frameH / 2 + ((transform.position_y + aDy) * previewScale),
 	                    rotation: (transform.rotation + aRot) * Math.PI / 180,
-	                    scaleX: displayScale * clipScale * aSx * (transform.flip_x ? -1 : 1),
-	                    scaleY: displayScale * clipScale * aSy * (transform.flip_y ? -1 : 1),
+	                    scaleX: displayScale * clipScale * aSx * edgeX * (transform.flip_x ? -1 : 1),
+	                    scaleY: displayScale * clipScale * aSy * edgeY * (transform.flip_y ? -1 : 1),
 	                    texW: cropRect.width,
 	                    texH: cropRect.height,
 	                    texX: cropRect.x,
@@ -8849,8 +8863,19 @@
         const availableH = Math.max(1, shell.clientHeight || shell.getBoundingClientRect().height);
         // fit = mức "vừa khung"; previewZoom nhân thêm vào (1 = vừa khung).
         const fit = Math.min(availableW / payload.width, availableH / payload.height) * previewZoom;
-        frame.style.width = `${Math.max(1, Math.floor(payload.width * fit))}px`;
-        frame.style.height = `${Math.max(1, Math.floor(payload.height * fit))}px`;
+        /* Làm tròn MỘT cạnh rồi suy cạnh kia theo ĐÚNG tỉ lệ sequence. Làm tròn xuống riêng
+         * từng cạnh là tỉ lệ khung lệch tỉ lệ hình tới gần 1px -> hình không phủ kín khung
+         * và lộ một vệt nền ở hai mép. */
+        const maxW = Math.max(1, Math.floor(payload.width * fit));
+        const maxH = Math.max(1, Math.floor(payload.height * fit));
+        let frameW = maxW;
+        let frameH = Math.max(1, Math.round(maxW * payload.height / payload.width));
+        if (frameH > maxH) {
+            frameH = maxH;
+            frameW = Math.max(1, Math.min(maxW, Math.round(maxH * payload.width / payload.height)));
+        }
+        frame.style.width = `${frameW}px`;
+        frame.style.height = `${frameH}px`;
 	        updateSequencePreviewTransform();
 	        updateSafeZoneOverlay();
 	    }
