@@ -758,6 +758,10 @@ struct ExportInterval {
   // MẶT NẠ CẮT HÌNH của block (tab Video) — KHÁC adjustMaskPath (mặt nạ đó chỉ giới hạn
   // phạm vi chỉnh màu). Xem AppendVideoMaskFilter.
   std::string videoMaskPath;
+  // XOÁ LOGO (tab Retouch > Xoá logo): chế độ + các hình chữ nhật PIXEL trên stream nguồn,
+  // "x:y:w:h:p|..." do backend dựng lại từ số đã kẹp. Rỗng = không xoá. Xem AppendLogoRemovalFilters.
+  std::string logoMode;
+  std::string logoRects;
   // KEYFRAME thông số màu: biểu thức theo thời gian cho `eq` (token LOCALT). Có giá trị
   // thì chuỗi adjustFilters KHÔNG chứa eq nữa — xem AppendColorAdjustEq.
   std::string adjEqContrastExpr;
@@ -856,6 +860,10 @@ struct ExportOverlay {
   // MẶT NẠ CẮT HÌNH của block (tab Video) — KHÁC adjustMaskPath (mặt nạ đó chỉ giới hạn
   // phạm vi chỉnh màu). Xem AppendVideoMaskFilter.
   std::string videoMaskPath;
+  // XOÁ LOGO (tab Retouch > Xoá logo): chế độ + các hình chữ nhật PIXEL trên stream nguồn,
+  // "x:y:w:h:p|..." do backend dựng lại từ số đã kẹp. Rỗng = không xoá. Xem AppendLogoRemovalFilters.
+  std::string logoMode;
+  std::string logoRects;
   std::string adjEqContrastExpr;
   std::string adjEqBrightnessExpr;
   std::string adjEqSaturationExpr;
@@ -1782,6 +1790,8 @@ bool ReadExportPayload(
     item.adjustFilters = ExtractJsonStringField(objects[i], "adj_filters", "");
     item.adjustMaskPath = ExtractJsonStringField(objects[i], "adj_mask_path", "");
     item.videoMaskPath = ExtractJsonStringField(objects[i], "video_mask_path", "");
+    item.logoMode = ExtractJsonStringField(objects[i], "logo_mode", "");
+    item.logoRects = ExtractJsonStringField(objects[i], "logo_rects", "");
     item.adjEqContrastExpr = ExtractJsonStringField(objects[i], "adj_eq_contrast_expr", "");
     item.adjEqBrightnessExpr = ExtractJsonStringField(objects[i], "adj_eq_brightness_expr", "");
     item.adjEqSaturationExpr = ExtractJsonStringField(objects[i], "adj_eq_saturation_expr", "");
@@ -1859,6 +1869,8 @@ bool ReadExportPayload(
       overlay.adjustFilters = ExtractJsonStringField(overlayObjects[i], "adj_filters", "");
       overlay.adjustMaskPath = ExtractJsonStringField(overlayObjects[i], "adj_mask_path", "");
       overlay.videoMaskPath = ExtractJsonStringField(overlayObjects[i], "video_mask_path", "");
+      overlay.logoMode = ExtractJsonStringField(overlayObjects[i], "logo_mode", "");
+      overlay.logoRects = ExtractJsonStringField(overlayObjects[i], "logo_rects", "");
       overlay.adjEqContrastExpr = ExtractJsonStringField(overlayObjects[i], "adj_eq_contrast_expr", "");
       overlay.adjEqBrightnessExpr = ExtractJsonStringField(overlayObjects[i], "adj_eq_brightness_expr", "");
       overlay.adjEqSaturationExpr = ExtractJsonStringField(overlayObjects[i], "adj_eq_saturation_expr", "");
@@ -2261,6 +2273,95 @@ void AppendExtraAdjustLayers(std::ofstream& script, double start,
 }
 
 
+/* XOÁ LOGO của block — chạy TRƯỚC mọi chuỗi màu, ở kích thước NGUỒN (trước scale/xoay),
+ * đúng thứ tự preview: xoá logo sửa ẢNH GỐC, grade/LUT là lớp áp lên kết quả đó.
+ *
+ * `rectsSpec` = "x:y:w:h:p|..." (pixel nguyên, backend dựng lại từ số đã kẹp). Công thức
+ * pixel của cả ba chế độ nằm ở static/js/logo-removal.js — preview chạy bản JS của đúng
+ * các phép dưới đây:
+ *   delogo   -> filter `delogo` (nối thẳng, không nhánh).
+ *   blur     -> crop vùng, `boxblur` power 2, overlay lại đúng chỗ.
+ *   pixelate -> crop vùng, `scale` area xuống n ô, `scale` neighbor lên lại, overlay.
+ * `delogo` là filter GPL — bản FFmpeg build LGPL không có nó. Thiếu thì rơi về làm mờ
+ * thay vì để cả lần xuất đổ vì "No such filter".
+ * Kết thúc bằng `null` (nếu có nhánh) để đoạn sau của caller nối tiếp được bằng dấu phẩy. */
+struct LogoRect {
+  int x = 0;
+  int y = 0;
+  int w = 0;
+  int h = 0;
+  int p = 0;
+};
+
+std::vector<LogoRect> ParseLogoRects(const std::string& spec) {
+  std::vector<LogoRect> out;
+  std::stringstream all(spec);
+  std::string part;
+  while (std::getline(all, part, '|')) {
+    int v[5] = {0, 0, 0, 0, 0};
+    int count = 0;
+    std::stringstream one(part);
+    std::string num;
+    while (count < 5 && std::getline(one, num, ':')) {
+      char* end = nullptr;
+      const long parsed = std::strtol(num.c_str(), &end, 10);
+      if (end == num.c_str()) break;
+      v[count++] = static_cast<int>(parsed);
+    }
+    if (count != 5) continue;
+    LogoRect r;
+    r.x = std::max(0, v[0]);
+    r.y = std::max(0, v[1]);
+    r.w = v[2];
+    r.h = v[3];
+    r.p = std::max(0, v[4]);
+    if (r.w < 6 || r.h < 6) continue;
+    out.push_back(r);
+    if (out.size() >= 4) break;
+  }
+  return out;
+}
+
+void AppendLogoRemovalFilters(std::ofstream& script, const std::string& mode,
+                              const std::string& rectsSpec, const std::string& tag) {
+  const std::vector<LogoRect> rects = ParseLogoRects(rectsSpec);
+  if (rects.empty()) return;
+  std::string m = (mode == "blur" || mode == "pixelate") ? mode : "delogo";
+  if (m == "delogo" && !HasFfmpegFilter("delogo")) m = "blur";
+  if (m == "delogo") {
+    for (const auto& r : rects) {
+      script << ",delogo=x=" << r.x << ":y=" << r.y << ":w=" << r.w << ":h=" << r.h;
+    }
+    return;
+  }
+  for (size_t k = 0; k < rects.size(); k++) {
+    const auto& r = rects[k];
+    const std::string t = tag + std::to_string(k);
+    script << ",split[" << t << "b][" << t << "f];\n";
+    // yuva444p: mọi mặt phẳng CÙNG độ phân giải -> cùng một bán kính/ô cho cả sáng lẫn màu,
+    // đúng như bản JS chạy trên RGB. Để nguồn 4:2:0 thì màu mờ gấp đôi sáng (đo được lệch
+    // 11/255 so với preview). Giữ alpha (overlay PNG) nhưng KHÔNG làm mờ nó.
+    script << "[" << t << "f]crop=" << r.w << ":" << r.h << ":" << r.x << ":" << r.y << ",format=yuva444p";
+    if (m == "pixelate") {
+      const int block = std::max(2, r.p);
+      const int nx = std::max(1, static_cast<int>(std::lround(static_cast<double>(r.w) / block)));
+      const int ny = std::max(1, static_cast<int>(std::lround(static_cast<double>(r.h) / block)));
+      script << ",scale=" << nx << ":" << ny << ":flags=area"
+             << ",scale=" << r.w << ":" << r.h << ":flags=neighbor";
+    } else {
+      // boxblur từ chối cả graph khi bán kính > nửa cạnh ngắn của mặt phẳng. Frontend đã
+      // kẹp p ≤ cạnh ngắn/4; kẹp lại ở đây cho chắc.
+      const int cap = std::max(1, std::min(r.w, r.h) / 4);
+      const int radius = std::max(1, std::min(r.p, cap));
+      script << ",boxblur=luma_radius=" << radius << ":luma_power=2"
+             << ":chroma_radius=" << radius << ":chroma_power=2:alpha_radius=0";
+    }
+    script << "[" << t << "p];\n";
+    script << "[" << t << "b][" << t << "p]overlay=" << r.x << ":" << r.y << ":format=auto[" << t << "o];\n";
+    script << "[" << t << "o]null";
+  }
+}
+
 /* MẶT NẠ CẮT HÌNH của block: nhân mặt nạ vào ALPHA của luồng.
  *
  * ĐƠN GIẢN HƠN AppendColorAdjustFilters vì không phải phủ lại lên nhánh gốc — mặt nạ kia
@@ -2529,6 +2630,7 @@ void WriteClipVideoFilters(
   if (item.renderFrames > 0) {
     script << ",trim=end_frame=" << item.renderFrames;
   }
+  AppendLogoRemovalFilters(script, item.logoMode, item.logoRects, "logoc" + idx + "_");
   // Clip lane chính đã setpts 0-based -> LOCALT trừ mốc 0.
   AppendColorAdjustFilters(script,
                            ColorAdjustChain(0.0, item.adjustFilters, item.adjEqContrastExpr,
@@ -3199,6 +3301,8 @@ void WriteVisualOverlayFilter(
   const bool overlayDynTransform = overlayKf
     || HasAnimGeomExpr(overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr);
 
+  // Xoá logo: ngay sau setpts (hoặc sau `null` của ảnh tĩnh xử lý một lần — xoá MỘT lần), trước chuỗi màu.
+  AppendLogoRemovalFilters(script, overlay.logoMode, overlay.logoRects, "logoo" + id + "_");
   // Overlay giữ mốc tuyệt đối sau setpts -> LOCALT trừ timeline_start.
   AppendColorAdjustFilters(script,
                            ColorAdjustChain(start, overlay.adjustFilters, overlay.adjEqContrastExpr,

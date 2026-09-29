@@ -5134,6 +5134,32 @@ function normalizeVideoMaskFields(raw) {
   }
 }
 
+/* XOÁ LOGO của block -> hai field phẳng cho sidecar: `logo_mode` và `logo_rects`
+ * ("x:y:w:h:p|..." — pixel NGUYÊN của stream mà chuỗi filter chạy trên đó, p = bán kính mờ
+ * hoặc cạnh ô khảm). Frontend đã quy đổi bằng LogoRemoval.exportRects; ở đây chỉ DỰNG LẠI
+ * chuỗi từ số đã kẹp, không nhận chuỗi nào của client — field này đổ thẳng vào filter script.
+ * Sidecar tự kẹp thêm theo kích thước thật của stream. */
+const LOGO_MODES = new Set(['delogo', 'blur', 'pixelate']);
+function normalizeLogoRemovalFields(raw) {
+  if (!raw || typeof raw !== 'object') return {};
+  const mode = LOGO_MODES.has(raw.mode) ? raw.mode : 'delogo';
+  const toInt = (v, lo, hi) => {
+    const n = Math.round(Number(v));
+    return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : null;
+  };
+  const rects = (Array.isArray(raw.rects) ? raw.rects : []).slice(0, 4).map((r) => {
+    const x = toInt(r?.x, 0, 16384);
+    const y = toInt(r?.y, 0, 16384);
+    const w = toInt(r?.w, 0, 16384);
+    const h = toInt(r?.h, 0, 16384);
+    const p = toInt(r?.p, 0, 4096);
+    if ([x, y, w, h, p].some((v) => v === null) || w < 6 || h < 6) return null;
+    return `${x}:${y}:${w}:${h}:${p}`;
+  }).filter(Boolean);
+  if (!rects.length) return {};
+  return { logo_mode: mode, logo_rects: rects.join('|') };
+}
+
 // Biểu thức keyframe -> FFmpeg do frontend sinh (chỉ số/hàm toán). Whitelist ký tự để
 // không thể chèn ký tự phá cú pháp filtergraph (nháy, ; , [ ] : \). null nếu rỗng.
 function sanitizeFfmpegExpr(value, maxLength = 8000) {
@@ -5281,6 +5307,7 @@ function normalizeExportIntervals(timeline, sequenceSettings = null) {
       ...normalizeColorAdjustFields(item?.color_adjust),
       ...normalizeAdjustLayerFields(item?.color_adjust_layer),
       ...normalizeVideoMaskFields(item?.video_mask_png),
+      ...normalizeLogoRemovalFields(item?.logo_removal_px),
     };
   });
 }
@@ -5661,7 +5688,13 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
         id: `${baseOverlay.id}_anim`,
       });
     } else {
-      overlays.push({ ...baseOverlay, ...(animVideoFields || {}), ...kfFields, ...adjFields, ...maskFields, index: overlayIndex++ });
+      // XOÁ LOGO chỉ ở nhánh KHÔNG bake: chuỗi khung bake sẵn đã xoá logo trong từng
+      // khung PNG (frontend đi qua cùng LogoRemoval), xoá lần nữa là sai toạ độ.
+      overlays.push({
+        ...baseOverlay, ...(animVideoFields || {}), ...kfFields, ...adjFields, ...maskFields,
+        ...normalizeLogoRemovalFields(item.logo_removal_px),
+        index: overlayIndex++,
+      });
     }
   });
   const visualTypes = new Set(['media', 'text']);
@@ -7455,7 +7488,7 @@ if (require.main === module) {
 // `normalizeEditingPayload` xuất ra để test được HỢP ĐỒNG payload mà không phải dựng cả
 // một lượt render (xem tests/scripts/retouch_export_pipeline.js).
 module.exports = {
-  createApp, start, normalizeColorAdjustFields, normalizeVideoMaskFields, normalizeEditingPayload,
+  createApp, start, normalizeColorAdjustFields, normalizeVideoMaskFields, normalizeLogoRemovalFields, normalizeEditingPayload,
   // Xuất ra để test kiểm được cổng an toàn của /api/retouch/track mà không phải chạy
   // MediaPipe: đường "cho phép" nếu kiểm qua HTTP là sẽ khởi động sidecar thật.
   resolveRetouchSource,

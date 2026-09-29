@@ -41,6 +41,7 @@
     <!-- auto-grade.js đọc window.ColorAdjust lúc khởi tạo (UMD) -> phải nạp SAU color-adjust.js -->
     <script src="/static/js/auto-grade.js?v=autograde-p1"></script>
     <script src="/static/js/retouch.js?v=retouch-p1"></script>
+    <script src="/static/js/logo-removal.js?v=logo-p1"></script>
     <script src="/static/js/auto-subtitle.js?v=autosub-lumen-p2"></script>
     <!-- Văn bản → Local Subtitle: bộ đọc tệp phụ đề (hàm thuần) + panel. Panel dùng lại buildSrt/
          injectStyle của auto-subtitle.js nên nạp SAU nó. -->
@@ -5692,7 +5693,7 @@
             text: { label: _t('Văn bản'), subs: { basic: _t('Cơ bản'), template: _t('Mẫu'), effect: _t('Hiệu ứng'), transform: _t('Biến đổi') } },
             anim: { label: _t('Hiệu ứng động'), subs: { in: _t('Vào'), out: _t('Ra'), combo: _t('Kết hợp') } },
             shape: { label: _t('Hình dạng'), subs: { basic: _t('Cơ bản'), transform: _t('Biến đổi') } },
-            retouch: { label: _t('Retouch'), subs: { basic: _t('Làm đẹp') } },
+            retouch: { label: _t('Retouch'), subs: { basic: _t('Làm đẹp'), logo: _t('Xoá logo') } },
             adjust: {
                 label: _t('Điều chỉnh'),
                 subs: {
@@ -6620,10 +6621,11 @@
 	                // thứ tự mà khâu bake khi xuất sẽ phải theo.
 	                // Kết quả là CANVAS -> buộc đi đường nhiều lượt (b), y như khi có
 	                // lớp Điều chỉnh; PIXI.Filter một lượt không nhận canvas trung gian.
+	                // XOÁ LOGO đi cùng retouch qua EditingRuntime.sourceFxDrawable (retouch rồi
+	                // xoá logo) — cùng lý do buộc sang đường canvas nhiều lượt.
 	                const rtClip = activeClip;
-	                const rtOn = !!(window.Retouch && rtClip?.retouch
-	                    && !Retouch.isIdentity(rtClip.retouch)
-	                    && window.EditingRuntime?.retouchedDrawable);
+	                const rtOn = !!(rtClip && window.EditingRuntime?.sourceFxDrawable
+	                    && window.EditingRuntime.clipHasSourceFx(rtClip));
 	                const useSpatialPath = !!window.ColorAdjust
 	                    && !!window.EditingRuntime?.colorAdjustedDrawable
 	                    && this.videoEl.videoWidth > 0
@@ -6634,9 +6636,10 @@
 	                    if (rtOn) {
 	                        // Mốc thời gian là giây NGUỒN của clip — đúng trục mà landmark
 	                        // được ghi (retouch_track lấy mẫu theo thời gian nguồn).
-	                        base = window.EditingRuntime.retouchedDrawable(
+	                        base = window.EditingRuntime.sourceFxDrawable(
 	                            this.videoEl, textureW, textureH, rtClip,
-	                            Number(this.videoEl.currentTime) || 0, textureW / Math.max(1, textureH))
+	                            Number(this.videoEl.currentTime) || 0, textureW / Math.max(1, textureH),
+	                            'mainpreview')
 	                            || this.videoEl;
 	                    }
 	                    let fx = window.EditingRuntime.colorAdjustedDrawable(
@@ -15968,6 +15971,10 @@
                 // stream mà chuỗi filter chạy trên đó (chuỗi màu cũng chèn TRƯỚC scale).
                 const maskPng = window.EditingRuntime.videoMaskExportPng(clip.video_mask, srcW, srcH);
                 if (maskPng) out = { ...out, video_mask_png: maskPng };
+                // XOÁ LOGO: hình chữ nhật pixel trên KHUNG NỐI — cùng stream `[0:v]` mà sidecar
+                // chèn delogo/boxblur vào (trước chuỗi màu, trước scale).
+                const logoPx = window.EditingRuntime.logoRemovalExportPx?.(clip, srcW, srcH);
+                if (logoPx) out = { ...out, logo_removal_px: logoPx };
             }
             if (window.TextAnimations && TextAnimations.hasAnimation && TextAnimations.hasAnimation(clip)) {
                 const dur = Math.max(0.05, clipSequenceDuration(clip));
