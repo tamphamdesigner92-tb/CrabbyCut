@@ -51,6 +51,7 @@ Test 1 - Whisper/
 │   │   ├── settings-panel.js           # UI bảng Cài đặt (Menu → Cài đặt…), pane Auto Sound Effects
 │   │   ├── auto-sfx-assets.js          # Auto Sound Effects: tra nhóm SFXs theo cấu hình, tính vị trí theo đỉnh sóng
 │   │   ├── retouch.js                  # Retouch làm đẹp mặt (13 thanh trượt, landmark FaceMesh)
+│   │   ├── logo-removal.js             # Xoá logo cố định: delogo/làm mờ/khảm + tự nhận diện logo ở góc
 │   │   ├── pixi-timeline-renderer.js   # Renderer ruler + segment timeline (Pixi)
 │   │   ├── perf-runtime.js             # Runtime timeline/transcript
 │   │   └── auto-reframe-geometry.js    # Helper hình học Auto-Reframe (dùng chung UI/test)

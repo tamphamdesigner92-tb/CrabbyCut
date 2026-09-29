@@ -5881,8 +5881,11 @@
             // Khung đứng yên: dùng 1 video ẩn seek tới mép nguồn, cache frame.
             const seamSource = (Number(item.source_start) || 0) + (mode === 'end' ? itemSourceSpan(item) : 0);
             const seamUrl = previewAssetUrl(asset);
-            const drawable = captureSeamFrame(
+            let drawable = captureSeamFrame(
                 `${item.id}@${Math.round(seamSource * 100)}@${seamUrl}`, seamUrl, seamSource);
+            // Khung seam là ảnh THÔ của asset -> xoá logo ở đây, không thì logo nháy lại
+            // đúng trong vùng chuyển cảnh. (Lớp 'live' là canvas fx đã xoá sẵn.)
+            if (drawable) drawable = logoRemovedDrawable(drawable, drawable.width, drawable.height, item, `seam:${item.id}:${mode}`);
             if (drawable) return { drawable, w0: sz.width, h0: sz.height };
             return null;
         }
@@ -6362,10 +6365,12 @@
          * Mốc thời gian phải là GIỜ NGUỒN (trục mà landmark được ghi):
          *   lớp SỐNG -> video.currentTime;  lớp SEAM -> clip.end (A) / clip.start (B).
          * Không suy từ thời gian sequence ở đây: có Tốc độ thì hai trục khác nhau. */
-        const retouchLayer = (drawable, texW, texH, clip, srcTime) => {
+        // Xoá logo đi cùng retouch (sourceFxDrawable) — slot A/B là khoá pool riêng để hai
+        // lớp cùng khung không ghi đè canvas của nhau.
+        const retouchLayer = (drawable, texW, texH, clip, srcTime, slot) => {
             if (!drawable || !(texW > 0) || !(texH > 0)) return drawable;
-            if (!clip || !clip.retouch || !window.Retouch || Retouch.isIdentity(clip.retouch)) return drawable;
-            return retouchedDrawable(drawable, texW, texH, clip, srcTime, texW / Math.max(1, texH)) || drawable;
+            if (!clipHasSourceFx(clip)) return drawable;
+            return sourceFxDrawable(drawable, texW, texH, clip, srcTime, texW / Math.max(1, texH), `trans${slot}`) || drawable;
         };
         const liveSrcTime = Number(video && video.currentTime) || 0;
         const aSrcTime = firstHalf ? liveSrcTime : (Number(trans.spanA.clip.end) || 0);
@@ -6375,12 +6380,12 @@
         const scaled = (draw) => (g) => { g.save(); g.scale(rs, rs); draw(g); g.restore(); };
         const dA = scaled((g) => {
             if (!drawA) return;
-            const src = retouchLayer(drawA, aTexW, aTexH, trans.spanA.clip, aSrcTime);
+            const src = retouchLayer(drawA, aTexW, aTexH, trans.spanA.clip, aSrcTime, 'A');
             drawMainClipLayer(g, seqW, seqH, trans.spanA, aLocal, src, aTexW, aTexH);
         });
         const dB = scaled((g) => {
             if (!drawB) return;
-            const src = retouchLayer(drawB, bTexW, bTexH, trans.spanB.clip, bSrcTime);
+            const src = retouchLayer(drawB, bTexW, bTexH, trans.spanB.clip, bSrcTime, 'B');
             drawMainClipLayer(g, seqW, seqH, trans.spanB, bLocal, src, bTexW, bTexH);
         });
         // fullFrame: lớp lane chính là khung đầy & đục -> blur làm mượt phải overscan (xem transitions.js).
@@ -7617,7 +7622,9 @@
             text: '',
             style: defaultTextStyle(),
         };
-        ['speed', 'adjustments', 'retouch', 'audio_denoise'].forEach((field) => {
+        // logo_removal chuyển thẳng được: vùng theo tỉ lệ VÙNG ẢNH của clip, mà vùng ảnh đó
+        // chính là cả khung của file nguồn = asset của item mới.
+        ['speed', 'adjustments', 'retouch', 'logo_removal', 'audio_denoise'].forEach((field) => {
             if (clip[field]) item[field] = deepClone(clip[field]);
         });
         editingItems.push(item);
@@ -8439,6 +8446,649 @@
         return renderer.draw(drawable, texW, texH, faces, cfg, aspect) || drawable;
     }
 
+    // ==================== XOÁ LOGO (tab Retouch > subtab "Xoá logo") ====================
+    //
+    // GẮN THEO BLOCK như retouch: `clip.logo_removal` / `item.logo_removal` =
+    // { enabled, mode, strength, regions: [{x,y,w,h}] } — vùng theo TỈ LỆ của VÙNG ẢNH THẬT
+    // của block. Dữ liệu, quy đổi pixel và công thức xử lý nằm ở static/js/logo-removal.js;
+    // ở đây chỉ nối vào đường vẽ, panel và tay cầm.
+    //
+    // XUẤT: lane chính và media overlay KHÔNG bake — sidecar dựng `delogo`/`boxblur`/khảm
+    // trên stream nguồn từ đúng các hình chữ nhật mà `LogoRemoval.exportRects` tính ra (xem
+    // logoRemovalExportPx). Các đường ĐÃ bake ở frontend (chuyển cảnh, miếng vá Retouch,
+    // chuỗi khung ảnh tĩnh) đi qua `sourceFxDrawable` nên tự có xoá logo.
+    const logoFxPool = new Map();   // key -> { canvas, ctx }
+    const LOGO_FX_MAX = 10;
+    // Giữ nút so sánh -> preview tạm bỏ xoá logo (cùng lối với retouchCompareOff).
+    let logoCompareOff = false;
+    // Vùng đang có tay cầm trên preview (chỉ số trong regions của block đang chọn).
+    let logoActiveRegion = 0;
+    let logoDetectBusy = false;
+    let logoDrawCleanup = null;
+    let logoDrag = null;
+
+    function logoActive(clip) {
+        return !!(window.LogoRemoval && clip && clip.logo_removal && LogoRemoval.isActive(clip.logo_removal));
+    }
+
+    /* VÙNG ẢNH THẬT của block trên một khung texW×texH (pixel khung đó).
+     * Lane chính: texture là KHUNG NỐI (hoặc proxy của nó) mà clip chỉ chiếm một phần —
+     * quy vùng ảnh của clip từ pixel khung nối sang pixel texture, như mainCropRect.
+     * Overlay: cả asset là vùng ảnh. */
+    function logoContentRect(clip, texW, texH) {
+        const full = { x: 0, y: 0, width: texW, height: texH };
+        if (!clip || clip.type === 'media') return full;
+        if (typeof mainConcatFrameSize !== 'function' || typeof mainClipContentRect !== 'function') return full;
+        const frame = mainConcatFrameSize();
+        const rect = mainClipContentRect(clip);
+        if (!rect || !(frame?.width > 0) || !(frame?.height > 0)) return full;
+        const kx = texW / frame.width;
+        const ky = texH / frame.height;
+        return { x: rect.x * kx, y: rect.y * ky, width: rect.width * kx, height: rect.height * ky };
+    }
+
+    /* Đưa một khung qua Xoá logo, trả canvas trong pool (theo `key`) hoặc CHÍNH `drawable`
+     * khi không có gì để làm. Cùng hợp đồng với retouchedDrawable: không bao giờ trả null.
+     * Chỉ đọc/ghi pixel TRONG các vùng (getImageData cỡ vùng) — phần còn lại của khung đi
+     * đường drawImage của GPU, nên mỗi khung chỉ tốn vài ms dù nguồn 4K. */
+    function logoRemovedDrawable(drawable, texW, texH, clip, key) {
+        if (logoCompareOff || !drawable || !logoActive(clip)) return drawable;
+        const w = Math.round(texW);
+        const h = Math.round(texH);
+        if (!(w > 8) || !(h > 8)) return drawable;
+        const cfg = LogoRemoval.normalize(clip.logo_removal);
+        const rects = LogoRemoval.exportRects(cfg, logoContentRect(clip, w, h), w, h);
+        if (!rects.length) return drawable;
+        let entry = logoFxPool.get(key);
+        if (!entry) {
+            if (logoFxPool.size >= LOGO_FX_MAX) logoFxPool.delete(logoFxPool.keys().next().value);
+            const canvas = document.createElement('canvas');
+            entry = { canvas, ctx: canvas.getContext('2d') };
+            logoFxPool.set(key, entry);
+        }
+        const { canvas, ctx } = entry;
+        if (!ctx) return drawable;
+        if (canvas.width !== w) canvas.width = w;
+        if (canvas.height !== h) canvas.height = h;
+        ctx.clearRect(0, 0, w, h);
+        try { ctx.drawImage(drawable, 0, 0, w, h); } catch (_) { return drawable; }
+        for (const r of rects) {
+            // Nới 1px: delogo lấy mẫu ở hàng/cột NGAY NGOÀI vùng (xem delogoRgba).
+            const bw = r.w + 2;
+            const bh = r.h + 2;
+            let img;
+            try { img = ctx.getImageData(r.x - 1, r.y - 1, bw, bh); } catch (_) { return drawable; }
+            LogoRemoval.applyRectRgba(img.data, bw, { x: 1, y: 1, w: r.w, h: r.h, p: r.p }, cfg.mode);
+            ctx.putImageData(img, r.x - 1, r.y - 1);
+        }
+        return canvas;
+    }
+
+    function clipHasSourceFx(clip) {
+        return logoActive(clip)
+            || !!(window.Retouch && clip && clip.retouch && !Retouch.isIdentity(clip.retouch));
+    }
+
+    /* ĐIỂM NỐI CHUNG của mọi phép sửa ẢNH NGUỒN của block: Retouch rồi Xoá logo. Mọi đường
+     * vẽ trước đây gọi retouchedDrawable nay gọi hàm này, để không đường nào quên logo.
+     * Retouch đi TRƯỚC: nó cần chính thẻ <video> để biết đang phát hay dừng (chọn lưới
+     * thấp/cao), và vùng mặt gần như không bao giờ chồng lên logo ở góc. */
+    function sourceFxDrawable(drawable, texW, texH, clip, sourceTime, aspect, key) {
+        let out = drawable;
+        if (window.Retouch && clip?.retouch && !Retouch.isIdentity(clip.retouch)) {
+            out = retouchedDrawable(out, texW, texH, clip, sourceTime, aspect) || out;
+        }
+        return logoRemovedDrawable(out, texW, texH, clip, `logo:${key || 'default'}`);
+    }
+
+    /* Spec cho sidecar: hình chữ nhật PIXEL trên stream mà chuỗi filter chạy trên đó
+     * (lane chính: khung nối; overlay: kích thước gốc của asset). null = không xoá. */
+    function logoRemovalExportPx(clip, frameW, frameH) {
+        if (!logoActive(clip) || !(frameW > 0) || !(frameH > 0)) return null;
+        const cfg = LogoRemoval.normalize(clip.logo_removal);
+        const rects = LogoRemoval.exportRects(cfg, logoContentRect(clip, frameW, frameH), frameW, frameH);
+        return rects.length ? { mode: cfg.mode, rects } : null;
+    }
+
+    function setLogoCompare(off) {
+        const next = !!off;
+        if (next === logoCompareOff) return;
+        logoCompareOff = next;
+        if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
+        else renderPreviewOverlays();
+    }
+
+    // Cỡ VÙNG ẢNH THẬT của block theo pixel NGUỒN — để panel hiện kích thước vùng bằng px.
+    function logoFrameSize(target) {
+        if (target && target.type === 'media') {
+            const asset = findAsset(target.asset_id);
+            return { W: Math.max(1, Number(asset?.width) || 1920), H: Math.max(1, Number(asset?.height) || 1080) };
+        }
+        const rect = (typeof mainClipContentRect === 'function') ? mainClipContentRect(target) : null;
+        return { W: Math.max(1, Number(rect?.width) || 1920), H: Math.max(1, Number(rect?.height) || 1080) };
+    }
+
+    /* Điểm VÀO DUY NHẤT để sửa `logo_removal`. Dọn field rỗng hẳn (tắt + không còn vùng);
+     * tắt nhưng còn vùng thì GIỮ để bật lại không phải vẽ lại. */
+    function applyLogoRemoval(mutate, options = {}) {
+        const targets = retouchTargets();
+        if (!targets.length || !window.LogoRemoval) return;
+        if (options.saveHistory) recordHistory();
+        targets.forEach((target) => {
+            const cfg = LogoRemoval.normalize(target.logo_removal);
+            mutate(cfg, target);
+            const next = LogoRemoval.normalize(cfg);
+            if (LogoRemoval.isEmpty(next)) delete target.logo_removal;
+            else target.logo_removal = next;
+        });
+        // Overlay bật/tắt logo là đổi LOẠI THẺ preview (video <-> canvas fx) -> phải dựng lại
+        // phần tử, không chỉ vẽ lại texture. renderPreviewOverlays lo cả tay cầm vùng.
+        if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
+        renderPreviewOverlays();
+    }
+
+    function currentLogoRemoval() {
+        const t = retouchPrimaryTarget();
+        return window.LogoRemoval ? LogoRemoval.normalize(t ? t.logo_removal : null) : null;
+    }
+
+    function logoSectionHtml() {
+        if (!window.LogoRemoval) return '';
+        const target = retouchPrimaryTarget();
+        const cfg = currentLogoRemoval();
+        const on = cfg.enabled;
+        const canDetect = !!target && (target.type !== 'media' || itemIsVideoMedia(target));
+        if (logoActiveRegion >= cfg.regions.length) logoActiveRegion = Math.max(0, cfg.regions.length - 1);
+        const frame = target ? logoFrameSize(target) : { W: 0, H: 0 };
+        const regionRows = cfg.regions.map((r, i) => `
+                <div class="logo-region-row ${i === logoActiveRegion ? 'is-active' : ''}">
+                    <button type="button" class="logo-region-pick" data-logo-select="${i}">
+                        <span>${escapeHtml(_t('Vùng {n}', { n: i + 1 }))}</span>
+                        <span class="logo-region-size">${Math.round(r.w * frame.W)} × ${Math.round(r.h * frame.H)} px</span>
+                    </button>
+                    <button type="button" class="logo-region-del" data-logo-delete="${i}"
+                            title="${escapeHtml(_t('Xoá vùng {n}', { n: i + 1 }))}"
+                            aria-label="${escapeHtml(_t('Xoá vùng {n}', { n: i + 1 }))}">✕</button>
+                </div>`).join('');
+        const full = cfg.regions.length >= LogoRemoval.MAX_REGIONS;
+        const needsStrength = cfg.mode !== 'delogo';
+        const modeOpt = (value, label) => `<option value="${value}" ${cfg.mode === value ? 'selected' : ''}>${label}</option>`;
+        return `
+            <div class="ins-sec" data-ins-tab="retouch" data-ins-sub="logo">
+                <div class="ins-sec-head">
+                    <span class="ins-sec-title">${_t('Xoá logo')}</span>
+                    <button type="button" class="adj-mini-btn ${on && cfg.regions.length ? '' : 'is-off'}"
+                            id="editingLogoCompare" ${on && cfg.regions.length ? '' : 'disabled'}
+                            title="${_t('Giữ để xem ảnh gốc')}">${_t('Giữ để so sánh')}</button>
+                    <button type="button" class="adj-mini-btn ${cfg.regions.length || on ? '' : 'is-off'}" id="editingLogoReset">${_t('Đặt lại tất cả')}</button>
+                </div>
+                <div class="editing-checkbox-row">
+                    <input id="editingLogoEnabled" type="checkbox" data-logo="1" ${on ? 'checked' : ''} ${target ? '' : 'disabled'}>
+                    <label for="editingLogoEnabled">${_t('Bật Xoá logo cho block này')}</label>
+                </div>
+                <div class="logo-actions">
+                    <button type="button" class="adj-mini-btn" id="editingLogoDetect"
+                            ${canDetect && !logoDetectBusy && !full ? '' : 'disabled'}
+                            title="${escapeHtml(canDetect ? _t('Tìm logo cố định ở 4 góc khung bằng cách so nhiều khung hình của block') : _t('Tự nhận diện cần block video (ảnh tĩnh chỉ có một khung để so)'))}">
+                        ${logoDetectBusy ? _t('Đang nhận diện…') : _t('Tự nhận diện')}</button>
+                    <button type="button" class="adj-mini-btn ${logoDrawCleanup ? 'is-active' : ''}" id="editingLogoDraw"
+                            ${target && !full ? '' : 'disabled'}
+                            title="${_t('Kéo một khung chữ nhật quanh logo trên preview. Esc để huỷ.')}">${_t('Vẽ vùng')}</button>
+                </div>
+                ${regionRows ? `<div class="logo-region-list">${regionRows}</div>` : `
+                <div class="adj-hint">${_t('Chưa có vùng nào. Bấm "Tự nhận diện" hoặc "Vẽ vùng" rồi kéo khung quanh logo trên preview.')}</div>`}
+                <div class="ins-row rt-target-row">
+                    <label for="editingLogoMode">${_t('Cách xoá')}</label>
+                    <div class="fig-field">
+                        <select id="editingLogoMode" data-logo="1" ${target ? '' : 'disabled'}>
+                            ${modeOpt('delogo', _t('Nội suy từ viền (delogo)'))}
+                            ${modeOpt('blur', _t('Làm mờ'))}
+                            ${modeOpt('pixelate', _t('Khảm (pixel)'))}
+                        </select>
+                    </div>
+                </div>
+                <div class="ins-row rt-row">
+                    <label for="editingLogo_strength">${_t('Mức')}</label>
+                    <input type="range" id="editingLogo_strength" data-logo="1"
+                           min="0" max="100" step="1" value="${cfg.strength}" ${needsStrength && target ? '' : 'disabled'}>
+                    <input type="number" id="editingLogo_strengthNum" data-logo="1"
+                           min="0" max="100" step="1" value="${cfg.strength}" ${needsStrength && target ? '' : 'disabled'}>
+                </div>
+                <div class="adj-hint">${needsStrength
+                    ? _t('Mức càng cao thì vùng logo càng mờ / ô khảm càng to.')
+                    : _t('Vùng được lấp bằng màu của viền xung quanh — nên kéo khung RỘNG hơn logo một chút.')}</div>
+            </div>`;
+    }
+
+    /* Ghi một control của panel Xoá logo. Cùng khuôn handleRetouchFieldInput. */
+    function handleLogoFieldInput(target, options = {}) {
+        const id = String(target.id || '');
+        if (!id.startsWith('editingLogo')) return false;
+        const commit = () => {
+            if (!options.commit) return;
+            inspectorEditInProgress = false;
+            renderAll();
+        };
+        const beginEdit = () => {
+            if (!inspectorEditInProgress) { recordHistory(); inspectorEditInProgress = true; }
+        };
+        if (id === 'editingLogoEnabled') {
+            beginEdit();
+            applyLogoRemoval((c) => { c.enabled = !!target.checked; });
+            refreshAdjustPanel();
+            commit();
+            return true;
+        }
+        if (id === 'editingLogoMode') {
+            beginEdit();
+            applyLogoRemoval((c) => { c.mode = LogoRemoval.MODES.includes(target.value) ? target.value : 'delogo'; });
+            refreshAdjustPanel();
+            commit();
+            return true;
+        }
+        if (id === 'editingLogo_strength' || id === 'editingLogo_strengthNum') {
+            const raw = Number(target.value);
+            const value = Math.max(0, Math.min(100, Number.isFinite(raw) ? Math.round(raw) : 0));
+            beginEdit();
+            applyLogoRemoval((c) => { c.strength = value; });
+            const other = document.getElementById(id.endsWith('Num') ? 'editingLogo_strength' : 'editingLogo_strengthNum');
+            if (other && Number(other.value) !== value) other.value = String(value);
+            commit();
+            return true;
+        }
+        return false;
+    }
+
+    function handleLogoClick(event) {
+        const t = event.target;
+        if (t?.closest?.('#editingLogoReset')) {
+            const targets = retouchTargets();
+            if (!targets.length) return true;
+            stopLogoDraw();
+            recordHistory();
+            targets.forEach((x) => { delete x.logo_removal; });
+            logoActiveRegion = 0;
+            if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
+            refreshAdjustPanel();
+            renderAll();
+            return true;
+        }
+        if (t?.closest?.('#editingLogoDraw')) {
+            if (logoDrawCleanup) stopLogoDraw();
+            else startLogoDraw();
+            refreshAdjustPanel();
+            return true;
+        }
+        if (t?.closest?.('#editingLogoDetect')) {
+            detectLogoForSelection();
+            return true;
+        }
+        const del = t?.closest?.('[data-logo-delete]');
+        if (del) {
+            const index = Number(del.dataset.logoDelete);
+            applyLogoRemoval((c) => { c.regions.splice(index, 1); }, { saveHistory: true });
+            if (logoActiveRegion >= index && logoActiveRegion > 0) logoActiveRegion--;
+            refreshAdjustPanel();
+            renderAll();
+            return true;
+        }
+        const pick = t?.closest?.('[data-logo-select]');
+        if (pick) {
+            logoActiveRegion = Number(pick.dataset.logoSelect) || 0;
+            refreshAdjustPanel();
+            renderPreviewOverlays();
+            return true;
+        }
+        return false;
+    }
+
+    // Thêm một vùng (tỉ lệ) cho mọi block đang chọn và BẬT luôn — vẽ/nhận diện xong mà
+    // còn phải đi tìm công tắc là thừa một bước.
+    function addLogoRegions(regions, options = {}) {
+        const clean = regions.map((r) => LogoRemoval.normalizeRegion(r)).filter(Boolean);
+        if (!clean.length) return 0;
+        let added = 0;
+        applyLogoRemoval((c) => {
+            if (options.replace) c.regions = [];
+            clean.forEach((r) => {
+                if (c.regions.length < LogoRemoval.MAX_REGIONS) { c.regions.push(r); added++; }
+            });
+            c.enabled = true;
+        }, { saveHistory: true });
+        const cfg = currentLogoRemoval();
+        logoActiveRegion = Math.max(0, (cfg?.regions.length || 1) - 1);
+        refreshAdjustPanel();
+        renderAll();
+        return added;
+    }
+
+    // ---- TAY CẦM VÙNG LOGO TRÊN PREVIEW ----
+    //
+    // Dùng CHUNG phép ánh xạ nguồn -> màn hình với tay cầm mặt nạ (maskSourceFrame): vùng
+    // sống trong KHÔNG GIAN NGUỒN nên block bị xoay/lật/phóng thì khung vẫn bám đúng logo.
+    // Quy ước (u,v) của maskSourceFrame: u ∈ [-asp, asp], v ∈ [-1, 1], tâm ảnh ở (0,0).
+    function logoEditorTarget() {
+        if (!window.LogoRemoval || editingTextSession) return null;
+        const sec = document.querySelector('.ins-sec[data-ins-tab="retouch"][data-ins-sub="logo"]');
+        if (!sec || sec.style.display === 'none' || !sec.offsetParent) return null;
+        const target = retouchPrimaryTarget();
+        if (!target) return null;
+        const item = selectedEditingItem();
+        const isMain = !(item && item === target);
+        if (isMain) {
+            // Như maskEditorTarget: khung nguồn lấy từ sprite ĐANG HIỆN, nên chỉ vẽ khi clip
+            // được chọn đúng là clip ở playhead.
+            const span = mainClipSequenceSpans().find((s) => s.clip === target);
+            const t = currentSequenceTime();
+            if (!span || t < span.start - 0.001 || t > span.end + 0.05) return null;
+        }
+        const sf = maskSourceFrame({ target, isMain });
+        if (!sf) return null;
+        return { target, isMain, sf, cfg: LogoRemoval.normalize(target.logo_removal) };
+    }
+
+    const logoUv = (sf, nx, ny) => ({ u: (nx * 2 - 1) * sf.asp, v: ny * 2 - 1 });
+
+    // Điểm màn hình (client) -> toạ độ tỉ lệ trên ảnh nguồn. null nếu khung suy biến.
+    function logoPointFromClient(sf, clientX, clientY) {
+        const frame = document.getElementById('sequencePreviewFrame');
+        const rect = frame?.getBoundingClientRect?.();
+        if (!rect) return null;
+        const d = maskScreenDelta(sf, (clientX - rect.left) - sf.cx, (clientY - rect.top) - sf.cy);
+        if (!d) return null;
+        return { x: (d.u / sf.asp + 1) / 2, y: (d.v + 1) / 2 };
+    }
+
+    function renderLogoOverlay(root) {
+        const selectionRoot = document.getElementById('sequencePreviewShell') || root;
+        let layer = document.getElementById('logoRegionOverlay');
+        const ctx = logoEditorTarget();
+        const regions = ctx ? ctx.cfg.regions : [];
+        const drawing = logoDrag && logoDrag.mode === 'draw' ? logoDrag.rect : null;
+        if (!ctx || (!regions.length && !drawing)) {
+            layer?.remove();
+            return;
+        }
+        if (!layer) {
+            layer = document.createElement('div');
+            layer.id = 'logoRegionOverlay';
+            layer.className = 'adj-mask-overlay logo-region-overlay';
+            layer.innerHTML = '<svg class="adj-mask-svg"></svg>';
+        }
+        if (layer.parentElement !== selectionRoot) selectionRoot.appendChild(layer);
+        const { x: offX, y: offY } = previewFrameOffsetIn(selectionRoot);
+        const rootRect = selectionRoot.getBoundingClientRect?.();
+        const sf = ctx.sf;
+        const P = (nx, ny) => {
+            const uv = logoUv(sf, nx, ny);
+            const s = maskToScreen(sf, uv.u, uv.v);
+            return { x: s.x + offX, y: s.y + offY };
+        };
+        const quad = (r) => [P(r.x, r.y), P(r.x + r.w, r.y), P(r.x + r.w, r.y + r.h), P(r.x, r.y + r.h)];
+        const pathOf = (pts) => 'M' + pts.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join('L') + 'Z';
+        const svg = layer.querySelector('svg');
+        const w = Math.max(1, Math.round(rootRect?.width || 0));
+        const h = Math.max(1, Math.round(rootRect?.height || 0));
+        svg.setAttribute('width', w);
+        svg.setAttribute('height', h);
+        svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+        const paths = regions.map((r, i) => {
+            const d = pathOf(quad(r));
+            const cls = i === logoActiveRegion ? 'adj-mask-path' : 'adj-mask-path logo-region-idle';
+            return `<path d="${d}" class="adj-mask-path-shadow"/><path d="${d}" class="${cls}"/>`;
+        });
+        if (drawing) {
+            const d = pathOf(quad(drawing));
+            paths.push(`<path d="${d}" class="adj-mask-path-shadow"/><path d="${d}" class="adj-mask-path"/>`);
+        }
+        svg.innerHTML = paths.join('');
+
+        layer.querySelectorAll('.adj-mask-handle').forEach((el) => el.remove());
+        if (logoDrawCleanup) return;   // đang vẽ vùng mới: không cho kéo vùng cũ
+        const active = regions[logoActiveRegion];
+        if (!active) return;
+        const addHandle = (cls, pos, mode, extra = {}) => {
+            const el = document.createElement('div');
+            el.className = `adj-mask-handle ${cls}`;
+            el.style.left = `${pos.x}px`;
+            el.style.top = `${pos.y}px`;
+            el.addEventListener('pointerdown', (event) => startLogoDrag(event, mode, extra), true);
+            // Chặn mousedown: shell có handler "bấm ra ngoài -> bỏ chọn block" (xem
+            // renderMaskOverlay — cùng bẫy).
+            el.addEventListener('mousedown', (event) => { event.preventDefault(); event.stopPropagation(); }, true);
+            layer.appendChild(el);
+        };
+        addHandle('move', P(active.x + active.w / 2, active.y + active.h / 2), 'move');
+        [['nw', 0, 0], ['ne', 1, 0], ['se', 1, 1], ['sw', 0, 1]].forEach(([key, fx, fy]) => {
+            addHandle(`size ${key}`, P(active.x + fx * active.w, active.y + fy * active.h), 'size', { fx, fy });
+        });
+    }
+
+    function startLogoDrag(event, mode, extra) {
+        const ctx = logoEditorTarget();
+        const region = ctx?.cfg.regions[logoActiveRegion];
+        if (!ctx || !region) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        logoDrag = {
+            mode,
+            fx: extra?.fx ?? 0,
+            fy: extra?.fy ?? 0,
+            start: { ...region },
+            origin: logoPointFromClient(ctx.sf, event.clientX, event.clientY),
+            sf: ctx.sf,
+            index: logoActiveRegion,
+            historySaved: false,
+        };
+        document.body.classList.add('editing-selection-dragging');
+    }
+
+    function handleLogoDrag(event) {
+        if (!logoDrag || logoDrag.mode === 'draw') return;
+        const drag = logoDrag;
+        const p = logoPointFromClient(drag.sf, event.clientX, event.clientY);
+        if (!p || !drag.origin) return;
+        const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+        const s = drag.start;
+        const min = LogoRemoval.MIN_REGION * 2;
+        let next;
+        if (drag.mode === 'move') {
+            next = {
+                x: clamp(s.x + (p.x - drag.origin.x), 0, 1 - s.w),
+                y: clamp(s.y + (p.y - drag.origin.y), 0, 1 - s.h),
+                w: s.w,
+                h: s.h,
+            };
+        } else {
+            // Kéo GÓC: góc đối diện đứng yên.
+            let x0 = s.x;
+            let y0 = s.y;
+            let x1 = s.x + s.w;
+            let y1 = s.y + s.h;
+            if (drag.fx) x1 = clamp(p.x, x0 + min, 1); else x0 = clamp(p.x, 0, x1 - min);
+            if (drag.fy) y1 = clamp(p.y, y0 + min, 1); else y0 = clamp(p.y, 0, y1 - min);
+            next = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+        }
+        if (!drag.historySaved) { recordHistory(); drag.historySaved = true; }
+        applyLogoRemoval((c) => {
+            if (c.regions[drag.index]) c.regions[drag.index] = next;
+        });
+    }
+
+    function endLogoDrag() {
+        if (!logoDrag || logoDrag.mode === 'draw') return;
+        const changed = logoDrag.historySaved;
+        logoDrag = null;
+        document.body.classList.remove('editing-selection-dragging');
+        if (changed) {
+            refreshAdjustPanel();
+            renderAll();
+        }
+    }
+
+    /* CHẾ ĐỘ VẼ VÙNG: kéo một hình chữ nhật trên preview. Nghe ở SHELL, pha capture — cùng
+     * lý do với startAdjustPick: khung chọn và tay cầm là con của shell và phủ lên block. */
+    function startLogoDraw() {
+        stopLogoDraw();
+        const frame = document.getElementById('sequencePreviewFrame');
+        const shell = document.getElementById('sequencePreviewShell') || frame;
+        if (!frame || !shell) return;
+        if (!retouchTargets().length) {
+            setEditingStatusText(_t('Hãy chọn block có logo trước khi vẽ vùng.'));
+            return;
+        }
+        frame.classList.add('is-color-picking');
+        shell.classList.add('is-color-picking');
+        setEditingStatusText(_t('Vẽ vùng logo: kéo một khung chữ nhật quanh logo trên preview. Esc để huỷ.'));
+        const onDown = (event) => {
+            const rect = frame.getBoundingClientRect();
+            if (event.clientX < rect.left || event.clientX > rect.right
+                || event.clientY < rect.top || event.clientY > rect.bottom) return;
+            const ctx = logoEditorTarget();
+            const p = ctx ? logoPointFromClient(ctx.sf, event.clientX, event.clientY) : null;
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+            if (!p) {
+                setEditingStatusText(_t('Không vẽ được ở đây: đưa playhead vào block đang chọn rồi thử lại.'));
+                return;
+            }
+            logoDrag = { mode: 'draw', sf: ctx.sf, origin: p, rect: null };
+        };
+        const onMove = (event) => {
+            if (!logoDrag || logoDrag.mode !== 'draw') return;
+            const p = logoPointFromClient(logoDrag.sf, event.clientX, event.clientY);
+            if (!p) return;
+            const o = logoDrag.origin;
+            const c01 = (v) => Math.max(0, Math.min(1, v));
+            const x0 = c01(Math.min(o.x, p.x));
+            const y0 = c01(Math.min(o.y, p.y));
+            logoDrag.rect = { x: x0, y: y0, w: c01(Math.max(o.x, p.x)) - x0, h: c01(Math.max(o.y, p.y)) - y0 };
+            renderLogoOverlay();
+        };
+        const onUp = () => {
+            if (!logoDrag || logoDrag.mode !== 'draw') return;
+            const r = logoDrag.rect;
+            logoDrag = null;
+            stopLogoDraw();
+            if (!r || r.w < 0.01 || r.h < 0.01) {
+                setEditingStatusText(_t('Vùng quá nhỏ — kéo một khung lớn hơn quanh logo.'));
+                refreshAdjustPanel();
+                renderPreviewOverlays();
+                return;
+            }
+            addLogoRegions([r]);
+            setEditingStatusText(_t('Đã thêm vùng logo. Kéo tay cầm để chỉnh cho khớp.'));
+        };
+        const onKey = (event) => {
+            if (event.key !== 'Escape') return;
+            event.preventDefault();
+            event.stopPropagation();
+            logoDrag = null;
+            stopLogoDraw();
+            refreshAdjustPanel();
+            renderPreviewOverlays();
+            setEditingStatusText(_t('Đã huỷ vẽ vùng logo.'));
+        };
+        shell.addEventListener('pointerdown', onDown, true);
+        window.addEventListener('pointermove', onMove, true);
+        window.addEventListener('pointerup', onUp, true);
+        document.addEventListener('keydown', onKey, true);
+        logoDrawCleanup = () => {
+            shell.removeEventListener('pointerdown', onDown, true);
+            window.removeEventListener('pointermove', onMove, true);
+            window.removeEventListener('pointerup', onUp, true);
+            document.removeEventListener('keydown', onKey, true);
+            frame.classList.remove('is-color-picking');
+            shell.classList.remove('is-color-picking');
+        };
+    }
+
+    function stopLogoDraw() {
+        if (!logoDrawCleanup) return;
+        const fn = logoDrawCleanup;
+        logoDrawCleanup = null;
+        fn();
+    }
+
+    /* TỰ NHẬN DIỆN: lấy mẫu khung rải đều trong block, thu nhỏ về 480px, cắt đúng VÙNG
+     * ẢNH THẬT (lane chính) rồi để LogoRemoval.detectLogoRegions tìm cạnh đứng yên ở góc.
+     * Chạy trong renderer: không cần Python/OpenCV, chạy được trên mọi máy. */
+    const LOGO_DETECT_FRAMES = 16;
+    const LOGO_DETECT_WIDTH = 480;
+
+    /* Khoảng NGUỒN để lấy mẫu: CẢ FILE nguồn chứ không chỉ khoảng của block. Logo cố định
+     * nằm suốt file, mà nền phải ĐỔI đủ nhiều thì trung vị gradient mới triệt được cạnh của
+     * cảnh — block ngắn (vài giây, hay vừa thả vào timeline) gần như là cảnh tĩnh.
+     * Lane chính: đoạn của file nguồn trong khung nối (mainClipSegmentFor), không phải cả
+     * temp_input — các file khác nhau có thể có logo khác nhau. */
+    function logoDetectRange(target, src) {
+        if (target.type === 'media') {
+            const d = Number(findAsset(target.asset_id)?.duration);
+            if (d > 0.5) return { t0: 0, t1: d };
+            return { t0: src.time, t1: src.time + Math.max(0.1, itemSourceSpan(target)) };
+        }
+        const seg = (typeof mainClipSegmentFor === 'function') ? mainClipSegmentFor(target) : null;
+        if (seg && seg.end > seg.start) return { t0: seg.start, t1: seg.end };
+        return { t0: src.time, t1: src.time + Math.max(0.1, src.duration) };
+    }
+
+    async function detectLogoForSelection() {
+        if (logoDetectBusy || !window.LogoRemoval) return;
+        const target = retouchPrimaryTarget();
+        if (!target) return;
+        const src = autoGradeFrameSource(target);
+        if (!src || src.still) {
+            setEditingStatusText(_t('Tự nhận diện cần block video (ảnh tĩnh chỉ có một khung để so).'));
+            return;
+        }
+        logoDetectBusy = true;
+        refreshAdjustPanel();
+        setEditingStatusText(_t('Đang nhận diện logo…'));
+        try {
+            // Mốc NGUỒN rải đều, chừa 3% hai đầu (khung fade/slate ở mép hay phẳng).
+            const range = logoDetectRange(target, src);
+            const span = Math.max(0.1, range.t1 - range.t0);
+            const times = [];
+            for (let k = 0; k < LOGO_DETECT_FRAMES; k++) {
+                times.push(range.t0 + span * (0.03 + 0.94 * (k / (LOGO_DETECT_FRAMES - 1))));
+            }
+            const lumas = [];
+            let dims = null;
+            for (const t of times) {
+                const cap = await captureSeamFrameAsync(src.url, t, { cache: false });
+                if (!cap || !(cap.width > 8)) continue;
+                const content = logoContentRect(target, cap.width, cap.height);
+                const scale = Math.min(1, LOGO_DETECT_WIDTH / Math.max(1, content.width));
+                const w = Math.max(16, Math.round(content.width * scale));
+                const h = Math.max(16, Math.round(content.height * scale));
+                if (dims && (dims.w !== w || dims.h !== h)) continue;
+                dims = { w, h };
+                const c = document.createElement('canvas');
+                c.width = w; c.height = h;
+                const g = c.getContext('2d', { willReadFrequently: true });
+                g.drawImage(cap, content.x, content.y, content.width, content.height, 0, 0, w, h);
+                lumas.push(LogoRemoval.rgbaToLuma(g.getImageData(0, 0, w, h).data, w, h));
+            }
+            if (lumas.length < 3 || !dims) throw new Error(_t('không đọc được đủ khung hình'));
+            const result = LogoRemoval.detectLogoRegions(lumas, dims.w, dims.h);
+            if (!result.regions.length) {
+                setEditingStatusText(_t('Không tìm thấy logo cố định ở góc khung. Hãy dùng "Vẽ vùng".'));
+                return;
+            }
+            const added = addLogoRegions(result.regions);
+            setEditingStatusText(result.staticScene
+                ? _t('Đã thêm {n} vùng — nhưng cảnh gần như đứng yên nên có thể nhận nhầm. Kiểm tra lại trên preview.', { n: added })
+                : _t('Đã nhận diện {n} vùng logo. Kéo tay cầm nếu cần chỉnh.', { n: added }));
+        } catch (error) {
+            setEditingStatusText(_t('Không nhận diện được logo: {error}', { error: error.message }));
+        } finally {
+            logoDetectBusy = false;
+            refreshAdjustPanel();
+        }
+    }
+
     function adjustTargets() {
         const out = [];
         if (!isTrackLocked(findTrack('track_main'))) {
@@ -9236,6 +9886,7 @@
                 <div class="adj-hint">${_t('Mọi thông số tính theo TỈ LỆ khung nên mặt nạ nằm đúng chỗ ở mọi độ phân giải.')}</div>
             </div>`}
             ${withRetouch ? retouchSectionHtml() : ''}
+            ${withRetouch ? logoSectionHtml() : ''}
             `;
     }
 
@@ -10150,6 +10801,7 @@
             if (targets.length) applyLutToTargets(targets, '');
             return true;
         }
+        if (handleLogoClick(event)) return true;
         if (event.target?.closest?.('#editingRtReset')) {
             const targets = retouchTargets();
             if (!targets.length) return true;
@@ -11956,6 +12608,9 @@
         if (target.dataset && target.dataset.retouch === '1' && window.Retouch) {
             if (handleRetouchFieldInput(target, options)) return;
         }
+        if (target.dataset && target.dataset.logo === '1' && window.LogoRemoval) {
+            if (handleLogoFieldInput(target, options)) return;
+        }
         // KHỬ TIẾNG ỒN — cũng dùng chung cho clip lane chính lẫn overlay, nên đứng
         // TRƯỚC nhánh `if (!item)` bên dưới (clip lane chính không có `item`).
         // Mặt nạ Video: định tuyến TRƯỚC mọi nhánh khác vì nó ghi vào block ở CẢ hai lane
@@ -13265,6 +13920,8 @@
         // theo thời điểm — cùng lý do với hai nhánh ngay dưới: giá trị này quyết định LOẠI
         // THẺ của phần tử preview, đổi giữa lúc phát là dựng lại <video>, mất frame và tiếng.
         if (window.Retouch && item.retouch && !Retouch.isIdentity(item.retouch)) return true;
+        // XOÁ LOGO: cùng lý do — kết quả là canvas trung gian.
+        if (logoActive(item)) return true;
         // CÓ KEYFRAME MÀU thì trả true cho CẢ item, không xét identity theo từng thời
         // điểm: quyết định này đổi LOẠI THẺ của phần tử preview (canvas <-> video/img) và
         // renderPreviewOverlays dựng lại thẻ mỗi lần nó đổi. Đường nội suy đi qua 0 là
@@ -13334,11 +13991,12 @@
         // sửa DA (kết cấu, khuyết điểm), grade/LUT là lớp thẩm mỹ áp LÊN kết quả đó.
         // Mốc thời gian là currentTime của chính thẻ nguồn, tức trục thời gian của ASSET —
         // đúng trục mà /api/retouch/track ghi landmark cho overlay.
+        // XOÁ LOGO đi cùng retouch qua sourceFxDrawable (cùng trục thời gian, cùng khung).
         let src = sourceEl;
-        if (window.Retouch && item.retouch && !Retouch.isIdentity(item.retouch) && w > 0 && h > 0) {
-            src = retouchedDrawable(
+        if (clipHasSourceFx(item) && w > 0 && h > 0) {
+            src = sourceFxDrawable(
                 src, w, h, item,
-                Number(sourceEl.currentTime) || 0, w / Math.max(1, h)) || src;
+                Number(sourceEl.currentTime) || 0, w / Math.max(1, h), `ovl:${item.id}`) || src;
         }
         let adj = ColorAdjust.normalize(itemColorAdjustments(item));
         if (layerAdjs.length) {
@@ -15255,6 +15913,7 @@
         renderMainTransitionComposite(mainTrans, root, frameW, frameH, previewScale);
         renderSelectionBox(root, frameW, frameH, previewScale, seqTime);
         renderMaskOverlay(root);
+        renderLogoOverlay(root);
         // KEYFRAME: bảng thông số + nút hình thoi/mũi tên phải theo SÁT playhead — nếu
         // không, chúng chỉ làm mới khi chọn lại đối tượng hoặc sửa giá trị, và "kẹt cứng"
         // ở giá trị keyframe ghi SAU CÙNG khi kéo/tua playhead (bug báo cáo 2026-07-19).
@@ -18082,6 +18741,34 @@
         }
     }
 
+    /* ẢNH TĨNH qua MỌI phép sửa nguồn (Retouch rồi Xoá logo) -> canvas RIÊNG, hoặc null khi
+     * không có phép nào. Ảnh có xoá logo đi đường chuỗi khung như ảnh có retouch (backend
+     * không gửi logo_* cho chuỗi đã bake), nên một bản cài đặt JS lo trọn cho ảnh. */
+    async function sourceFxStillCanvas(item, asset) {
+        const rt = await retouchedStillCanvas(item, asset);
+        if (!logoActive(item)) return rt;
+        try {
+            const base = rt || await loadImageEl(asset?.url || '');
+            const texW = base?.naturalWidth || base?.width || 0;
+            const texH = base?.naturalHeight || base?.height || 0;
+            if (!(texW > 0 && texH > 0)) return rt;
+            const out = logoRemovedDrawable(base, texW, texH, item, `still:${item.id}`);
+            const canvas = document.createElement('canvas');
+            canvas.width = texW;
+            canvas.height = texH;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return rt;
+            ctx.drawImage(out, 0, 0, texW, texH);
+            return canvas;
+        } catch (error) {
+            console.warn('[logo] không bake được ảnh tĩnh:', error);
+            if (typeof setEditingStatusText === 'function') {
+                setEditingStatusText(_t('Không xoá được logo cho một ảnh overlay ({why}).', { why: error.message }));
+            }
+            return rt;
+        }
+    }
+
     /* Ảnh tĩnh CÓ retouch nhưng KHÔNG có hoạt ảnh: đẩy ảnh đã retouch qua đường chuỗi
      * khung. Hai khung là tối thiểu mà `materializeAnimationFrameFiles` nhận, và cũng đã
      * đủ — `eof_action=repeat` của sidecar giữ khung cuối suốt phần còn lại của block.
@@ -18287,7 +18974,8 @@
             // ảnh chụp ra là hình CHƯA cắt trong khi preview đã cắt. Khung mặt nạ =
             // kích thước TEXTURE, đúng khung mà syncSpriteMask dùng.
             const mainDrawable = videoMaskedDrawable(
-                colorAdjustedDrawable(video, texW, texH, effectiveAdjustments(clip, localT), `capture:${span.index}`),
+                colorAdjustedDrawable(logoRemovedDrawable(video, texW, texH, clip, `capture:${span.index}`),
+                    texW, texH, effectiveAdjustments(clip, localT), `capture:${span.index}`),
                 texW, texH, clip.video_mask, `capcut:main:${span.index}`);
             drawLayer(mainDrawable, drawSize.width, drawSize.height, tr, anim);
         }
@@ -18622,10 +19310,11 @@
      * (trần 4, thu hồi cái cũ nhất), mà ở đây hai lớp A/B cùng tồn tại trong một khung —
      * dùng thẳng là lớp vẽ sau ghi đè lớp vẽ trước. */
     function retouchTransitionLayer(info, clip, srcTime, slot) {
-        if (!info || !info.drawable || !clip || !clip.retouch) return null;
-        if (!window.Retouch || Retouch.isIdentity(clip.retouch)) return null;
+        if (!info || !info.drawable || !clip || !clipHasSourceFx(clip)) return null;
         const w = Math.max(2, info.texW), h = Math.max(2, info.texH);
-        const out = retouchedDrawable(info.drawable, w, h, clip, srcTime, w / h);
+        // sourceFxDrawable = retouch + XOÁ LOGO: khung chuyển cảnh được bake ở đây rồi phủ
+        // lên [mainv], nên thiếu logo ở đây là logo hiện lại đúng trong đoạn chuyển cảnh.
+        const out = sourceFxDrawable(info.drawable, w, h, clip, srcTime, w / h, `bakeTrans${slot}`);
         if (!out || out === info.drawable) return null;
         // Khoá canvas là SLOT ('A'/'B'), không phải theo block: chỉ hai lớp cùng tồn tại
         // tại một thời điểm, còn `bakeCanvasPool` không có trần — khoá theo block là mỗi
@@ -19024,8 +19713,9 @@
         await eachSourceFrame(srcUrl, times, async (frame, k, texW, texH) => {
             const localT = k / exportFps;
             const srcT = times[k];
-            // ĐÚNG hàm mà preview gọi -> không thể lệch với preview.
-            const rt = retouchedDrawable(frame, texW, texH, clip, srcT, texW / Math.max(1, texH));
+            // ĐÚNG hàm mà preview gọi -> không thể lệch với preview. Miếng vá phủ lên
+            // [mainv] đã xoá logo, nên nó cũng phải xoá logo (sourceFxDrawable).
+            const rt = sourceFxDrawable(frame, texW, texH, clip, srcT, texW / Math.max(1, texH), 'bakeRtMain');
             const { canvas: comp, ctx } = bakeCanvas('retouchSeq', seqW, seqH);
             if (fullFrame) { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, seqW, seqH); }
             // fullFrame: để drawMainClipLayer áp luôn chuỗi màu (khung đã trọn vẹn nên
@@ -19244,8 +19934,8 @@
         const sink = bakedFrameSink(collect, seqId, 'image/png');
         let wrote = 0;
         await eachSourceFrame(asset.url, runTimes, async (frame, k, texW, texH) => {
-            // ĐÚNG hàm mà preview gọi -> không thể lệch với preview.
-            const rt = retouchedDrawable(frame, texW, texH, item, runTimes[k], texW / Math.max(1, texH));
+            // ĐÚNG hàm mà preview gọi -> không thể lệch với preview (kể cả xoá logo).
+            const rt = sourceFxDrawable(frame, texW, texH, item, runTimes[k], texW / Math.max(1, texH), 'bakeRtOvl');
             const { canvas: comp, ctx } = bakeCanvas('rtOverlaySeq', seqW, seqH);
             // KHÔNG tô nền: ngoài hình lớp phải TRONG SUỐT (xem ghi chú PNG ở trên).
             // KHÔNG áp màu: sidecar áp, cùng bộ lọc với chính item gốc.
@@ -19433,7 +20123,7 @@
                 const imgAsset = findAsset(copy.asset_id);
                 // RETOUCH cho ảnh tĩnh: bake MỘT LẦN (ảnh không đổi theo thời gian) rồi
                 // dùng cho cả hai đường bên dưới.
-                const rtStill = await retouchedStillCanvas(copy, imgAsset);
+                const rtStill = await sourceFxStillCanvas(copy, imgAsset);
                 await attachAnim(copy, renderImageAnimationSequence, imgAsset, rtStill);
                 // Không có hoạt ảnh -> attachAnim không sinh gì, mà retouch thì không diễn
                 // đạt được bằng filter FFmpeg. Đẩy ảnh đã retouch qua đường chuỗi khung.
@@ -19503,6 +20193,11 @@
                 const png = videoMaskExportPng(copy.video_mask,
                     Number(maskAsset?.width) || 0, Number(maskAsset?.height) || 0);
                 if (png) copy.video_mask_png = png;
+                // XOÁ LOGO: sidecar xoá trên stream của asset ở kích thước GỐC. Chuỗi khung đã
+                // bake (ảnh tĩnh, hoạt ảnh) thì frontend đã xoá trong từng khung rồi.
+                const logoPx = logoRemovalExportPx(copy,
+                    Number(maskAsset?.width) || 0, Number(maskAsset?.height) || 0);
+                if (logoPx) copy.logo_removal_px = logoPx;
             }
             items.push(copy);
         }
@@ -20898,6 +21593,26 @@
                 touch-action: none;
             }
             .adj-mask-handle.move { cursor: move; width: 13px; height: 13px; }
+            /* XOÁ LOGO: vùng KHÔNG được chọn vẽ nét mảnh hơn, tay cầm chỉ ở vùng đang chọn. */
+            .adj-mask-path.logo-region-idle { stroke: rgba(255,255,255,0.7); stroke-dasharray: 3 4; }
+            .logo-actions { display: flex; gap: 6px; margin: 6px 0 8px; }
+            .logo-actions .adj-mini-btn { flex: 1 1 0; justify-content: center; }
+            .logo-actions .adj-mini-btn.is-active { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
+            .logo-region-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+            .logo-region-row { display: flex; align-items: stretch; gap: 4px; }
+            .logo-region-pick {
+                flex: 1 1 auto; display: flex; justify-content: space-between; align-items: center;
+                padding: 5px 8px; border-radius: var(--r-sm); border: 1px solid var(--border-color);
+                background: var(--panel-bg-light); color: var(--text-main); font-size: var(--fs-xs);
+                cursor: pointer; box-shadow: none;
+            }
+            .logo-region-row.is-active .logo-region-pick { border-color: var(--primary); }
+            .logo-region-size { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+            .logo-region-del {
+                flex: 0 0 28px; border-radius: var(--r-sm); border: 1px solid var(--border-color);
+                background: var(--panel-bg-light); color: var(--text-muted); cursor: pointer; box-shadow: none;
+            }
+            .logo-region-del:hover { color: var(--text-main); border-color: var(--border-strong); }
             .adj-mask-handle.size { cursor: nwse-resize; border-radius: 2px; }
             .adj-mask-handle.size.ne, .adj-mask-handle.size.sw { cursor: nesw-resize; }
             .adj-mask-handle.size.n, .adj-mask-handle.size.s { cursor: ns-resize; }
@@ -21276,7 +21991,9 @@
             .sequence-preview-shell.is-color-picking #editingSelectionBox,
             .sequence-preview-shell.is-color-picking #editingSelectionBox *,
             .sequence-preview-shell.is-color-picking #adjMaskOverlay,
-            .sequence-preview-shell.is-color-picking #adjMaskOverlay * {
+            .sequence-preview-shell.is-color-picking #adjMaskOverlay *,
+            .sequence-preview-shell.is-color-picking #logoRegionOverlay,
+            .sequence-preview-shell.is-color-picking #logoRegionOverlay * {
                 pointer-events: none !important;
                 cursor: crosshair !important;
             }
@@ -21650,8 +22367,9 @@
          * tưởng retouch hỏng. */
         document.addEventListener('pointerdown', (event) => {
             if (event.target?.closest?.('#editingRtCompare')) setRetouchCompare(true);
+            if (event.target?.closest?.('#editingLogoCompare')) setLogoCompare(true);
         });
-        const releaseCompare = () => setRetouchCompare(false);
+        const releaseCompare = () => { setRetouchCompare(false); setLogoCompare(false); };
         window.addEventListener('pointerup', releaseCompare);
         window.addEventListener('pointercancel', releaseCompare);
         window.addEventListener('blur', releaseCompare);
@@ -21709,6 +22427,9 @@
         window.addEventListener('pointermove', handleMaskDrag, { passive: false });
         window.addEventListener('pointerup', endMaskDrag);
         window.addEventListener('pointercancel', endMaskDrag);
+        window.addEventListener('pointermove', handleLogoDrag, { passive: false });
+        window.addEventListener('pointerup', endLogoDrag);
+        window.addEventListener('pointercancel', endLogoDrag);
         // Chuyển tab/subtab Inspector không đi qua đường render preview (nó chỉ đổi display),
         // nên phải tự vẽ lại: vào subtab "Mặt nạ" là thấy tay cầm ngay, rời đi là mất ngay.
         ['inspectorTabs', 'inspectorSubtabs'].forEach((id) => {
@@ -23806,6 +24527,10 @@
         // RETOUCH: lane chính vẽ ở index.html nên điểm nối phải lộ ra ngoài.
         retouchedDrawable,
         resetRetouchCaches,
+        // XOÁ LOGO: index.html gọi cho sprite lane chính và cho payload export.
+        clipHasSourceFx,
+        sourceFxDrawable,
+        logoRemovalExportPx,
         // index.html dựng payload cho clip lane chính -> cần cả spec export của lớp.
         adjustLayerExportSpec,
         // ỐNG HÚT MÀU của media overlay (lane chính có window.pickPreviewSourceColor).

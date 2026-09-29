@@ -9786,3 +9786,52 @@ Kéo resizer trái ở 1920: 528 -> 384px, inline ghi đè đúng. **Còn tồn 
 của thanh điều khiển preview vốn đã chạm nút Play với panel 288px ("… / 00:00:06:"); panel 330px
 che thêm ("… / 00:00:"). Không có phần tử nào báo tràn (`scrollWidth`) — nút Play nằm đè lên chữ.
 
+## Xoá logo — tab Retouch > subtab "Xoá logo" (2026-09-29)
+
+Xoá logo / watermark **cố định** (logo kênh, TikTok…) trên clip lane chính và media overlay
+(video + ảnh). Dữ liệu gắn theo block như retouch: `clip.logo_removal` / `item.logo_removal` =
+`{ enabled, mode: 'delogo'|'blur'|'pixelate', strength 0..100, regions: [{x,y,w,h}] }`, vùng theo
+**tỉ lệ 0..1 của vùng ảnh thật** của block (lane chính: `mainClipContentRect`; overlay: cả asset),
+tối đa 4 vùng. Tắt công tắc nhưng còn vùng thì GIỮ field (`isEmpty` ≠ `isActive`).
+
+**Một nguồn sự thật — `static/js/logo-removal.js`:** chuẩn hoá, `exportRects` (vùng -> pixel
+CHẴN, lề 2px vì `delogo` từ chối vùng chạm mép: hợp lệ khi `x ≥ 1` và `x + w ≤ W − 1`), công thức
+pixel cho preview và bộ tự nhận diện.
+
+| Chế độ | Preview (JS trên ImageData) | Xuất (sidecar) | Đối chiếu trong test |
+|---|---|---|---|
+| delogo | `delogoRgba` | `delogo=x:y:w:h` | trùng TỪNG PIXEL (YUV444) |
+| blur | `boxBlurRgba` (hộp 2 lượt, mép phản xạ) | `crop,format=yuva444p,boxblur=r:2:r:2:alpha_radius=0` + overlay | lệch TB ≤ 2.5 |
+| pixelate | `pixelateRgba` | `crop,format=yuva444p,scale=area,scale=neighbor` + overlay | lệch TB ≤ 6 |
+
+- **`delogo` hiện hành lấy mẫu NGOÀI vùng:** FFmpeg nới vùng 1px (band = 1) rồi lấy hàng/cột
+  ngoài cùng làm mẫu và thay CẢ vùng. Bản đầu chép công thức cũ (mẫu là mép của chính vùng) nên
+  lệch tới 109/255 — test `logo_removal` giờ so từng pixel với `delogo` thật.
+- **`format=yuva444p` trong nhánh blur/khảm là bắt buộc:** nguồn 4:2:0 có mặt phẳng màu nửa độ
+  phân giải, cùng bán kính là màu mờ gấp đôi sáng (đo được lệch 11/255 so với preview).
+- `delogo` là filter GPL: FFmpeg không có nó thì sidecar rơi về làm mờ thay vì đổ cả lần xuất.
+
+**Đường vẽ.** `sourceFxDrawable` (editing-runtime.js) = Retouch rồi Xoá logo; MỌI chỗ trước đây gọi
+`retouchedDrawable` nay gọi nó (preview Pixi lane chính, canvas fx overlay, chuyển cảnh preview +
+bake, miếng vá Retouch, ảnh tĩnh). `logoRemovedDrawable` chỉ `getImageData` cỡ vùng (+1px) nên rẻ
+dù nguồn 4K. Overlay có logo đi đường canvas fx (`itemHasColorAdjust`), như retouch.
+
+**Xuất.** Lane chính và overlay KHÔNG bake: frontend gửi `logo_removal_px = { mode, rects:[{x,y,w,h,p}] }`
+(pixel của stream: khung nối cho `[0:v]`, cỡ gốc asset cho overlay) -> backend
+`normalizeLogoRemovalFields` dựng lại `logo_mode` + `logo_rects` ("x:y:w:h:p|…") từ số đã kẹp ->
+sidecar `AppendLogoRemovalFilters` chèn NGAY SAU trim/fps, TRƯỚC chuỗi màu và scale. Chuỗi khung đã
+bake (`animation_render`) không nhận `logo_*` — frontend đã xoá trong từng khung.
+
+**Tự nhận diện** (`detectLogoRegions`, chạy trong renderer, không cần Python): 16 khung rải trên CẢ
+file nguồn (overlay: cả asset; lane chính: đoạn của file đó trong khung nối — block ngắn gần như là
+cảnh tĩnh), thu về 480px, TRUNG VỊ gradient theo thời gian (cạnh nền động triệt nhau, cạnh logo ở
+lại), chỉ xét 4 góc (bỏ dải chữ thập giữa khung: phụ đề cứng, bảng tên). Ngưỡng tính trên CẢ vùng
+góc, có trần 60 — bản đầu chỉ tính trên pixel điểm > 0 nên chính logo kéo ngưỡng lên cao hơn logo
+và video thật không tìm ra gì. Nền gần như đứng yên -> `staticScene`, UI cảnh báo có thể nhận nhầm.
+
+**Tay cầm.** Dùng chung `maskSourceFrame` với mặt nạ (vùng nằm trong không gian nguồn nên đi theo
+xoay/lật/phóng). "Vẽ vùng" nghe ở shell pha capture như ống hút màu; kéo góc giữ góc đối diện; một
+cú kéo = một undo.
+
+Test: `npm run test:logo-removal` (mô hình, khớp FFmpeg, nhận diện, backend, sidecar end-to-end cả
+lane chính lẫn overlay).
