@@ -814,6 +814,9 @@ struct ExportOverlay {
   double positionX = 0.0;
   double positionY = 0.0;
   double scale = 100.0;
+  // HỆ SỐ VỪA KHUNG của block media (renderer tính, backend chuyển): "scale 100%" của media overlay
+  // = vừa khung như lane chính (xem ExportInterval::fitScale). Ảnh chữ/hình khối, payload cũ: 1.
+  double fitScale = 1.0;
   double rotation = 0.0;
   double opacity = 100.0;
   bool flipX = false;
@@ -1847,6 +1850,7 @@ bool ReadExportPayload(
       overlay.positionX = ExtractDoubleFieldOr(overlayObjects[i], "position_x", 0.0);
       overlay.positionY = ExtractDoubleFieldOr(overlayObjects[i], "position_y", 0.0);
       overlay.scale = ClampDouble(ExtractDoubleFieldOr(overlayObjects[i], "scale", 100.0), 1.0, 800.0);
+      overlay.fitScale = ClampDouble(ExtractDoubleFieldOr(overlayObjects[i], "fit_scale", 1.0), 0.001, 64.0);
       overlay.rotation = ExtractDoubleFieldOr(overlayObjects[i], "rotation", 0.0);
       overlay.opacity = ClampDouble(ExtractDoubleFieldOr(overlayObjects[i], "opacity", 100.0), 0.0, 100.0);
       overlay.flipX = ExtractBoolField(overlayObjects[i], "flip_x", false);
@@ -3315,7 +3319,9 @@ void WriteVisualOverlayFilter(
   const int inputIndex = 1 + overlay.assetInputIndex;
   const int seqW = settings.width > 0 ? settings.width : 1920;
   const int seqH = settings.height > 0 ? settings.height : 1080;
-  const double scaleValue = std::max(0.01, overlay.scale / 100.0);
+  // SCALE HIỆU DỤNG = scale của người dùng × hệ số vừa khung (xem ExportOverlay::fitScale), như lane chính.
+  const double overlayFit = (overlay.fitScale > 0.0) ? overlay.fitScale : 1.0;
+  const double scaleValue = std::max(0.01, (overlay.scale / 100.0) * overlayFit);
   const double opacityValue = ClampDouble(overlay.opacity / 100.0, 0.0, 1.0);
   const double rotationRad = overlay.rotation * 3.14159265358979323846 / 180.0;
   const std::string id = std::to_string(overlay.index);
@@ -3410,7 +3416,7 @@ void WriteVisualOverlayFilter(
   if (overlayDynTransform) {
     AppendKfTransformFilters(script, start, overlay.kfScaleExpr, overlay.kfRotExpr, overlay.kfOpacityExpr,
                              overlay.scale, overlay.rotation, opacityValue,
-                             overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr);
+                             overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr, overlayFit);
   } else {
     if (std::abs(rotationRad) > 0.000001) {
       const std::string angle = FfmpegDouble(rotationRad);

@@ -9943,3 +9943,16 @@ Test: `npm run test:logo-ai` — backend với bộ chạy giả; sidecar Python
 màu TB của khung, không cần model) trên nguồn ĐỔI MÀU MỖI KHUNG → dán lệch một khung là lộ ngay (có ca
 đối chứng cố tình lệch 1 khung phải đo ra > 30/255); CFR + VFR, 1x + 1.5x, lane chính + overlay; có model
 thì chạy thêm MI-GAN thật trên một ảnh.
+
+## "Scale 100%" của media overlay = vừa khung, như lane chính; sóng âm có tầng riêng (2026-09-30)
+
+**Lỗi người dùng báo (dự án `G:\Work\AI\Test CrabbyCut\Test Export\Test.crab`):** cùng nguồn `DSCF3442.MOV` 3840×2160 trên sequence 1920×1080 — block lane chính 107% trông bằng block lane overlay 55%. Lane chính lấy **vừa khung** làm 100% (`MainLane.fitScale`, theo CapCut), còn overlay lấy **số pixel của chính tệp**. Premiere lẫn CapCut đều dùng MỘT mốc cho mọi track (Premiere: cỡ gốc, CapCut: vừa khung); CrabbyCut theo mốc của lane chính.
+
+- `itemBaseSize` của media = cỡ gốc × `mediaAssetFitScale(asset)` (= `MainLane.fitScale({width, height}, seqW, seqH)`; chưa biết cỡ asset thì 1, khung dự phòng như cũ). Mọi thứ hiển thị (preview, khung chọn, kéo, chuyển cảnh, miếng vá Retouch ghép lên canvas sequence) đi qua hàm này nên tự đúng.
+- `itemNativeSize` = số pixel của tệp, cho những gì sống trong KHÔNG GIAN NGUỒN: canvas bake chuỗi khung hoạt ảnh ảnh (giữ độ nét), biên độ hoạt ảnh (`slideDist` — giữ đúng số cũ để hoạt ảnh dự án cũ không đổi, preview và export cùng dùng). Mặt nạ cắt hình dùng toạ độ chuẩn hoá 0..1 theo tỉ lệ khung nên không phụ thuộc cỡ hộp.
+- Export: renderer ghi `fit_scale` cho mỗi block media → backend chuyển vào overlay (ảnh chữ/hình khối, payload cũ: 1) → sidecar `scaleValue = scale/100 × fitScale`, nhánh keyframe truyền `fitScale` vào `AppendKfTransformFilters` như lane chính.
+- **Dự án cũ:** `getHistoryState` ghi `mediaScaleBasis: 'fit'`; `restoreEditingHistoryState` thiếu khoá đó thì `migrateMediaScaleToFit()` (scale và keyframe scale chia cho hệ số) sau khi nạp `editingAssets` — cỡ trên canvas y hệt, chạy đúng một lần (undo/redo mang dấu mốc). Test.crab: block overlay 55 → 110.
+- Đổi khổ sequence (`rescaleOverlaysForSequenceResize`) không còn nhân scale của media: mốc vừa khung tự theo khổ mới. Magic Fill (ảnh phủ kín, logo giữ cỡ gốc, ảnh đặt trong ô) và "sao clip lane chính sang overlay" chia cho hệ số của asset.
+- Test `npm run test:media-scale-fit`: hàm thật trong VM (cỡ nền, bằng lane chính cùng nguồn, quy đổi giữ cỡ trên canvas, dấu mốc) + sidecar (scale 100 + fit 0,5 trùng framemd5 bản scale 50 kiểu cũ, cả nhánh keyframe; thiếu `fit_scale` giữ nghĩa cũ). E2E Electron trên Test.crab: khung chọn overlay/lane chính tỉ lệ 1,0280 = 110/107.
+
+**Sóng âm trên block video overlay** (cùng báo cáo): canvas sóng phủ viewport ở z25 — TRÊN cả block đang chọn (z24) — và dải sóng media 24px sát đáy; block overlay chỉ cao 45px nên sóng vẽ đè giữa thumbnail, và vì dải chỉ thụt 4px trong khi tay cầm trim rộng 8px nên nửa tay cầm bị sóng che. Nay: khoảng thụt = bề rộng tay cầm thật (8px, kẹp 25% block) + 2px cho MỌI block; video overlay có tiếng (`.has-audio`) chia hai tầng — dải phim `bottom: 19px`, sóng 14px ở đáy (`WAVE_OVERLAY_*`, kind `overlay` trong `waveformStripRect`).

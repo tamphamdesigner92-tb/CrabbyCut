@@ -709,19 +709,12 @@
                             if (Number.isFinite(v) && v !== 0) st[field] = v * k;
                         });
                 }
-            } else {
-                /* Ảnh/video/vector: kích thước gốc là SỐ PIXEL CỦA CHÍNH TỆP, không có số đo
-                   nào của ta để phóng — cần chỉnh transform.scale. Ảnh raster bị kéo lên là
-                   không tránh được (tệp chỉ có bấy nhiêu pixel), nhưng vẫn hơn hẳn việc nó
-                   teo còn một nửa khung hình.
-                   Asset KHÔNG biết kích thước thì itemBaseSize đã lấy theo Sequence
-                   (width × 0.45) nên nó tự lớn theo rồi — chạm vào là phóng hai lần. */
-                const asset = findAsset(item.asset_id);
-                if (Number(asset?.width) > 0 && tr && Number.isFinite(Number(tr.scale))) {
-                    tr.scale = clamp(Number(tr.scale) * k, 1, 800);
-                    scaleKeyframeField(item.keyframes, 'scale', k);
-                }
             }
+            /* Ảnh/video/vector: KHÔNG chạm transform.scale. Mốc 100% của media là VỪA KHUNG
+               (mediaAssetFitScale) nên cỡ trên canvas tự đi theo khổ mới — như block lane chính.
+               Trước 2026-09-30 mốc là cỡ gốc của tệp nên chỗ này phải nhân scale theo k; giữ phép
+               nhân đó bây giờ là phóng hai lần. Asset không biết cỡ thì cỡ nền là khung dự
+               phòng theo Sequence (width × 0.45), cũng tự lớn theo. */
 
             if (item.transform) item.transform = normalizeTransform(item.transform);
         });
@@ -4639,7 +4632,8 @@
             const blockHeight = Math.max(1, parseFloat(block.style.height) || 45);
             const isMediaOverlay = block.classList.contains('editing-item-block')
                 && block.classList.contains('editing-media-block');
-            const stripHeight = Math.max(12, blockHeight - (isMediaOverlay ? 6 : 50));
+            // Overlay có tiếng: dải phim nhường 19px cho dải sóng riêng (xem CSS has-audio + WAVE_OVERLAY_*).
+            const stripHeight = Math.max(12, blockHeight - (isMediaOverlay ? (hasAudio ? 22 : 6) : 50));
             const thumbWidth = Math.max(24, stripHeight * ratio);
             const singleFrameSource = true;   // đổi thành false khi có filmstrip nhiều khung
             const count = singleFrameSource ? 1 : Math.max(1, Math.ceil(blockWidth / thumbWidth));
@@ -5397,8 +5391,17 @@
      * của lane chính) nên trim/kéo cạnh vẫn khớp; biên độ nhân theo volume của block;
      * mute/lane ẩn/lane khoá -> làm mờ đúng như block.
      * ====================================================================== */
-    const WAVE_INSET_X = 4;          // khớp left/right của .editing-thumb-strip cũ
+    /* Dải sóng thụt khỏi hai mép ĐỦ BỀ RỘNG TAY CẦM TRIM (.editing-resize-handle: 8px, tối đa 25%
+       bề rộng block) + 2px. Canvas sóng nằm TRÊN block đang chọn (z25 > z24, xem CSS) nên trước
+       đây thụt 4px là nửa tay cầm bị sóng vẽ đè — khó nhìn, khó nắm (người dùng báo 2026-09-30). */
+    const WAVE_HANDLE_W = 8;
+    const WAVE_HANDLE_GAP = 2;
     const WAVE_MEDIA_BOTTOM = 5;     // dải sóng nằm sát đáy block media/main
+    /* Block VIDEO OVERLAY (45px): dải sóng RIÊNG ở đáy, dải phim nhường chỗ phía trên (CSS
+       `.editing-media-block.has-audio .editing-thumb-strip`) — trước đây sóng 24px vẽ đè giữa
+       thumbnail. 14px + đáy 3px: vừa đủ đọc nhịp tiếng mà dải phim vẫn còn 24px. */
+    const WAVE_OVERLAY_HEIGHT = 14;
+    const WAVE_OVERLAY_BOTTOM = 3;
     /* 24 chứ không phải 16: ở 16px nửa biên độ chỉ còn 8px nên tiếng nói bình thường vẽ ra
        một sợi chỉ, phải kéo Volume lên mới nhìn được — mà Volume là thuộc tính XUẤT BẢN,
        không phải nút phóng to hình. Lane thấp nhất có sóng là media (block 49-4=45px) nên 24+5
@@ -5449,11 +5452,16 @@
     // bên cho đẹp (không đè tay cầm resize) nhưng px/giây PHẢI theo block, nếu không
     // sóng bị co tỉ lệ và lệch playhead (xem paintViewport trong audio-waveform.js).
     function waveformStripRect(kind, left, top, width, height) {
-        const x = left + WAVE_INSET_X;
-        const w = width - WAVE_INSET_X * 2;
+        // Thụt đúng bằng tay cầm trim THẬT của block này (8px, kẹp 25% bề rộng) + khe 2px.
+        const inset = Math.min(WAVE_HANDLE_W, width * 0.25) + WAVE_HANDLE_GAP;
+        const x = left + inset;
+        const w = Math.max(0, width - inset * 2);
         const mapRect = { x: left, w: width };
         if (kind === 'audio') {
             return { x, w, mapRect, y: top + WAVE_AUDIO_TOP, h: Math.max(6, height - WAVE_AUDIO_TOP - WAVE_AUDIO_BOTTOM) };
+        }
+        if (kind === 'overlay') {
+            return { x, w, mapRect, y: top + height - WAVE_OVERLAY_BOTTOM - WAVE_OVERLAY_HEIGHT, h: WAVE_OVERLAY_HEIGHT };
         }
         return { x, w, mapRect, y: top + height - WAVE_MEDIA_BOTTOM - WAVE_MEDIA_HEIGHT, h: WAVE_MEDIA_HEIGHT };
     }
@@ -5513,7 +5521,8 @@
                 kind,
                 key: source.key,
                 url: source.url,
-                rect: waveformStripRect(kind, timelineX(item.timeline_start),
+                // Video overlay: dải sóng riêng dưới dải phim (xem WAVE_OVERLAY_*), không đè thumbnail.
+                rect: waveformStripRect(kind === 'media' ? 'overlay' : kind, timelineX(item.timeline_start),
                     laneBlockTop(laneRowTop(rowIndex, rows)), width, laneBlockHeight(item.type)),
                 srcStart,
                 srcEnd: srcStart + itemSourceSpan(item),
@@ -7587,8 +7596,10 @@
         /* BẢN SAO PHẢI TRÔNG GIỐNG BẢN GỐC — kể cả khi người dùng đã kéo/co giãn/xoay clip
          * lane chính. Hai lane hiểu `scale` khác nhau đúng một hệ số:
          *   lane chính : cỡ trên canvas = khung nối × HỆ SỐ VỪA KHUNG × scale/100
-         *   overlay    : cỡ trên canvas = khổ asset × scale/100      (asset = chính khung nối)
-         * nên scale của bản sao = fit × scale của clip. Vị trí/xoay/lật/độ mờ mang y nguyên
+         *   overlay    : cỡ trên canvas = khổ asset × HỆ SỐ VỪA KHUNG CỦA ASSET × scale/100
+         *                (asset = chính khung nối; xem mediaAssetFitScale)
+         * nên scale của bản sao = fit × scale của clip / hệ số của asset — bằng đúng scale của clip
+         * khi vùng ảnh phủ trọn khung nối. Vị trí/xoay/lật/độ mờ mang y nguyên
          * (cùng hệ toạ độ sequence).
          * Bản trước đặt `coverScalePercent` (phủ kín khung) và bỏ hết transform của clip: nó
          * đúng hồi "scale 100% = phủ kín", nhưng nay 100% là VỪA KHUNG, và clip đã chỉnh tay
@@ -7598,7 +7609,7 @@
         const transform = {
             ...defaultTransform(),
             ...clipTr,
-            scale: clampTransformValue('scale', clipTr.scale * fit),
+            scale: clampTransformValue('scale', clipTr.scale * fit / mediaAssetFitScale(asset)),
         };
         if (!(asset.width > 0) || !(asset.height > 0)) {
             // Không probe được khổ asset -> overlay không có cỡ gốc đáng tin; giữ đường cũ
@@ -14809,6 +14820,34 @@
         return { width: seq.width, height: seq.height };
     }
 
+    /* "SCALE 100%" CỦA BLOCK MEDIA (video/ảnh) Ở LANE OVERLAY = VỪA KHUNG, như block lane chính.
+     *
+     * Cùng một định nghĩa với lane chính (MainLane.fitScale, theo CapCut): media khác khổ dự án
+     * VỪA KHUNG (contain) ở 100%. Trước 2026-09-30 overlay lấy SỐ PIXEL CỦA CHÍNH TỆP làm 100%,
+     * nên CÙNG một nguồn 4K trên sequence 1080p hiện ở 107% trên lane chính mà chỉ 55% trên lane
+     * overlay (người dùng báo, dự án Test.crab). Premiere lẫn CapCut đều dùng MỘT mốc cho mọi
+     * track; CrabbyCut theo mốc của CapCut vì lane chính đã theo.
+     * Dự án cũ được quy đổi một lần khi mở (migrateMediaScaleToFit) nên hình không xê dịch.
+     * Chưa biết cỡ asset thì hệ số = 1 (cỡ nền rơi về khung dự phòng theo Sequence như cũ). */
+    function mediaAssetFitScale(asset, seq = payloadSequence()) {
+        const aw = Number(asset?.width);
+        const ah = Number(asset?.height);
+        if (!(aw > 0 && ah > 0)) return 1;
+        return window.MainLane
+            ? MainLane.fitScale({ width: aw, height: ah }, seq.width, seq.height)
+            : Math.min(Number(seq.width) / aw, Number(seq.height) / ah) || 1;
+    }
+
+    /* Cỡ GỐC của block media: số pixel của chính tệp. Dùng cho mọi thứ sống trong KHÔNG GIAN
+     * NGUỒN — canvas bake chuỗi khung (giữ đủ độ nét khi phóng to), mặt nạ — tức đúng cỡ luồng
+     * mà sidecar nhận; sidecar nhân thêm `fit_scale` (xem exportPayload) để ra cỡ hiển thị. */
+    function itemNativeSize(item, asset = null) {
+        return {
+            width: Number(asset?.width) || (payloadSequence().width * 0.45),
+            height: Number(asset?.height) || (payloadSequence().height * 0.25),
+        };
+    }
+
     function itemBaseSize(item, asset = null) {
         // Row lane chính: cỡ gốc là VÙNG ẢNH đã vừa khung, không phải cỡ asset.
         if (isMainLaneBoxItem(item)) return mainLaneBaseSize(item);
@@ -14819,10 +14858,10 @@
         if (item?.type === 'text') {
             return measureTextItemBox(item);
         }
-        return {
-            width: Number(asset?.width) || (payloadSequence().width * 0.45),
-            height: Number(asset?.height) || (payloadSequence().height * 0.25),
-        };
+        // Media: cỡ TRÊN CANVAS ở scale 100% = cỡ gốc × hệ số vừa khung (xem mediaAssetFitScale).
+        const native = itemNativeSize(item, asset);
+        const f = mediaAssetFitScale(asset);
+        return { width: native.width * f, height: native.height * f };
     }
 
     function selectedVisualItemForBox(seqTime = currentSequenceTime()) {
@@ -16111,8 +16150,9 @@
                         charCount: (animTextBox.displayLines || []).join('').length,
                     };
                 } else {
-                    // shape/ảnh: boxHeight lấy từ kích thước hiển thị (cho slide/drift)
-                    const sz = item.type === 'shape' ? shapeCanvasSize(item.style) : itemBaseSize(item, asset);
+                    // shape/ảnh: boxHeight cho slide/drift. Media lấy CỠ GỐC — đúng số dùng trước khi
+                    // mốc 100% đổi sang vừa khung (mediaAssetFitScale), để hoạt ảnh dự án cũ không đổi.
+                    const sz = item.type === 'shape' ? shapeCanvasSize(item.style) : itemNativeSize(item, asset);
                     metrics = { boxHeight: sz.height, fontSize: 0, charCount: 0 };
                 }
                 const replayTime = (animReplaySession && animReplaySession.itemId === item.id)
@@ -19246,7 +19286,7 @@
     async function renderImageAnimationSequence(item, resolved, fps, asset, retouchedSrc) {
         const src = asset?.url || '';
         if (!src) return null;
-        const size = itemBaseSize(item, asset);
+        const size = itemNativeSize(item, asset);   // bake ở CỠ GỐC; sidecar nhân fit_scale (xem mediaAssetFitScale)
         const baseW = Math.max(2, Math.ceil(size.width));
         const baseH = Math.max(2, Math.ceil(size.height));
         // RETOUCH TRƯỚC CHUỖI MÀU — cùng thứ tự với preview (paintColorFxCanvas) và với
@@ -19472,7 +19512,8 @@
                 // (sz), đúng khung mà applyVideoMaskCss dùng, nên hai bên khớp nhau.
                 drawable = videoMaskedDrawable(drawable, sz.width, sz.height,
                     item.video_mask, `capcut:ovl:${item.id}`);
-                metrics = { boxHeight: sz.height, fontSize: 0, charCount: 0 };
+                // Biên độ hoạt ảnh theo CỠ GỐC như preview (xem renderPreviewOverlays).
+                metrics = { boxHeight: itemNativeSize(item, asset).height, fontSize: 0, charCount: 0 };
             }
             let anim = null;
             if (window.TextAnimations && itemSupportsAnimation(item) && TextAnimations.hasAnimation(item)) {
@@ -20327,6 +20368,8 @@
         if (retouchSpatialFx(item, Number(item.duration) || 0, Number(item.timeline_start) || 0)) {
             return { skip: _t('có hiệu ứng không gian (viền mờ / hạt / nét / làm mờ)') };
         }
+        // Cỡ HIỂN THỊ ở scale 100% (itemBaseSize): item được ghép lên canvas cỡ SEQUENCE theo đúng
+        // vị trí/scale của nó (placeAt) rồi cắt miếng vá — không phải bake ở cỡ nguồn.
         const size = itemBaseSize(item, asset);
         const w0 = Math.max(2, Number(size.width) || 0);
         const h0 = Math.max(2, Number(size.height) || 0);
@@ -20550,6 +20593,9 @@
         };
         for (const item of editingItems) {
             const copy = deepClone(item);
+            /* Media: sidecar co luồng CỠ GỐC (tệp, hoặc chuỗi khung bake ở cỡ gốc) theo scale/100 ×
+             * fit_scale — cùng mốc "100% = vừa khung" với preview (xem mediaAssetFitScale). */
+            if (copy?.type === 'media') copy.fit_scale = mediaAssetFitScale(findAsset(copy.asset_id));
             if (copy?.type === 'text') {
                 /* Mẫu bị phóng to -> bake dày thêm rồi CHIA lại transform.scale, để ffmpeg
                    nhận ảnh đã đủ pixel thay vì kéo raster lên (xem templateExportBakeDensity).
@@ -20606,7 +20652,8 @@
                 // VIDEO: không bake PNG được -> gửi SPEC biểu thức FFmpeg (opacity qua
                 // fade + dịch chuyển qua overlay x/y theo t). Sidecar dựng filter.
                 if (window.TextAnimations && TextAnimations.hasAnimation(copy)) {
-                    const boxH = itemBaseSize(copy, findAsset(copy.asset_id)).height;
+                    // CỠ GỐC như preview (xem renderPreviewOverlays) — hoạt ảnh dự án cũ không đổi.
+                    const boxH = itemNativeSize(copy, findAsset(copy.asset_id)).height;
                     const spec = TextAnimations.videoAnimationExpr(copy, boxH);
                     if (spec) copy.animation_video = spec;
                 }
@@ -20711,7 +20758,25 @@
             subtitleState: subtitleState ? deepClone(subtitleState) : null,
             // Các bộ nhập từ tệp (Local Subtitle) — khoá riêng, xem ghi chú ở subtitleState.
             subtitleImports: deepClone(subtitleImports),
+            // Mốc "scale 100%" của block media overlay (xem mediaAssetFitScale). Thiếu khoá này =
+            // dự án lưu trước 2026-09-30 (100% = cỡ gốc của tệp) -> migrateMediaScaleToFit.
+            mediaScaleBasis: 'fit',
         };
+    }
+
+    /* Dự án lưu TRƯỚC khi mốc 100% của media overlay đổi sang VỪA KHUNG: scale của chúng tính
+     * trên cỡ gốc của tệp. Quy đổi một lần: scale_mới = scale_cũ / hệ số vừa khung, keyframe scale
+     * cũng vậy -> cỡ trên canvas y hệt trước. Chỉ media BIẾT cỡ asset (chưa biết thì hệ số = 1, cỡ
+     * nền vẫn là khung dự phòng như cũ). Gọi sau khi editingAssets đã nạp. */
+    function migrateMediaScaleToFit() {
+        editingItems.forEach((item) => {
+            if (!item || item.type !== 'media' || isMainLaneBoxItem(item)) return;
+            const f = mediaAssetFitScale(findAsset(item.asset_id));
+            if (!(f > 0) || Math.abs(f - 1) < 1e-9) return;
+            const tr = item.transform;
+            if (tr && Number.isFinite(Number(tr.scale))) tr.scale = clamp(Number(tr.scale) / f, 1, 800);
+            scaleKeyframeField(item.keyframes, 'scale', 1 / f);
+        });
     }
 
     function restoreEditingHistoryState(state) {
@@ -20738,6 +20803,8 @@
             if (window.TextAnimations?.pairPositionKeyframes) TextAnimations.pairPositionKeyframes(it);
         });
         editingAssets = Array.isArray(state.editingAssets) ? deepClone(state.editingAssets) : [];
+        // Dự án cũ: scale media overlay tính trên cỡ gốc -> quy về mốc vừa khung (xem hàm).
+        if (state.mediaScaleBasis !== 'fit') migrateMediaScaleToFit();
         selectedEditingItemId = String(state.selectedEditingItemId || '');
         selectedEditingItemIds = new Set(Array.isArray(state.selectedEditingItemIds) ? state.selectedEditingItemIds.map(String) : []);
         selectedMainClipIndexes = new Set((Array.isArray(state.selectedMainClipIndexes) ? state.selectedMainClipIndexes : [])
@@ -21713,6 +21780,9 @@
                cộng lại vượt chiều cao -> dải phim ra chiều cao ÂM và biến mất. Nhãn đã có
                nền mờ riêng, sóng âm vẽ trên canvas z21 (trên block) nên đè lên vẫn đọc được. */
             .editing-item-block.editing-media-block .editing-thumb-strip { top: 3px; bottom: 3px; }
+            /* Video overlay CÓ TIẾNG: dải phim nhường 19px ở đáy (khe 2px + dải sóng 14px + đáy 3px,
+               xem WAVE_OVERLAY_* trong JS) — sóng âm có tầng riêng, không vẽ đè thumbnail nữa. */
+            .editing-item-block.editing-media-block.has-audio .editing-thumb-strip { bottom: 19px; }
             /* Sóng âm THẬT: 1 canvas phủ viewport, nằm TRONG #segmentsTrack.
                z-index 25 = trên MỌI trạng thái của block, dưới dải chuyển cảnh (26) và rail
                nhãn lane (30) -> tự bị rail che, không cần tự clip. pointer-events none để
@@ -23720,7 +23790,9 @@
             if (plan.kind === MFA.KIND_COVER) {
                 transform.position_x = 0;
                 transform.position_y = 0;
-                transform.scale = MFA.coverScalePercent(asset.width, asset.height, seqW, seqH);
+                // coverScalePercent tính trên CỠ GỐC của asset -> quy về mốc vừa khung (mediaAssetFitScale).
+                transform.scale = MFA.coverScalePercent(asset.width, asset.height, seqW, seqH)
+                    / mediaAssetFitScale(asset, { width: seqW, height: seqH });
             } else if (plan.place === 'logo') {
                 /* LOGO THƯƠNG HIỆU: giữa khung hình theo chiều ngang (giữa KHUNG, không
                    phải giữa ô lưới — logo là dấu ấn thương hiệu, lệch tâm khung thì lộ),
@@ -23728,7 +23800,8 @@
                 const logoH = Number(asset.height) > 0 ? Number(asset.height) : seqH * 0.2;
                 transform.position_x = 0;
                 transform.position_y = Math.round(ctx.safe.top + (logoH / 2) - (seqH / 2));
-                transform.scale = 100;
+                // Cỡ gốc = 100% cỡ tệp; mốc 100% nay là vừa khung -> chia hệ số (mediaAssetFitScale).
+                transform.scale = clampTransformValue('scale', 100 / mediaAssetFitScale(asset, { width: seqW, height: seqH }));
                 blockedRects.push({
                     start: plan.tlStart,
                     end: plan.tlStart + duration,
@@ -23751,7 +23824,8 @@
                 });
                 transform.position_x = placement.positionX;
                 transform.position_y = placement.positionY;
-                transform.scale = placement.scale;
+                // insetPlacement tính scale trên CỠ GỐC của asset -> quy về mốc vừa khung.
+                transform.scale = clampTransformValue('scale', placement.scale / mediaAssetFitScale(asset, { width: seqW, height: seqH }));
                 blockedRects.push({
                     start: plan.tlStart,
                     end: plan.tlStart + duration,

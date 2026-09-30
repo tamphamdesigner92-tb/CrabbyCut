@@ -5639,6 +5639,12 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
       position_x: transform.position_x,
       position_y: transform.position_y,
       scale: transform.scale,
+      /* HỆ SỐ VỪA KHUNG của block media (renderer tính, xem mediaAssetFitScale): "scale 100%" của
+       * media overlay = vừa khung như lane chính; sidecar co luồng cỡ gốc theo scale/100 × hệ số.
+       * Ảnh chữ/hình khối (bake sẵn ở cỡ hiển thị) và payload cũ không có -> 1 = như trước. */
+      fit_scale: (type === 'media' && !textImagePath && !shapeImagePath && Number(item.fit_scale) > 0)
+        ? Math.max(0.001, Math.min(64, Number(item.fit_scale)))
+        : 1,
       rotation: transform.rotation,
       opacity: transform.opacity,
       flip_x: transform.flip_x,
