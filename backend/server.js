@@ -1466,6 +1466,8 @@ async function writeProjectReport(reason) {
   lines.push(reportLine(2, 'fps', render?.fps));
   lines.push(reportLine(2, 'codec', render?.codec));
   lines.push(reportLine(2, 'quality', render?.quality));
+  lines.push(reportLine(2, 'bitrate', render?.rate_mode
+    ? (render.rate_mode === 'custom' ? `custom ${render.rate_mbps} Mbps` : render.rate_mode) : null));
   lines.push(reportLine(2, 'encoder', render?.encoder));
   lines.push(reportLine(2, 'audio_bitrate', render?.audio_bitrate));
   lines.push(reportLine(2, 'interval_count', render?.interval_count));
@@ -4746,6 +4748,16 @@ function exportOutputFrame(sequenceWidth, sequenceHeight, preset, mode = EXPORT_
 }
 const EXPORT_CODEC_VALUES = new Set(['h264', 'hevc', 'prores']);
 const EXPORT_QUALITY_VALUES = new Set(['small', 'balanced', 'high']);
+/* Ô "Bitrate" kiểu CapCut (mục 1.20 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md, người dùng chốt
+ * 2026-10-01) thay ô "Chất lượng": ba mức là CHẤT LƯỢNG CỐ ĐỊNH có trần, "custom" là bitrate trung
+ * bình người dùng nhập (Mbps). Cùng dải với kRateMbpsMin/Max của sidecar. */
+const EXPORT_RATE_MODES = new Set(['lower', 'recommended', 'higher', 'custom']);
+const EXPORT_RATE_MBPS_MIN = 0.5;
+const EXPORT_RATE_MBPS_MAX = 400;
+// Payload/khách cũ chỉ gửi `quality`: Cao -> Khuyến nghị, Cân bằng / Tệp nhỏ -> Thấp hơn.
+const RATE_MODE_FROM_QUALITY = { high: 'recommended', balanced: 'lower', small: 'lower' };
+// Chiều ngược lại cho `quality` (preset CPU, báo cáo): Thấp hơn là Cân bằng cũ.
+const QUALITY_FROM_RATE_MODE = { lower: 'balanced', recommended: 'high', higher: 'high', custom: 'high' };
 const EXPORT_AUDIO_VALUES = new Set(['128k', '192k', '320k']);
 
 function evenDimension(value, fallback) {
@@ -4788,7 +4800,15 @@ function normalizeExportSettings(body = {}) {
     ? String(raw.fps || body.export_fps || 'source')
     : 'source';
   const codec = EXPORT_CODEC_VALUES.has(String(raw.codec || 'h264')) ? String(raw.codec || 'h264') : 'h264';
-  const quality = EXPORT_QUALITY_VALUES.has(String(raw.quality || 'high')) ? String(raw.quality || 'high') : 'high';
+  let quality = EXPORT_QUALITY_VALUES.has(String(raw.quality || 'high')) ? String(raw.quality || 'high') : 'high';
+  let rateMode = EXPORT_RATE_MODES.has(String(raw.rate_mode || '')) ? String(raw.rate_mode) : RATE_MODE_FROM_QUALITY[quality];
+  const rateMbpsRaw = Number(raw.rate_mbps);
+  const rateMbps = Number.isFinite(rateMbpsRaw) && rateMbpsRaw >= EXPORT_RATE_MBPS_MIN && rateMbpsRaw <= EXPORT_RATE_MBPS_MAX
+    ? Math.round(rateMbpsRaw * 100) / 100
+    : null;
+  // "Tùy chỉnh" mà số không hợp lệ -> Khuyến nghị (sidecar cũng tự lùi như vậy).
+  if (rateMode === 'custom' && rateMbps === null) rateMode = 'recommended';
+  if (EXPORT_RATE_MODES.has(String(raw.rate_mode || ''))) quality = QUALITY_FROM_RATE_MODE[rateMode];
   const audioBitrate = EXPORT_AUDIO_VALUES.has(String(raw.audio_bitrate || '192k')) ? String(raw.audio_bitrate || '192k') : '192k';
 
   return {
@@ -4798,6 +4818,8 @@ function normalizeExportSettings(body = {}) {
     fps,
     codec,
     quality,
+    rate_mode: rateMode,
+    ...(rateMode === 'custom' ? { rate_mbps: rateMbps } : {}),
     audio_bitrate: audioBitrate,
   };
 }
@@ -7592,4 +7614,6 @@ module.exports = {
   ensureSdrAsset,
   pruneSdrCache,
   exportOutputFrame,
+  // Test khoá ô "Bitrate" (mục 1.20): mức, số Mbps, lùi về Khuyến nghị, suy từ `quality` cũ.
+  normalizeExportSettings,
 };

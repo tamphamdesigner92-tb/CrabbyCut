@@ -916,6 +916,14 @@ struct ExportSettings {
   std::string renderFps = "30";
   std::string codec = "h264";
   std::string quality = "high";
+  /* Ô "Bitrate" kiểu CapCut (mục 1.20, người dùng chốt 2026-10-01) — thay ô "Chất lượng".
+   *   lower / recommended / higher: CHẤT LƯỢNG CỐ ĐỊNH có TRẦN (NVENC `-cq`, CPU CRF). Trần = bitrate
+   *     cố định cũ của Cân bằng / Cao / 2×Cao, nên bản xuất không bao giờ to hơn bản cũ cùng mức;
+   *     nguồn dễ nén (phim AV1 2 Mbps) thì nhỏ hẳn đi.
+   *   custom: bitrate trung bình người dùng nhập (`rateMbps`), đỉnh ×1,5.
+   * Payload cũ không có `rate_mode` thì suy từ `quality` (RateModeFromQuality). */
+  std::string rateMode = "recommended";
+  double rateMbps = 0.0;
   std::string audioBitrate = "192k";
   double mainAudioVolume = 100.0;
   /* ============ TRỤC THỜI GIAN THẬT CỦA FILE NGUỒN ============
@@ -1211,20 +1219,59 @@ double ClampDouble(double value, double minValue, double maxValue) {
   return std::max(minValue, std::min(maxValue, value));
 }
 
-std::string BitrateForHardware(const ExportSettings& settings) {
-  // Bitrate theo khung THẬT SỰ được mã hoá (cỡ xuất ở mục 1.12), không theo cỡ sequence.
+/* Ô "Bitrate" (ExportSettings::rateMode). Payload cũ chỉ có `quality`: Cao -> Khuyến nghị (cùng trần),
+ * Cân bằng -> Thấp hơn (cùng trần), Tệp nhỏ -> Thấp hơn. */
+const double kRateMbpsMin = 0.5;
+const double kRateMbpsMax = 400.0;
+
+std::string RateModeFromQuality(const std::string& quality) {
+  if (quality == "balanced" || quality == "small") return "lower";
+  return "recommended";
+}
+
+bool RateIsCustom(const ExportSettings& settings) {
+  return settings.rateMode == "custom" && settings.rateMbps >= kRateMbpsMin && settings.rateMbps <= kRateMbpsMax;
+}
+
+/* Mức chất lượng cố định của từng mức. NVENC `-cq` (đo VMAF trên 4.320 khung 4K, mục 1.20:
+ * 19 kém bitrate cố định cũ 0,1 điểm mà nhỏ hơn 29%); CPU là CRF của libx264/libx265 — Khuyến nghị
+ * giữ CRF 18 như trước. */
+int RateHardwareCq(const ExportSettings& settings) {
+  if (settings.rateMode == "lower") return 23;
+  if (settings.rateMode == "higher") return 16;
+  return 19;
+}
+
+std::string RateCpuCrf(const ExportSettings& settings) {
+  if (settings.rateMode == "lower") return "23";
+  if (settings.rateMode == "higher") return "16";
+  return "18";
+}
+
+/* Bitrate cho encoder phần cứng, kbps: TRẦN của các mức chất lượng (bitrate cố định cũ của cùng mức,
+ * "Cao hơn" gấp đôi Cao), hoặc bitrate TRUNG BÌNH người dùng nhập ở "Tùy chỉnh" (không nhân theo cỡ
+ * khung — người dùng đã chọn con số). Các mức theo khung THẬT SỰ được mã hoá (cỡ xuất ở mục 1.12). */
+int RateKbps(const ExportSettings& settings) {
+  if (RateIsCustom(settings)) {
+    return static_cast<int>(std::round(settings.rateMbps * 1000.0));
+  }
   const int width = OutputResized(settings) ? settings.outputWidth : (settings.width > 0 ? settings.width : 1920);
   const int height = OutputResized(settings) ? settings.outputHeight : (settings.height > 0 ? settings.height : 1080);
   const double pixels = static_cast<double>(std::max(1, width * height));
   const double scale = pixels / (1920.0 * 1080.0);
-  int baseKbps = 9000;
-  if (settings.codec == "hevc") {
-    baseKbps = settings.quality == "small" ? 4500 : (settings.quality == "balanced" ? 7000 : 11000);
-  } else {
-    baseKbps = settings.quality == "small" ? 5500 : (settings.quality == "balanced" ? 8500 : 13000);
-  }
-  const int kbps = ClampInt(static_cast<int>(std::round(baseKbps * scale)), 2500, 80000);
+  const bool hevc = settings.codec == "hevc";
+  int baseKbps = hevc ? 11000 : 13000;
+  if (settings.rateMode == "lower") baseKbps = hevc ? 7000 : 8500;
+  if (settings.rateMode == "higher") baseKbps = hevc ? 22000 : 26000;
+  return ClampInt(static_cast<int>(std::round(baseKbps * scale)), 2500, 80000);
+}
+
+std::string KbpsArg(long long kbps) {
   return std::to_string(kbps) + "k";
+}
+
+std::string BitrateForHardware(const ExportSettings& settings) {
+  return KbpsArg(RateKbps(settings));
 }
 
 std::string PreviewBitrate() {
@@ -1747,6 +1794,14 @@ bool ReadExportPayload(
   }
   if (!IsAllowed(settings.codec, {"h264", "hevc", "prores"})) settings.codec = "h264";
   if (!IsAllowed(settings.quality, {"small", "balanced", "high"})) settings.quality = "high";
+  settings.rateMode = ExtractStringField(text, "rate_mode", "");
+  settings.rateMbps = ExtractDoubleFieldOr(text, "rate_mbps", 0.0);
+  if (!IsAllowed(settings.rateMode, {"lower", "recommended", "higher", "custom"})) {
+    settings.rateMode = RateModeFromQuality(settings.quality);
+  }
+  if (settings.rateMode == "custom" && !(settings.rateMbps >= kRateMbpsMin && settings.rateMbps <= kRateMbpsMax)) {
+    settings.rateMode = "recommended";
+  }
   if (!IsAllowed(settings.audioBitrate, {"128k", "192k", "320k"})) settings.audioBitrate = "192k";
 
   std::string arrayContent;
@@ -3615,13 +3670,17 @@ void AppendCpuEncoderArgs(std::vector<std::string>& cmd, const ExportSettings& s
     cmd.insert(cmd.end(), {"-c:v", "prores_ks", "-profile:v", "3", "-c:a", "pcm_s16le"});
     return;
   }
-  const std::string crf = settings.quality == "small" ? "28" : (settings.quality == "balanced" ? "23" : "18");
   const std::string preset = QualityPreset(settings);
-  if (settings.codec == "hevc") {
-    cmd.insert(cmd.end(), {"-c:v", "libx265", "-preset", preset, "-crf", crf, "-tag:v", "hvc1"});
+  cmd.insert(cmd.end(), {"-c:v", settings.codec == "hevc" ? "libx265" : "libx264", "-preset", preset});
+  if (RateIsCustom(settings)) {
+    // "Tùy chỉnh": bitrate trung bình người dùng nhập, đỉnh ×1,5 (bộ đệm 2 giây của đỉnh).
+    const long long kbps = RateKbps(settings);
+    cmd.insert(cmd.end(), {"-b:v", KbpsArg(kbps), "-maxrate", KbpsArg(kbps * 3 / 2), "-bufsize", KbpsArg(kbps * 3)});
   } else {
-    cmd.insert(cmd.end(), {"-c:v", "libx264", "-preset", preset, "-crf", crf});
+    // Các mức chất lượng: CRF không trần — đúng hành vi CPU trước giờ (Khuyến nghị = CRF 18 cũ).
+    cmd.insert(cmd.end(), {"-crf", RateCpuCrf(settings)});
   }
+  if (settings.codec == "hevc") cmd.insert(cmd.end(), {"-tag:v", "hvc1"});
   cmd.insert(cmd.end(), {"-c:a", "aac", "-b:a", settings.audioBitrate});
 }
 
@@ -3635,8 +3694,20 @@ void AppendHardwareEncoderArgs(std::vector<std::string>& cmd, const ExportSettin
   if (plan.mode == "videotoolbox") {
     cmd.insert(cmd.end(), {"-c:v", plan.videoEncoder, "-b:v", bitrate, "-realtime", "1", "-prio_speed", "1"});
   } else if (plan.mode == "nvenc") {
-    cmd.insert(cmd.end(), {"-c:v", plan.videoEncoder, "-preset", "fast", "-b:v", bitrate});
+    /* `-preset fast` = p1 + tune hq (md5 trùng khi thử trên cùng khung). Mức chất lượng: VBR đích 0
+     * + `-cq` + trần `-maxrate` — cảnh khó chạm trần thì như bitrate cố định cũ, cảnh dễ thì nhỏ
+     * hẳn. Đo (mục 1.20): tốc độ như nhau ở mọi mức; phim AV1 4K 39,1 -> 27,7 Mbps ở cq 19. */
+    const long long kbps = RateKbps(settings);
+    cmd.insert(cmd.end(), {"-c:v", plan.videoEncoder, "-preset", "fast", "-rc", "vbr"});
+    if (RateIsCustom(settings)) {
+      cmd.insert(cmd.end(), {"-b:v", KbpsArg(kbps), "-maxrate", KbpsArg(kbps * 3 / 2), "-bufsize", KbpsArg(kbps * 3)});
+    } else {
+      cmd.insert(cmd.end(), {"-cq", std::to_string(RateHardwareCq(settings)), "-b:v", "0",
+                             "-maxrate", KbpsArg(kbps), "-bufsize", KbpsArg(kbps * 2)});
+    }
   } else if (plan.mode == "qsv") {
+    /* QSV/AMF/VideoToolbox: chưa có máy để đo chế độ chất lượng của chúng -> giữ bitrate cố định như
+     * trước, với con số của mức đã chọn (trần của mức chất lượng = bitrate cố định cũ cùng mức). */
     cmd.insert(cmd.end(), {"-c:v", plan.videoEncoder, "-preset", "veryfast", "-b:v", bitrate});
   } else if (plan.mode == "amf") {
     cmd.insert(cmd.end(), {"-c:v", plan.videoEncoder, "-quality", "speed", "-b:v", bitrate});

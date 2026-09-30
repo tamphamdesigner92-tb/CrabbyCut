@@ -5146,17 +5146,26 @@ HỆ QUẢ CÓ CHỦ Ý: trên desktop, chọn TỆP LẺ nay là LINK chứ kh�
 ### Preset Và Quality Export
 
 ```text
-- CPU fallback:
-  - quality=high: CRF 18, preset `veryfast`.
-  - quality=balanced: CRF 23, preset `veryfast`.
-  - quality=small: CRF 28, preset `ultrafast`.
-- Hardware encoder không dùng CRF thống nhất; sidecar map quality sang bitrate theo độ phân giải export.
+- Từ 2026-10-01 hộp thoại Xuất có ô "Bitrate" kiểu CapCut THAY ô "Chất lượng"
+  (`export_settings.rate_mode` = lower | recommended | higher | custom, `rate_mbps` cho custom;
+  người dùng chốt, xem mục 1.20 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md):
+  - Thấp hơn / Khuyến nghị (mặc định) / Cao hơn = CHẤT LƯỢNG CỐ ĐỊNH có TRẦN:
+    NVENC `-rc vbr -cq 23/19/16 -b:v 0 -maxrate TRẦN -bufsize 2×TRẦN`;
+    TRẦN = bitrate cố định cũ của Cân bằng / Cao / 2×Cao = 8.500 / 13.000 / 26.000 kbps (H.265:
+    7.000 / 11.000 / 22.000) cho 1080p, nhân theo số điểm ảnh của khung xuất, kẹp 2.500..80.000.
+    CPU: CRF 23/18/16, không trần (như trước).
+  - Tùy chỉnh (Mbps, 0,5..400): `-b:v T -maxrate 1,5T -bufsize 3T` (NVENC và CPU).
+  - QSV/AMF/VideoToolbox: chưa đo chế độ chất lượng của chúng -> `-b:v` = trần của mức (hoặc T).
+  - Payload cũ chỉ có `quality`: high -> recommended, balanced/small -> lower (backend + sidecar).
+  - ProRes không dùng bitrate -> ô bị khoá.
+- `quality` vẫn còn (suy từ mức: lower -> balanced, còn lại -> high) cho preset CPU và báo cáo:
+  - preset `veryfast`; quality=small (payload cũ) -> `ultrafast`.
 - Hardware encoder dùng chế độ ưu tiên tốc độ:
   - VideoToolbox: `-realtime 1 -prio_speed 1`.
-  - NVENC: `-preset fast`.
+  - NVENC: `-preset fast` (= p1 + tune hq).
   - QSV: `-preset veryfast`.
   - AMF: `-quality speed`.
-- Giá trị mặc định khi UI/backend không gửi đủ setting: codec=h264, quality=high, fps=source, resolution=source, audio_bitrate=192k.
+- Giá trị mặc định khi UI/backend không gửi đủ setting: codec=h264, rate_mode=recommended, fps=source, resolution=source, audio_bitrate=192k.
 ```
 
 ### Sequence, Resize Và Transform Khi Export

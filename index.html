@@ -2239,6 +2239,11 @@
         .transcribe-options-grid .form-group {
             margin-bottom: 0;
         }
+        /* Ô số Mbps của Bitrate "Tùy chỉnh" (hộp thoại Xuất) — nằm ngay dưới ô chọn. */
+        .export-bitrate-custom { display: flex; align-items: center; gap: var(--sp-3); margin-top: var(--sp-3); }
+        .export-bitrate-custom[hidden] { display: none; }
+        .export-bitrate-custom input { flex: 1 1 auto; min-width: 0; }
+        .export-bitrate-unit { font-size: var(--fs-xs); color: var(--text-muted); }
         input, select, textarea {
             width: 100%; padding: var(--sp-4) var(--sp-5);
             border: 1px solid var(--border-color);
@@ -3912,13 +3917,22 @@
             </div>
         </div>
         <div class="transcribe-options-grid">
+            <!-- Ô "Bitrate" kiểu CapCut (mục 1.20 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md, người dùng chốt
+                 2026-10-01) thay ô "Chất lượng" cũ. Ba mức đầu là CHẤT LƯỢNG CỐ ĐỊNH có trần: tệp tự
+                 nhỏ khi nguồn dễ nén, không bao giờ to hơn bitrate cố định cũ của cùng mức. "Tùy chỉnh"
+                 = bitrate trung bình (Mbps). ProRes không dùng bitrate -> ô bị khoá (syncExportBitrateUi). -->
             <div class="form-group">
-                <label for="exportQuality">Chất lượng</label>
-                <select id="exportQuality">
-                    <option value="high" selected>Cao</option>
-                    <option value="balanced">Cân bằng</option>
-                    <option value="small">Tệp nhỏ</option>
+                <label for="exportBitrate">Bitrate</label>
+                <select id="exportBitrate">
+                    <option value="lower">Thấp hơn</option>
+                    <option value="recommended" selected>Khuyến nghị</option>
+                    <option value="higher">Cao hơn</option>
+                    <option value="custom">Tùy chỉnh</option>
                 </select>
+                <div id="exportBitrateCustomRow" class="export-bitrate-custom" hidden>
+                    <input id="exportBitrateMbps" type="number" min="0.5" max="400" step="0.5" value="20" inputmode="decimal" aria-label="Bitrate (Mbps)">
+                    <span class="export-bitrate-unit">Mbps</span>
+                </div>
             </div>
             <div class="form-group">
                 <label for="exportAudioBitrate">Âm thanh</label>
@@ -16054,7 +16068,7 @@
         const exportResolution = document.getElementById('exportResolution')?.value || 'source';
         const exportFps = document.getElementById('exportFps')?.value || 'source';
         const exportCodec = document.getElementById('exportCodec')?.value || 'h264';
-        const exportQuality = document.getElementById('exportQuality')?.value || 'high';
+        const exportRate = readExportBitrate();
         const exportAudioBitrate = document.getElementById('exportAudioBitrate')?.value || '192k';
         const exportSettings = {
             resolution: 'sequence',
@@ -16062,7 +16076,8 @@
             sequence: sequencePayload,
             fps: exportFps,
             codec: exportCodec,
-            quality: exportQuality,
+            rate_mode: exportRate.mode,
+            ...(exportRate.mode === 'custom' ? { rate_mbps: exportRate.mbps } : {}),
             audio_bitrate: exportAudioBitrate,
         };
         const exportFileNameRaw = document.getElementById('exportFileName')?.value || '';
@@ -16151,6 +16166,7 @@
     document.getElementById('btnExportVideo').addEventListener('click', () => {
         if (document.getElementById('btnExportVideo').disabled) return;
         syncExportFileNameFromProject();
+        syncExportBitrateUi();   // sequence có thể đã đổi khổ từ lần mở trước
         if (window.EditingRuntime?.openExportModal) {
             window.EditingRuntime.openExportModal();
         }
@@ -16159,6 +16175,51 @@
     document.getElementById('btnExportFromStep4')?.addEventListener('click', () => {
         performVideoExport();
     });
+
+    /* Ô "Bitrate" (xem ghi chú ở markup). Cỡ khung THẬT SỰ được mã hoá = cỡ preset của "Kích thước
+     * video", hoặc cỡ sequence khi để "Theo Sequence" — cùng quy tắc với RateKbps của sidecar. */
+    const EXPORT_PRESET_FRAMES = {
+        p720: [1280, 720], p1080: [1920, 1080], p1440: [2560, 1440], p2160: [3840, 2160],
+        vertical_720: [720, 1280], vertical_1080: [1080, 1920], vertical_1440: [1440, 2560],
+        vertical_2160: [2160, 3840], square_1080: [1080, 1080],
+    };
+    // Số điền sẵn cho "Tùy chỉnh": trần của mức Khuyến nghị (13 Mbps cho H.264 1080p, 11 cho H.265).
+    function recommendedExportMbps() {
+        const preset = document.getElementById('exportResolution')?.value || 'source';
+        let seq = { width: 1920, height: 1080 };
+        try { seq = getSequencePayload(); } catch (_) { /* chưa có sequence: lấy 1080p */ }
+        const [w, h] = EXPORT_PRESET_FRAMES[preset] || [seq.width, seq.height];
+        const base = (document.getElementById('exportCodec')?.value === 'hevc') ? 11 : 13;
+        const mbps = base * (w * h) / (1920 * 1080);
+        return Math.min(80, Math.max(2.5, Math.round(mbps * 2) / 2));
+    }
+    let exportBitrateMbpsTouched = false;
+    function syncExportBitrateUi() {
+        const select = document.getElementById('exportBitrate');
+        const row = document.getElementById('exportBitrateCustomRow');
+        const input = document.getElementById('exportBitrateMbps');
+        if (!select || !row || !input) return;
+        const prores = document.getElementById('exportCodec')?.value === 'prores';
+        select.disabled = prores;
+        input.disabled = prores;
+        select.title = prores ? _t('ProRes không dùng bitrate (chất lượng cố định theo profile).') : '';
+        const custom = select.value === 'custom';
+        row.hidden = !custom;
+        if (custom && !exportBitrateMbpsTouched) input.value = String(recommendedExportMbps());
+    }
+    function readExportBitrate() {
+        const mode = document.getElementById('exportBitrate')?.value || 'recommended';
+        if (mode !== 'custom') return { mode };
+        const mbps = Number(String(document.getElementById('exportBitrateMbps')?.value || '').replace(',', '.'));
+        // Số không hợp lệ -> Khuyến nghị (backend và sidecar cũng lùi như vậy).
+        if (!Number.isFinite(mbps) || mbps < 0.5 || mbps > 400) return { mode: 'recommended' };
+        return { mode, mbps };
+    }
+    document.getElementById('exportBitrateMbps')?.addEventListener('input', () => { exportBitrateMbpsTouched = true; });
+    ['exportBitrate', 'exportCodec', 'exportResolution'].forEach((id) => {
+        document.getElementById(id)?.addEventListener('change', syncExportBitrateUi);
+    });
+    syncExportBitrateUi();
 </script>
 <script src="/static/js/editing-runtime.js?v=lumen-p5-lsub"></script>
 <script src="/static/js/perf-runtime.js"></script>
