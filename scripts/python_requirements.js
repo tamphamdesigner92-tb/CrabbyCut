@@ -101,11 +101,12 @@ const GROUPS = [
   },
   {
     id: 'logo_ai',
-    label: 'Xoá logo bằng AI',
-    trigger: 'Xoá logo bằng AI (MI-GAN)',
+    label: 'Xoá vật thể bằng AI',
+    trigger: 'Xoá vật thể bằng AI (LaMa)',
     /* asr/logo_inpaint_sidecar.py import lười bên trong hàm: onnxruntime ở open_session(),
-     * cv2 + numpy ở process(). Model MI-GAN (28 MB) KHÔNG phải gói pip — sidecar tự tải nó
-     * vào thư mục models ở lần chạy đầu (xem backend/logo-ai.js -> MODEL). Trên Windows
+     * cv2 + numpy ở process(); cv2 phải là bản contrib (bộ bám vật thể CSRT). Model LaMa
+     * (208 MB) KHÔNG phải gói pip — sidecar tự tải nó vào thư mục models ở lần chạy đầu (xem
+     * backend/logo-ai.js -> MODEL). Trên Windows
      * faster-whisper đã kéo onnxruntime về, nên máy đã cài ASR thì nhóm này gần như miễn phí. */
     modules: [
       { module: 'onnxruntime', pip: 'onnxruntime', source: 'asr/logo_inpaint_sidecar.py:open_session' },

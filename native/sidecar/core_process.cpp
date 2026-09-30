@@ -760,9 +760,9 @@ struct ExportInterval {
   // "x:y:w:h:p|..." do backend dựng lại từ số đã kẹp. Rỗng = không xoá. Xem AppendLogoRemovalFilters.
   std::string logoMode;
   std::string logoRects;
-  // XOÁ LOGO BẰNG AI: thư mục một lượt của backend/logo-ai.js (r{k}.ffconcat + miếng vá PNG),
+  // XOÁ VẬT THỂ BẰNG AI: thư mục một lượt của backend/logo-ai.js (r{k}.ffconcat + miếng vá PNG),
   // vị trí miếng vá "x:y|..." (pixel stream nguồn) và PTS nguồn của khung ĐẦU lượt đó.
-  // Có dir thì thay cho logoMode/logoRects. Xem AppendLogoAiFilters.
+  // Dán SAU chuỗi logoMode/logoRects (cả hai có thể cùng có). Xem AppendLogoAiFilters.
   std::string logoAiDir;
   std::string logoAiRects;
   double logoAiT0 = 0.0;
@@ -868,9 +868,9 @@ struct ExportOverlay {
   // "x:y:w:h:p|..." do backend dựng lại từ số đã kẹp. Rỗng = không xoá. Xem AppendLogoRemovalFilters.
   std::string logoMode;
   std::string logoRects;
-  // XOÁ LOGO BẰNG AI: thư mục một lượt của backend/logo-ai.js (r{k}.ffconcat + miếng vá PNG),
+  // XOÁ VẬT THỂ BẰNG AI: thư mục một lượt của backend/logo-ai.js (r{k}.ffconcat + miếng vá PNG),
   // vị trí miếng vá "x:y|..." (pixel stream nguồn) và PTS nguồn của khung ĐẦU lượt đó.
-  // Có dir thì thay cho logoMode/logoRects. Xem AppendLogoAiFilters.
+  // Dán SAU chuỗi logoMode/logoRects (cả hai có thể cùng có). Xem AppendLogoAiFilters.
   std::string logoAiDir;
   std::string logoAiRects;
   double logoAiT0 = 0.0;
@@ -2098,9 +2098,11 @@ void AppendLogoRemovalFilters(std::ofstream& script, const std::string& mode,
   }
 }
 
-/* XOÁ LOGO BẰNG AI: dán các miếng vá đã vẽ sẵn (asr/logo_inpaint_sidecar.py) lên luồng nguồn.
+/* XOÁ VẬT THỂ BẰNG AI: dán các miếng vá đã vẽ sẵn (asr/logo_inpaint_sidecar.py) lên luồng nguồn.
  *
- * Mỗi vùng là MỘT chuỗi PNG theo đúng PTS của từng khung nguồn, đóng gói bằng `r{k}.ffconcat`
+ * Mỗi vùng (logo cố định hoặc vật thể chuyển động — miếng vá của vật thể cỡ hộp bao cả quãng
+ * nó đi, ngoài chỗ của từng khung thì alpha 0, nên vị trí dán vẫn cố định) là MỘT chuỗi PNG
+ * theo đúng PTS của từng khung nguồn, đóng gói bằng `r{k}.ffconcat`
  * (concat demuxer: mỗi ảnh hiện đúng tới khung sau, nguồn VFR vẫn đúng). Nạp bằng `movie=`
  * như mặt nạ (xem AppendVideoMaskFilter) để khỏi đánh số lại input của overlay.
  *
@@ -2120,7 +2122,8 @@ void AppendLogoAiFilters(std::ofstream& script, const std::string& dir, const st
   std::stringstream all(rectsSpec);
   std::string part;
   int k = 0;
-  while (k < 4 && std::getline(all, part, '|')) {
+  // Tối đa 8 miếng vá: 4 vùng cố định + 4 vật thể chuyển động (backend/logo-ai.js MAX_PATCHES).
+  while (k < 8 && std::getline(all, part, '|')) {
     const size_t colon = part.find(':');
     if (colon == std::string::npos) { k++; continue; }
     const long x = std::strtol(part.c_str(), nullptr, 10);
@@ -2269,10 +2272,11 @@ void WriteClipVideoFilters(
     timing << ",trim=end_frame=" << item.renderFrames;
   }
   script << "[0:v]" << UntaggedColorFix(settings.sourceColorUntagged) << timing.str();
+  // Công thức (vùng cố định) TRƯỚC, miếng vá AI (vùng 'ai' và/hoặc vật thể chuyển động) SAU —
+  // backend gửi được cả hai cho cùng một block (logo xoá bằng delogo + vật thể xoá bằng AI).
+  AppendLogoRemovalFilters(script, item.logoMode, item.logoRects, "logoc" + idx + "_");
   if (!item.logoAiDir.empty()) {
     AppendLogoAiFilters(script, item.logoAiDir, item.logoAiRects, item.logoAiT0, timing.str(), "logoaic" + idx + "_");
-  } else {
-    AppendLogoRemovalFilters(script, item.logoMode, item.logoRects, "logoc" + idx + "_");
   }
   // Clip lane chính đã setpts 0-based -> LOCALT trừ mốc 0.
   AppendColorAdjustFilters(script,
@@ -2805,10 +2809,10 @@ void WriteVisualOverlayFilter(
   }
   script << timing.str();
   // AI chỉ cho overlay VIDEO: ảnh tĩnh/chuỗi khung đã bake xoá logo ở frontend.
+  // Như lane chính: công thức trước, miếng vá AI sau.
+  AppendLogoRemovalFilters(script, overlay.logoMode, overlay.logoRects, "logoo" + id + "_");
   if (!overlay.logoAiDir.empty() && !OverlayIsImageLike(overlay) && !OverlayIsImageSequence(overlay)) {
     AppendLogoAiFilters(script, overlay.logoAiDir, overlay.logoAiRects, overlay.logoAiT0, timing.str(), "logoaio" + id + "_");
-  } else {
-    AppendLogoRemovalFilters(script, overlay.logoMode, overlay.logoRects, "logoo" + id + "_");
   }
   // Overlay giữ mốc tuyệt đối sau setpts -> LOCALT trừ timeline_start.
   AppendColorAdjustFilters(script,

@@ -13,7 +13,11 @@
  *      bằng màu của chính khung đó -> lệch một khung là vùng logo khác màu nền xung quanh.
  *      Chạy cả nguồn CFR, nguồn VFR, tốc độ 1.5x, và nhánh media overlay.
  *   5. Có model thật (CRAB_LOGO_AI_MODEL_DIR hoặc thư mục models mặc định) thì chạy thêm một
- *      ảnh tĩnh qua MI-GAN.
+ *      ảnh tĩnh qua LaMa.
+ *   6. VẬT THỂ CHUYỂN ĐỘNG: mô hình dữ liệu (mốc, nội suy), backend nhận mốc vật thể (khoá đổi
+ *      theo mốc), field xuất gộp công thức + AI, và end-to-end: một hộp trắng CHẠY ngang khung
+ *      trên nguồn đổi màu mỗi khung -> bám theo từ MỘT mốc, bản xuất không còn hộp trắng và
+ *      miếng vá của từng khung rơi đúng khung (cùng phép đo lệch màu như logo cố định).
  *
  * Chạy: node tests/scripts/logo_ai.js   (phần ffmpeg/python/sidecar tự bỏ qua nếu thiếu)
  * ========================================================================== */
@@ -66,6 +70,26 @@ function testModel() {
     LogoRemoval.applyRectRgba(b, W, r, 'delogo');
     assert.deepStrictEqual(a, b);
     console.log('  ✓ mô hình dữ liệu: chế độ ai + dự phòng delogo');
+
+    // Vật thể: mốc sắp theo t, mốc trùng (< KEY_EPS) giữ mốc sau, nội suy / giữ mốc ngoài.
+    const oc = LogoRemoval.normalize({ enabled: true, mode: 'delogo', objects: [{ keys: [
+        { t: 2, x: 0.5, y: 0.5, w: 0.2, h: 0.2 },
+        { t: 0, x: 0.1, y: 0.1, w: 0.2, h: 0.2 },
+        { t: 2.01, x: 0.6, y: 0.5, w: 0.2, h: 0.2 },
+    ] }] });
+    assert.strictEqual(oc.objects[0].keys.length, 2);
+    assert.strictEqual(oc.objects[0].keys[1].x, 0.6);
+    assert.ok(LogoRemoval.isActive(oc), 'chỉ có vật thể vẫn là đang bật');
+    assert.ok(LogoRemoval.needsAi(oc), 'vật thể luôn cần lượt AI');
+    assert.ok(!LogoRemoval.needsAi({ enabled: true, mode: 'delogo', regions: [{ x: 0.1, y: 0.1, w: 0.2, h: 0.2 }] }));
+    const mid = LogoRemoval.objectBoxAt(oc.objects[0], 1.005);
+    assert.ok(Math.abs(mid.x - 0.35) < 1e-3, `nội suy giữa hai mốc: ${mid.x}`);
+    assert.strictEqual(LogoRemoval.objectBoxAt(oc.objects[0], -5).x, 0.1);
+    assert.strictEqual(LogoRemoval.objectBoxAt(oc.objects[0], 99).x, 0.6);
+    const up = LogoRemoval.upsertObjectKey(oc.objects[0], 2.005, { x: 0.7, y: 0.5, w: 0.2, h: 0.2 });
+    assert.deepStrictEqual(up.keys.map((k) => k.x), [0.1, 0.7]);
+    assert.ok(!LogoRemoval.isEmpty({ enabled: false, objects: oc.objects }), 'tắt mà còn vật thể thì giữ');
+    console.log('  ✓ mô hình dữ liệu: vật thể chuyển động (mốc, nội suy, ghi đè mốc)');
 }
 
 // ------------------------------------------------------------------ 2. backend
@@ -163,6 +187,18 @@ async function testBackendQueue() {
         assert.strictEqual(k2.state, 'none');
         assert.notStrictEqual(k2.key, v.key);
 
+        // Vật thể: chỉ có vật thể (không vùng) là hợp lệ; mốc được kẹp/sắp; mốc khác -> khoá khác.
+        const objBody = { ...base, rects: [], objects: [{ keys: [{ t: 2, x: 10, y: 10, w: 40, h: 40 }, { t: 1, x: 300, y: 0, w: 999, h: 40 }] }] };
+        const on = ai.normalizeRequest({ ...objBody, start: 1, end: 3 });
+        assert.deepStrictEqual(on.objects[0].keys.map((k) => [k.t, k.x, k.w]), [[1, 300, 20], [2, 10, 40]]);
+        const ko1 = ai.request({ ...objBody, start: 1, end: 3 });
+        const ko2 = ai.request({ ...objBody, objects: [{ keys: [{ t: 2, x: 12, y: 10, w: 40, h: 40 }] }], start: 1, end: 3 });
+        assert.strictEqual(ko1.state, 'none');
+        assert.notStrictEqual(ko1.key, ko2.key);
+        assert.notStrictEqual(ko1.key, k2.key);
+        // Ảnh tĩnh: vật thể bị bỏ -> không còn gì để làm.
+        assert.throws(() => ai.request({ ...objBody, still: true }), /vật thể hợp lệ/);
+
         // Huỷ lượt đang chạy.
         const slow = ai.request({ ...base, start: 100, end: 101 }, { run: true });
         for (let i = 0; i < 100 && ai.jobStatus(slow.job_id).state !== 'running'; i++) await sleep(5);
@@ -194,10 +230,25 @@ async function testBackendQueue() {
     }
 
     // server.js: 'ai' không dùng được -> delogo trên các hình chữ nhật gửi kèm.
-    const { normalizeLogoRemovalFields } = require(path.join(ROOT, 'backend', 'server.js'));
+    const { normalizeLogoRemovalFields, logoAi } = require(path.join(ROOT, 'backend', 'server.js'));
     assert.deepStrictEqual(
         normalizeLogoRemovalFields({ mode: 'ai', key: 'abc', run: 'nope', rects: [{ x: 10, y: 20, w: 40, h: 30, p: 0 }] }),
         { logo_mode: 'delogo', logo_rects: '10:20:40:30:0' });
+    // Chế độ công thức + lượt AI của vật thể -> CẢ HAI bộ field (công thức trước, vá sau).
+    const realExport = logoAi.exportFields;
+    logoAi.exportFields = (raw) => (raw.key === 'k' && raw.run === 'r'
+        ? { logo_ai_dir: '/x', logo_ai_rects: '1:2', logo_ai_t0: 0 } : null);
+    try {
+        assert.deepStrictEqual(
+            normalizeLogoRemovalFields({ mode: 'blur', key: 'k', run: 'r', objects: 1, rects: [{ x: 10, y: 20, w: 40, h: 30, p: 3 }] }),
+            { logo_mode: 'blur', logo_rects: '10:20:40:30:3', logo_ai_dir: '/x', logo_ai_rects: '1:2', logo_ai_t0: 0 });
+        assert.deepStrictEqual(normalizeLogoRemovalFields({ mode: 'delogo', key: 'k', run: 'r', objects: 1, rects: [] }),
+            { logo_ai_dir: '/x', logo_ai_rects: '1:2', logo_ai_t0: 0 });
+        assert.deepStrictEqual(normalizeLogoRemovalFields({ mode: 'ai', key: 'k', run: 'r', rects: [{ x: 10, y: 20, w: 40, h: 30, p: 0 }] }),
+            { logo_ai_dir: '/x', logo_ai_rects: '1:2', logo_ai_t0: 0 });
+    } finally {
+        logoAi.exportFields = realExport;
+    }
     console.log('  ✓ backend: cổng an toàn, cache phủ khoảng, gộp sát / tách xa, huỷ, field xuất');
 }
 
@@ -390,7 +441,7 @@ function defaultModelDir() {
 function testRealModel() {
     const modelPath = path.join(defaultModelDir(), MODEL.file);
     if (!fs.existsSync(modelPath) || !ffmpegAvailable() || !pythonHas(['numpy', 'cv2', 'onnxruntime'])) {
-        console.log('  (bỏ qua MI-GAN thật: chưa có model/onnxruntime)');
+        console.log('  (bỏ qua LaMa thật: chưa có model/onnxruntime)');
         return;
     }
     const work = fs.mkdtempSync(path.join(os.tmpdir(), 'crab-logo-ai-real-'));
@@ -410,8 +461,88 @@ function testRealModel() {
         const patch = rawFrames(path.join(work, 'run', 'r0_000000.png'), index.rects[0].box.w, index.rects[0].box.h)[0];
         const f = 4 + (index.rects[0].box.w - logo.w - 8) / 2;
         const inner = meanRgb(patch, index.rects[0].box.w, { x: Math.round(f) + 6, y: Math.round(f) + 4, w: logo.w - 12, h: logo.h - 8 });
-        console.log(`  MI-GAN thật (${index.provider}): vùng logo trắng -> ${inner.map((v) => v.toFixed(0))}`);
-        assert.ok(Math.min(...inner) < 225, 'MI-GAN: logo trắng vẫn còn');
+        console.log(`  LaMa thật (${index.provider}): vùng logo trắng -> ${inner.map((v) => v.toFixed(0))}`);
+        assert.ok(Math.min(...inner) < 225, 'LaMa: logo trắng vẫn còn');
+    } finally {
+        fs.rmSync(work, { recursive: true, force: true });
+    }
+}
+
+/* VẬT THỂ CHUYỂN ĐỘNG end-to-end: hộp trắng CHẠY ngang trên nền đổi màu mỗi khung. Chỉ một
+ * mốc ở đầu đoạn -> lượt AI phải tự bám theo hộp; bản xuất (lane chính) không được còn khung
+ * nào có hộp trắng, và bên trong vị trí THẬT của hộp ở mỗi khung phải trùng màu nền quanh nó
+ * (miếng vá của vật thể cỡ cả quãng đi, alpha theo từng khung — lệch khung là lộ). Kèm một
+ * vùng logo CỐ ĐỊNH xoá bằng delogo cùng lúc (field công thức + field AI trên cùng block). */
+function testMovingObject() {
+    if (!ffmpegAvailable() || !fs.existsSync(SIDECAR) || !pythonHas(['numpy', 'cv2'])) {
+        console.log('  (bỏ qua vật thể end-to-end: thiếu ffmpeg/sidecar/numpy/cv2)');
+        return;
+    }
+    const W = 320; const H = 240;
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'crab-logo-ai-obj-'));
+    try {
+        const src = path.join(work, 'obj.mp4');
+        // Hộp 36×36 chạy 3 px/khung; nền đổi màu PHẲNG mỗi khung + vân dọc nhẹ cho bộ bám có
+        // chỗ bám; một "logo" trắng CỐ ĐỊNH ở góc trên phải cho vùng delogo.
+        const geq = "geq=r='20+mod(N*37\\,120)+mod(X\\,16)':g='20+mod(N*91+60\\,120)':b='20+mod(N*53+120\\,120)'";
+        execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error',
+            '-f', 'lavfi', '-i', `color=c=black:s=${W}x${H}:r=25:d=2`,
+            '-f', 'lavfi', '-i', 'color=c=white:s=36x36:r=25:d=2',
+            '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo:d=2',
+            '-filter_complex', [`[0:v]format=rgb24,${geq},drawbox=x=270:y=10:w=36:h=20:color=white:t=fill[bg]`,
+                "[bg][1:v]overlay=x='30+3*n':y=120,format=yuv420p[v]"].join(';'),
+            '-map', '[v]', '-map', '2:a', '-shortest',
+            '-c:v', 'libx264', '-crf', '12', '-c:a', 'aac', src]);
+        const index = runPySidecar({
+            source_path: src, still: false, start: 0, end: 2, frame_w: W, frame_h: H, rects: [],
+            objects: [{ keys: [{ t: 0.0, x: 28, y: 118, w: 40, h: 40 }] }],
+            out_dir: path.join(work, 'run'),
+        }, work);
+        const obj = index.rects.find((r) => r.kind === 'object');
+        assert.ok(obj && Array.isArray(obj.track) && obj.track.length === index.times.length, 'index phải có hộp bám từng khung');
+        // Bám đúng: tâm hộp bám theo tâm thật (30+3n+18) trong vài px.
+        let worstTrack = 0;
+        obj.core.forEach((c, i) => {
+            const n = Math.round(index.times[i] * 25);
+            worstTrack = Math.max(worstTrack, Math.abs(c[0] + c[2] / 2 - (30 + 3 * n + 18)));
+        });
+        assert.ok(worstTrack < 8, `bộ bám lệch ${worstTrack.toFixed(1)} px`);
+        const payload = {
+            resolution: 'source', width: W, height: H,
+            fps: '25', render_fps: '25', codec: 'h264', quality: 'high', audio_bitrate: '128k',
+            intervals: [{
+                index: 0, start: 0.2, end: 1.8, position_x: 0, position_y: 0,
+                scale: 100, rotation: 0, opacity: 100, audio_volume: 100,
+                logo_mode: 'delogo', logo_rects: '266:6:44:28:0',
+                logo_ai_dir: path.join(work, 'run'), logo_ai_rects: `${obj.box.x}:${obj.box.y}`, logo_ai_t0: index.times[0],
+            }],
+        };
+        const payloadPath = path.join(work, 'timeline.json');
+        fs.writeFileSync(payloadPath, JSON.stringify(payload));
+        const outPath = path.join(work, 'out.mp4');
+        const res = spawnSync(SIDECAR, ['export-video', src, outPath, payloadPath, work, 'high', '25'],
+            { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 });
+        assert.strictEqual(res.status, 0, `sidecar lỗi (vật thể):
+${res.stdout}
+${res.stderr}`);
+        const frames = rawFrames(outPath, W, H);
+        let worst = 0;
+        let white = 0;
+        let logoWhite = 0;
+        frames.slice(0, -1).forEach((f, i) => {
+            const n = i + 5;  // khung ra i = khung nguồn 0.2 s + i
+            const inner = { x: 30 + 3 * n + 6, y: 126, w: 24, h: 24 };
+            const ring = { x: 30 + 3 * n + 6, y: 170, w: 24, h: 12 };
+            const a = meanRgb(f, W, inner);
+            const b = meanRgb(f, W, ring);
+            worst = Math.max(worst, ...a.map((v, c) => Math.abs(v - b[c])));
+            if (Math.min(...a) > 225) white++;
+            if (Math.min(...meanRgb(f, W, { x: 276, y: 14, w: 24, h: 12 })) > 225) logoWhite++;
+        });
+        console.log(`  end-to-end vật thể chạy     ${frames.length} khung, bám lệch ≤ ${worstTrack.toFixed(1)} px, lệch màu vá/nền tối đa ${worst.toFixed(1)}`);
+        assert.strictEqual(white, 0, `vật thể trắng còn ở ${white} khung`);
+        assert.strictEqual(logoWhite, 0, `logo cố định (delogo) còn ở ${logoWhite} khung`);
+        assert.ok(worst <= 20, `miếng vá vật thể lệch khung / lệch màu (${worst.toFixed(1)})`);
     } finally {
         fs.rmSync(work, { recursive: true, force: true });
     }
@@ -422,6 +553,7 @@ async function main() {
     testModel();
     await testBackendQueue();
     testEndToEnd();
+    testMovingObject();
     testRealModel();
     console.log('logo_ai: OK');
 }

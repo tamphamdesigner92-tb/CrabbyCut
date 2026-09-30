@@ -4397,7 +4397,7 @@ function resolveRetouchSource(raw) {
   return resolved;
 }
 
-/* Model MI-GAN nằm cạnh runtime (%LOCALAPPDATA%\CrabbyCut\models) ở CẢ HAI đường chạy: tải một
+/* Model LaMa (Xoá vật thể AI) nằm cạnh runtime (%LOCALAPPDATA%\CrabbyCut\models) ở CẢ HAI đường chạy: tải một
  * lần cho mọi dự án, và chạy từ mã nguồn cũng không làm bẩn thư mục repo bằng 28 MB nhị phân. */
 function logoAiModelDir() {
   if (process.env.CRAB_LOGO_AI_MODEL_DIR) return path.resolve(process.env.CRAB_LOGO_AI_MODEL_DIR);
@@ -4911,22 +4911,29 @@ function normalizeVideoMaskFields(raw) {
   }
 }
 
-/* XOÁ LOGO của block -> hai field phẳng cho sidecar: `logo_mode` và `logo_rects`
- * ("x:y:w:h:p|..." — pixel NGUYÊN của stream mà chuỗi filter chạy trên đó, p = bán kính mờ
- * hoặc cạnh ô khảm). Frontend đã quy đổi bằng LogoRemoval.exportRects; ở đây chỉ DỰNG LẠI
- * chuỗi từ số đã kẹp, không nhận chuỗi nào của client — field này đổ thẳng vào filter script.
+/* XOÁ VẬT THỂ của block -> field phẳng cho sidecar:
+ *   - `logo_mode` + `logo_rects` ("x:y:w:h:p|..." — pixel NGUYÊN của stream mà chuỗi filter
+ *     chạy trên đó, p = bán kính mờ hoặc cạnh ô khảm) cho vùng CỐ ĐỊNH xoá bằng công thức.
+ *     Frontend đã quy đổi bằng LogoRemoval.exportRects; ở đây chỉ DỰNG LẠI chuỗi từ số đã kẹp,
+ *     không nhận chuỗi nào của client — field này đổ thẳng vào filter script.
+ *   - `logo_ai_*` khi có lượt AI `{ key, run }`: miếng vá của vùng cố định chế độ 'ai' VÀ/HOẶC
+ *     của vật thể chuyển động (vật thể luôn đi AI). Hai loại cùng có được: logo xoá bằng
+ *     delogo + vật thể xoá bằng AI -> sidecar chạy công thức trước rồi dán miếng vá.
  * Sidecar tự kẹp thêm theo kích thước thật của stream. */
 const LOGO_MODES = new Set(['delogo', 'blur', 'pixelate']);
 function normalizeLogoRemovalFields(raw) {
   if (!raw || typeof raw !== 'object') return {};
-  /* CHẾ ĐỘ AI: dán miếng vá của lượt `{ key, run }` — dir/vị trí/mốc đọc từ index TRÊN ĐĨA
-   * (logoAi.exportFields), không nhận đường dẫn nào của client. Lượt không dùng được (đã bị
-   * dọn, chưa xong) -> delogo trên cùng các hình chữ nhật frontend gửi kèm: thà logo được
-   * nội suy còn hơn bản xuất lộ nguyên logo mà không báo gì. */
+  /* LƯỢT AI: dir/vị trí/mốc đọc từ index TRÊN ĐĨA (logoAi.exportFields), không nhận đường dẫn
+   * nào của client. Lượt không dùng được (đã bị dọn, chưa xong) ở chế độ 'ai' -> delogo trên
+   * cùng các hình chữ nhật frontend gửi kèm: thà logo được nội suy còn hơn bản xuất lộ nguyên
+   * logo mà không báo gì. Vật thể chuyển động thì không có đường lùi công thức (hộp đổi mỗi
+   * khung) -> chỉ ghi log. */
+  const ai = raw.key && raw.run ? logoAi.exportFields({ ...raw, mode: 'ai' }) : null;
   if (raw.mode === 'ai') {
-    const ai = logoAi.exportFields(raw);
     if (ai) return ai;
     logStatus('[logo-ai] không dùng được miếng vá AI khi xuất — rơi về delogo');
+  } else if (raw.objects && !ai) {
+    logStatus('[logo-ai] vật thể chuyển động chưa có miếng vá AI dùng được — bản xuất KHÔNG xoá vật thể');
   }
   const mode = LOGO_MODES.has(raw.mode) ? raw.mode : 'delogo';
   const toInt = (v, lo, hi) => {
@@ -4942,8 +4949,9 @@ function normalizeLogoRemovalFields(raw) {
     if ([x, y, w, h, p].some((v) => v === null) || w < 6 || h < 6) return null;
     return `${x}:${y}:${w}:${h}:${p}`;
   }).filter(Boolean);
-  if (!rects.length) return {};
-  return { logo_mode: mode, logo_rects: rects.join('|') };
+  const out = rects.length ? { logo_mode: mode, logo_rects: rects.join('|') } : {};
+  if (ai && raw.mode !== 'ai') Object.assign(out, ai);
+  return out;
 }
 
 // Biểu thức keyframe -> FFmpeg do frontend sinh (chỉ số/hàm toán). Whitelist ký tự để
