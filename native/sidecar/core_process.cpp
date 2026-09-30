@@ -12,6 +12,7 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -4092,10 +4093,21 @@ int CommandExportVideo(int argc, char** argv) {
   /* ĐO TRỤC THỜI GIAN CỦA FILE NGUỒN — MỘT LẦN cho cả lượt export.
    * Xem khối chú thích ở ExportSettings::videoStart: mọi mốc `trim`/`atrim` phải cộng thêm
    * mốc bắt đầu thật của luồng, nếu không mỗi điểm nối lẻ ra một khung của cảnh trước. */
-  settings.videoStart = MediaStreamStartTime(source, "v:0");
-  settings.audioStart = MediaStreamStartTime(source, "a:0");
-  settings.sourceFps = MediaStreamFps(source);
+  /* Các lần dò nguồn độc lập nhau chạy SONG SONG: mỗi lần là một tiến trình ffprobe (~120 ms
+   * khởi động trên Windows), gọi nối tiếp cả lượt dò mất 1,8 s trên Bin Tom. Chỉ những hàm không
+   * có trạng thái chung (CommandOutput dùng biến cục bộ); MediaColorUntagged có cache tĩnh nên
+   * chạy ở luồng này, cùng lúc với các lần dò kia. */
+  auto videoStartProbe = std::async(std::launch::async, [&source]() { return MediaStreamStartTime(source, "v:0"); });
+  auto audioStartProbe = std::async(std::launch::async, [&source]() { return MediaStreamStartTime(source, "a:0"); });
+  auto fpsProbe = std::async(std::launch::async, [&source]() { return MediaStreamFps(source); });
+  // Seek vào giữa nguồn có an toàn không (seek theo batch + dải nguồn mục 1.1): chỉ đọc header gói.
+  auto seekSafeProbe = std::async(std::launch::async, [&source]() {
+    return BatchSeekEnabled() ? SourceSeekSafe(source) : false;
+  });
   settings.sourceColorUntagged = MediaColorUntagged(source);
+  settings.videoStart = videoStartProbe.get();
+  settings.audioStart = audioStartProbe.get();
+  settings.sourceFps = fpsProbe.get();
   if (settings.sourceColorUntagged) {
     Emit("progress", "Nguồn không gắn nhãn màu — đọc theo BT.709 cho khớp preview.");
   }
@@ -4122,10 +4134,9 @@ int CommandExportVideo(int argc, char** argv) {
       && !TextOverlaySupported()) {
     Emit("progress", "FFmpeg hiện tại không có drawtext; text overlay sẽ bị bỏ qua khi export.");
   }
-  /* Seek vào giữa nguồn có an toàn không — dùng cho seek theo batch (batch chỉ-hình) và dải
-   * nguồn (mục 1.1, mọi nhánh có hình). Dò một lần: chỉ đọc header gói. */
+  // Kết quả dò seek (chạy song song từ đầu lượt, xem seekSafeProbe).
+  settings.seekSafe = seekSafeProbe.get();
   if (BatchSeekEnabled()) {
-    settings.seekSafe = SourceSeekSafe(source);
     if (!settings.seekSafe) {
       Emit("progress", "Video nguồn là bản nối nhiều cấu hình mã hoá — không seek theo batch/dải.");
     }
