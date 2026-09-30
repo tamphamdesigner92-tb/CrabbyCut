@@ -96,7 +96,13 @@ async function main() {
   assert.ok(fs.existsSync(again.path), 'dọn cache không được xoá bản đang dùng trong temp_uploads');
   fs.rmSync(path.join(tempDir, 'editing_assets'), { recursive: true, force: true });
   await ensureSdrAsset(usedPath);
-  pruneSdrCache({ ttlMs: -1 });
+  /* Dọn lặp tới khi sạch (tối đa ~2 s): bản mp4 VỪA dựng có lúc còn bị giữ handle một nhịp
+   * (ffmpeg chưa nhả hẳn / trình quét virus) nên lượt xoá đầu thất bại và pruneSdrCache bỏ qua
+   * mục đó — trong app nó được dọn ở lượt sau, vô hại; đòi sạch ngay lần đầu là test chập chờn. */
+  for (let i = 0; i < 20 && cacheEntries().length; i += 1) {
+    pruneSdrCache({ ttlMs: -1 });
+    if (cacheEntries().length) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
   assert.deepStrictEqual(cacheEntries(), [], 'quá hạn dùng thì phải dọn');
   console.log('  ok  dọn cache SDR theo trần dung lượng và hạn dùng');
 
