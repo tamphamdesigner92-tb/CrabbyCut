@@ -4681,7 +4681,8 @@ const EXPORT_FPS_VALUES = new Set(['source', '23.976', '24', '25', '29.97', '30'
  * về `output_content_*` rồi đệm đen cho đủ `output_*` (xem OutputColorFilters ở sidecar).
  *   'fit'   — như Premiere (Scale To Fit): đúng cỡ preset, hình co vừa, khổ lệch thì có viền đen;
  *   'short' — như CapCut: giữ khổ sequence, preset chỉ quy định cạnh ngắn, không viền.
- * Trả null = xuất đúng cỡ sequence ('source', 'custom', hoặc preset trùng cỡ sequence). */
+ * Trả null = xuất đúng cỡ sequence ('source', 'custom', hoặc preset trùng cỡ sequence).
+ * Người dùng chốt 2026-09-30: làm như Premiere ('fit'); 'short' giữ lại phòng khi thêm lựa chọn. */
 const EXPORT_SCALE_MODE = 'fit';
 
 function exportOutputFrame(sequenceWidth, sequenceHeight, preset, mode = EXPORT_SCALE_MODE) {
