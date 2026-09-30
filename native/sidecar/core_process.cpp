@@ -3111,6 +3111,30 @@ bool OverlayStillOnce(const ExportOverlay& overlay) {
       && overlay.adjustMaskPath.empty() && overlay.videoMaskPath.empty();
 }
 
+/* GIỮ KHUNG CUỐI CỦA CHUỖI KHUNG HOẠT ẢNH BẰNG KHUNG NHÂN BẢN, KHÔNG BẰNG eof_action=repeat.
+ *
+ * Chuỗi PNG của item hoạt ảnh phủ trọn cửa sổ In→Hold→Out, nhưng `setpts=…+start/TB` cắt phần lẻ
+ * (D2TS) nên cả chuỗi có thể sớm lên gần một khung và hết TRƯỚC mép cửa sổ 1–3 khung nền. Trước
+ * đây giữ khung cuối bằng `eof_action=repeat` — đúng hình, nhưng đắt: đo 2026-09-30 trên "Bin Tom"
+ * (17 chuỗi, 1.043 khung): cả lượt 14,8 s so với 11,0–11,3 s khi `pass`; luồng filter 8,6 so với
+ * 4,2 CPU-giây, kể cả khi thay khung PNG bằng ảnh 16×16 — tức là phí của khung sườn chứ không phải
+ * của phép trộn. `pass` trơn thì mất đúng 10 khung ở mép cửa sổ (426–427, 697–698, …).
+ * Cách mới: nối K khung nhân bản khung cuối (`tpad clone`, chỉ tăng tham chiếu) rồi `pass`. K đủ
+ * để chuỗi còn khung tới hết cửa sổ: mép cửa sổ ≤ start + duration − 0,5/fps, chuỗi (đã sớm tối đa
+ * một khung) có N + K khung -> K > duration·fps + 0,5 − N; cộng 1 khung dư. Khung nhân bản quá
+ * cửa sổ bị `enable` che như với repeat. Không biết N (payload cũ) thì giữ repeat.
+ * Env tắt: CRABBYCUT_EXPORT_SEQPASS=0. */
+int SequenceTailFrames(const ExportOverlay& overlay) {
+  if (!OverlayIsImageSequence(overlay) || overlay.frameCount <= 0 || !(overlay.seqFps > 0.0)) return 0;
+  const char* env = std::getenv("CRABBYCUT_EXPORT_SEQPASS");
+  if (env) {
+    const std::string value = env;
+    if (value == "0" || value == "false" || value == "off") return 0;
+  }
+  const double needed = overlay.duration * overlay.seqFps + 0.5 - static_cast<double>(overlay.frameCount);
+  return std::max(1, static_cast<int>(std::ceil(needed)) + 1);
+}
+
 void WriteVisualOverlayFilter(
   std::ofstream& script,
   const ExportOverlay& overlay,
@@ -3257,6 +3281,9 @@ void WriteVisualOverlayFilter(
     script << ",loop=loop=-1:size=1,trim=duration=" << FixedSeconds(overlay.duration) << ",";
     writeSetpts();
   }
+  // Chuỗi khung: nối khung nhân bản ở đuôi thay cho eof_action=repeat (xem SequenceTailFrames).
+  const int seqTail = SequenceTailFrames(overlay);
+  if (seqTail > 0) script << ",tpad=stop=" << seqTail << ":stop_mode=clone";
   script << "[ov" << id << "];\n";
 
   script << inputLabel << "[ov" << id << "]overlay=";
@@ -3282,10 +3309,11 @@ void WriteVisualOverlayFilter(
            << (overlay.positionY >= 0 ? "+" : "") << FfmpegDouble(overlay.positionY);
   }
   script << ":enable='between(t," << FfmpegDouble(OverlayEnableStart(start, settings)) << "," << FfmpegDouble(end) << ")'"
-         // Sequence hoạt ảnh: GIỮ frame cuối sau EOF (repeat) — nếu pass, text sẽ
-         // biến mất đúng 1 frame tại ranh giới sequence->hold gây "nháy"; enable
-         // window vẫn gate hiển thị đúng đoạn nên repeat không làm dư hình
-         << ":eof_action=" << (OverlayIsImageSequence(overlay) ? "repeat" : "pass")
+         // Sequence hoạt ảnh: GIỮ frame cuối sau EOF — nếu pass mà chuỗi hết sớm, text
+         // biến mất 1–3 frame ở cuối cửa sổ gây "nháy"; enable window vẫn gate hiển thị.
+         // Nay giữ bằng các khung nhân bản ở đuôi chuỗi (SequenceTailFrames) + pass; chỉ
+         // khi không biết số khung mới dùng repeat (đắt, xem SequenceTailFrames).
+         << ":eof_action=" << ((OverlayIsImageSequence(overlay) && seqTail == 0) ? "repeat" : "pass")
          << ":format=" << (yuvStatic ? "yuv420" : "auto");
   // Lớp phủ động trong chuỗi YUV: ghép RGBA như cũ rồi về ngay yuv420p BT.709/tv, để lớp sau
   // (và cả phần còn lại của chuỗi) không phải kéo luồng chính qua RGBA.
