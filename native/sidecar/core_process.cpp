@@ -1040,6 +1040,7 @@ struct ExportRunTiming {
   double sequenceDuration = 0.0;
   double seekTo = 0.0;   // 0 = không seek (giải mã nguồn từ giây 0)
   size_t fastClips = 0;  // số clip lane chính đi đường nhanh YUV (mục 1.3)
+  size_t sourceRanges = 0;  // số input nguồn riêng theo dải (mục 1.1); 0 = mọi clip đọc [0:v]
   double runMs = 0.0;
   int exitCode = 0;
   bool cpuRetry = false;
@@ -1112,6 +1113,7 @@ std::string ExportTimingJson(const std::string& encoder) {
         << ",\"sequence_duration\":" << run.sequenceDuration
         << ",\"seek_to\":" << run.seekTo
         << ",\"fast_clips\":" << run.fastClips
+        << ",\"source_ranges\":" << run.sourceRanges
         << std::setprecision(1)
         << ",\"run_ms\":" << run.runMs << ",\"exit\":" << run.exitCode
         << ",\"cpu_retry\":" << (run.cpuRetry ? "true" : "false") << "}";
@@ -1564,9 +1566,10 @@ void ProbeMainSourceForFastPath(const std::string& source, ExportSettings& setti
   // yuva*: đường cũ dựng alpha của nguồn lên nền đen, đường nhanh thì bỏ alpha -> không đi.
   const bool yuv = pixFmt.rfind("yuv", 0) == 0 && pixFmt.rfind("yuva", 0) != 0;
   const bool bt709 = space == "bt709" || settings.sourceColorUntagged;
+  // Cỡ nguồn ghi cả khi không đi đường nhanh: số dải nguồn (MaxSourceRanges) cũng cần nó.
+  settings.sourceWidth = width > 0 ? static_cast<int>(width) : 0;
+  settings.sourceHeight = height > 0 ? static_cast<int>(height) : 0;
   if (!yuv || !bt709 || rotated || width <= 0 || height <= 0) return;
-  settings.sourceWidth = static_cast<int>(width);
-  settings.sourceHeight = static_cast<int>(height);
   ChromaLocationPos(chromaLoc, settings.sourceChromaH, settings.sourceChromaV);
   settings.fastPathSource = true;
 }
@@ -2301,6 +2304,10 @@ struct MainLaneFast {
 // Số clip của lượt đang ghi đi đường nhanh — ghi vào số đo (ExportRunTiming::fastClips).
 static int g_fastClipCount = 0;
 
+// Input mang hình của từng clip trong lượt đang ghi (chỉ số tính từ đầu batch). Rỗng = mọi clip
+// đọc [0:v]. ExportBatch điền trước khi ghi filter script — xem PlanSourceRanges.
+static std::vector<int> g_clipVideoInput;
+
 // Clip có chuỗi màu nào (của chính nó, lớp Điều chỉnh, các lớp thêm) — xem MainLaneFastPlan.
 bool IntervalHasColorAdjust(const ExportInterval& item) {
   return !item.adjustFilters.empty() || !item.adjustFiltersPost.empty() || !item.adjustMaskPath.empty()
@@ -2497,7 +2504,9 @@ void WriteClipVideoFilters(
     trimEnd -= halfFrame;
   }
   trimStart = std::max(0.0, trimStart);
-  script << "[0:v]" << UntaggedColorFix(settings.sourceColorUntagged)
+  // Input mang hình của clip này: 0, hoặc input riêng của dải nguồn chứa nó (xem PlanSourceRanges).
+  const int videoInput = localIndex < g_clipVideoInput.size() ? g_clipVideoInput[localIndex] : 0;
+  script << "[" << videoInput << ":v]" << UntaggedColorFix(settings.sourceColorUntagged)
          << "trim=start=" << FixedSeconds(trimStart) << ":end=" << FixedSeconds(trimEnd)
          << ",setpts=PTS-STARTPTS";
   // TỐC ĐỘ: nén/dãn trục thời gian TRƯỚC bước `fps=` — sau `fps=` thì khung đã bị
@@ -3568,6 +3577,94 @@ double BatchSeekSeconds(const std::vector<ExportInterval>& intervals, size_t off
   return seekTo >= kBatchSeekMinSeconds ? seekTo : 0.0;
 }
 
+/* ===== MỖI DẢI NGUỒN MỘT INPUT (mục 1.1, docs/KE_HOACH_TOI_UU_EXPORT_WIN.md) =====
+ *
+ * Mọi clip lane chính đọc CÙNG một [0:v]: bộ giải mã chạy một mạch từ đầu tới mốc cuối mà batch
+ * cần, và MỖI khung được phát tới đủ N nhánh `trim` rồi phần lớn bị vứt. Dự án cắt theo kịch bản
+ * (clip rải khắp nguồn) trả giá nặng nhất. Đo 2026-09-30 trên "Bin Tom - Tap 3" (20 clip, dùng
+ * 76,6 s trên dải nguồn 9,96 → 265 s, H.264 1080×1920): 19–21 s -> 16,1–16,5 s khi gom thành 12
+ * dải, CPU 95 -> 67 CPU-giây, bản xuất trùng framemd5 2.297/2.297 khung; RAM 1,53 -> 1,68 GB.
+ *
+ * Cách làm y như seek theo batch (xem khối chú thích ở trên): mỗi dải là một input
+ * `-itsoffset S -ss S -i nguồn`, PTS giữ nguyên nên `trim` của từng clip dùng nguyên. Dải = các
+ * cửa sổ `trim` (tính y như WriteClipVideoFilters) xếp theo mốc nguồn, gộp khi cách nhau dưới
+ * kRangeMergeGapSeconds; quá MaxSourceRanges thì gộp hai dải có khe nhỏ nhất. Mọi bộ giải mã
+ * khởi động cùng lúc (đồ hình chỉ cấu hình khi mọi input đã có khung), nên số dải giảm theo độ
+ * phân giải nguồn. Lượt tiếng không dùng dải: tiếng vẫn giải mã từ 0 trên input 0 (xem lý do AAC
+ * ở trên). Batch chỉ-hình thì dải đầu dùng luôn input 0 — một dải là đúng seek theo batch cũ.
+ * Chỉ khi seek an toàn (SourceSeekSafe). Tắt: CRABBYCUT_EXPORT_RANGES=0. */
+constexpr double kRangeMergeGapSeconds = 2.0;
+
+bool SourceRangesEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_RANGES");
+  if (!env) return true;
+  const std::string value = env;
+  return !(value == "0" || value == "false" || value == "off");
+}
+
+// 12 dải ở ≤ 1080p, 6 ở 4K (giảm theo căn bậc hai số điểm ảnh); chưa đo được cỡ nguồn thì 6.
+size_t MaxSourceRanges(const ExportSettings& settings) {
+  if (settings.sourceWidth <= 0 || settings.sourceHeight <= 0) return 6;
+  const double pixels = static_cast<double>(settings.sourceWidth) * settings.sourceHeight;
+  const long n = std::lround(12.0 * std::sqrt((1920.0 * 1080.0) / std::max(1.0, pixels)));
+  return static_cast<size_t>(std::max(4L, std::min(12L, n)));
+}
+
+struct SourceRangePlan {
+  std::vector<double> seekTo;     // mỗi dải một mốc seek (0 = không seek)
+  std::vector<size_t> clipRange;  // clip (chỉ số trong batch) -> dải
+  bool inputZeroIsRange = false;  // dải 0 dùng luôn input 0 (batch chỉ-hình)
+  bool active() const { return !seekTo.empty(); }
+};
+
+SourceRangePlan PlanSourceRanges(const std::vector<ExportInterval>& intervals, size_t offset, size_t count,
+                                 const ExportSettings& settings, FilterScriptMode mode) {
+  SourceRangePlan plan;
+  if (!SourceRangesEnabled() || !BatchSeekEnabled() || !settings.seekSafe || count == 0
+      || mode == FilterScriptMode::AudioOnly) {
+    return plan;
+  }
+  struct Group { double from; double to; std::vector<size_t> clips; };
+  std::vector<Group> wins;
+  const double half = settings.sourceFps > 0.0 ? 0.5 / settings.sourceFps : 0.0;
+  for (size_t i = 0; i < count; i++) {
+    const ExportInterval& item = intervals[offset + i];
+    const double from = std::max(0.0, item.start + settings.videoStart - half);
+    const double to = std::max(from, item.end + settings.videoStart - half);
+    wins.push_back({from, to, {i}});
+  }
+  std::stable_sort(wins.begin(), wins.end(), [](const Group& a, const Group& b) { return a.from < b.from; });
+  std::vector<Group> groups;
+  for (auto& w : wins) {
+    if (!groups.empty() && w.from - groups.back().to < kRangeMergeGapSeconds) {
+      groups.back().to = std::max(groups.back().to, w.to);
+      groups.back().clips.push_back(w.clips.front());
+    } else {
+      groups.push_back(w);
+    }
+  }
+  const size_t maxRanges = MaxSourceRanges(settings);
+  while (groups.size() > maxRanges) {
+    size_t best = 0;
+    for (size_t i = 1; i + 1 < groups.size(); i++) {
+      if (groups[i + 1].from - groups[i].to < groups[best + 1].from - groups[best].to) best = i;
+    }
+    groups[best].to = std::max(groups[best].to, groups[best + 1].to);
+    groups[best].clips.insert(groups[best].clips.end(), groups[best + 1].clips.begin(), groups[best + 1].clips.end());
+    groups.erase(groups.begin() + static_cast<long>(best) + 1);
+  }
+  plan.inputZeroIsRange = mode == FilterScriptMode::VideoOnly;
+  plan.clipRange.assign(count, 0);
+  for (size_t k = 0; k < groups.size(); k++) {
+    const double seek = groups[k].from - kBatchSeekMarginSeconds;
+    plan.seekTo.push_back(seek >= kBatchSeekMinSeconds ? seek : 0.0);
+    for (size_t clip : groups[k].clips) plan.clipRange[clip] = k;
+  }
+  // Batch có tiếng, một dải, không seek = đúng [0:v] như cũ: giữ nguyên lệnh.
+  if (!plan.inputZeroIsRange && groups.size() == 1 && plan.seekTo[0] <= 0.0) return SourceRangePlan();
+  return plan;
+}
+
 void AppendOverlayInputArgs(
   std::vector<std::string>& cmd,
   const std::vector<ExportOverlay>& overlays,
@@ -3656,7 +3753,22 @@ int ExportBatch(
 ) {
   fs::create_directories(fs::path(output).parent_path());
   fs::path scriptPath = tempDir / ("export_filter_batch_" + std::to_string(batchIndex) + ".txt");
-  if (!WriteFilterScript(scriptPath, intervals, offset, count, settings, overlays, mode)) {
+  /* Dải nguồn (mục 1.1, xem PlanSourceRanges): input thêm đứng SAU input lớp phủ, nên chỉ số
+   * lớp phủ (1 + assetInputIndex) giữ nguyên. Phải biết trước khi ghi filter script. */
+  const SourceRangePlan ranges = PlanSourceRanges(intervals, offset, count, settings, mode);
+  int overlayInputs = 0;
+  for (const auto& overlay : overlays) {
+    if (OverlayNeedsInput(overlay)) overlayInputs++;
+  }
+  const size_t firstExtraRange = ranges.inputZeroIsRange ? 1 : 0;
+  g_clipVideoInput.clear();
+  for (size_t i = 0; ranges.active() && i < count; i++) {
+    const size_t k = ranges.clipRange[i];
+    g_clipVideoInput.push_back(k < firstExtraRange ? 0 : 1 + overlayInputs + static_cast<int>(k - firstExtraRange));
+  }
+  const bool scriptOk = WriteFilterScript(scriptPath, intervals, offset, count, settings, overlays, mode);
+  g_clipVideoInput.clear();
+  if (!scriptOk) {
     Emit("error", "cannot write ffmpeg filter script", 6);
     return 6;
   }
@@ -3694,7 +3806,8 @@ int ExportBatch(
   };
   // Seek theo batch: xem khối chú thích ở BatchSeekSeconds — PTS không đổi nên filter script
   // viết ở trên dùng nguyên được.
-  const double seekTo = BatchSeekSeconds(intervals, offset, count, settings, mode);
+  const double seekTo = ranges.inputZeroIsRange ? ranges.seekTo[0]
+                                                : BatchSeekSeconds(intervals, offset, count, settings, mode);
   if (seekTo > 0.0) {
     baseCmd.insert(baseCmd.end(), {"-itsoffset", FixedSeconds(seekTo), "-ss", FixedSeconds(seekTo)});
   }
@@ -3703,6 +3816,7 @@ int ExportBatch(
   ExportRunTiming timing;
   timing.seekTo = seekTo;
   timing.fastClips = static_cast<size_t>(g_fastClipCount);
+  timing.sourceRanges = ranges.seekTo.size();
   timing.mode = mode == FilterScriptMode::AudioOnly ? "audio"
               : (mode == FilterScriptMode::VideoOnly ? "video" : "full");
   timing.label = mode == FilterScriptMode::AudioOnly
@@ -3723,6 +3837,13 @@ int ExportBatch(
   auto runOnce = [&](const std::string& runLabel) {
     std::vector<std::string> cmd = baseCmd;
     AppendOverlayInputArgs(cmd, overlays, timing.sequenceDuration, tempDir);
+    for (size_t k = firstExtraRange; k < ranges.seekTo.size(); k++) {
+      cmd.insert(cmd.end(), {"-reinit_filter", "0"});
+      if (ranges.seekTo[k] > 0.0) {
+        cmd.insert(cmd.end(), {"-itsoffset", FixedSeconds(ranges.seekTo[k]), "-ss", FixedSeconds(ranges.seekTo[k])});
+      }
+      cmd.insert(cmd.end(), {"-i", source});
+    }
     AppendStreamMapArgs(cmd, scriptPath, mode);
     AppendEncoderArgsForMode(cmd, settings, plan, mode);
     if (bench) {
@@ -3973,6 +4094,14 @@ int CommandExportVideo(int argc, char** argv) {
       && !TextOverlaySupported()) {
     Emit("progress", "FFmpeg hiện tại không có drawtext; text overlay sẽ bị bỏ qua khi export.");
   }
+  /* Seek vào giữa nguồn có an toàn không — dùng cho seek theo batch (batch chỉ-hình) và dải
+   * nguồn (mục 1.1, mọi nhánh có hình). Dò một lần: chỉ đọc header gói. */
+  if (BatchSeekEnabled()) {
+    settings.seekSafe = SourceSeekSafe(source);
+    if (!settings.seekSafe) {
+      Emit("progress", "Video nguồn là bản nối nhiều cấu hình mã hoá — không seek theo batch/dải.");
+    }
+  }
   g_exportTiming.probeMs = MsSince(g_exportTiming.started);
 
   if (!overlays.empty()) {
@@ -3995,15 +4124,6 @@ int CommandExportVideo(int argc, char** argv) {
     const std::string ext = settings.codec == "prores" ? ".mov" : ".mp4";
     Emit("progress", "Chia " + std::to_string(batches.size()) + " lượt render theo thời gian "
                      + "(giữ chuỗi lớp phủ ngắn để render không chậm dần theo độ dài phim)...");
-    // Batch hình ở đây là batch DUY NHẤT được seek (xem BatchSeekSeconds) -> dò ở đây, một lần.
-    if (BatchSeekEnabled()) {
-      const auto seekProbeStarted = ExportClock::now();
-      settings.seekSafe = SourceSeekSafe(source);
-      g_exportTiming.probeMs += MsSince(seekProbeStarted);
-      if (!settings.seekSafe) {
-        Emit("progress", "Video nguồn là bản nối nhiều cấu hình mã hoá — không seek theo batch.");
-      }
-    }
 
     std::vector<std::string> batchPaths;
     for (size_t i = 0; i < batches.size(); i++) {
