@@ -312,13 +312,9 @@ function createLogoAi(options) {
       if (job.canceled) throw Object.assign(new Error('canceled'), { canceled: true });
       const index = readIndex(outDir) || payload?.index;
       if (!index) throw new Error(t('Sidecar không trả kết quả.'));
-      job.index = index;
-      job.run = runId;
-      job.progress = 1;
-      job.state = 'done';
-      job.message = t('Đã xoá logo bằng AI.');
-      setStatus(t('Đã xoá logo bằng AI ({n} khung).', { n: index.times.length }));
       // Lượt cũ bị lượt này phủ trọn -> dọn (preview đang giữ đường dẫn cũ sẽ hỏi lại trạng thái).
+      // Dọn XONG rồi mới báo 'done': báo trước thì ai hỏi trạng thái ngay lúc đó (preview, test)
+      // vẫn thấy lượt cũ còn trên đĩa — chạy đua, lúc được lúc không.
       for (const r of listRuns(job.key)) {
         if (r.run === runId) continue;
         if (job.req.still || (r.index.start >= index.start - 1e-3 && r.index.end <= index.end + 1e-3)) {
@@ -326,6 +322,12 @@ function createLogoAi(options) {
           indexCache.delete(path.join(cacheDir, job.key, r.run));
         }
       }
+      job.index = index;
+      job.run = runId;
+      job.progress = 1;
+      job.state = 'done';
+      job.message = t('Đã xoá logo bằng AI.');
+      setStatus(t('Đã xoá logo bằng AI ({n} khung).', { n: index.times.length }));
     } catch (error) {
       await fsp.rm(outDir, { recursive: true, force: true }).catch(() => {});
       if (job.canceled || error?.canceled) {
