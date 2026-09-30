@@ -83,7 +83,37 @@ function exportOnce(source, timelineFile, output, seek) {
   assert.ok(timing, `sidecar phải phát sự kiện timing:\n${r.stdout}`);
   // Batch trung gian to bằng chính bản xuất (4K 39 phút: ~11,5 GB) -> phải dọn ngay sau khi ghép.
   assert.ok(!fs.existsSync(path.join(TEST_DIR, 'export_batches')), 'thư mục batch trung gian phải được xoá sau khi ghép xong');
+  /* `moov` phải nằm TRƯỚC `mdat` (phát được khi mới tải một phần, như `+faststart` cũ). Bước ghép
+   * nay dành sẵn chỗ cho moov (`-moov_size`) thay cho lượt ghi lại cả tệp: phần dư là hộp `free`
+   * ngay sau moov. Không có `free` = đã rơi về `+faststart` (ước thiếu chỗ) — vẫn đúng nhưng chậm. */
+  const atoms = topLevelAtoms(output);
+  assert.ok(atoms.indexOf('moov') >= 0 && atoms.indexOf('moov') < atoms.indexOf('mdat'),
+    `moov phải đứng trước mdat, đang: ${atoms.join(' ')}`);
+  assert.strictEqual(atoms[atoms.indexOf('moov') + 1], 'free',
+    `chỗ dành sẵn cho moov phải còn dư (hộp free sau moov), đang: ${atoms.join(' ')}`);
   return { runs: JSON.parse(timing.message).runs, log: r.stdout };
+}
+
+// Tên các hộp cấp ngoài cùng của tệp mp4, theo thứ tự.
+function topLevelAtoms(file) {
+  const fd = fs.openSync(file, 'r');
+  const size = fs.fstatSync(fd).size;
+  const head = Buffer.alloc(16);
+  const names = [];
+  try {
+    for (let pos = 0; pos + 8 <= size;) {
+      fs.readSync(fd, head, 0, 16, pos);
+      let len = head.readUInt32BE(0);
+      if (len === 1) len = Number(head.readBigUInt64BE(8));
+      else if (len === 0) len = size - pos;
+      names.push(head.toString('latin1', 4, 8));
+      if (len < 8) break;
+      pos += len;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return names;
 }
 
 function frameHashes(file) {

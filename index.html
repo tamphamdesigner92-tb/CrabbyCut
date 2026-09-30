@@ -3860,10 +3860,12 @@
             <label for="exportFileName">Tên tệp xuất</label>
             <input id="exportFileName" type="text" value="studio_final_cut">
         </div>
-        <div class="form-group" style="display: none;">
+        <!-- Mục 1.12: ô này từng bị ẩn và vô tác dụng (backend luôn xuất đúng cỡ sequence). Nay
+             backend co ở đuôi đồ thị theo lựa chọn này — xem exportOutputFrame (backend/server.js). -->
+        <div class="form-group">
             <label for="exportResolution">Kích thước video</label>
             <select id="exportResolution">
-                <option value="source" selected>Giữ kích thước nguồn</option>
+                <option value="source" selected>Theo Sequence</option>
                 <option value="p720">HD 720p (1280x720)</option>
                 <option value="p1080">Full HD 1080p (1920x1080)</option>
                 <option value="p1440">QHD 1440p (2560x1440)</option>

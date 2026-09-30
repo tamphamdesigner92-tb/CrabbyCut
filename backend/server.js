@@ -1465,6 +1465,10 @@ async function writeProjectReport(reason) {
   const renderSeq = render?.sequence;
   lines.push(reportLine(2, 'sequence', renderSeq?.width && renderSeq?.height
     ? `${renderSeq.width}x${renderSeq.height} @ ${render?.render_fps || renderSeq.fps || '?'} fps` : null));
+  // Cỡ bản xuất khi khác cỡ sequence (ô "Độ phân giải", mục 1.12); phần hình nhỏ hơn = có viền đen.
+  lines.push(reportLine(2, 'output_size', render?.output_width && render?.output_height
+    ? `${render.output_width}x${render.output_height} (${render.output_preset}; hình ${render.output_content_width}x${render.output_content_height})`
+    : null));
   lines.push(reportLine(2, 'timeline_duration_sec', render?.timeline_duration_sec));
   lines.push(reportLine(2, 'output_duration_sec', render?.output_duration_sec));
   // Nguồn mà ffmpeg phải GIẢI MÃ (temp_input.mp4), không phải file người dùng thêm vào.
@@ -4650,7 +4654,7 @@ async function runAutoReframeAnalysis({ videoPath, clips, mode, options }) {
 }
 
 const EXPORT_RESOLUTIONS = {
-  source: { width: null, height: null, label: 'Giữ kích thước nguồn' },
+  source: { width: null, height: null, label: 'Theo Sequence' },
   p720: { width: 1280, height: 720, label: 'HD 720p' },
   p1080: { width: 1920, height: 1080, label: 'Full HD 1080p' },
   p1440: { width: 2560, height: 1440, label: 'QHD 1440p' },
@@ -4671,6 +4675,40 @@ const EXPORT_RESOLUTIONS = {
  * người dùng đang thấy "59.94 fps" trên thanh điều khiển. Không một dòng lỗi nào.
  * Hai danh sách lệch nhau là lỗi im lặng -> giữ chúng bằng nhau. */
 const EXPORT_FPS_VALUES = new Set(['source', '23.976', '24', '25', '29.97', '30', '50', '59.94', '60']);
+
+/* CỠ BẢN XUẤT THEO Ô "ĐỘ PHÂN GIẢI" (mục 1.12). Trước đây ô này vô tác dụng: sequence luôn đè.
+ * Đồ thị của sidecar vẫn dựng ở cỡ sequence; các số dưới đây chỉ bảo đuôi đồ thị co phần hình
+ * về `output_content_*` rồi đệm đen cho đủ `output_*` (xem OutputColorFilters ở sidecar).
+ *   'fit'   — như Premiere (Scale To Fit): đúng cỡ preset, hình co vừa, khổ lệch thì có viền đen;
+ *   'short' — như CapCut: giữ khổ sequence, preset chỉ quy định cạnh ngắn, không viền.
+ * Trả null = xuất đúng cỡ sequence ('source', 'custom', hoặc preset trùng cỡ sequence). */
+const EXPORT_SCALE_MODE = 'fit';
+
+function exportOutputFrame(sequenceWidth, sequenceHeight, preset, mode = EXPORT_SCALE_MODE) {
+  const target = EXPORT_RESOLUTIONS[String(preset || '').trim().toLowerCase()];
+  const sw = Number(sequenceWidth);
+  const sh = Number(sequenceHeight);
+  if (!target || !target.width || !target.height || !(sw > 0) || !(sh > 0)) return null;
+  const even = (v) => Math.max(16, 2 * Math.round(v / 2));
+  let frame;
+  if (mode === 'short') {
+    const s = Math.min(target.width, target.height) / Math.min(sw, sh);
+    const w = Math.min(7680, even(sw * s));
+    const h = Math.min(7680, even(sh * s));
+    frame = { output_width: w, output_height: h, output_content_width: w, output_content_height: h };
+  } else {
+    const s = Math.min(target.width / sw, target.height / sh);
+    frame = {
+      output_width: target.width,
+      output_height: target.height,
+      output_content_width: Math.min(target.width, even(sw * s)),
+      output_content_height: Math.min(target.height, even(sh * s)),
+    };
+  }
+  if (frame.output_width === sw && frame.output_height === sh
+      && frame.output_content_width === sw && frame.output_content_height === sh) return null;
+  return frame;
+}
 const EXPORT_CODEC_VALUES = new Set(['h264', 'hevc', 'prores']);
 const EXPORT_QUALITY_VALUES = new Set(['small', 'balanced', 'high']);
 const EXPORT_AUDIO_VALUES = new Set(['128k', '192k', '320k']);
@@ -7204,6 +7242,11 @@ function createApp() {
       exportSettings.width = sequenceSettings.width;
       exportSettings.height = sequenceSettings.height;
       exportSettings.resolution = 'sequence';
+      /* Ô "Độ phân giải" của hộp thoại xuất (renderer gửi ở `legacy_resolution`, bản cũ ở
+       * `export_preset`): đồ thị vẫn ở cỡ sequence, sidecar co ở đuôi — xem exportOutputFrame. */
+      exportSettings.output_preset = String(exportRaw.legacy_resolution || req.body.export_preset || 'source');
+      Object.assign(exportSettings, exportOutputFrame(sequenceSettings.width, sequenceSettings.height,
+        exportSettings.output_preset) || {});
       /* "Giữ theo nguồn" ở hộp thoại Xuất = THEO TIMEBASE CỦA SEQUENCE, không phải theo
        * nhịp khung của file nguồn. Đúng như Premiere: ô Frame Rate của Export Settings mặc
        * định lấy timebase sequence, và nhịp của từng clip nguồn không liên quan.
@@ -7429,4 +7472,5 @@ module.exports = {
   sdrOverridesForEditingAssets,
   ensureSdrAsset,
   pruneSdrCache,
+  exportOutputFrame,
 };

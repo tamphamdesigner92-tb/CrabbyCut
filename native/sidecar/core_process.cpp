@@ -933,7 +933,20 @@ struct ExportSettings {
   int sourceHeight = 0;
   int sourceChromaH = 128;   // vị trí mẫu màu, đơn vị 1/256 điểm ảnh luma (như scale in_h_chr_pos)
   int sourceChromaV = 128;
+  /* CỠ BẢN XUẤT KHÁC CỠ SEQUENCE (mục 1.12, ô "Độ phân giải" của hộp thoại xuất). Đồ thị vẫn
+   * dựng ở cỡ sequence (`width`/`height`); đuôi đồ thị co phần hình về content* rồi đệm đen cho
+   * đủ output* (content = output thì không đệm). Backend tính các số này (exportOutputFrame);
+   * 0 = xuất đúng cỡ sequence. Xem OutputColorFilters. */
+  int outputWidth = 0;
+  int outputHeight = 0;
+  int contentWidth = 0;
+  int contentHeight = 0;
 };
+
+bool OutputResized(const ExportSettings& settings) {
+  return settings.outputWidth > 0 && settings.outputHeight > 0
+      && settings.contentWidth > 0 && settings.contentHeight > 0;
+}
 
 struct EncoderPlan {
   std::string mode = "cpu";
@@ -1173,8 +1186,9 @@ double ClampDouble(double value, double minValue, double maxValue) {
 }
 
 std::string BitrateForHardware(const ExportSettings& settings) {
-  const int width = settings.width > 0 ? settings.width : 1920;
-  const int height = settings.height > 0 ? settings.height : 1080;
+  // Bitrate theo khung THẬT SỰ được mã hoá (cỡ xuất ở mục 1.12), không theo cỡ sequence.
+  const int width = OutputResized(settings) ? settings.outputWidth : (settings.width > 0 ? settings.width : 1920);
+  const int height = OutputResized(settings) ? settings.outputHeight : (settings.height > 0 ? settings.height : 1080);
   const double pixels = static_cast<double>(std::max(1, width * height));
   const double scale = pixels / (1920.0 * 1080.0);
   int baseKbps = 9000;
@@ -1673,6 +1687,21 @@ bool ReadExportPayload(
   settings.audioBitrate = ExtractStringField(text, "audio_bitrate", "192k");
   settings.mainAudioVolume = ClampDouble(ExtractDoubleFieldOr(text, "main_audio_volume", 100.0), 0.0, 1000.0);
   ApplyResolutionPreset(settings);
+  {
+    // Cỡ xuất (mục 1.12): số chẵn 16..7680, phần hình nằm gọn trong khung xuất; sai thì bỏ qua.
+    const auto evenIn = [](int v) { return v >= 16 && v <= 7680 && v % 2 == 0; };
+    const int ow = ExtractIntField(text, "output_width", 0);
+    const int oh = ExtractIntField(text, "output_height", 0);
+    const int cw = ExtractIntField(text, "output_content_width", ow);
+    const int ch = ExtractIntField(text, "output_content_height", oh);
+    if (evenIn(ow) && evenIn(oh) && evenIn(cw) && evenIn(ch) && cw <= ow && ch <= oh
+        && !(ow == settings.width && oh == settings.height && cw == ow && ch == oh)) {
+      settings.outputWidth = ow;
+      settings.outputHeight = oh;
+      settings.contentWidth = cw;
+      settings.contentHeight = ch;
+    }
+  }
 
   /* DANH SÁCH NHỊP KHUNG PHẢI PHỦ CẢ NTSC. Trùng EXPORT_FPS_VALUES (backend/server.js) và
    * PREVIEW_FPS_CHOICES (index.html) — ba danh sách này lệch nhau là lỗi im lặng: lựa chọn
@@ -1904,6 +1933,20 @@ std::string ClipPixelFormat(const ExportSettings& settings) {
  * chuyển luôn đúng, kể cả khi luồng phía trước bị kéo sang pc/bt470bg), rồi `setparams` gắn
  * primaries/transfer — trước đây hai nhãn này ra `unknown` ngay cả ở ca bình thường. */
 std::string OutputColorFilters(const ExportSettings& settings) {
+  /* Cỡ xuất khác cỡ sequence (mục 1.12, pha 1): co cả khung đã dựng về cỡ phần hình ngay ở phép
+   * đổi màu cuối (một lượt swscale), lanczos như các bộ dựng phim khi thu nhỏ; phần hình nhỏ hơn
+   * khung xuất thì đệm đen hai bên, toạ độ chẵn cho 4:2:0. */
+  if (OutputResized(settings)) {
+    std::string out = "scale=w=" + std::to_string(settings.contentWidth) + ":h=" + std::to_string(settings.contentHeight)
+      + ":flags=lanczos:out_color_matrix=bt709:out_range=tv," + ClipPixelFormat(settings);
+    if (settings.contentWidth != settings.outputWidth || settings.contentHeight != settings.outputHeight) {
+      const int x = ((settings.outputWidth - settings.contentWidth) / 2) & ~1;
+      const int y = ((settings.outputHeight - settings.contentHeight) / 2) & ~1;
+      out += ",pad=w=" + std::to_string(settings.outputWidth) + ":h=" + std::to_string(settings.outputHeight)
+        + ":x=" + std::to_string(x) + ":y=" + std::to_string(y) + ":color=black";
+    }
+    return out + ",setsar=1,setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709";
+  }
   return "scale=out_color_matrix=bt709:out_range=tv," + ClipPixelFormat(settings)
     + ",setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709";
 }
@@ -2501,9 +2544,15 @@ void WriteClipVideoFilters(
      *  - clip không nhả khung nào (mốc cắt ngoài nguồn): tpad hết ngay, `concat` sang dải đen.
      *    `tpad=stop_mode=add` KHÔNG làm được việc này: đầu vào rỗng thì nó cũng không ra khung
      *    nào (đã thử, Gyan 8.1.1) — lúc đó mọi clip phía sau bị xô sớm lên.
-     * Dải đen chỉ được kéo khung khi `concat` thật sự sang nó, nên ca thường không tốn gì. */
-    script << fast.geometry << ",setsar=1," << ClipPixelFormat(settings)
-           << ",tpad=stop=-1:stop_mode=clone[fc" << idx << "];\n";
+     * Dải đen chỉ được kéo khung khi `concat` thật sự sang nó, nên ca thường không tốn gì.
+     * `tpad` đứng TRƯỚC hình học (sau chuỗi màu — chuỗi màu có thể theo thời gian): để nhân bản
+     * khung cuối, tpad giữ một tham chiếu tới MỌI khung đi qua, nên khung nó nhả ra "không ghi
+     * được" và `overlay` đầu tiên phía sau phải chép nguyên khung trước khi trộn. Đứng trước
+     * `scale` thì khung ra khỏi scale là bộ đệm mới. Hình học là phép cố định nên nhân bản trước
+     * hay sau nó cho ra y hệt (đo: md5 trùng trên 4.320 khung 4K). Đo batch 180 s 4K, 70 phụ đề,
+     * `-f null`: 33,2 -> 28,1 s. */
+    script << ",tpad=stop=-1:stop_mode=clone" << fast.geometry << ",setsar=1," << ClipPixelFormat(settings)
+           << "[fc" << idx << "];\n";
     script << "color=c=black:s=" << seqW << "x" << seqH
            << ":d=" << FixedSeconds(baseDuration)
            << ":r=" << settings.renderFps << "[fk" << idx << "];\n";
@@ -3681,7 +3730,11 @@ int ExportBatch(
       cmd.insert(cmd.end(), {"-benchmark", "-progress", rel + ".progress.txt"});
       if (FfmpegHasPrintGraphs()) cmd.insert(cmd.end(), {"-print_graphs_file", rel + ".graphs.json"});
     }
-    cmd.insert(cmd.end(), {"-movflags", "+faststart", output});
+    /* `+faststart` chỉ cho tệp CUỐI (một batch ghi thẳng ra đích). Batch trung gian và lượt
+     * tiếng chỉ là đầu vào của bước ghép: dời `moov` lên đầu là đọc + ghi lại cả tệp lần hai
+     * cho không ai dùng (đo: ~0,6 s mỗi batch 4K 180 s). */
+    if (batchCount <= 1) cmd.insert(cmd.end(), {"-movflags", "+faststart"});
+    cmd.push_back(output);
     if (bench) {
       WriteBenchCommand(runLabel, cmd, tempDir);
       SetChildEnv("FFREPORT", "file=export_bench/" + runLabel + ".log:level=32");
@@ -3714,6 +3767,20 @@ int ExportBatch(
 void RemoveExportBatches(const fs::path& batchDir) {
   std::error_code ec;
   fs::remove_all(batchDir, ec);
+}
+
+/* CHỖ DÀNH SẴN CHO `moov` Ở ĐẦU TỆP (`-moov_size`, bước ghép cuối của lượt xuất nhiều batch).
+ * `+faststart` ghi xong cả tệp rồi mới dời `moov` lên đầu, tức đọc + ghi lại TOÀN BỘ tệp lần hai
+ * (bản 39 phút 4K: 11,5 GB). Dành sẵn chỗ thì `moov` ghi thẳng vào đó, phần dư thành hộp `free`.
+ * Ước DƯ theo số mẫu: mỗi mẫu tốn tối đa ~36 byte trong bảng mẫu (stsz 4 + co64 8 + stsc 12 +
+ * ctts 8 + stss 4); tiếng tính như AAC 96 kHz (1024 mẫu/gói) cho chắc. Thiếu thì ffmpeg báo
+ * "reserved_moov_size is too small" và nơi gọi ghép lại bằng `+faststart`. Chỉ dùng cho lượt xuất
+ * nhiều batch (≥ kOverlayBatchMinTotalSeconds), nên phần dư không đáng kể so với cỡ tệp. */
+int MoovReserveBytes(double seconds, double fps) {
+  const double videoSamples = std::max(0.0, seconds) * std::max(1.0, fps);
+  const double audioSamples = std::max(0.0, seconds) * (96000.0 / 1024.0);
+  const double bytes = 262144.0 + 40.0 * (videoSamples + audioSamples);
+  return static_cast<int>(std::min(bytes, 1.0e9));
 }
 
 EncoderPlan SelectPreviewPlan() {
@@ -3974,15 +4041,32 @@ int CommandExportVideo(int argc, char** argv) {
     fs::create_directories(fs::path(output).parent_path());
     Emit("progress", "Đang ghép " + std::to_string(batchPaths.size()) + " lượt hình với tiếng...");
     /* Hình `-c copy` (nối chính xác từng khung), tiếng cũng `-c copy` (đã encode một lượt ở
-     * trên). `-shortest` phòng khi hai luồng lệch nhau vài mili giây ở khung cuối. */
+     * trên). `-shortest` phòng khi hai luồng lệch nhau vài mili giây ở khung cuối.
+     * `moov` ở đầu tệp bằng CHỖ DÀNH SẴN (xem MoovReserveBytes) thay cho `+faststart`; ffmpeg báo
+     * thiếu chỗ thì ghép lại theo cách cũ. ProRes (.mov, tiếng PCM) giữ `+faststart`. */
     const auto concatStarted = ExportClock::now();
-    int code = RunIn({
-      "ffmpeg", "-y", "-v", "error", "-nostdin",
-      "-f", "concat", "-safe", "0", "-i", concatList.string(),
-      "-i", audioPath.string(),
-      "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-shortest",
-      "-movflags", "+faststart", output,
-    }, tempDir);
+    const auto finalMux = [&](bool reserveMoov) {
+      std::vector<std::string> cmd = {
+        "ffmpeg", "-y", "-v", "error", "-nostdin",
+        "-f", "concat", "-safe", "0", "-i", concatList.string(),
+        "-i", audioPath.string(),
+        "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-shortest",
+      };
+      if (reserveMoov) {
+        cmd.insert(cmd.end(), {"-moov_size", std::to_string(MoovReserveBytes(
+          SequenceDuration(intervals, 0, intervals.size()), ParseFpsValue(settings.renderFps)))});
+      } else {
+        cmd.insert(cmd.end(), {"-movflags", "+faststart"});
+      }
+      cmd.push_back(output);
+      return RunIn(cmd, tempDir);
+    };
+    const bool reserveMoov = settings.codec != "prores";
+    int code = finalMux(reserveMoov);
+    if (code != 0 && reserveMoov) {
+      Emit("progress", "Chỗ dành cho mục lục video không đủ — ghép lại theo cách cũ...");
+      code = finalMux(false);
+    }
     g_exportTiming.concatMs = MsSince(concatStarted);
     fs::remove(concatList);
     if (code != 0) {

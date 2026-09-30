@@ -1,7 +1,8 @@
 # Kế hoạch: Xuất video CrabbyCut nhanh ≥ 2× trên Windows và macOS — sửa lệnh ffmpeg + tự build ffmpeg
 
-> **Trạng thái (cập nhật 2026-09-29, phiên 3): Bước 0 XONG; Bước 1 đã xong 1.15 (+ cache SDR), 1.1a, 1.16 (hỏi chỗ lưu trước, ghi thẳng ra đích), 1.17 (+ tắt tự phát khi mở dự án), 1.18, 1.3 và 1.5 (cả hai BẬT mặc định).** Lập ngày 2026-09-26, bắt đầu thi công 2026-09-27.
+> **Trạng thái (cập nhật 2026-09-30, phiên 4): Bước 0 XONG; Bước 1 đã xong 1.15 (+ cache SDR), 1.1a, 1.16 (hỏi chỗ lưu trước, ghi thẳng ra đích), 1.17 (+ tắt tự phát khi mở dự án), 1.18, 1.3 và 1.5 (cả hai BẬT mặc định), chữa `tpad` của 1.3 (khung "không ghi được"), phần `faststart` của 1.8, 1.12 pha 1. MỤC TIÊU "CA THẬT 2 ≤ 10 PHÚT" ĐÃ ĐẠT: 55,6 phút → 9,2 phút (phát lại), 1.11 hoãn (số đo ở mục 1.11).** Lập ngày 2026-09-26, bắt đầu thi công 2026-09-27.
 > - 0A mục 1–5: commit `0508bd0`; Bước 0 + phần đầu Bước 1 (phiên 2): commit `5e5635a` — cả hai trên `main`, **chưa push**. 0A mục 6: đã port sang `CrabbyCut_Private`, **chưa commit** bên đó. Chưa dựng bộ cài, chưa phát hành (người dùng chọn).
+> - **Bản 39 phút (phát lại, 2026-09-30):** 3.334,9 s (số nền) → 1.392,5 s (1.1a) → 731,3 s (1.3 + 1.5) → **552,9 s** (chữa `tpad` + `moov` dành sẵn) = **6,0×**; trong app còn bớt 21,6 s tải về nhờ 1.16.
 > - **Lợi đã có:** dự án phụ đề 4K 39 phút 49,6 → 23,2 phút (1.1a, trước 1.3); bản cắt 300 s 4K 191–196 s → 111–113 s với 1.3 (1,7×) → 81–91 s với 1.3 + 1.5 (~2,2×); Bin Tom 50–56 s → 39–40 s (1.3) → 29–35 s (1.3 + 1.5); trong app Bin Tom 129,2 s → 39,1 s; lượt xuất đầu của Bin Tom bỏ được 72,5/129 s (1.15). 25/25 test export xanh trên Gyan 8.1.1 (`npm run test:export-all`).
 > - Danh sách việc cho phiên sau: xem mục **"VIỆC TIẾP THEO"** ngay dưới khối này.
 > **Bổ sung 2026-09-27:**
@@ -18,7 +19,7 @@
 
 ## VIỆC TIẾP THEO (đọc đầu tiên khi mở phiên mới)
 
-**Trạng thái git lúc dừng (2026-09-29, phiên 3)** — kiểm lại bằng `git status` / `git log -3` trước khi làm:
+**Trạng thái git lúc dừng (2026-09-30, phiên 4)** — kiểm lại bằng `git status` / `git log -3` trước khi làm. Phiên 3 = commit `8fd9a22`; phiên 4 (chữa `tpad`, `moov` dành sẵn, 1.12 pha 1): xem commit mới nhất.
 
 | Repo | Trạng thái |
 |---|---|
@@ -52,8 +53,10 @@
 4. **1.3 đường nhanh YUV cho lane chính** — **xong, BẬT mặc định**. Test `test:export-fast-path`. Bin Tom 50–56 → 39–40 s; bản cắt 300 s 4K 191–196 → 111–113 s (1,7×). Bộ so 0.3 ĐẠT trên Bin Tom (gần bản chuẩn hơn: 40,3 → 45,1 dB). Chi tiết mục 1.3.
 5. **1.5 lớp phủ ở YUV** — **xong, BẬT mặc định** (người dùng nới tiêu chí (b), xem "Quyết định đã chốt"). Chữa màu mép (`AlphaWeightedYuva420`, chỉ ảnh tĩnh; đệm +4) và **ảnh tĩnh xử lý một lần** (`OverlayStillOnce`). Bộ so 0.3 trên Bin Tom ĐẠT: so bản chuẩn 40,3 → 52,5 dB. Env tắt: `CRABBYCUT_EXPORT_YUVCOMP=0`, `CRABBYCUT_EXPORT_ALPHACHROMA=0`, `CRABBYCUT_EXPORT_STILL1=0`.
 6. **1.15 cache SDR, 1.16 ghi thẳng ra đích, 1.17 tắt tự phát** — xong theo lựa chọn của người dùng (chi tiết ở từng mục). Test `test:export-output-path`; E2E Electron cho 1.16/1.17.
-7. Tiếp theo: 1.11 (cả track phụ đề thành một luồng) — micro-bench cho thấy trên nền 1.3 + 1.5 chỉ còn lợi ~20% ở batch 4K 49 lớp phủ (5,2 → 4,2 s cho 30 s phim), nhỏ hơn dự tính vì lane chính mới là khoản lớn. Cân nhắc đo lại bản 39 phút trước khi làm.
-- **Câu hỏi đang chờ người dùng:** không còn. Các câu (a)–(e) đã được trả lời 2026-09-29 (xem bảng "Quyết định đã chốt").
+7. **Đo lại bản 39 phút (phiên 4)** trên nền 1.3 + 1.5: 731,3 s. Tách batch 3 (4.320 khung 4K AV1, 70 phụ đề, `-f null`): chỉ giải mã 19,1 s, lane chính 22,9 s, cả đồ thị 31–33 s — và **một** `overlay` trong suốt đã thêm ~5 s, còn 10 → 70 lớp chỉ thêm ~3,5 s. Thủ phạm: `tpad=stop_mode=clone` của 1.3 giữ tham chiếu tới mọi khung → `overlay` đầu phải chép nguyên khung 4K. **Đã chữa** (dời `tpad` lên trước hình học, md5 trùng 4.320 khung): batch 33,2 → 28,1 s. Cùng lúc: batch trung gian bỏ `+faststart`, bước ghép cuối dành sẵn chỗ cho `moov` (`-moov_size`) thay cho lượt ghi lại cả tệp. **Kết quả: 731,3 → 552,9 s** (hình 574,7 → 453,3 s; ghép 84,3 → 27,2 s). Chi tiết ở mục 1.3 và 1.8.
+8. **1.11 hoãn**: sau khi chữa `tpad`, 70 lớp phủ chỉ còn tốn ~3 s/batch (cả đồ thị 26 s so với lane chính 23 s), trong đó ~1 s là phần trộn mà 1.11 cũng phải trả → lợi còn ~2 s/batch (~4% bản 39 phút) trong khi phải mô phỏng chính xác quy tắc hiện/tắt của framesync (xem mục 1.11). Làm lại khi có dự án nhiều lớp phủ hơn hẳn.
+9. **1.12 pha 1 — đã làm, CHỜ MỘT QUYẾT ĐỊNH**: ô "Kích thước video" (trước bị ẩn và vô tác dụng) nay hiện ra và có tác dụng; chưa chốt cách xử lý khi khổ preset khác khổ sequence (Premiere: đúng cỡ preset + viền đen; CapCut: giữ khổ, preset là cạnh ngắn). Mã đang theo Premiere (`EXPORT_SCALE_MODE = 'fit'`). Xem mục 1.12.
+- **Câu hỏi đang chờ người dùng:** cách co khi khổ preset khác khổ sequence (mục 1.12). Các câu (a)–(e) đã được trả lời 2026-09-29 (xem bảng "Quyết định đã chốt").
 - `CrabbyCut_Private`: chưa port gì của phiên 2–3. Mục trung lập để port (M.2): phần đo (sidecar + backend + renderer), 1.15, 1.1a, 1.17, 1.3, 1.5, ảnh tĩnh một lần.
 
 **Công cụ và dữ liệu có sẵn trên máy dev:**
@@ -416,6 +419,7 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
   1. **YUV 4:2:0** (clip không chỉnh màu): `scale` → `pad` (khung đủ lớn, vị trí chẵn) → `crop exact`. Cắt lẻ mà clip tràn kín khung theo chiều đó → `scale` dời vị trí mẫu màu 1 điểm ảnh luma (`in/out_*_chr_pos`, +256) để sau phép cắt lẻ mẫu màu về đúng chỗ.
   2. **4:4:4 rồi hạ 4:2:0**: đệm lẻ, cắt lẻ mà mép clip nằm trong khung, clip giữ nguyên cỡ bị cắt lẻ. Ở hai ca đầu, mẫu màu ở mép clip giáp nền đen phải là trung bình (đen, cột đầu clip) như đường cũ; mẹo dời mẫu màu thì lấy trọn màu đen (đo: kênh U 30,2 so với 32,3 dB của đường cũ). Ca cuối: swscale chép thẳng khi không co giãn và **bỏ qua** `chr_pos` (đo: hai bản y hệt).
   3. **RGB** (clip có chuỗi màu): co giãn + đặt vị trí ở RGB, đổi sang YUV một lần ở cuối = đúng phép tính của đường cũ, chỉ bỏ nền `color` + `overlay`. Vì: (a) swscale vừa đổi RGB→YUV vừa co giãn thì đổi trước rồi mới co giãn, chỗ vọt/kẹp ở cạnh khác đường cũ (luma so bản chuẩn 47,8 so với 54,4 dB); (b) đường cũ kẹp gam RGB ngay sau chuỗi màu, giống preview (WebGL áp màu trên RGB) — giữ YUV nguyên vẹn thì vùng rất bão hoà khác preview. Test: `curves` ra **trùng từng bit** đường cũ.
+- **`tpad` phải đứng TRƯỚC hình học (chữa 2026-09-30, phiên 4).** Để nhân bản khung cuối, `tpad` giữ một tham chiếu tới MỌI khung đi qua (`cache_stop = av_frame_clone`), nên khung nó nhả ra "không ghi được" và `overlay` đầu tiên phía sau phải chép nguyên khung (`ff_inlink_make_frame_writable`) — 4K là ~9,5 MB mỗi khung. Đặt `tpad` ngay sau chuỗi màu, trước `scale` → khung ra khỏi `scale` là bộ đệm mới. Hình học là phép cố định nên bản xuất y hệt (md5 trùng trên 4.320 khung 4K). Đo batch 3 của bản 39 phút (`-f null`): 33,2 → 28,1 s; cả lượt xuất 731,3 → 552,9 s (cùng phần `moov` của 1.8). Clip giữ nguyên cỡ (scale không làm gì) thì khung vẫn là khung của bộ giải mã, `overlay` vẫn phải chép — như đường cũ.
 - **Số khung:** `tpad=stop=-1:stop_mode=clone` rồi `concat` với một dải đen `color`, rồi `trim=end_frame=N`. Kế hoạch cũ ghi `tpad … stop_mode=add` cho clip không có khung nào — **sai**: đầu vào rỗng thì `tpad add` cũng không ra khung nào (đã thử), mọi clip sau bị xô sớm lên. Clip ngắn thì tpad clone chạy mãi nên `concat` không bao giờ sang dải đen.
 - **Ba bẫy đã gặp:**
   - `pad` làm tròn bề rộng **đầu vào** xuống số chẵn: cắt phần thấy được (có thể rộng lẻ) rồi mới đệm thì mất một cột ở mép clip → luôn **đệm trước, cắt sau** (clip đã scale luôn rộng chẵn).
@@ -556,7 +560,7 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
   - `ExportBatch` chưa an toàn khi chạy đồng thời (biến toàn cục `g_filterAuxDir`/`g_filterAuxSeq` `:1882-1883`, và `plan` bị đổi tại chỗ `:3057-3060`). Ghi mọi script trước rồi mới spawn.
   - Lỗi phiên NVENC: thử lại batch đó bằng NVENC sau khi các batch khác xong, rồi mới chuyển mọi batch sang CPU. GeForce giới hạn số phiên, dùng chung với OBS/ShadowPlay; GTX 1060 chỉ có một bộ NVENC.
   - Cho dự án không lớp phủ đi đường VideoOnly + một lượt AudioOnly. Việc này sửa luôn khoảng hở AAC ở mối nối của đường 80 interval (`:3356`).
-- Bỏ `+faststart` ở file batch trung gian (chỉ có ích khi có nhiều batch).
+- Bỏ `+faststart` ở file batch trung gian (chỉ có ích khi có nhiều batch). — **ĐÃ LÀM (2026-09-30)**, kèm bước ghép cuối: `moov` ghi vào **chỗ dành sẵn** ở đầu tệp (`-moov_size`, `MoovReserveBytes`: 256 KB + 40 byte mỗi mẫu hình/tiếng, tiếng tính như AAC 96 kHz — dư ~15× so với nhu cầu đo được) thay cho `+faststart` (ghi xong rồi đọc + ghi lại cả tệp). Thiếu chỗ thì ffmpeg trả lỗi "reserved_moov_size is too small" và sidecar ghép lại bằng `+faststart`. ProRes giữ `+faststart`. Đo bản 39 phút: ghép **84,3 → 27,2 s**. `test:export-batch-seek` kiểm `moov` đứng trước `mdat` và có hộp `free` ngay sau.
 - **Sau 1.11, xem lại lý do chia batch.** Batch ~180 s sinh ra chỉ để chặn chi phí chuỗi lớp phủ tăng theo (số khung × số lớp phủ) (`:2253-2279`). Khi phụ đề đã thành một luồng, chi phí đó biến mất. Kích thước batch nên chọn lại theo hai mục đích còn lại:
   - song song (mục này), tức đủ batch cho N tiến trình;
   - cache (1.13), tức lưới cố định, ví dụ 60 s.
@@ -566,7 +570,10 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
 - Cache ở `%LOCALAPPDATA%\CrabbyCut\encoder-probe.json`, theo {hash `ffmpeg -version`, GPU, driver}.
 - Không đổi tham số NVENC.
 
-**1.11 Mỗi track phụ đề/chữ tĩnh thành MỘT luồng ảnh** (#12, #7; đã chốt 2026-09-27). Env: `CRABBYCUT_EXPORT_SUBSTREAM=0`.
+**1.11 Mỗi track phụ đề/chữ tĩnh thành MỘT luồng ảnh** (#12, #7; đã chốt 2026-09-27). Env: `CRABBYCUT_EXPORT_SUBSTREAM=0`. — **HOÃN (2026-09-30, phiên 4), theo số đo:**
+- Batch 3 bản 39 phút (4.320 khung 4K, 70 phụ đề, `-f null`, sau khi chữa `tpad`): lane chính 22,9 s; lane + MỘT `overlay` khung track trong suốt suốt batch (cận dưới của 1.11) 23,6–24,2 s; cả 70 lớp 25,9–26,2 s. Tức 1.11 lợi ~2 s/batch ≈ 27 s cho cả bản 39 phút (~5%).
+- Các giả thuyết đã loại bằng số đo: tính biểu thức x/y mỗi khung (`eval=init` không đổi gì), biểu thức `enable` (bỏ hẳn không đổi gì), framesync chép khung vì luồng ảnh 25 khung/s lệch lưới 24 (đưa về `fps=24` không đổi gì — sau EOF framesync hạ `sync` về 0 nên không chép).
+- Chỗ khó khi làm: phải chép ĐÚNG quy tắc hiện/tắt của đường cũ ở từng khung. Sau `concat`, luồng chính mang timebase 1/1.000.000 (`avf_concat.c`: `outlink->time_base = AV_TIME_BASE_Q`), mốc từng khung phụ thuộc cách cộng dồn độ dài segment; khung cuối của mỗi câu còn phụ thuộc EOF của `trim=duration` (làm tròn gần nhất ở timebase 1/25) và `setpts` cắt phần lẻ (`D2TS`). Hướng sidecar-thuần đã phác: đệm từng câu (đã xử lý như cũ) vào khung chung của track ở toạ độ chẵn, nối thành một luồng đúng lưới khung, ghép bằng một `overlay`; với `alpha = 0` công thức của `overlay` cho lại đúng điểm ảnh nền nên có thể trùng từng bit.
 - **Vì sao:** chi phí chuỗi `overlay` tăng theo số lớp phủ trong batch, kể cả lớp đang tắt (#12).
   - Đo ở 4K: 85 lớp = 95 khung/s; một luồng = **173 khung/s**, và con số này không đổi dù có bao nhiêu câu.
   - Cách này cũng bỏ hàng nghìn `-i`, tức hết lo trần dòng lệnh 32.766 ký tự (`:158`).
@@ -588,7 +595,12 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
   - 0.3 trên fixture 9.
 - Bản fork có thể thay việc bake khung cố định bằng một filter "nhiều ảnh" (2.4). Khi đó renderer không phải bake lại.
 
-**1.12 Độ phân giải xuất có tác dụng thật** (đã chốt 2026-09-27).
+**1.12 Độ phân giải xuất có tác dụng thật** (đã chốt 2026-09-27). — **PHA 1 ĐÃ LÀM (2026-09-30, phiên 4)**:
+- Ô "Kích thước video" trong hộp thoại xuất trước đây **bị ẩn** (`display: none`) và vô tác dụng; nay hiện ra, lựa chọn đầu đổi tên "Theo Sequence" (cùng nhãn với ô tốc độ khung hình).
+- Backend `exportOutputFrame(seqW, seqH, preset)` tính `output_width/height` + `output_content_width/height` (renderer vẫn gửi lựa chọn ở `legacy_resolution`); sidecar dựng đồ thị ở cỡ sequence như cũ, `OutputColorFilters` co phần hình ở phép đổi màu cuối (`scale … flags=lanczos`, một lượt swscale) rồi `pad` đen toạ độ chẵn nếu khổ lệch. Bitrate NVENC tính theo cỡ xuất. Báo cáo dự án có dòng `output_size`.
+- **Chưa chốt — khổ preset khác khổ sequence:** Premiere (Export → Scaling mặc định "Scale To Fit") ra đúng cỡ preset, thêm viền đen; CapCut coi độ phân giải là cạnh ngắn, giữ khổ dự án (2.35:1 ở 1080p ≈ 2560×1080, không viền). Mã có cả hai (`EXPORT_SCALE_MODE` = `'fit'` | `'short'`), đang để `'fit'` — cũng là cách nhánh xuất cũ `BuildVideoFilter` của CrabbyCut từng làm (`force_original_aspect_ratio=decrease` + `pad`). Chọn `'short'` thì các preset "Dọc …"/"Vuông" thành thừa.
+- Test `npm run test:export-resolution`: phép tính cỡ (cả hai kiểu), và 4 lượt xuất thật (khổ rộng → 720p viền trên/dưới; 4:3 có lớp phủ → viền hai bên; cùng khổ phóng to → không viền; ProRes khổ dọc): cỡ khung, viền đen (Y≈16), phần hình so với bản xuất đúng cỡ sequence rồi co bằng ffmpeg 44–56 dB, lệch 4 px tụt còn 19–24 dB.
+- Chưa làm: pha 2 (dựng cả đồ thị ở cỡ xuất, bake chữ ở mật độ của cỡ xuất).
 - **Hiện nay** backend ép `resolution: 'sequence'` (`index.html:15821`, `server.js:6927`), nên ô "Độ phân giải" vô tác dụng. Sidecar đã có sẵn `ApplyResolutionPreset` (`core_process.cpp:1219`).
 - **Pha 1:** dựng đồ thị ở cỡ sequence như cũ, `scale` xuống cỡ xuất ở đuôi (`OutputColorFilters`). Đúng ngay, và giảm tải cho encoder.
 - **Pha 2:** dựng cả đồ thị ở cỡ xuất (nhân mọi toạ độ/cỡ clip, lớp phủ, khung track 1.11 với hệ số f). Renderer bake chữ ở mật độ của cỡ xuất (`templateExportBakeDensity`). Phần ghép và filter nhẹ đi ~f².
@@ -783,7 +795,8 @@ Nguồn:
    - Riêng "Ca thật 2" (phụ đề song ngữ 39 phút, 4K AV1) trên máy này: từ ~49 phút xuống **≤ 10 phút** khi xuất 4K; xuất 1080p (1.12) còn nhanh hơn.
    - Trên Mac: đo theo M.7.
 2. **Chất lượng**: `tests/scripts/export_fidelity.js` theo 0.3.
-3. **Hồi quy**: `npm run test:export`, `test:export-many-overlays`, `test:export-color`, `test:export-long-subtitles`, `test:sequence-fps`, `test:seam`, `test:frame-grid`, `test:overlay-placement`, `test:video-mask`, `test:video-anim`, `test:position-keyframe`, `test:color-adjust`, `test:adjust-layer`, `test:clip-speed`, `test:mixed-orientation`, `test:retouch-export`, `test:transition-frames`, `test:main-lane-concat`, `test:unicode-path`, cộng các test mới của Bước 1: `test:export-concat-video-overlay`, `test:auto-subtitle`, `test:export-hdr-asset-usage`, `test:export-batch-seek`, `test:export-yuv-composite`, `test:export-fast-path` — cả 25 test: `npm run test:export-all` (~15 phút; đưa thư mục FFmpeg ghim lên đầu PATH trước).
+3. **Hồi quy**: `npm run test:export`, `test:export-many-overlays`, `test:export-color`, `test:export-long-subtitles`, `test:sequence-fps`, `test:seam`, `test:frame-grid`, `test:overlay-placement`, `test:video-mask`, `test:video-anim`, `test:position-keyframe`, `test:color-adjust`, `test:adjust-layer`, `test:clip-speed`, `test:mixed-orientation`, `test:retouch-export`, `test:transition-frames`, `test:main-lane-concat`, `test:unicode-path`, cộng các test mới của Bước 1: `test:export-concat-video-overlay`, `test:auto-subtitle`, `test:export-hdr-asset-usage`, `test:export-batch-seek`, `test:export-yuv-composite`, `test:export-fast-path`, `test:export-output-path`, `test:export-resolution` — cả 27 test: `npm run test:export-all` (~15 phút; đưa thư mục FFmpeg ghim lên đầu PATH trước).
+   - `test:concat-cache` chạy bằng Node 24 của máy: Node 24 **bỏ qua** `rmSync({ maxRetries })` khi gặp EPERM (đo 2026-09-30: hỏng sau 0–1 ms; Node 20.18 của Electron thì đợi ~1,8 s rồi xoá được), nên hàm dọn của bài kiểm tự lặp. Backend thật chạy bằng Node của Electron nên không bị.
    - Chạy khi app/backend **đang tắt** (bẫy `core_c.node` EPERM).
    - Xong thì khôi phục `progress.txt`.
 4. **Máy không NVIDIA**: `FFMPEG_EXPORT_HW=0` + `CRABBYCUT_HWACCEL_DECODE=0` phải đúng và không chậm hơn số nền CPU; `d3d11va` thử được ngay trên máy này.
