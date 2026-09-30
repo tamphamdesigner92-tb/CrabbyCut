@@ -63,7 +63,8 @@
 13. **Bin Tom sau phiên 5 (phát lại):** 27,5–28,6 s (A/B đầu phiên) → **20,2–20,3 s** (−27%): 1.1 gom dải −12%, bỏ `repeat` −15%, dò song song −0,5 s. Bản 39 phút đo lại cuối phiên: 547,9 s (phiên 4: 552,9 s) — nhánh nhiều batch không chậm đi.
 14. Việc kế tiếp theo thứ tự: 1.6 → 1.7 → 1.4 → 1.10 → 1.12 pha 2 → 1.2 → phần còn lại của 1.8 → 1.9 → 1.13 → 1.14; 1.11 khi có dự án nhiều lớp phủ hơn hẳn.
 15. **Fixture người dùng chỉ định cho bước tiếp (2026-09-30): `G:\Work\AI\Test CrabbyCut\Test Export\Test.crab`** — sequence 1920×1080 25 fps; lane chính 2 nguồn khác khổ (`swim_protect_v2 (720p).mp4` 1366×720 + `DSCF3442.MOV` 3840×2160, clip 107%); lane overlay: video 4K cùng nguồn (nay 110% sau khi đổi mốc vừa khung) và một block **scale 150%, độ mờ 48% có keyframe độ mờ** — đúng đường `geq` của mục 1.6. Chưa dựng payload bench (`npm run bench:export -- --crab "<đường dẫn>"` lần đầu mở Electron để ghi payload). Việc nhỏ đã thấy: gộp các lần `ffprobe` (mục 12); đệm thay kéo 1 px cho chữ rộng lẻ (mục 11a, cần bộ so 0.3); lượt xuất trong app của Bin Tom chưa đo lại (phần vẽ trước ở renderer).
-- **Câu hỏi đang chờ người dùng:** không còn. Các câu (a)–(e) trả lời 2026-09-29, câu khổ lệch của 1.12 trả lời 2026-09-30 (xem bảng "Quyết định đã chốt").
+16. **Phiên 6 (2026-10-01): 1.19 áp màu sau phép co — xong** (dự án "Yêu Con 1" của người dùng: server 120,8 → 58,0 s). **1.20 bitrate theo chất lượng — đo xong, chờ quyết.** Fixture bench mới: `test_temp/bench_export/yeu_con_1` (bản sao .crab ở `test_temp/yeucon_src/`). Bản Gyan 8.1.1 ghim trong scratch đã bị dọn (thư mục `bin` rỗng) — phiên này đo và chạy test trên BtbN N-123955 của PATH (đúng bản app đang chạy từ mã nguồn dùng).
+- **Câu hỏi đang chờ người dùng:** 1.20 (đổi cách chọn bitrate của NVENC). Các câu (a)–(e) trả lời 2026-09-29, câu khổ lệch của 1.12 trả lời 2026-09-30 (xem bảng "Quyết định đã chốt").
 - `CrabbyCut_Private`: chưa port gì của phiên 2–3. Mục trung lập để port (M.2): phần đo (sidecar + backend + renderer), 1.15, 1.1a, 1.17, 1.3, 1.5, ảnh tĩnh một lần.
 
 **Công cụ và dữ liệu có sẵn trên máy dev:**
@@ -512,6 +513,29 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
 **1.18 (mới) Dọn batch trung gian sau khi ghép** — **đã làm**, chưa commit.
 - Sau lượt xuất nhiều batch, `<temp>/export_batches/` (to bằng chính bản xuất: ~11,5 GB ở dự án 4K 39 phút) nằm lại trong thư mục tạm của dự án tới lượt xuất sau. Nay `RemoveExportBatches` xoá ngay sau khi ghép cuối thành công, ở cả nhánh có lớp phủ lẫn nhánh 80 clip. `test:export-batch-seek` kiểm thư mục đã mất.
 - Còn lại (1.8): ghép cuối `-c copy` + `+faststart` 11,5 GB mất 66 s; batch trung gian cũng mang `+faststart` vô ích.
+
+**1.19 (mới, 2026-10-01) Màu theo từng điểm ảnh áp SAU bước co nhỏ** — **đã làm**. Env tắt `CRABBYCUT_EXPORT_COLOR_AFTER_SCALE=0`; test `test:export-color-after-scale`.
+- **Ca thật (người dùng báo "nhanh hơn ít"):** `G:\Work\CorgiBanana\Corgi Banana\KOC Retailer\Thang 8\Yêu Con 1\Yeu Con 1_vid 1.crab` — 37,8 s, sequence 1080×1920 30 fps, nguồn DJI HEVC Main 10 1728×3072 59,94 fps, 25 lớp phủ (14 chuỗi khung động, 2 Retouch video), một **lớp Điều chỉnh phủ cả bài có keyframe cường độ LUT**. Trong app: vẽ trước 31 s (Retouch 27,5 s) + sidecar 124 s. Bản cũ ~3 phút → ~2,6 phút: các tối ưu trước nhắm vào bản dài nhiều batch, dự án này chỉ một batch.
+- **Tách khâu (bench `yeu_con_1`, phát lại, BtbN N-123955):** phần hình 118,5 s = giải mã 35,4 s + lọc ~81,6 s + mã hoá ~1,5 s. Bỏ riêng lớp Điều chỉnh: 33,9 s → lớp đó tốn **~85 s**. Nguyên nhân: chuỗi màu chạy ở cỡ NGUỒN (1728×3072 10-bit: `split` → 2×`lut3d` → `blend`), rồi mới co về 1080×1920 — gấp 2,56 lần số điểm ảnh, lại ở 10-bit.
+- **Sửa:** tầng màu theo từng điểm ảnh (eq, colorbalance, curves, lut3d, trộn LUT, vignette) chạy SAU phép co khi phép co làm nhỏ khung, vẫn ở định dạng nguồn (co YUV 10-bit → màu → rgb24). Tầng theo lân cận (unsharp/avgblur/noise — bán kính tính theo điểm ảnh nguồn), mọi tầng trước nó, tầng có mặt nạ, clip có keyframe hình học, clip phóng to: giữ chỗ cũ (script trùng từng chữ). Áp cho cả đường nhanh, đường cũ của lane chính và lớp phủ. Adjustment Layer của Premiere/CapCut và preview Pixi đều áp ở cỡ hiển thị, nên thứ tự mới gần chuẩn hơn.
+- **Đo:** so thứ tự cũ (FFV1, 1.135 khung): co YUV rồi áp màu **57,95 dB gộp, khung tệ nhất 55,2 dB**; co về rgb24 rồi áp: 43,8 dB (LUT chạy trên 8-bit — loại); co về rgb48: 53,1 dB. Phát lại cả lượt: **server 120,8 → 58,0 s (2,08×)**. Giải mã NVDEC (`-hwaccel cuda`) cho dải nguồn HEVC 10-bit: không lợi (50,2 so với 50,4 s) — đồ thị lọc vẫn là nút thắt; bỏ mã hoá (`-f null`) cũng 51,1 s.
+- Còn lại trên dự án này: lớp Điều chỉnh vẫn ~22 s ở cỡ 1080×1920 (2×lut3d + blend 10-bit); Retouch vẽ trước ở renderer 27–42 s (`getImageData` 7 s trong cửa sổ 15 s của CPU profile) — chưa làm.
+
+**1.20 (mới, 2026-10-01) Bitrate theo chất lượng thay cho bitrate cố định** — **đo xong, CHỜ NGƯỜI DÙNG QUYẾT**.
+- **Người dùng báo:** bản xuất phụ đề song ngữ 10,6 GB so với nguồn 612 MB; nghi bitrate quá cao làm chậm.
+- **Hiện trạng:** NVENC `-preset fast -b:v <kbps>` với kbps = 13.000 (Cao) × số điểm ảnh / 1080p — không theo nội dung. 3840×1646 → 39,6 Mbps (thực đo 35,9 Mbps). Nguồn AV1 chỉ 2,07 Mbps. Đường CPU (libx264) thì đã dùng CRF 18 theo chất lượng. Premiere "Match Source – Adaptive High Bitrate" cũng chọn bitrate theo cỡ khung (4K 24–30 fps khoảng 35–45 Mbps theo các hướng dẫn phổ biến), nên mức hiện tại không lệch chuẩn nhưng thừa với nguồn đã nén mạnh.
+- **Đo trên batch 3 bản 39 phút (4.320 khung 4K, 70 phụ đề, cùng đồ thị lọc):** thời gian 31,7–35,8 s ở mọi mức (không mã hoá: 30,8 s) → **bitrate KHÔNG làm chậm phần dựng hình**; preset p4 chậm hơn p1 ~4,6 s/batch nên loại. VMAF (so bản FFV1 của chính đồ thị, 1.440 khung, ghép cặp theo số thứ tự khung):
+
+  | Mức | Mbps | Cỡ batch | VMAF tb | 1% thấp |
+  |---|---|---|---|---|
+  | hiện tại (VBR 39,6 M) | 39,1 | 838 MiB | 99,04 | 96,89 |
+  | p1 CQ 19 (trần 39,6 M) | 27,7 | 595 MiB | 98,93 | 96,56 |
+  | p1 CQ 21 | 21,6 | 463 MiB | 98,74 | 96,14 |
+  | p1 CQ 23 | 16,5 | 355 MiB | 98,40 | 95,46 |
+  | p1 CQ 26 | 11,4 | 245 MiB | 97,80 | 94,15 |
+
+- Cỡ tệp có tốn thời gian ở bước ghép cuối (`-c copy`, tỉ lệ với cỡ): 80,7 s cho 10,6 GB ở lượt của người dùng.
+- Bẫy đo đã gặp: bản tham chiếu FFV1 thiếu `-r/-fps_mode cfr` → lệch vài khung; mkv lưu mốc ms nên so theo PTS thì framesync cặp nhầm cứ 3 khung một (VMAF ~0 đều đặn) — phải `setpts=N/24/TB` cả hai phía.
 
 **1.1 Chỉ giải mã đoạn được dùng** (#1, #13). Env: `CRABBYCUT_EXPORT_SEEK=0`.
 - **Bước đầu, rủi ro thấp: seek theo batch (#13).** — **đã viết mã (1.1a), đang kiểm** (2026-09-28):

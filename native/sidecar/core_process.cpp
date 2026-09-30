@@ -2255,7 +2255,7 @@ std::string ColorAdjustChain(double start, const std::string& staticFilters,
   return out;
 }
 
-void AppendColorAdjustFilters(std::ofstream& script, const std::string& filters,
+void AppendColorAdjustFilters(std::ostream& script, const std::string& filters,
                               const std::string& maskPath, const std::string& tag) {
   if (filters.empty()) return;
   if (maskPath.empty()) {
@@ -2280,7 +2280,7 @@ void AppendColorAdjustFilters(std::ofstream& script, const std::string& filters,
 
 // Nối chuỗi màu của các lớp 1..n-1 SAU lớp 0, đúng thứ tự áp. Tag riêng từng lớp: tag đặt tên
 // nhãn nhánh (split/lut3d/blend@…) — trùng tag giữa hai lớp là hỏng cả filtergraph.
-void AppendExtraAdjustLayers(std::ofstream& script, double start,
+void AppendExtraAdjustLayers(std::ostream& script, double start,
                              const std::vector<ExtraAdjustLayer>& layers, const std::string& tagBase) {
   for (size_t k = 0; k < layers.size(); k++) {
     const auto& layer = layers[k];
@@ -2292,6 +2292,95 @@ void AppendExtraAdjustLayers(std::ofstream& script, double start,
                                               layer.lutMixExpr, tag),
                              "", "");
   }
+}
+
+/* MÀU THEO TỪNG ĐIỂM ẢNH ÁP SAU BƯỚC CO NHỎ (đo 2026-09-30 trên dự án thật "Yêu Con 1").
+ *
+ * Chuỗi màu vốn chạy ở cỡ NGUỒN, trước bước co về cỡ hiển thị. Nguồn DJI 1728×3072 10-bit trên
+ * sequence 1080×1920, một lớp Điều chỉnh có keyframe cường độ LUT (2×lut3d + blend) tốn ~75 ms
+ * mỗi khung: 85 s trong 118,5 s phần hình của cả lượt. Co trước rồi mới áp màu: xem số ở
+ * docs/KE_HOACH_TOI_UU_EXPORT_WIN.md (mục 1.19).
+ *
+ * Đổi thứ tự chỉ đúng với phép tính TỪNG ĐIỂM ẢNH: eq, colorbalance, curves, lut3d, trộn blend,
+ * vignette (theo toạ độ TƯƠNG ĐỐI của khung). Giá trị ra của một điểm chỉ phụ thuộc chính nó,
+ * nên co trước hay sau chỉ khác ở mép chi tiết (phép co trộn các điểm TRƯỚC hay SAU khi đổi màu).
+ * Hiệu ứng theo LÂN CẬN (unsharp, avgblur, noise) có bán kính tính bằng điểm ảnh của khung mà
+ * frontend khai (ColorAdjust.ffmpegFilters, frameHeight) -> giữ chỗ cũ, cả mọi tầng TRƯỚC nó
+ * (thứ tự áp không được đảo). Mặt nạ màu theo toạ độ nguồn -> tầng có mặt nạ cũng giữ chỗ cũ.
+ * Tên bộ lọc được dò bằng chuỗi con: đường dẫn lỡ chứa "noise" thì chỉ là đi đường cũ.
+ *
+ * Preview (Pixi) áp filter ở cỡ HIỂN THỊ, và Adjustment Layer của Premiere/CapCut áp lên khung
+ * đã dựng ở cỡ sequence, nên thứ tự mới còn gần hai chuẩn đó hơn. Chỉ dời khi phép co làm NHỎ
+ * khung (phóng to thì áp trước mới rẻ) — phía gọi quyết định. */
+bool ColorChainIsPointwise(const std::string& chain) {
+  for (const char* spatial : {"unsharp", "avgblur", "gblur", "boxblur", "noise", "movie="}) {
+    if (chain.find(spatial) != std::string::npos) return false;
+  }
+  return true;
+}
+
+// Env tắt (A/B, test so với thứ tự cũ): CRABBYCUT_EXPORT_COLOR_AFTER_SCALE=0.
+bool ColorAfterScaleEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_COLOR_AFTER_SCALE");
+  return !(env && std::string(env) == "0");
+}
+
+struct ColorStage {
+  std::string chain;   // kết quả của ColorAdjustChain (rỗng = tầng không làm gì)
+  std::string mask;    // mặt nạ màu của tầng (chỉ tầng của chính block có)
+  std::string tag;
+};
+
+struct SplitColorStages {
+  std::string pre;    // phải chạy ở cỡ nguồn, đúng chỗ cũ
+  std::string post;   // chạy sau bước co nhỏ
+};
+
+/* Chia các tầng màu (theo ĐÚNG thứ tự áp) thành phần trước / sau bước co. Phần sau luôn là một
+ * ĐUÔI của danh sách: tầng cuối cùng không dời được giữ lại chính nó và mọi tầng trước nó. */
+SplitColorStages SplitColorStagesForScale(const std::vector<ColorStage>& stages, bool allowPost) {
+  size_t firstPost = stages.size();
+  if (allowPost && ColorAfterScaleEnabled()) {
+    firstPost = 0;
+    for (size_t k = 0; k < stages.size(); k++) {
+      const ColorStage& stage = stages[k];
+      if (stage.chain.empty()) continue;
+      if (!stage.mask.empty() || !ColorChainIsPointwise(stage.chain)) firstPost = k + 1;
+    }
+  }
+  std::ostringstream pre;
+  std::ostringstream post;
+  for (size_t k = 0; k < stages.size(); k++) {
+    AppendColorAdjustFilters(k < firstPost ? pre : post, stages[k].chain, stages[k].mask, stages[k].tag);
+  }
+  return {pre.str(), post.str()};
+}
+
+/* Các tầng màu của một block theo thứ tự áp: chuỗi của chính block (có thể kèm mặt nạ), lớp
+ * Điều chỉnh 0 (gọi với mặt nạ RỖNG — xem WriteClipVideoFilters), rồi các lớp 1..n-1. Gọi
+ * ColorAdjustChain theo đúng thứ tự cũ: nó ghi file lệnh sendcmd có số thứ tự. */
+template <typename Block>
+std::vector<ColorStage> BlockColorStages(const Block& b, double start, const std::string& ownTag,
+                                         const std::string& layerTag) {
+  std::vector<ColorStage> stages;
+  stages.push_back({ColorAdjustChain(start, b.adjustFilters, b.adjEqContrastExpr, b.adjEqBrightnessExpr,
+                                     b.adjEqSaturationExpr, b.adjustFiltersPost, b.adjustLutAPath,
+                                     b.adjustLutBPath, b.adjustLutMixExpr, ownTag),
+                    b.adjustMaskPath, ownTag});
+  stages.push_back({ColorAdjustChain(start, b.adjustLayerFilters, b.adjLayerEqContrastExpr,
+                                     b.adjLayerEqBrightnessExpr, b.adjLayerEqSaturationExpr,
+                                     b.adjustLayerFiltersPost, b.adjustLayerLutAPath,
+                                     b.adjustLayerLutBPath, b.adjustLayerLutMixExpr, layerTag),
+                    "", ""});
+  for (size_t k = 0; k < b.extraAdjustLayers.size(); k++) {
+    const auto& layer = b.extraAdjustLayers[k];
+    const std::string tag = layerTag + "k" + std::to_string(k + 1) + "_";
+    stages.push_back({ColorAdjustChain(start, layer.filters, layer.eqContrastExpr, layer.eqBrightnessExpr,
+                                       layer.eqSaturationExpr, layer.filtersPost, layer.lutAPath,
+                                       layer.lutBPath, layer.lutMixExpr, tag),
+                      "", ""});
+  }
+  return stages;
 }
 
 
@@ -2462,6 +2551,11 @@ void AppendVideoMaskFilter(std::ofstream& script, const std::string& maskPath,
 struct MainLaneFast {
   bool ok = false;
   std::string geometry;
+  /* Chỉ nhánh RGB (clip có chỉnh màu): `geometry` = `scale` + `place`. Tầng màu theo từng điểm
+   * ảnh chen vào GIỮA hai phần khi phép co làm nhỏ khung (`shrinks`) — xem ColorChainIsPointwise. */
+  std::string scale;
+  std::string place;
+  bool shrinks = false;
 };
 
 // Số clip của lượt đang ghi đi đường nhanh — ghi vào số đo (ExportRunTiming::fastClips).
@@ -2535,7 +2629,10 @@ MainLaneFast MainLaneFastPlan(const ExportInterval& item, const ExportSettings& 
   if (!axis(w, seqW, x, !rgbRoute, ax) || !axis(h, seqH, y, chromaSubV && !rgbRoute, ay)) return plan;
   if (rgbRoute) {
     std::ostringstream g;
-    g << ",scale=w=" << w << ":h=" << h << ",format=rgb24";
+    // Co ở định dạng NGUỒN; tầng màu dời ra sau phép co (nếu có) chạy ngay đây, rồi mới về RGB.
+    plan.scale = ",scale=w=" + std::to_string(w) + ":h=" + std::to_string(h);
+    plan.shrinks = static_cast<long long>(w) * h < static_cast<long long>(iw) * ih;
+    g << ",format=rgb24";
     if (ax.len != w || ay.len != h || ax.ox != 0 || ay.ox != 0) {
       g << ",pad=width=" << ax.len << ":height=" << ay.len
         << ":x=" << ax.ox << ":y=" << ay.ox << ":color=black";
@@ -2545,7 +2642,8 @@ MainLaneFast MainLaneFastPlan(const ExportInterval& item, const ExportSettings& 
     }
     g << ",scale=out_color_matrix=bt709:out_range=tv";
     plan.ok = true;
-    plan.geometry = g.str();
+    plan.place = g.str();
+    plan.geometry = plan.scale + plan.place;
     return plan;
   }
   /* Hai cách xử lý toạ độ lẻ:
@@ -2700,24 +2798,16 @@ void WriteClipVideoFilters(
     AppendLogoRemovalFilters(script, item.logoMode, item.logoRects, "logoc" + idx + "_");
   }
   // Clip lane chính đã setpts 0-based -> LOCALT trừ mốc 0.
-  AppendColorAdjustFilters(script,
-                           ColorAdjustChain(0.0, item.adjustFilters, item.adjEqContrastExpr,
-                                            item.adjEqBrightnessExpr, item.adjEqSaturationExpr,
-                                            item.adjustFiltersPost, item.adjustLutAPath,
-                                            item.adjustLutBPath, item.adjustLutMixExpr,
-                                            "adjc" + idx + "_"),
-                           item.adjustMaskPath, "adjc" + idx + "_");
-  // Lớp Điều chỉnh: gọi LẦN HAI với mặt nạ RỖNG. Nhờ vậy nó nối vào chuỗi hiện tại
-  // (sau nhánh mặt nạ đã đóng ở lời gọi trên), đúng như preview áp lượt 2 lên TOÀN khung.
-  // Dựng qua ColorAdjustChain như chuỗi block -> có đủ keyframe eq + trộn cường độ LUT.
-  AppendColorAdjustFilters(script,
-                           ColorAdjustChain(0.0, item.adjustLayerFilters, item.adjLayerEqContrastExpr,
-                                            item.adjLayerEqBrightnessExpr, item.adjLayerEqSaturationExpr,
-                                            item.adjustLayerFiltersPost, item.adjustLayerLutAPath,
-                                            item.adjustLayerLutBPath, item.adjustLayerLutMixExpr,
-                                            "adjl" + idx + "_"),
-                           "", "");
-  AppendExtraAdjustLayers(script, 0.0, item.extraAdjustLayers, "adjl" + idx + "_");
+  // Lớp Điều chỉnh là tầng THỨ HAI, mặt nạ RỖNG: nó nối sau nhánh mặt nạ của chính block (đã
+  // đóng ở tầng đầu), đúng như preview áp lượt 2 lên TOÀN khung. Dựng qua ColorAdjustChain như
+  // chuỗi block -> có đủ keyframe eq + trộn cường độ LUT. Tầng theo từng điểm ảnh ở ĐUÔI danh
+  // sách chạy sau phép co khi phép co làm nhỏ khung (xem ColorChainIsPointwise).
+  const bool colorAfterScale = fast.ok
+    ? (fast.shrinks && !fast.scale.empty())
+    : (!clipDynTransform && item.videoMaskPath.empty() && scaleValue < 1.0);
+  const SplitColorStages color = SplitColorStagesForScale(
+    BlockColorStages(item, 0.0, "adjc" + idx + "_", "adjl" + idx + "_"), colorAfterScale);
+  script << color.pre;
   if (fast.ok) {
     /* Chốt đúng renderFrames khung — việc nền `color` + overlay của đường cũ vẫn làm:
      *  - clip ngắn hơn: `tpad` clone lặp khung cuối MÃI, nên `concat` không bao giờ sang đoạn 2;
@@ -2730,9 +2820,15 @@ void WriteClipVideoFilters(
      * được" và `overlay` đầu tiên phía sau phải chép nguyên khung trước khi trộn. Đứng trước
      * `scale` thì khung ra khỏi scale là bộ đệm mới. Hình học là phép cố định nên nhân bản trước
      * hay sau nó cho ra y hệt (đo: md5 trùng trên 4.320 khung 4K). Đo batch 180 s 4K, 70 phụ đề,
-     * `-f null`: 33,2 -> 28,1 s. */
-    script << ",tpad=stop=-1:stop_mode=clone" << fast.geometry << ",setsar=1," << ClipPixelFormat(settings)
-           << "[fc" << idx << "];\n";
+     * `-f null`: 33,2 -> 28,1 s.
+     * Có tầng màu chạy sau phép co thì tpad đứng SAU tầng đó (vẫn trước bước đổi định dạng,
+     * nên khung ra vẫn là bộ đệm mới): khung nhân bản giữ nguyên màu của khung cuối như cũ. */
+    if (color.post.empty()) {
+      script << ",tpad=stop=-1:stop_mode=clone" << fast.geometry;
+    } else {
+      script << fast.scale << color.post << ",tpad=stop=-1:stop_mode=clone" << fast.place;
+    }
+    script << ",setsar=1," << ClipPixelFormat(settings) << "[fc" << idx << "];\n";
     script << "color=c=black:s=" << seqW << "x" << seqH
            << ":d=" << FixedSeconds(baseDuration)
            << ":r=" << settings.renderFps << "[fk" << idx << "];\n";
@@ -2746,7 +2842,7 @@ void WriteClipVideoFilters(
     script << ",scale=max(2\\,ceil(iw*" << FfmpegDouble(scaleValue) << "/2)*2)"
            << ":max(2\\,ceil(ih*" << FfmpegDouble(scaleValue) << "/2)*2)";
   }
-  script << ",format=rgba";
+  script << color.post << ",format=rgba";
   if (item.flipX) {
     script << ",hflip";
   }
@@ -3384,28 +3480,18 @@ void WriteVisualOverlayFilter(
     AppendLogoRemovalFilters(script, overlay.logoMode, overlay.logoRects, "logoo" + id + "_");
   }
   // Overlay giữ mốc tuyệt đối sau setpts -> LOCALT trừ timeline_start.
-  AppendColorAdjustFilters(script,
-                           ColorAdjustChain(start, overlay.adjustFilters, overlay.adjEqContrastExpr,
-                                            overlay.adjEqBrightnessExpr, overlay.adjEqSaturationExpr,
-                                            overlay.adjustFiltersPost, overlay.adjustLutAPath,
-                                            overlay.adjustLutBPath, overlay.adjustLutMixExpr,
-                                            "adjo" + id + "_"),
-                           overlay.adjustMaskPath, "adjo" + id + "_");
-  // Lớp Điều chỉnh — xem ghi chú ở WriteClipVideoFilters.
-  AppendColorAdjustFilters(script,
-                           ColorAdjustChain(start, overlay.adjustLayerFilters, overlay.adjLayerEqContrastExpr,
-                                            overlay.adjLayerEqBrightnessExpr, overlay.adjLayerEqSaturationExpr,
-                                            overlay.adjustLayerFiltersPost, overlay.adjustLayerLutAPath,
-                                            overlay.adjustLayerLutBPath, overlay.adjustLayerLutMixExpr,
-                                            "adjlo" + id + "_"),
-                           "", "");
-  AppendExtraAdjustLayers(script, start, overlay.extraAdjustLayers, "adjlo" + id + "_");
+  // Tầng màu của chính block, rồi lớp Điều chỉnh — xem ghi chú ở WriteClipVideoFilters (cùng cách
+  // chia tầng trước / sau phép co).
+  const SplitColorStages color = SplitColorStagesForScale(
+    BlockColorStages(overlay, start, "adjo" + id + "_", "adjlo" + id + "_"),
+    !overlayDynTransform && overlay.videoMaskPath.empty() && scaleValue < 1.0);
+  script << color.pre;
   AppendVideoMaskFilter(script, overlay.videoMaskPath, "vmo" + id + "_");
   if (!overlayDynTransform) {
     script << ",scale=max(2\\,ceil(iw*" << FfmpegDouble(scaleValue) << "/2)*2)"
            << ":max(2\\,ceil(ih*" << FfmpegDouble(scaleValue) << "/2)*2)";
   }
-  script << ",format=rgba";
+  script << color.post << ",format=rgba";
   AppendFeatherAlpha(script, overlay.featherPx);
   if (overlay.flipX) {
     script << ",hflip";
