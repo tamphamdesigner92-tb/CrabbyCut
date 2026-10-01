@@ -30,7 +30,7 @@
  *
  * Đọc thêm: `--env KEY=VALUE` (lặp được) để bật/tắt cờ thí nghiệm của sidecar khi A/B,
  * `--ffmpeg-dir <bin>` để đo trên bản ffmpeg ghim (đưa lên đầu PATH), `--cpu` =
- * FFMPEG_EXPORT_HW=0. Kết quả: reports/perf_export_<fixture>_<giờ>.json + bảng in ra màn hình.
+ * FFMPEG_EXPORT_HW=0, `--resolution p1080` = phát lại với ô "Độ phân giải" khác lượt ghi.Kết quả: reports/perf_export_<fixture>_<giờ>.json + bảng in ra màn hình.
  */
 const assert = require('assert');
 const fs = require('fs');
@@ -69,6 +69,7 @@ function parseArgs(argv) {
     else if (arg === '--lossless') opts.lossless = true;
     else if (arg === '--gold') opts.gold = true;
     else if (arg === '--lavfi') opts.lavfi = true;
+    else if (arg === '--resolution') opts.resolution = next();
     else if (arg === '--help' || arg === '-h') opts.help = true;
     else throw new Error(`tham số lạ: ${arg}`);
   }
@@ -522,6 +523,17 @@ async function replayOnce() {
     // Không phát lại mốc/đo của lượt ghi: lượt phát lại KHÔNG có bước vẽ trước.
     .filter(([key]) => key !== 'client_started_at_ms' && key !== 'client_timing_json');
   fields.push(['client_started_at_ms', String(Date.now())]);
+  /* `--resolution p1080|p720|…`: phát lại cùng payload với ô "Độ phân giải" khác (mục 1.12).
+   * Chữ vẫn là PNG đã bake ở mật độ sequence của lượt ghi. */
+  if (opts.resolution) {
+    for (const entry of fields) {
+      if (entry[0] === 'export_settings') {
+        entry[1] = JSON.stringify({ ...JSON.parse(entry[1]), legacy_resolution: opts.resolution });
+      } else if (entry[0] === 'export_preset') {
+        entry[1] = opts.resolution;
+      }
+    }
+  }
   const files = capture.files.map((file) => ({
     field: file.field, name: file.originalname, type: file.mimetype, path: path.join(captureDir, 'frames', file.file),
   }));

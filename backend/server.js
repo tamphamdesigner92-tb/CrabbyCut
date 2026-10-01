@@ -1505,6 +1505,8 @@ async function writeProjectReport(reason) {
   lines.push(reportLine(2, 'sidecar_ms', serverTiming?.sidecar_ms));
   lines.push(reportLine(2, 'verify_ms', serverTiming?.verify_ms));
   const sidecarTiming = render?.sidecar_timing;
+  // Cỡ khung mà đồ thị dựng: khác `sequence` khi xuất nhỏ hơn sequence (mục 1.12 pha 2).
+  lines.push(reportLine(2, 'graph_size', sidecarTiming?.graph_size || null));
   lines.push(reportLine(2, 'sidecar_probe_ms', sidecarTiming?.probe_ms));
   lines.push(reportLine(2, 'sidecar_plan_ms', sidecarTiming?.plan_ms));
   lines.push(reportLine(2, 'sidecar_concat_ms', sidecarTiming?.concat_ms));
@@ -4714,8 +4716,9 @@ const EXPORT_RESOLUTIONS = {
 const EXPORT_FPS_VALUES = new Set(['source', '23.976', '24', '25', '29.97', '30', '50', '59.94', '60']);
 
 /* CỠ BẢN XUẤT THEO Ô "ĐỘ PHÂN GIẢI" (mục 1.12). Trước đây ô này vô tác dụng: sequence luôn đè.
- * Đồ thị của sidecar vẫn dựng ở cỡ sequence; các số dưới đây chỉ bảo đuôi đồ thị co phần hình
- * về `output_content_*` rồi đệm đen cho đủ `output_*` (xem OutputColorFilters ở sidecar).
+ * Phần hình cỡ `output_content_*` = khung sequence co đều theo `output_scale`, đệm đen cho đủ
+ * `output_*`. Sidecar dựng đồ thị ở cỡ sequence rồi co ở đuôi (pha 1, OutputColorFilters); pha 2
+ * (dựng thẳng ở cỡ phần hình khi co nhỏ, ApplyOutputScaleToPayload) đang sau env, chờ người dùng.
  *   'fit'   — như Premiere (Scale To Fit): đúng cỡ preset, hình co vừa, khổ lệch thì có viền đen;
  *   'short' — như CapCut: giữ khổ sequence, preset chỉ quy định cạnh ngắn, không viền.
  * Trả null = xuất đúng cỡ sequence ('source', 'custom', hoặc preset trùng cỡ sequence).
@@ -4733,7 +4736,7 @@ function exportOutputFrame(sequenceWidth, sequenceHeight, preset, mode = EXPORT_
     const s = Math.min(target.width, target.height) / Math.min(sw, sh);
     const w = Math.min(7680, even(sw * s));
     const h = Math.min(7680, even(sh * s));
-    frame = { output_width: w, output_height: h, output_content_width: w, output_content_height: h };
+    frame = { output_width: w, output_height: h, output_content_width: w, output_content_height: h, output_scale: s };
   } else {
     const s = Math.min(target.width / sw, target.height / sh);
     frame = {
@@ -4741,6 +4744,7 @@ function exportOutputFrame(sequenceWidth, sequenceHeight, preset, mode = EXPORT_
       output_height: target.height,
       output_content_width: Math.min(target.width, even(sw * s)),
       output_content_height: Math.min(target.height, even(sh * s)),
+      output_scale: s,
     };
   }
   if (frame.output_width === sw && frame.output_height === sh
@@ -7391,7 +7395,7 @@ function createApp() {
       exportSettings.height = sequenceSettings.height;
       exportSettings.resolution = 'sequence';
       /* Ô "Độ phân giải" của hộp thoại xuất (renderer gửi ở `legacy_resolution`, bản cũ ở
-       * `export_preset`): đồ thị vẫn ở cỡ sequence, sidecar co ở đuôi — xem exportOutputFrame. */
+       * `export_preset`): cỡ phần hình + hệ số co — xem exportOutputFrame. */
       exportSettings.output_preset = String(exportRaw.legacy_resolution || req.body.export_preset || 'source');
       Object.assign(exportSettings, exportOutputFrame(sequenceSettings.width, sequenceSettings.height,
         exportSettings.output_preset) || {});

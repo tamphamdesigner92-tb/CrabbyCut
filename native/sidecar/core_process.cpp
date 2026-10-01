@@ -974,6 +974,11 @@ struct ExportSettings {
   int outputHeight = 0;
   int contentWidth = 0;
   int contentHeight = 0;
+  // Hệ số sequence -> phần hình mà backend dùng để tính content* (0 = payload cũ, không có).
+  double outputScale = 0.0;
+  // Đồ thị đã dựng ở cỡ phần hình (pha 2, xem ApplyOutputScaleToPayload): `width`/`height` lúc
+  // này là content*, đuôi đồ thị chỉ còn đệm đen.
+  bool builtAtOutputScale = false;
 };
 
 bool OutputResized(const ExportSettings& settings) {
@@ -1084,6 +1089,8 @@ struct ExportTimingLog {
   double probeMs = 0.0;
   double planMs = 0.0;
   double concatMs = 0.0;
+  // Cỡ khung mà đồ thị dựng ("WxH"); khác cỡ sequence khi dựng ở cỡ xuất (mục 1.12 pha 2).
+  std::string graphSize;
   std::vector<ExportRunTiming> runs;
 };
 
@@ -1135,6 +1142,7 @@ std::string ExportTimingJson(const std::string& encoder) {
       << ",\"concat_ms\":" << g_exportTiming.concatMs
       << ",\"encoder\":\"" << EscapeJson(encoder) << "\""
       << ",\"bench\":" << (g_exportBenchDir.empty() ? "false" : "true")
+      << ",\"graph_size\":\"" << EscapeJson(g_exportTiming.graphSize) << "\""
       << ",\"runs\":[";
   for (size_t i = 0; i < g_exportTiming.runs.size(); i++) {
     const ExportRunTiming& run = g_exportTiming.runs[i];
@@ -1783,6 +1791,7 @@ bool ReadExportPayload(
       settings.outputHeight = oh;
       settings.contentWidth = cw;
       settings.contentHeight = ch;
+      settings.outputScale = ClampDouble(ExtractDoubleFieldOr(text, "output_scale", 0.0), 0.0, 64.0);
     }
   }
 
@@ -2037,10 +2046,14 @@ std::string ClipPixelFormat(const ExportSettings& settings) {
 std::string OutputColorFilters(const ExportSettings& settings) {
   /* Cỡ xuất khác cỡ sequence (mục 1.12, pha 1): co cả khung đã dựng về cỡ phần hình ngay ở phép
    * đổi màu cuối (một lượt swscale), lanczos như các bộ dựng phim khi thu nhỏ; phần hình nhỏ hơn
-   * khung xuất thì đệm đen hai bên, toạ độ chẵn cho 4:2:0. */
+   * khung xuất thì đệm đen hai bên, toạ độ chẵn cho 4:2:0. Pha 2 (ApplyOutputScaleToPayload, đang
+   * sau env) dựng thẳng đồ thị ở cỡ phần hình khi co nhỏ, ở đây chỉ còn bước đệm. */
   if (OutputResized(settings)) {
-    std::string out = "scale=w=" + std::to_string(settings.contentWidth) + ":h=" + std::to_string(settings.contentHeight)
-      + ":flags=lanczos:out_color_matrix=bt709:out_range=tv," + ClipPixelFormat(settings);
+    // Pha 2: đồ thị đã ở cỡ phần hình (ApplyOutputScaleToPayload) — chỉ đổi màu, không co nữa.
+    std::string out = settings.builtAtOutputScale
+      ? "scale=out_color_matrix=bt709:out_range=tv," + ClipPixelFormat(settings)
+      : "scale=w=" + std::to_string(settings.contentWidth) + ":h=" + std::to_string(settings.contentHeight)
+        + ":flags=lanczos:out_color_matrix=bt709:out_range=tv," + ClipPixelFormat(settings);
     if (settings.contentWidth != settings.outputWidth || settings.contentHeight != settings.outputHeight) {
       const int x = ((settings.outputWidth - settings.contentWidth) / 2) & ~1;
       const int y = ((settings.outputHeight - settings.contentHeight) / 2) & ~1;
@@ -4563,6 +4576,85 @@ int CommandPreviewProxy(int argc, char** argv) {
   return 0;
 }
 
+/* ===== ĐỒ THỊ DỰNG Ở CỠ XUẤT (mục 1.12 pha 2) =====
+ *
+ * Pha 1 dựng cả đồ thị ở cỡ sequence rồi co ở đuôi (OutputColorFilters): xuất 1080p từ sequence
+ * 4K là ghép lane chính, đổi màu, trộn mọi lớp phủ trên khung 4K cho một bản ra chỉ bằng 1/4 số
+ * điểm ảnh — rồi thêm một lượt lanczos 4K -> 1080p trên luồng filter. Đo bản cắt 300 s 4K (100
+ * phụ đề): xuất 1080p theo pha 1 CHẬM HƠN xuất đúng cỡ 4K (75,7 so với 70,0 s).
+ *
+ * Nay khi cỡ xuất NHỎ hơn sequence, dựng đồ thị thẳng ở cỡ phần hình (content*): cả cảnh co đều
+ * quanh tâm khung theo hệ số s của backend (`output_scale`, exportOutputFrame). Mọi số đo theo
+ * ĐIỂM ẢNH SEQUENCE nhân s:
+ *   - scale hiệu dụng, qua `fitScale` — nên áp cho cả nhánh keyframe scale (AppendKfTransformFilters
+ *     nhân fitScale vào biểu thức);
+ *   - vị trí tĩnh, biểu thức vị trí keyframe và độ dời của hoạt ảnh (đơn vị px);
+ *   - cỡ chữ drawtext, bề rộng mép mềm (tính trên lớp phủ ĐÃ co).
+ * Không đổi: số đo theo điểm ảnh NGUỒN (xoá logo, mặt nạ, bán kính làm mờ — đều đứng trước phép
+ * co), hệ số nhân của hoạt ảnh, góc xoay, độ mờ. PNG chữ vẫn bake ở mật độ sequence; chuỗi của lớp
+ * phủ co nó (ảnh tĩnh: một lần).
+ *
+ * fitScale nhân thêm (1 − 2e-6): hệ số in ra 6 chữ số thập phân (FfmpegDouble), và với s = 2/3
+ * (1080p -> 720p) "0.666667" làm 1920 điểm ảnh thành 1280,0006 -> ceil(·/2)*2 = 1282, clip vừa
+ * khung tràn 2 px. Hụt đi một chút thì mọi tích đáng lẽ là số chẵn tròn ra đúng số đó (ở 7680 px
+ * hụt 0,015 px), còn tích không tròn thì ceil cho như cũ.
+ * Phóng to (cỡ xuất lớn hơn sequence) giữ cách pha 1.
+ *
+ * CHƯA BẬT MẶC ĐỊNH (2026-10-01) — bật bằng CRABBYCUT_EXPORT_OUTSCALE=1. Đo: 4K -> 1080p (bản cắt
+ * 300 s, 100 phụ đề) 81,5 -> 67,5 s (−17%); Test.crab 1080p -> 720p 17,0 -> 13,1 s (−23%); Bin Tom
+ * 1080×1920 -> 720×1280 25,1 -> 22,7 s (−10%). Bộ so 0.3 trên Test.crab: (b) ĐẠT (mới/cũ 49,9 dB,
+ * VMAF 97,6, khung tệ nhất 40,1) nhưng (a) TRƯỢT: so bản chuẩn 45,49 -> 42,86 dB. Bản chuẩn dựng từ
+ * CHÍNH đồ thị pha 1 (dựng ở cỡ sequence ở độ chính xác cao rồi co lanczos), nên cách nào lấy mẫu
+ * khác thứ tự đều "xa" nó hơn — chỗ lệch nhiều nhất là clip 4K ở 107%: pha 1 co hai lần (0,535 rồi
+ * 2/3), pha 2 co một lần (0,357). Co bằng lanczos thay bicubic không thu hẹp (42,39 dB). Người dùng
+ * quyết có nới tiêu chí (a) cho mục này không (xem mục 1.12 của kế hoạch). */
+bool OutputScaleEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_OUTSCALE");
+  return env && std::string(env) == "1";
+}
+
+bool ApplyOutputScaleToPayload(ExportSettings& settings, std::vector<ExportInterval>& intervals,
+                               std::vector<ExportOverlay>& overlays) {
+  if (!OutputResized(settings) || !OutputScaleEnabled() || settings.width <= 0 || settings.height <= 0) return false;
+  const double s = settings.outputScale;
+  if (!(s > 0.0 && s < 0.999)) return false;
+  // Phần hình phải đúng là khung sequence nhân s (lệch do làm tròn chẵn ≤ 1 px; bị kẹp trần thì
+  // không còn là phép co đều -> giữ pha 1).
+  if (std::abs(settings.width * s - settings.contentWidth) > 2.0
+      || std::abs(settings.height * s - settings.contentHeight) > 2.0) return false;
+  std::ostringstream factorText;
+  factorText << std::setprecision(12) << s;
+  const std::string factor = factorText.str();
+  const auto scaledExpr = [&](std::string& expr) {
+    if (!expr.empty()) expr = "((" + expr + ")*" + factor + ")";
+  };
+  const double fitFactor = s * (1.0 - 2e-6);
+  for (auto& item : intervals) {
+    item.fitScale *= fitFactor;
+    item.positionX *= s;
+    item.positionY *= s;
+    scaledExpr(item.kfXExpr);
+    scaledExpr(item.kfYExpr);
+    scaledExpr(item.animXExpr);
+    scaledExpr(item.animYExpr);
+  }
+  for (auto& overlay : overlays) {
+    overlay.fitScale *= fitFactor;
+    overlay.positionX *= s;
+    overlay.positionY *= s;
+    scaledExpr(overlay.kfXExpr);
+    scaledExpr(overlay.kfYExpr);
+    scaledExpr(overlay.animXExpr);
+    scaledExpr(overlay.animYExpr);
+    if (overlay.featherPx > 0) overlay.featherPx = std::max(1, static_cast<int>(std::lround(overlay.featherPx * s)));
+    overlay.fontSize = std::max(1, static_cast<int>(std::lround(overlay.fontSize * s)));
+  }
+  settings.width = settings.contentWidth;
+  settings.height = settings.contentHeight;
+  settings.builtAtOutputScale = true;
+  return true;
+}
+
 int CommandExportVideo(int argc, char** argv) {
   if (argc < 8) {
     Emit("error", "export-video expects source output timeline_json_file temp_dir preset fps", 2);
@@ -4592,6 +4684,11 @@ int CommandExportVideo(int argc, char** argv) {
     Emit("error", payloadError, 4);
     return 4;
   }
+  if (ApplyOutputScaleToPayload(settings, intervals, overlays)) {
+    Emit("progress", "Dựng đồ thị ở cỡ xuất " + std::to_string(settings.width) + "x" + std::to_string(settings.height)
+                     + " (hệ số " + FfmpegDouble(settings.outputScale) + ").");
+  }
+  g_exportTiming.graphSize = std::to_string(settings.width) + "x" + std::to_string(settings.height);
   /* ĐO TRỤC THỜI GIAN CỦA FILE NGUỒN — MỘT LẦN cho cả lượt export.
    * Xem khối chú thích ở ExportSettings::videoStart: mọi mốc `trim`/`atrim` phải cộng thêm
    * mốc bắt đầu thật của luồng, nếu không mỗi điểm nối lẻ ra một khung của cảnh trước. */
