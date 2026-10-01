@@ -1730,10 +1730,18 @@ std::vector<ExtraAdjustLayer> ReadExtraAdjustLayers(const std::string& obj) {
   return out;
 }
 
+/* Chuỗi màu có thứ biến thiên theo thời gian bên trong: token LOCALT (lớp Điều chỉnh phủ một phần
+ * block, "Viền mờ dần" có keyframe…) hoặc `sendcmd` (keyframe colorbalance/curves/làm mờ đi qua file
+ * lệnh theo giờ CỤC BỘ của block — backend nối nó vào đầu chuỗi). Cắt đôi block như vậy thì nửa sau
+ * chạy lại giờ cục bộ từ 0. Trước 2026-10-01 chỉ dò LOCALT, và lớp phủ không dò chuỗi của chính nó
+ * (mục 1.7, test:export-batch-time-varying). */
+bool ColorChainTimeVarying(const std::string& chain) {
+  return chain.find("LOCALT") != std::string::npos || chain.find("sendcmd") != std::string::npos;
+}
+
 bool ExtraAdjustLayersTimeVarying(const std::vector<ExtraAdjustLayer>& layers) {
   for (const auto& layer : layers) {
-    if (layer.filters.find("LOCALT") != std::string::npos
-        || layer.filtersPost.find("LOCALT") != std::string::npos
+    if (ColorChainTimeVarying(layer.filters) || ColorChainTimeVarying(layer.filtersPost)
         || !layer.eqContrastExpr.empty() || !layer.eqBrightnessExpr.empty()
         || !layer.eqSaturationExpr.empty() || !layer.lutMixExpr.empty()) {
       return true;
@@ -3188,12 +3196,11 @@ bool HasAnyExpr(std::initializer_list<const std::string*> exprs) {
 
 // Clip có thuộc tính biến thiên theo thời gian -> KHÔNG được cắt đôi.
 bool IntervalIsTimeVarying(const ExportInterval& item) {
-  /* Chuỗi màu chứa token LOCALT = có biểu thức theo thời gian bên trong: lớp Điều chỉnh
-   * phủ MỘT PHẦN block (`enable='between(LOCALT,..)'`), "Viền mờ dần" có keyframe… Cắt đôi
-   * block như vậy là nửa sau chạy lại từ t=0 và cửa sổ thời gian rơi sai chỗ. */
-  const auto hasLocalT = [](const std::string& s) { return s.find("LOCALT") != std::string::npos; };
-  if (hasLocalT(item.adjustLayerFilters) || hasLocalT(item.adjustFilters)
-      || hasLocalT(item.adjustFiltersPost) || hasLocalT(item.adjustLayerFiltersPost)
+  /* Chuỗi màu có biểu thức / lệnh theo thời gian bên trong (ColorChainTimeVarying): lớp Điều
+   * chỉnh phủ MỘT PHẦN block (`enable='between(LOCALT,..)'`), keyframe màu qua sendcmd… Cắt
+   * đôi block như vậy là nửa sau chạy lại từ t=0 và cửa sổ thời gian rơi sai chỗ. */
+  if (ColorChainTimeVarying(item.adjustLayerFilters) || ColorChainTimeVarying(item.adjustFilters)
+      || ColorChainTimeVarying(item.adjustFiltersPost) || ColorChainTimeVarying(item.adjustLayerFiltersPost)
       || ExtraAdjustLayersTimeVarying(item.extraAdjustLayers)) {
     return true;
   }
@@ -3212,6 +3219,8 @@ bool OverlayIsTimeVarying(const ExportOverlay& overlay) {
   if (OverlayIsImageSequence(overlay)) return true;
   if (!OverlayIsImageLike(overlay)) return true;      // video/audio: có trục thời gian riêng
   if (overlay.animInDur > 0.001 || overlay.animOutDur > 0.001) return true;
+  // Chuỗi màu CỦA CHÍNH lớp phủ cũng có thể mang LOCALT / sendcmd (xem ColorChainTimeVarying).
+  if (ColorChainTimeVarying(overlay.adjustFilters) || ColorChainTimeVarying(overlay.adjustFiltersPost)) return true;
   if (!overlay.adjustLayerFilters.empty() || !overlay.adjLayerEqContrastExpr.empty()
       || !overlay.adjLayerEqBrightnessExpr.empty() || !overlay.adjLayerEqSaturationExpr.empty()
       || !overlay.adjustLayerLutMixExpr.empty() || !overlay.extraAdjustLayers.empty()) return true;
