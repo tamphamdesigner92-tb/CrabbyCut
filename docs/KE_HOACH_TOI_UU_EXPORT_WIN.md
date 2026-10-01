@@ -64,6 +64,7 @@
 14. Việc kế tiếp theo thứ tự: 1.6 → 1.7 → 1.4 → 1.10 → 1.12 pha 2 → 1.2 → phần còn lại của 1.8 → 1.9 → 1.13 → 1.14; 1.11 khi có dự án nhiều lớp phủ hơn hẳn.
 15. **Fixture người dùng chỉ định cho bước tiếp (2026-09-30): `G:\Work\AI\Test CrabbyCut\Test Export\Test.crab`** — sequence 1920×1080 25 fps; lane chính 2 nguồn khác khổ (`swim_protect_v2 (720p).mp4` 1366×720 + `DSCF3442.MOV` 3840×2160, clip 107%); lane overlay: video 4K cùng nguồn (nay 110% sau khi đổi mốc vừa khung) và một block **scale 150%, độ mờ 48% có keyframe độ mờ** — đúng đường `geq` của mục 1.6. Chưa dựng payload bench (`npm run bench:export -- --crab "<đường dẫn>"` lần đầu mở Electron để ghi payload). Việc nhỏ đã thấy: gộp các lần `ffprobe` (mục 12); đệm thay kéo 1 px cho chữ rộng lẻ (mục 11a, cần bộ so 0.3); lượt xuất trong app của Bin Tom chưa đo lại (phần vẽ trước ở renderer).
 16. **Phiên 6 (2026-10-01): 1.19 áp màu sau phép co — xong** (dự án "Yêu Con 1" của người dùng: server 120,8 → 58,0 s). **1.20 ô "Bitrate" kiểu CapCut — xong** (người dùng chốt). Fixture bench mới: `test_temp/bench_export/yeu_con_1` (bản sao .crab ở `test_temp/yeucon_src/`). Bản Gyan 8.1.1 ghim trong scratch đã bị dọn (thư mục `bin` rỗng) — phiên này đo và chạy test trên BtbN N-123955 của PATH (đúng bản app đang chạy từ mã nguồn dùng).
+17. **Phiên 7 (2026-10-01): 1.6 + 1.4 — xong.** Fixture `test_temp/bench_export/test_crab` (bản sao Test.crab ở `test_temp/testcrab_src/`): **55,6 → 14,2 s (3,9×)** — `geq` độ mờ keyframe −43 s, cắt trước khi phóng to −2,6 s. "Yêu Con 1": mép mềm Retouch −3 s. Việc kế tiếp: 1.7 → 1.10 → 1.12 pha 2 → 1.2 → phần còn lại của 1.8 → 1.9 → 1.13 → 1.14; Retouch vẽ trước ở renderer (27–42 s trên Yêu Con) đáng đo riêng.
 - **Câu hỏi đang chờ người dùng:** không còn. Các câu (a)–(e) trả lời 2026-09-29, câu khổ lệch của 1.12 trả lời 2026-09-30, ô Bitrate của 1.20 trả lời 2026-10-01 (xem bảng "Quyết định đã chốt").
 - `CrabbyCut_Private`: chưa port gì của phiên 2–3. Mục trung lập để port (M.2): phần đo (sidecar + backend + renderer), 1.15, 1.1a, 1.17, 1.3, 1.5, ảnh tĩnh một lần.
 
@@ -390,7 +391,11 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
 - Autorotate chỉ chèn một `transpose`, chỉ còn một buffersrc.
 - Thêm `-threads 1` cho input ảnh đơn.
 
-**1.6 Dẹp filter tính biểu thức từng điểm ảnh** (#6, làm trước 1.5 vì `geq` r/g/b chỉ nhận GBR(A)P, `vf_geq.c:266, 364-374`).
+**1.6 Dẹp filter tính biểu thức từng điểm ảnh** (#6, làm trước 1.5 vì `geq` r/g/b chỉ nhận GBR(A)P, `vf_geq.c:266, 364-374`). — **ĐÃ LÀM (2026-10-01, phiên 7)** cho hai chỗ `geq` còn lại; test `test:export-alpha-filters`.
+- **Đo trước (Test.crab, `-f null`):** lượt xuất 55,4–55,8 s; bỏ riêng `geq` độ mờ keyframe (block 150% của nguồn 1366×720 ≈ 2050×1080, 200 khung): **12,2 s** → geq tốn ~43 s (~215 ms/khung). Mép mềm Retouch trên "Yêu Con 1" (2 miếng vá ~510×490, 294 khung): ~3–5 s.
+- **Độ mờ keyframe** (`KfOpacityFilter`): `format=gbrap,sendcmd=f='kfopN.cmd',colorchannelmixer@kfopN=aa=1`, file lệnh `[expr] … aa 'clip(op/100,0,1)'`. Đã thử `lut` thay `colorchannelmixer`: không được — sendcmd [expr] gửi KẾT QUẢ số của biểu thức, mà `lut` cần chuỗi `val*k`. Kiểm riêng: alpha trùng hoàn toàn ở đoạn 100%, lệch ±1 ở đoạn mờ dần (geq cắt phần lẻ, colorchannelmixer làm tròn), RGB trùng, không trễ khung. **Bẫy:** để colorchannelmixer chạy ở rgba thì `overlay=format=auto` kéo LUỒNG CHÍNH qua rgba (geq ép gbrap), swscale đi đường yuv420p→rgba nhanh mà kém chính xác cho MỌI khung — bộ so 0.3 trượt (so bản chuẩn 45,5 → 41,6 dB); ép `format=gbrap` trước colorchannelmixer thì đồ thị quanh nó y như cũ. **Kết quả Test.crab: 57,5 → 16,0 s (3,6×); bộ so 0.3 ĐẠT** (mới/cũ 68,4 dB, so bản chuẩn 45,476 → 45,478). Env tắt `CRABBYCUT_EXPORT_KFOP=0`.
+- **Mép mềm** (`AppendFeatherAlpha`): tách một khung, `geq=lum=dốc mép` trên khung đó (một lần), `blend=multiply` vào alpha của mọi khung (framesync lặp khung cuối của nhánh dốc), `alphamerge`; ở gbrap như cũ. "Yêu Con 1": 59,7 → 56,5 s; bộ so 0.3 ĐẠT (trùng từng điểm ảnh — miếng vá JPEG alpha 255). Env tắt `CRABBYCUT_EXPORT_FEATHER1=0`.
+- Ghi chú cũ:
 - Keyframe opacity: `geq` → `colorchannelmixer=aa=…` (rgba) hoặc `lut=c0=val:c1=val:c2=val:c3='val*k'` (yuva) + `sendcmd` cờ `[expr]`.
   - Hai filter này nhận lệnh lúc chạy (`vf_colorchannelmixer.c:462-506`, `vf_lut.c:573-605`).
   - Phải ghi đủ `c0..c2=val`: thành phần bỏ trống mặc định là `clipval`, sẽ kẹp Y về 16–235 và U/V về 16–240 (`vf_lut.c:89-99, 267-274`).
@@ -477,7 +482,12 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
 - ProRes (`yuv422p10`, `:1653-1655`) dùng `yuv444p10`/`yuva444p10` để khỏi rơi xuống 8-bit.
 - Chấp nhận khác biệt nhỏ ở vùng rất bão hoà hoặc dưới mức đen: đường cũ kẹp theo gam RGB, đường mới thì không. Bộ so 0.3 (so trong RGB, so với bản chuẩn) sẽ phân xử.
 
-**1.4 Cắt trước khi scale khi phóng to; chỉnh màu sau khi thu nhỏ** (#5).
+**1.4 Cắt trước khi scale khi phóng to; chỉnh màu sau khi thu nhỏ** (#5). — **ĐÃ LÀM (2026-10-01)**: "chỉnh màu sau khi thu nhỏ" là mục 1.19; "cắt trước khi phóng to" cho đường nhanh lane chính (`PreCropPlanAxis`, `MainLaneFast::preCrop`), test `test:export-precrop`, env tắt `CRABBYCUT_EXPORT_PRECROP=0`.
+- **Ca thật:** Test.crab — nguồn 1366×720 nằm giữa khung chuẩn hoá 3840×2160 (viền đen), clip 108% (×1,4056 vừa khung) → mỗi khung co lên 5830×3280 rồi giữ 1920×1080.
+- **Cách làm:** vùng cắt trên lưới 2q của tỉ lệ rút gọn w/iw = p/q, lề 8 điểm ảnh nguồn; ảnh co của vùng cắt (len·p/q, chẵn) đặt ở vị trí cũ + start·p/q, phần pad/crop/chroma phía sau giữ nguyên phép tính. Chỉ khi phóng ≥ 1,3× và bớt ≥ 25% diện tích; clip có chỉnh màu thì chỉ khi mọi tầng theo từng điểm ảnh (cắt đứng TRƯỚC chuỗi màu, sau xoá logo). Test.crab: vùng cắt 2304×756 → co 3498×1148 thay cho 5830×3280.
+- **Kết quả Test.crab: 16,8 → 14,2 s (−15%); bộ so 0.3 ĐẠT** (mới/cũ 63,95 dB, tệ nhất 61,4 — bước lấy mẫu xInc làm tròn trên phân số khác mẫu số; so bản chuẩn 45,46 → 45,463). Test: 7 clip (1,2× không cắt, 1,35×–3×, dời lẻ, sát mép, curves cắt trước, unsharp giữ thứ tự cũ) ≥ 50 dB so với cách cũ, đột biến lệch mốc 2 px tụt 24 dB.
+- Chưa làm: lớp phủ phóng to (đường RGBA) và clip có keyframe hình học.
+- Ghi chú cũ:
 - Chỉ bật khi zoom ≥ ~1,3×.
 - Cắt trên lưới tỉ lệ rút gọn của W'/iw (W' = ceil(iw·s/2)·2, `:2132-2133`), chừa lề ≥ 4 px, rồi cắt chính xác lần nữa sau `scale`. Lý do: cắt trước thay đổi vị trí lấy mẫu của swscale.
 - "Màu sau khi thu nhỏ" chỉ khi chuỗi màu gồm phép từng điểm ảnh (`eq`/`colorbalance`/`curves`/`lut3d`), không mặt nạ.

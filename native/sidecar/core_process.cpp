@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <numeric>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -2090,6 +2091,46 @@ bool HasAnimGeomExpr(const std::string& sx, const std::string& sy, const std::st
   return !sx.empty() || !sy.empty() || !rot.empty();
 }
 
+// File lệnh phụ của filter script đang ghi (lutmix_*.cmd, kfop_*.cmd): nằm cạnh script, số thứ tự
+// chạy suốt tiến trình nên mỗi file một tên.
+static fs::path g_filterAuxDir;   // thư mục của filter script đang ghi (xem WriteFilterScript)
+static int g_filterAuxSeq = 0;
+
+/* ĐỘ MỜ CÓ KEYFRAME (mục 1.6 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md).
+ *
+ * Trước đây: `geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='clip(op/100,0,1)*alpha(X,Y)'` — geq tính bốn
+ * biểu thức cho TỪNG ĐIỂM ẢNH của từng khung. Đo trên Test.crab (block 150% của nguồn 1366×720 ->
+ * ~2050×1080, 200 khung): ~215 ms/khung, 43 trong 55,6 s của cả lượt xuất.
+ * Nay: `colorchannelmixer` chỉ còn hệ số `aa` (alpha ra = aa × alpha vào; tuỳ chọn có cờ T nên đổi
+ * được lúc chạy), và `sendcmd` cờ [expr] tính độ mờ MỘT LẦN mỗi khung rồi gửi vào — cùng khuôn
+ * ColorAdjustLutBlend: sendcmd đứng TRƯỚC filter nhận lệnh, lệnh nằm trong FILE (dấu phẩy của biểu
+ * thức), biến thời gian là T. Không ghi được file -> giữ geq cũ (thà chậm còn hơn mất keyframe).
+ * Env tắt (A/B, test so với cách cũ): CRABBYCUT_EXPORT_KFOP=0. */
+bool KfOpacityMixerEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_KFOP");
+  return !(env && std::string(env) == "0");
+}
+
+std::string KfOpacityFilter(const std::string& kfOpacityExpr, double start) {
+  const std::string op = SubstituteLocalTimeVar(kfOpacityExpr, start, "T");
+  const std::string geq = ",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='clip((" + op + ")/100,0,1)*alpha(X,Y)'";
+  if (!KfOpacityMixerEnabled()) return geq;
+  const std::string tag = "kfop" + std::to_string(++g_filterAuxSeq);
+  const fs::path dir = g_filterAuxDir.empty() ? fs::temp_directory_path() : g_filterAuxDir;
+  const fs::path cmdPath = dir / (tag + ".cmd");
+  {
+    std::ofstream cmd{cmdPath};
+    if (!cmd) return geq;
+    cmd << "0.0-1000000.0 [expr] colorchannelmixer@" << tag << " aa 'clip((" << op << ")/100,0,1)';\n";
+  }
+  /* `format=gbrap` TRƯỚC colorchannelmixer: geq chỉ nhận RGB tách mặt phẳng nên ffmpeg vẫn tự đổi
+   * sang gbrap ở đây, và `overlay=format=auto` phía sau theo đó kéo LUỒNG CHÍNH qua gbrap. Để
+   * colorchannelmixer chạy ở rgba thì overlay kéo luồng chính qua rgba — swscale đi đường yuv420p
+   * -> rgba nhanh mà kém chính xác, áp cho MỌI khung của cả batch: đo trên Test.crab, so bản chuẩn
+   * 45,5 dB tụt còn 41,6 dB (bộ so 0.3 đánh trượt). Giữ gbrap = giữ nguyên đồ thị quanh nó. */
+  return ",format=gbrap,sendcmd=f='" + FilterPath(cmdPath.string()) + "',colorchannelmixer@" + tag + "=aa=1";
+}
+
 // Nối chuỗi filter biến đổi theo thời gian (rotate -> scale -> opacity) cho 1 stream đã ở
 // format=rgba (gọi ngay sau format=rgba/flip). start = mốc trừ LOCALT. Thứ tự rotate
 // TRƯỚC scale để canvas rotate = đường chéo nguồn (hằng) không bị xén khi scale biến thiên.
@@ -2139,9 +2180,8 @@ void AppendKfTransformFilters(
   // đánh giá lại w/h mỗi frame -> scale động
   if (!kfScaleExpr.empty() || !animSxExpr.empty() || !animSyExpr.empty()) script << ":eval=frame";
   if (!kfOpacityExpr.empty()) {
-    // opacity biến thiên: geq nhân alpha sẵn có (0..1 * alpha gốc). geq dùng biến thời gian T.
-    const std::string op = SubstituteLocalTimeVar(kfOpacityExpr, start, "T");
-    script << ",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='clip((" << op << ")/100,0,1)*alpha(X,Y)'";
+    // opacity biến thiên: nhân alpha sẵn có với độ mờ của khung (xem KfOpacityFilter).
+    script << KfOpacityFilter(kfOpacityExpr, start);
   } else if (staticOpacity < 0.999) {
     script << ",colorchannelmixer=aa=" << FfmpegDouble(staticOpacity);
   }
@@ -2250,9 +2290,8 @@ std::string ColorAdjustEqFilter(double start,
 //  - Lệnh phải nằm trong FILE (`sendcmd=f=`): viết thẳng `c='…'` thì dấu phẩy của biểu thức
 //    đụng cú pháp tách lệnh của sendcmd, escape qua hai tầng (graph + sendcmd) không qua được.
 //  - Biến thời gian của sendcmd [expr] là T (giây của khung), giống blend cũ.
-static fs::path g_filterAuxDir;   // thư mục của filter script đang ghi (xem WriteFilterScript)
-static int g_filterAuxSeq = 0;
-
+//  - g_filterAuxDir / g_filterAuxSeq: khai báo ở trên AppendKfTransformFilters (độ mờ keyframe
+//    dùng cùng cơ chế file lệnh).
 std::string ColorAdjustLutBlend(double start, const std::string& aPath, const std::string& bPath,
                                 const std::string& mixExpr, const std::string& tag) {
   if (aPath.empty() || bPath.empty() || mixExpr.empty()) return "";
@@ -2611,6 +2650,9 @@ struct MainLaneFast {
   std::string scale;
   std::string place;
   bool shrinks = false;
+  /* Cắt trước khi phóng to (mục 1.4, PreCropPlanAxis): đứng ngay sau xoá logo, TRƯỚC chuỗi màu
+   * (chỉ cắt khi mọi tầng màu theo từng điểm ảnh) — `geometry` đã tính theo vùng cắt này. */
+  std::string preCrop;
 };
 
 // Số clip của lượt đang ghi đi đường nhanh — ghi vào số đo (ExportRunTiming::fastClips).
@@ -2631,6 +2673,75 @@ bool IntervalHasColorAdjust(const ExportInterval& item) {
       || !item.extraAdjustLayers.empty();
 }
 
+/* ===== CẮT TRƯỚC KHI PHÓNG TO (mục 1.4, docs/KE_HOACH_TOI_UU_EXPORT_WIN.md) =====
+ *
+ * Clip phóng to thì đường nhanh co CẢ khung nguồn lên rồi mới cắt lấy cửa sổ sequence. Test.crab:
+ * nguồn 1366×720 nằm giữa khung chuẩn hoá 3840×2160 (viền đen), clip 108% -> mỗi khung co lên
+ * 5830×3280 (19 triệu điểm ảnh) để giữ lại 1920×1080; cắt trước: 14,6 -> 11,1 s cả lượt xuất.
+ *
+ * Cắt trước làm đổi vị trí lấy mẫu của swscale, trừ khi vùng cắt nằm trên LƯỚI TỈ LỆ RÚT GỌN:
+ * w/iw = p/q (tối giản), vùng cắt bắt đầu ở bội của q và dài bội của q -> phép co vùng cắt có
+ * đúng tỉ lệ cũ (bước lấy mẫu xInc của swscale tính từ cùng một phân số) và mốc của nó trùng một
+ * điểm ảnh nguyên của ảnh co cũ (c0·p/q). Bội của 2q để mẫu màu 4:2:0 (nửa độ phân giải) cũng
+ * trùng lưới. Chừa lề kPreCropMargin điểm ảnh nguồn cho nhân nội suy (bicubic lấy 2 điểm mỗi bên,
+ * mặt phẳng màu ở nửa độ phân giải). Phép đặt vị trí phía sau giữ nguyên: ảnh co của vùng cắt là
+ * một mảnh của ảnh co cũ, đặt ở vị trí cũ + mốc của mảnh. Env tắt: CRABBYCUT_EXPORT_PRECROP=0. */
+const int kPreCropMargin = 8;
+const double kPreCropMinZoom = 1.3;
+
+bool PreCropEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_PRECROP");
+  return !(env && std::string(env) == "0");
+}
+
+struct PreCropAxis {
+  int start = 0;       // mốc cắt trên nguồn
+  int len = 0;         // độ dài cắt trên nguồn
+  int scaledLen = 0;   // độ dài sau co giãn (= len·p/q, chẵn)
+  int scaledOff = 0;   // mốc của mảnh trong ảnh co cũ (= start·p/q)
+};
+
+/* Một chiều: nguồn dài `in`, co thành `out`, đặt ở `pos` trong khung dài `seq`. false = không cắt
+ * được gì đáng kể (hoặc không ra số chẵn) -> giữ đường cũ cho chiều này. */
+bool PreCropPlanAxis(int in, int out, int pos, int seq, PreCropAxis& r) {
+  if (in <= 0 || out <= 0) return false;
+  const long long g = std::gcd(static_cast<long long>(out), static_cast<long long>(in));
+  const long long p = out / g;
+  const long long q = in / g;
+  const long long grid = 2 * q;
+  // Phần ảnh co lọt vào khung, theo toạ độ của ảnh co.
+  const int v0 = std::max(0, -pos);
+  const int v1 = std::min(out, seq - pos);
+  if (v1 - v0 < 2) return false;
+  const double ratio = static_cast<double>(in) / out;
+  const long long i0 = std::max(0LL, static_cast<long long>(std::floor(v0 * ratio)) - kPreCropMargin);
+  const long long i1 = std::min(static_cast<long long>(in), static_cast<long long>(std::ceil(v1 * ratio)) + kPreCropMargin);
+  const long long c0 = (i0 / grid) * grid;
+  const long long c1 = std::min(static_cast<long long>(in), ((i1 + grid - 1) / grid) * grid);
+  const long long len = c1 - c0;
+  if (len <= 0 || len >= in || len % q != 0) return false;
+  const long long scaledLen = len * p / q;
+  if (scaledLen % 2 != 0 || scaledLen < 2) return false;
+  r.start = static_cast<int>(c0);
+  r.len = static_cast<int>(len);
+  r.scaledLen = static_cast<int>(scaledLen);
+  r.scaledOff = static_cast<int>(c0 * p / q);
+  return true;
+}
+
+// Mọi tầng màu của clip theo từng điểm ảnh, không mặt nạ -> cắt trước chúng cũng không đổi kết quả.
+bool IntervalColorPointwise(const ExportInterval& item) {
+  if (!item.adjustMaskPath.empty()) return false;
+  for (const std::string* chain : {&item.adjustFilters, &item.adjustFiltersPost,
+                                   &item.adjustLayerFilters, &item.adjustLayerFiltersPost}) {
+    if (!ColorChainIsPointwise(*chain)) return false;
+  }
+  for (const auto& layer : item.extraAdjustLayers) {
+    if (!ColorChainIsPointwise(layer.filters) || !ColorChainIsPointwise(layer.filtersPost)) return false;
+  }
+  return true;
+}
+
 MainLaneFast MainLaneFastPlan(const ExportInterval& item, const ExportSettings& settings,
                               bool dynamicClip, double scaleValue, double opacityValue) {
   MainLaneFast plan;
@@ -2647,10 +2758,13 @@ MainLaneFast MainLaneFastPlan(const ExportInterval& item, const ExportSettings& 
   /* CÙNG PHÉP TÍNH với đường cũ, trên CÙNG con số đã in ra filter script (6 chữ số): cỡ
    * `max(2,ceil(iw*s/2)*2)` và toạ độ `(W-w)/2+posX` mà overlay RGBA cắt về số nguyên bằng (int). */
   const double s = std::stod(FfmpegDouble(scaleValue));
-  const int w = static_cast<int>(std::max(2.0, std::ceil(iw * s / 2) * 2));
-  const int h = static_cast<int>(std::max(2.0, std::ceil(ih * s / 2) * 2));
-  const int x = static_cast<int>((seqW - w) / 2.0 + std::stod(FfmpegDouble(item.positionX)));
-  const int y = static_cast<int>((seqH - h) / 2.0 + std::stod(FfmpegDouble(item.positionY)));
+  // Cỡ + vị trí của ẢNH ĐEM ĐẶT vào khung. Cắt trước (mục 1.4) thì đổi thành mảnh của ảnh co.
+  int w = static_cast<int>(std::max(2.0, std::ceil(iw * s / 2) * 2));
+  int h = static_cast<int>(std::max(2.0, std::ceil(ih * s / 2) * 2));
+  int x = static_cast<int>((seqW - w) / 2.0 + std::stod(FfmpegDouble(item.positionX)));
+  int y = static_cast<int>((seqH - h) / 2.0 + std::stod(FfmpegDouble(item.positionY)));
+  int inW = iw;   // cỡ đi vào phép co (vùng cắt trước, nếu có)
+  int inH = ih;
   const bool chromaSubV = settings.codec != "prores";   // yuv420p; ProRes là yuv422p10le
 
   /* Một chiều. ĐỆM TRƯỚC, CẮT SAU: clip (cỡ luôn chẵn) được đệm vào khung `len` ở vị trí `ox`,
@@ -2680,13 +2794,29 @@ MainLaneFast MainLaneFastPlan(const ExportInterval& item, const ExportSettings& 
    *    (WebGL áp màu trên RGB). Giữ YUV nguyên vẹn là bản xuất khác preview ở vùng rất bão hoà.
    * RGB không hạ mẫu màu nên toạ độ lẻ nào cũng đúng. */
   const bool rgbRoute = IntervalHasColorAdjust(item);
+  if (PreCropEnabled() && s >= kPreCropMinZoom && (!rgbRoute || IntervalColorPointwise(item))) {
+    PreCropAxis cx, cy;
+    const bool okX = PreCropPlanAxis(iw, w, x, seqW, cx);
+    const bool okY = PreCropPlanAxis(ih, h, y, seqH, cy);
+    // Mỗi chiều cắt được thì cắt; chiều nào không thì giữ trọn chiều đó. Chỉ đáng khi bớt ≥ 25%.
+    const int cw = okX ? cx.len : iw, ch = okY ? cy.len : ih;
+    if ((okX || okY) && static_cast<double>(cw) * ch <= 0.75 * static_cast<double>(iw) * ih) {
+      const int c0x = okX ? cx.start : 0, c0y = okY ? cy.start : 0;
+      plan.preCrop = ",crop=w=" + std::to_string(cw) + ":h=" + std::to_string(ch)
+                   + ":x=" + std::to_string(c0x) + ":y=" + std::to_string(c0y) + ":exact=1";
+      if (okX) { w = cx.scaledLen; x += cx.scaledOff; }
+      if (okY) { h = cy.scaledLen; y += cy.scaledOff; }
+      inW = cw;
+      inH = ch;
+    }
+  }
   Axis ax, ay;
   if (!axis(w, seqW, x, !rgbRoute, ax) || !axis(h, seqH, y, chromaSubV && !rgbRoute, ay)) return plan;
   if (rgbRoute) {
     std::ostringstream g;
     // Co ở định dạng NGUỒN; tầng màu dời ra sau phép co (nếu có) chạy ngay đây, rồi mới về RGB.
     plan.scale = ",scale=w=" + std::to_string(w) + ":h=" + std::to_string(h);
-    plan.shrinks = static_cast<long long>(w) * h < static_cast<long long>(iw) * ih;
+    plan.shrinks = static_cast<long long>(w) * h < static_cast<long long>(inW) * inH;
     g << ",format=rgb24";
     if (ax.len != w || ay.len != h || ax.ox != 0 || ay.ox != 0) {
       g << ",pad=width=" << ax.len << ":height=" << ay.len
@@ -2710,7 +2840,7 @@ MainLaneFast MainLaneFastPlan(const ExportInterval& item, const ExportSettings& 
    *    màu đen: đo (clip 80%, đệm lẻ cả hai chiều) kênh U so bản chuẩn 30,2 dB theo mẹo dời,
    *    32,3 dB theo đường cũ. Clip giữ nguyên cỡ thì swscale chép thẳng và BỎ QUA chr_pos (đo:
    *    hai bản y hệt). Ở 4:4:4 mọi toạ độ đều đúng; chỉ không đi vòng qua RGB như đường cũ. */
-  const bool sameSize = w == iw && h == ih;
+  const bool sameSize = w == inW && h == inH;
   /* Cắt lẻ mà clip KHÔNG phủ kín khung theo chiều đó: mép xa của clip (giáp nền đen) rơi vào
    * cột lẻ -> cùng chuyện mép như phép đệm lẻ (đo: clip 75% cắt lẻ trái, kênh V 32,6 so với
    * 33,3 dB của đường cũ). Mẹo dời mẫu màu chỉ dùng khi clip tràn kín khung. */
@@ -2862,6 +2992,7 @@ void WriteClipVideoFilters(
     : (!clipDynTransform && item.videoMaskPath.empty() && scaleValue < 1.0);
   const SplitColorStages color = SplitColorStagesForScale(
     BlockColorStages(item, 0.0, "adjc" + idx + "_", "adjl" + idx + "_"), colorAfterScale);
+  if (fast.ok) script << fast.preCrop;
   script << color.pre;
   if (fast.ok) {
     /* Chốt đúng renderFrames khung — việc nền `color` + overlay của đường cũ vẫn làm:
@@ -3335,14 +3466,35 @@ void WriteTextOverlayFilter(
  *
  * Alpha = khoảng cách tới mép gần nhất / featherPx, kẹp về [0,1]. Chỉ đụng kênh ALPHA;
  * R/G/B đi qua nguyên vẹn.
+ *
+ * DỐC MÉP TÍNH MỘT LẦN (mục 1.6): trước đây `geq` tính bốn biểu thức cho TỪNG điểm ảnh của TỪNG
+ * khung (r/g/b chỉ là chép lại), dù dốc mép không đổi theo thời gian — cỡ khung ở đây cố định
+ * (sau phép co tĩnh, trước mọi biến đổi theo thời gian). Nay: tách một khung, `geq` vẽ dốc mép
+ * lên KHUNG ĐÓ (một lần), rồi `blend=multiply` nhân vào alpha của mọi khung — nhánh dốc chỉ có
+ * một khung nên framesync lặp lại khung cuối của nó (repeatlast), đúng lối mặt nạ màu ở
+ * AppendColorAdjustFilters. Đo trên "Yêu Con 1" (2 miếng vá ~510×490, 294 khung): ~5 s.
+ * Ở gbrap như geq cũ (geq chỉ nhận RGB tách mặt phẳng): đổi định dạng ra là đổi luôn đường
+ * chuyển đổi của các filter phía sau (xem KfOpacityFilter). Env tắt: CRABBYCUT_EXPORT_FEATHER1=0.
  * ------------------------------------------------------------------------- */
 void AppendFeatherAlpha(std::ofstream& script, int featherPx) {
   if (featherPx <= 0) return;
   const std::string f = std::to_string(featherPx);
-  // Dấu nháy đơn đã bảo vệ dấu phẩy bên trong biểu thức — cùng quy ước với geq của
-  // nhánh keyframe opacity ngay phía trên, đừng escape thêm.
-  script << ",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)'"
-         << ":a='alpha(X,Y)*min(1,min(min(X,W-1-X),min(Y,H-1-Y))/" << f << ")'";
+  const char* env = std::getenv("CRABBYCUT_EXPORT_FEATHER1");
+  if (env && std::string(env) == "0") {
+    // Dấu nháy đơn đã bảo vệ dấu phẩy bên trong biểu thức — đừng escape thêm.
+    script << ",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)'"
+           << ":a='alpha(X,Y)*min(1,min(min(X,W-1-X),min(Y,H-1-Y))/" << f << ")'";
+    return;
+  }
+  const std::string t = "fth" + std::to_string(++g_filterAuxSeq) + "_";
+  script << ",format=gbrap,split[" << t << "s][" << t << "m];\n";
+  script << "[" << t << "m]trim=end_frame=1,alphaextract"
+         << ",geq=lum='255*min(1,min(min(X,W-1-X),min(Y,H-1-Y))/" << f << ")'[" << t << "r];\n";
+  script << "[" << t << "s]split[" << t << "c][" << t << "x];\n";
+  script << "[" << t << "x]alphaextract[" << t << "a];\n";
+  script << "[" << t << "a][" << t << "r]blend=all_mode=multiply[" << t << "am];\n";
+  script << "[" << t << "c][" << t << "am]alphamerge[" << t << "k];\n";
+  script << "[" << t << "k]null";
 }
 
 /* ===== GHÉP LỚP PHỦ Ở YUV (mục 1.5, docs/KE_HOACH_TOI_UU_EXPORT_WIN.md) =====
