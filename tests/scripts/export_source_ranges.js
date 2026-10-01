@@ -69,8 +69,9 @@ function writeTimeline(file, intervals, overlayPng) {
 function exportOnce(source, timelineFile, output, ranges) {
   const r = run(SIDECAR, ['export-video', source, output, timelineFile, TEST_DIR, 'sequence', String(FPS)], {
     timeout: 900000,
-    // CPU cho tất định và chạy được trên máy không có NVENC.
-    env: { ...process.env, FFMPEG_EXPORT_HW: '0', CRABBYCUT_EXPORT_RANGES: ranges ? '1' : '0' },
+    // CPU cho tất định và chạy được trên máy không có NVENC. Một lượt (không chia batch song song,
+    // mục 1.8): bài này đếm dải nguồn của MỘT lượt ffmpeg; chia batch thì mỗi batch gom dải riêng.
+    env: { ...process.env, FFMPEG_EXPORT_HW: '0', CRABBYCUT_EXPORT_RANGES: ranges ? '1' : '0', CRABBYCUT_EXPORT_PARALLEL: '1' },
   });
   assert.strictEqual(r.status, 0, `xuất thất bại (ranges=${ranges}):\n${r.stdout}\n${r.stderr}`);
   const timing = r.stdout.split(/\r?\n/).map((l) => { try { return JSON.parse(l); } catch (_) { return null; } })

@@ -161,7 +161,8 @@ function main() {
   const lutMix = { adj_layer_lut_a_path: cool, adj_layer_lut_b_path: warm, adj_layer_lut_mix_expr: MIX };
 
   const MAIN = ':v]trim=start=';
-  const OVERLAY = 'setpts=PTS-STARTPTS+0.100000/TB';
+  // Video lớp phủ ở 0,1 s; setpts dời sớm 0,1 ms (kOverlayTieEpsilon của sidecar).
+  const OVERLAY = 'setpts=PTS-STARTPTS+0.099900/TB';
   const FAST_SCALE = 'scale=w=';
   const OLD_SCALE = 'scale=max(2';
   const cases = [

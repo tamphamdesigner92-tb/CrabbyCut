@@ -12,6 +12,7 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <future>
 #include <iomanip>
 #include <iostream>
@@ -20,6 +21,7 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -170,39 +172,54 @@ std::wstring WidenForProcess(const std::string& text) {
 }
 #endif
 
-int RunIn(const std::vector<std::string>& args, const fs::path& workingDir) {
-  const std::string line = CommandLine(args);
 #ifdef _WIN32
-  if (line.size() <= kWindowsCommandLineLimit) {
-    std::wstring wide = WidenForProcess(line);
-    if (!wide.empty()) {
-      // CreateProcessW ĐƯỢC PHÉP sửa tại chỗ bộ đệm dòng lệnh -> phải là bộ đệm ghi được.
-      std::vector<wchar_t> buffer(wide.begin(), wide.end());
-      buffer.push_back(L'\0');
-      const std::wstring wideDir = workingDir.empty() ? std::wstring() : WidenForProcess(workingDir.string());
-      STARTUPINFOW si;
-      ZeroMemory(&si, sizeof(si));
-      si.cb = sizeof(si);
-      PROCESS_INFORMATION pi;
-      ZeroMemory(&pi, sizeof(pi));
-      if (CreateProcessW(nullptr, buffer.data(), nullptr, nullptr, TRUE, 0, nullptr,
-                         wideDir.empty() ? nullptr : wideDir.c_str(), &si, &pi)) {
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        DWORD exitCode = 1;
-        GetExitCodeProcess(pi.hProcess, &exitCode);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-        return static_cast<int>(exitCode);
-      }
-    }
-  } else {
+/* Khởi chạy một tiến trình KHÔNG chờ (lượt xuất song song, mục 1.8) — trả handle tiến trình, hoặc
+ * nullptr: `immediateCode` = 7 khi dòng lệnh vượt trần của Windows (đã báo lỗi), 0 khi
+ * CreateProcessW hỏng (RunIn lùi về std::system như trước). */
+HANDLE SpawnIn(const std::vector<std::string>& args, const fs::path& workingDir, int& immediateCode) {
+  immediateCode = 0;
+  const std::string line = CommandLine(args);
+  if (line.size() > kWindowsCommandLineLimit) {
     /* Vượt cả trần của CreateProcess. Nói THẲNG ra nguyên nhân: rơi về std::system() ở đây
      * chỉ đổi một thông báo khó hiểu này lấy một thông báo khó hiểu khác. */
     Emit("error", "Dòng lệnh ffmpeg dài " + std::to_string(line.size())
                   + " ký tự, vượt trần " + std::to_string(kWindowsCommandLineLimit)
                   + " của Windows. Dự án có quá nhiều lớp phủ (phụ đề/ảnh) cho một lượt render.", 7);
-    return 7;
+    immediateCode = 7;
+    return nullptr;
   }
+  std::wstring wide = WidenForProcess(line);
+  if (wide.empty()) return nullptr;
+  // CreateProcessW ĐƯỢC PHÉP sửa tại chỗ bộ đệm dòng lệnh -> phải là bộ đệm ghi được.
+  std::vector<wchar_t> buffer(wide.begin(), wide.end());
+  buffer.push_back(L'\0');
+  const std::wstring wideDir = workingDir.empty() ? std::wstring() : WidenForProcess(workingDir.string());
+  STARTUPINFOW si;
+  ZeroMemory(&si, sizeof(si));
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi;
+  ZeroMemory(&pi, sizeof(pi));
+  if (!CreateProcessW(nullptr, buffer.data(), nullptr, nullptr, TRUE, 0, nullptr,
+                      wideDir.empty() ? nullptr : wideDir.c_str(), &si, &pi)) {
+    return nullptr;
+  }
+  CloseHandle(pi.hThread);
+  return pi.hProcess;
+}
+#endif
+
+int RunIn(const std::vector<std::string>& args, const fs::path& workingDir) {
+  const std::string line = CommandLine(args);
+#ifdef _WIN32
+  int immediateCode = 0;
+  if (HANDLE process = SpawnIn(args, workingDir, immediateCode)) {
+    WaitForSingleObject(process, INFINITE);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(process, &exitCode);
+    CloseHandle(process);
+    return static_cast<int>(exitCode);
+  }
+  if (immediateCode != 0) return immediateCode;
 #endif
   const int status = std::system(ShellCommandLine(line).c_str());
 #ifdef _WIN32
@@ -1091,6 +1108,7 @@ struct ExportTimingLog {
   double concatMs = 0.0;
   // Cỡ khung mà đồ thị dựng ("WxH"); khác cỡ sequence khi dựng ở cỡ xuất (mục 1.12 pha 2).
   std::string graphSize;
+  size_t workers = 1;   // số lượt ffmpeg hình chạy cùng lúc (mục 1.8)
   std::vector<ExportRunTiming> runs;
 };
 
@@ -1143,6 +1161,7 @@ std::string ExportTimingJson(const std::string& encoder) {
       << ",\"encoder\":\"" << EscapeJson(encoder) << "\""
       << ",\"bench\":" << (g_exportBenchDir.empty() ? "false" : "true")
       << ",\"graph_size\":\"" << EscapeJson(g_exportTiming.graphSize) << "\""
+      << ",\"workers\":" << g_exportTiming.workers
       << ",\"runs\":[";
   for (size_t i = 0; i < g_exportTiming.runs.size(); i++) {
     const ExportRunTiming& run = g_exportTiming.runs[i];
@@ -3161,6 +3180,10 @@ std::string HexColorForDrawText(std::string color) {
  * xa gấp đôi khoảng nới. Và với chuỗi khung thì khung nội dung đầu tiên vẫn nằm ở đúng
  * `start`, nên nới cửa sổ không đổi thứ được vẽ — chỉ thôi vứt mất nó.
  */
+// Video/ảnh tĩnh lớp phủ đặt sớm chừng này (giây) để ca "hoà" với khung nền luôn rơi đúng phía —
+// xem writeSetpts ở WriteVisualOverlayFilter.
+constexpr double kOverlayTieEpsilon = 1e-4;
+
 double OverlayEnableStart(double start, const ExportSettings& settings) {
   const double fps = ParseFpsValue(settings.renderFps);
   if (!(fps > 0.0)) return start;
@@ -3199,6 +3222,11 @@ constexpr double kOverlayBatchTargetSeconds = 180.0;
 constexpr double kOverlayBatchMinTotalSeconds = 240.0;
 // Dò xa nhất bao nhiêu để tìm một mốc cắt an toàn trước khi bỏ cuộc (xem vòng dò bên dưới).
 constexpr double kOverlayBatchScanSeconds = 90.0;
+/* Batch ngắn nhất khi chia để chạy SONG SONG (mục 1.8): mỗi lượt ffmpeg tốn ~0,5–1 s khởi động
+ * (dò, mở bộ giải mã, seek về keyframe trước mốc, Defender quét PNG lần đầu). */
+constexpr double kParallelMinBatchSeconds = 8.0;
+// Lớp phủ tĩnh bị xén ở cuối batch kéo dài thêm chừng này qua mép (xem OverlaysForBatch).
+constexpr double kBatchOverlayTailSeconds = 1.0;
 
 bool HasAnyExpr(std::initializer_list<const std::string*> exprs) {
   for (const auto* expr : exprs) {
@@ -3298,7 +3326,10 @@ bool OverlayStraddles(const ExportOverlay& overlay, double at, double fps) {
 std::vector<OverlayBatch> PlanOverlayBatches(
   const std::vector<ExportInterval>& intervals,
   const std::vector<ExportOverlay>& overlays,
-  const ExportSettings& settings
+  const ExportSettings& settings,
+  double targetSeconds = kOverlayBatchTargetSeconds,
+  double minTotalSeconds = kOverlayBatchMinTotalSeconds,
+  bool splitInsideClips = true
 ) {
   std::vector<OverlayBatch> batches;
   const double fps = ParseFpsValue(settings.renderFps);
@@ -3307,7 +3338,7 @@ std::vector<OverlayBatch> PlanOverlayBatches(
   single.intervals = intervals;
   single.sequenceStart = 0.0;
   single.sequenceDuration = total;
-  if (!(fps > 0.0) || total < kOverlayBatchMinTotalSeconds) return {single};
+  if (!(fps > 0.0) || total < minTotalSeconds) return {single};
 
   OverlayBatch current;
   current.sequenceStart = 0.0;
@@ -3330,7 +3361,10 @@ std::vector<OverlayBatch> PlanOverlayBatches(
      cho từng lớp phủ, là hàng trăm triệu phép so vô ích trên dự án dài. */
   std::vector<const ExportOverlay*> blocking;
   for (const auto& overlay : overlays) {
-    if (OverlayIsTimeVarying(overlay)) blocking.push_back(&overlay);
+    /* Chỉ lớp phủ CÓ HÌNH chặn mốc cắt: batch chỉ dựng hình (FilterScriptMode::VideoOnly), tiếng
+     * là MỘT lượt liền cho cả phim. Trước đây lớp nhạc nền phủ cả bài ("Yêu Con 1": 0–37,8 s)
+     * chặn mọi mốc cắt, nên dự án không chia được batch nào. */
+    if (OverlayIsVisual(overlay) && OverlayIsTimeVarying(overlay)) blocking.push_back(&overlay);
   }
   auto safeToCutAt = [&](double at) {
     for (const auto* overlay : blocking) {
@@ -3353,8 +3387,8 @@ std::vector<OverlayBatch> PlanOverlayBatches(
 
     /* Cắt BÊN TRONG một clip chỉ được phép khi clip đó không có hiệu ứng biến thiên. Vòng
      * lặp: chừng nào clip hiện tại còn vắt qua mốc cắt mong muốn thì xén một khúc ra. */
-    while (!IntervalIsTimeVarying(item) && item.renderFrames > 1) {
-      const double want = batchStart + kOverlayBatchTargetSeconds;
+    while (splitInsideClips && !IntervalIsTimeVarying(item) && item.renderFrames > 1) {
+      const double want = batchStart + targetSeconds;
       const double itemEnd = itemStart + (static_cast<double>(item.renderFrames) / fps);
       if (want >= itemEnd) break;                       // mốc mong muốn nằm sau clip này
       long long frame = std::llround((want - itemStart) * fps);
@@ -3377,7 +3411,7 @@ std::vector<OverlayBatch> PlanOverlayBatches(
     }
     current.intervals.push_back(item);
     // Biên giữa hai clip cũng là một mốc cắt hợp lệ, nếu batch đã đủ dài và mốc đó an toàn.
-    if (cursor - batchStart >= kOverlayBatchTargetSeconds && safeToCutAt(cursor)
+    if (cursor - batchStart >= targetSeconds && safeToCutAt(cursor)
         && cursor < total - 0.5) {
       closeBatch(cursor);
     }
@@ -3406,6 +3440,8 @@ std::vector<ExportOverlay> OverlaysForBatch(
   std::vector<ExportOverlay> out;
   int nextInput = 0;
   for (const auto& source : overlays) {
+    // Batch chỉ dựng hình: lớp phủ chỉ-tiếng đi lượt tiếng (OverlaysForAudioPass), không nạp ở đây.
+    if (!OverlayIsVisual(source)) continue;
     if (!OverlayTouchesWindow(source, from, to, fps)) continue;
     ExportOverlay overlay = source;
     const double start = overlay.timelineStart - from;
@@ -3415,6 +3451,12 @@ std::vector<ExportOverlay> OverlaysForBatch(
     if (clippedEnd - clippedStart < 1e-6) continue;
     overlay.timelineStart = clippedStart;
     overlay.duration = clippedEnd - clippedStart;
+    /* Xén ở CUỐI batch thì cho dài dư qua mép (nội dung tĩnh nên vô hại; batch hết thì thôi).
+     * Xén khít mép là mất khung nền CUỐI của batch: luồng ảnh chạy theo nhịp của chính nó (PNG
+     * 25 khung/s), khung ảnh cuối ở mép − 1/25 s, sau đó framesync coi lớp phủ đã hết
+     * (eof_action=pass) — khung nền ở mép − 1/30 s mất lớp phủ, bản một lượt thì không
+     * (tests/scripts/export_parallel.js: khung 419 của mốc cắt 14 s). */
+    if (end > batch.sequenceDuration + 1e-6) overlay.duration += kBatchOverlayTailSeconds;
     if (OverlayNeedsInput(overlay)) overlay.assetInputIndex = nextInput++;
     out.push_back(overlay);
   }
@@ -3610,7 +3652,9 @@ bool OverlayStillOnce(const ExportOverlay& overlay) {
 /* GIỮ KHUNG CUỐI CỦA CHUỖI KHUNG HOẠT ẢNH BẰNG KHUNG NHÂN BẢN, KHÔNG BẰNG eof_action=repeat.
  *
  * Chuỗi PNG của item hoạt ảnh phủ trọn cửa sổ In→Hold→Out, nhưng `setpts=…+start/TB` cắt phần lẻ
- * (D2TS) nên cả chuỗi có thể sớm lên gần một khung và hết TRƯỚC mép cửa sổ 1–3 khung nền. Trước
+ * (D2TS) nên cả chuỗi có thể sớm lên gần một khung và hết TRƯỚC mép cửa sổ 1–3 khung nền (nay chuỗi
+ * đặt đúng sớm ¼ khung trên timebase µs, xem writeSetpts ở WriteVisualOverlayFilter; K dưới đây tính
+ * cho trường hợp sớm một khung nên vẫn dư). Trước
  * đây giữ khung cuối bằng `eof_action=repeat` — đúng hình, nhưng đắt: đo 2026-09-30 trên "Bin Tom"
  * (17 chuỗi, 1.043 khung): cả lượt 14,8 s so với 11,0–11,3 s khi `pass`; luồng filter 8,6 so với
  * 4,2 CPU-giây, kể cả khi thay khung PNG bằng ảnh 16×16 — tức là phí của khung sườn chứ không phải
@@ -3662,12 +3706,37 @@ void WriteVisualOverlayFilter(
 
   // Nén/dãn trục thời gian TRƯỚC khi dời về mốc tuyệt đối trên sequence: chia cả biểu
   // thức đã cộng `start` thì mốc bắt đầu của overlay cũng bị chia theo và lớp lệch chỗ.
+  /* CHUỖI KHUNG (chữ/hình động) đặt sớm ¼ khung xuất, trên timebase µs (mục 1.8). Hai lỗi cũ:
+   *  - `setpts=…+start/TB` CẮT phần lẻ (D2TS), mà chuỗi nạp bằng `-framerate` có timebase 1/fps —
+   *    mốc đầu bị cắt về SỐ KHUNG nguyên. "Bin Tom" (29,99926 khung/s): chữ ở 20,067 s -> 601,995
+   *    khung -> 601, sớm một khung, khung 0 rơi trước cửa sổ `enable` (mất khung đầu hoạt ảnh); cùng
+   *    chữ ở batch bắt đầu 14,365 s -> 171,06 -> 171 + 431 = 602 — bản chia batch khác bản một lượt.
+   *  - chuỗi được bake ĐÚNG nhịp xuất nên khung k trùng mốc khung nền S+k, một ca "hoà" mà framesync
+   *    phân xử bằng làm tròn µs của hai phía: timebase của `-framerate 29.999261` không đúng hệt
+   *    1218000/40601 của lưới xuất -> lệch 1 µs là chữ trễ một khung, tuỳ chỗ cắt batch.
+   * Sớm ¼ khung thì khung k nằm hẳn giữa hai khung nền và luôn hiện ở đúng khung S+k. Cửa sổ
+   * `enable` (mở sớm ½ khung) và khung đuôi (SequenceTailFrames, tính dư một khung) không đổi.
+   * Video/ảnh tĩnh: cắt phần lẻ như cũ (mốc ra luôn ≤ start — làm tròn lên thì khung ảnh tĩnh 1/25 s
+   * đầu tiên có thể trễ hơn khung nền đầu cửa sổ). VIDEO sớm thêm kOverlayTieEpsilon: video CÙNG nhịp
+   * xuất đặt đúng lưới cũng "hoà" ở mọi khung, và ca ở khung CUỐI cửa sổ (khung video cuối trùng mốc
+   * khung nền) đổi phe theo làm tròn µs — test:export-parallel, khung 1019. 0,1 ms lớn hơn hẳn sai số
+   * làm tròn (~1 µs) mà nhỏ hơn hẳn khoảng cách khung khi nhịp khác nhau (25 trên 30: ≥ 6,7 ms), nên
+   * chỉ ca "hoà" đổi — về đúng phía. KHÔNG cho ảnh tĩnh: timebase 1/25 nên (8 − 0,0001) × 25 bị cắt
+   * về 199 — cả ảnh sớm 40 ms, hết sớm 40 ms, mất khung nền cuối cửa sổ; nội dung không đổi nên ca
+   * "hoà" của ảnh tĩnh không hiện ra gì. */
+  const double setptsStart = (!OverlayIsImageLike(overlay) && !OverlayIsImageSequence(overlay))
+    ? start - kOverlayTieEpsilon : start;
+  const double renderFpsForSeq = ParseFpsValue(settings.renderFps);
   const auto writeSetpts = [&](std::ostream& out) {
+    if (OverlayIsImageSequence(overlay) && renderFpsForSeq > 0.0) {
+      out << "settb=AVTB,setpts=PTS-STARTPTS+round(" << FfmpegDouble(start - 0.25 / renderFpsForSeq) << "/TB)";
+      return;
+    }
     if (std::abs(overlay.speedRate - 1.0) >= 1e-4 && !OverlayIsImageSequence(overlay)) {
       out << "setpts=(PTS-STARTPTS)/" << FormatFilterNumber(overlay.speedRate)
-             << "+" << FfmpegDouble(start) << "/TB";
+             << "+" << FfmpegDouble(setptsStart) << "/TB";
     } else {
-      out << "setpts=PTS-STARTPTS+" << FfmpegDouble(start) << "/TB";
+      out << "setpts=PTS-STARTPTS+" << FfmpegDouble(setptsStart) << "/TB";
     }
   };
   // Ảnh tĩnh xử lý MỘT lần: trim/setpts dời ra sau `loop` ở cuối chuỗi (xem OverlayStillOnce).
@@ -3953,9 +4022,24 @@ bool WriteFilterScript(
   g_filterAuxDir = scriptPath.parent_path();   // file lệnh phụ (lutmix_*.cmd) nằm cạnh script
   g_fastClipCount = 0;
   const double renderFpsValue = ParseFpsValue(settings.renderFps);
+  /* LƯỢT CHỈ-TIẾNG NỐI KÈM ĐOẠN HÌNH GIẢ (mục 1.8). Ở lượt có hình, `concat` nối hình CÙNG tiếng
+   * (`v=1:a=1`): mỗi đoạn dài bằng luồng dài hơn, tiếng ngắn hơn hình thì được đệm lặng tới cuối
+   * đoạn hình. Nối tiếng một mình thì các đoạn nối theo đúng số mẫu — lệch dưới một mẫu mỗi đoạn,
+   * dồn qua 20 đoạn ("Bin Tom") là bản xuất chia batch khác bản một lượt ở từng mẫu tiếng. Đoạn
+   * hình giả 16×16, đúng nhịp + đúng số khung của đoạn thật, cho `concat` cùng mốc cuối đoạn (nó
+   * lấy mốc khung cuối × n/(n−1)) nên tiếng ra y hệt; hình giả đổ vào nullsink. */
+  bool dummyVideo = !wantVideo && wantAudio && renderFpsValue > 0.0 && count > 0;
+  for (size_t i = 0; dummyVideo && i < count; i++) {
+    if (intervals[offset + i].renderFrames <= 0) dummyVideo = false;
+  }
   for (size_t i = 0; i < count; i++) {
     const auto& item = intervals[offset + i];
     if (wantVideo) WriteClipVideoFilters(script, item, i, settings);
+    if (dummyVideo) {
+      script << "color=c=black:s=16x16:r=" << settings.renderFps
+             << ":d=" << FixedSeconds(static_cast<double>(item.renderFrames + 1) / renderFpsValue)
+             << ",trim=end_frame=" << item.renderFrames << "[dv" << i << "];\n";
+    }
     if (!wantAudio) continue;
     // Tiếng cắt theo ĐÚNG số khung của hình (xem BuildTimelineFrameGrid). Cắt theo giây
     // trong khi hình đi theo khung thì mỗi segment lệch nhau tới một khung, và `concat`
@@ -3985,21 +4069,30 @@ bool WriteFilterScript(
   }
   for (size_t i = 0; i < count; i++) {
     if (wantVideo) script << "[v" << i << "]";
+    if (dummyVideo) script << "[dv" << i << "]";
     if (wantAudio) script << "[a" << i << "]";
   }
   const std::string concatSpec = std::string("concat=n=") + std::to_string(count)
-    + ":v=" + (wantVideo ? "1" : "0") + ":a=" + (wantAudio ? "1" : "0");
+    + ":v=" + (wantVideo || dummyVideo ? "1" : "0") + ":a=" + (wantAudio ? "1" : "0");
   if (overlays.empty()) {
     if (wantVideo) {
       script << concatSpec << "[vcat]" << (wantAudio ? "[a]" : "") << ";\n";
       script << "[vcat]" << OutputColorFilters(settings) << "[v]\n";
+    } else if (dummyVideo) {
+      script << concatSpec << "[dvcat][a];\n[dvcat]nullsink\n";
     } else {
       script << concatSpec << (wantAudio ? "[a]" : "") << "\n";
     }
     return true;
   }
 
-  script << concatSpec << (wantVideo ? "[mainv]" : "") << (wantAudio ? "[maina]" : "") << ";\n";
+  if (wantVideo) {
+    script << concatSpec << "[mainv]" << (wantAudio ? "[maina]" : "") << ";\n";
+  } else if (dummyVideo) {
+    script << concatSpec << "[dvcat][maina];\n[dvcat]nullsink;\n";
+  } else {
+    script << concatSpec << "[maina];\n";
+  }
 
   std::string currentVideo = "[mainv]";
   size_t visualIndex = 0;
@@ -4228,9 +4321,10 @@ void AppendOverlayInputArgs(
       // Một khung duy nhất; `loop` trong filter lặp lại khung đã xử lý (xem OverlayStillOnce).
       cmd.insert(cmd.end(), {"-i", assetPath});
     } else if (OverlayIsImageLike(overlay)) {
+      // Dư 1 s: lớp phủ tĩnh xén ở cuối batch dài quá mép batch (xem OverlaysForBatch).
       cmd.insert(cmd.end(), {
         "-loop", "1",
-        "-t", FixedSeconds(std::max(0.05, sequenceDuration)),
+        "-t", FixedSeconds(std::max(0.05, sequenceDuration + kBatchOverlayTailSeconds)),
         "-i", assetPath
       });
     } else {
@@ -4281,7 +4375,22 @@ void AppendEncoderArgsForMode(std::vector<std::string>& cmd, const ExportSetting
   AppendEncoderArgs(cmd, settings, plan);
 }
 
-int ExportBatch(
+/* MỘT LƯỢT FFMPEG ĐÃ CHUẨN BỊ, CHƯA CHẠY (mục 1.8). PrepareExportBatch ghi filter script và dựng
+ * sẵn mọi thứ của dòng lệnh trừ bộ mã hoá; `buildCmd(plan, nhãn)` ghép nốt phần bộ mã hoá — lỗi
+ * phần cứng thì dựng lại với plan CPU. Tách hai bước để nhiều batch chạy SONG SONG được: bước
+ * chuẩn bị đụng biến toàn cục (g_clipVideoInput, g_filterAuxSeq, g_fastClipCount) nên chạy tuần
+ * tự ở luồng chính; bước chạy chỉ là tiến trình ffmpeg (xem RunBatchJobs). */
+struct BatchJob {
+  ExportRunTiming timing;
+  fs::path scriptPath;
+  fs::path tempDir;
+  bool video = true;   // false = lượt chỉ-tiếng: không phụ thuộc bộ mã hoá hình
+  std::string progressText;   // "batch 2/4 (7 đoạn)" — dòng tiến độ lúc khởi chạy
+  std::function<std::vector<std::string>(const EncoderPlan&, const std::string&)> buildCmd;
+};
+
+bool PrepareExportBatch(
+  BatchJob& job,
   const std::string& source,
   const std::string& output,
   const fs::path& tempDir,
@@ -4291,12 +4400,11 @@ int ExportBatch(
   size_t batchIndex,
   size_t batchCount,
   const ExportSettings& settings,
-  EncoderPlan& plan,
   const std::vector<ExportOverlay>& overlays,
   FilterScriptMode mode = FilterScriptMode::Full
 ) {
   fs::create_directories(fs::path(output).parent_path());
-  fs::path scriptPath = tempDir / ("export_filter_batch_" + std::to_string(batchIndex) + ".txt");
+  const fs::path scriptPath = tempDir / ("export_filter_batch_" + std::to_string(batchIndex) + ".txt");
   /* Dải nguồn (mục 1.1, xem PlanSourceRanges): input thêm đứng SAU input lớp phủ, nên chỉ số
    * lớp phủ (1 + assetInputIndex) giữ nguyên. Phải biết trước khi ghi filter script. */
   const SourceRangePlan ranges = PlanSourceRanges(intervals, offset, count, settings, mode);
@@ -4314,11 +4422,9 @@ int ExportBatch(
   g_clipVideoInput.clear();
   if (!scriptOk) {
     Emit("error", "cannot write ffmpeg filter script", 6);
-    return 6;
+    return false;
   }
 
-  Emit("progress", "Đang render batch " + std::to_string(batchIndex + 1) + "/" + std::to_string(batchCount)
-                   + " (" + std::to_string(count) + " đoạn)...");
   /* `-reinit_filter 0` — ĐÂY LÀ THỨ DẸP CHỚP ĐEN Ở ĐIỂM NỐI CẢNH.
    * (Port từ nhánh CrabbyCut_v2.0.0, commit 6dd4f6d — đã đo ở đó, xem số liệu bên dưới.)
    *
@@ -4356,8 +4462,8 @@ int ExportBatch(
     baseCmd.insert(baseCmd.end(), {"-itsoffset", FixedSeconds(seekTo), "-ss", FixedSeconds(seekTo)});
   }
   baseCmd.insert(baseCmd.end(), {"-i", source});
-  const bool bench = !g_exportBenchDir.empty();
-  ExportRunTiming timing;
+  ExportRunTiming& timing = job.timing;
+  timing = ExportRunTiming{};
   timing.seekTo = seekTo;
   timing.fastClips = static_cast<size_t>(g_fastClipCount);
   timing.sourceRanges = ranges.seekTo.size();
@@ -4374,13 +4480,20 @@ int ExportBatch(
     timing.sourceFrom = i == 0 ? item.start : std::min(timing.sourceFrom, item.start);
     timing.sourceTo = std::max(timing.sourceTo, item.end);
   }
+  job.scriptPath = scriptPath;
+  job.tempDir = tempDir;
+  job.video = mode != FilterScriptMode::AudioOnly;
+  job.progressText = "batch " + std::to_string(batchIndex + 1) + "/" + std::to_string(batchCount)
+                   + " (" + std::to_string(count) + " đoạn)";
   /* CHẠY VỚI THƯ MỤC LÀM VIỆC = tempDir. Đây là thứ làm cho đường dẫn tương đối ở
      AppendOverlayInputArgs trỏ đúng tệp. `source`, `output` và tệp kịch bản filter vẫn
      tuyệt đối nên không phụ thuộc vào cwd; đường dẫn NẰM TRONG kịch bản filter (LUT, mặt nạ)
-     cũng tuyệt đối — xem FilterPath. */
-  auto runOnce = [&](const std::string& runLabel) {
+     cũng tuyệt đối — xem FilterPath. Dựng lệnh là bản sao toàn bộ dữ liệu cần (lambda giữ
+     theo giá trị): lớp phủ của batch là biến tạm ở nơi gọi. */
+  const double sequenceDuration = timing.sequenceDuration;
+  job.buildCmd = [=](const EncoderPlan& plan, const std::string& runLabel) {
     std::vector<std::string> cmd = baseCmd;
-    AppendOverlayInputArgs(cmd, overlays, timing.sequenceDuration, tempDir);
+    AppendOverlayInputArgs(cmd, overlays, sequenceDuration, tempDir);
     for (size_t k = firstExtraRange; k < ranges.seekTo.size(); k++) {
       cmd.insert(cmd.end(), {"-reinit_filter", "0"});
       if (ranges.seekTo[k] > 0.0) {
@@ -4390,7 +4503,7 @@ int ExportBatch(
     }
     AppendStreamMapArgs(cmd, scriptPath, mode);
     AppendEncoderArgsForMode(cmd, settings, plan, mode);
-    if (bench) {
+    if (!g_exportBenchDir.empty()) {
       const std::string rel = "export_bench/" + runLabel;
       cmd.insert(cmd.end(), {"-benchmark", "-progress", rel + ".progress.txt"});
       if (FfmpegHasPrintGraphs()) cmd.insert(cmd.end(), {"-print_graphs_file", rel + ".graphs.json"});
@@ -4400,31 +4513,214 @@ int ExportBatch(
      * cho không ai dùng (đo: ~0,6 s mỗi batch 4K 180 s). */
     if (batchCount <= 1) cmd.insert(cmd.end(), {"-movflags", "+faststart"});
     cmd.push_back(output);
-    if (bench) {
-      WriteBenchCommand(runLabel, cmd, tempDir);
-      SetChildEnv("FFREPORT", "file=export_bench/" + runLabel + ".log:level=32");
-    }
-    const auto started = ExportClock::now();
-    const int code = RunIn(cmd, tempDir);
-    timing.runMs += MsSince(started);
-    if (bench) SetChildEnv("FFREPORT", "");
-    return code;
+    return cmd;
   };
-  int code = runOnce(timing.label);
-  if (code != 0 && plan.hardware) {
-    Emit("progress", "Encoder phần cứng " + plan.videoEncoder + " lỗi, chuyển batch export sang CPU...");
-    plan = CpuEncoderPlan(settings);
-    timing.cpuRetry = true;
-    code = runOnce(timing.label + "_cpu");
+  return true;
+}
+
+// Dòng lệnh của một lần chạy job: ghi cmd.json + bật FFREPORT khi đo (CRABBYCUT_EXPORT_BENCH).
+// FFREPORT là biến môi trường của TIẾN TRÌNH CON, chốt lúc khởi chạy — đặt ngay trước mỗi lần
+// spawn ở luồng chính là đủ, kể cả khi các ffmpeg khác đang chạy.
+std::vector<std::string> JobCommandForRun(const BatchJob& job, const EncoderPlan& plan, const std::string& runLabel) {
+  std::vector<std::string> cmd = job.buildCmd(plan, runLabel);
+  if (!g_exportBenchDir.empty()) {
+    WriteBenchCommand(runLabel, cmd, job.tempDir);
+    SetChildEnv("FFREPORT", "file=export_bench/" + runLabel + ".log:level=32");
   }
-  timing.exitCode = code;
-  g_exportTiming.runs.push_back(timing);
-  if (code != 0) {
-    Emit("error", "ffmpeg batch export failed", code);
-    return code;
+  return cmd;
+}
+
+/* SỐ LƯỢT FFMPEG CHẠY SONG SONG (mục 1.8). Đồ thị của một lượt có chuỗi lớp phủ chạy trên MỘT
+ * luồng filter: Bin Tom (20 clip, 19 lớp phủ) chỉ dùng 40–55% của 16 luồng CPU. Đo cả lượt xuất
+ * (phát lại, Ryzen 7 2700X 16 luồng), 1 / 2 / 3 / 4 lượt hình cùng lúc: Bin Tom 20,7 / 15,0 /
+ * 14,1 / 13,8 s; Test.crab 13,5 / 11,4 / 11,0 s; "Yêu Con 1" 60 / 52 / 52 s (chỉ cắt được một
+ * mốc); phim 4K AV1 300 s đã bão hoà CPU nên không đổi (67 / 67 / 66 s). Mặc định: 1 lượt hình
+ * cho mỗi 4 luồng CPU, tối đa 3; bớt khi RAM ít — mỗi lượt giữ khung của nhiều bộ giải mã (dải
+ * nguồn mục 1.1) và của chuỗi lớp phủ: ~1,5 GB ở ≤ 1080p, ~3 GB ở 4K.
+ * Env: CRABBYCUT_EXPORT_PARALLEL=N (0/1 = tắt, chạy nối tiếp như trước). */
+size_t ExportParallelWorkers(const ExportSettings& settings) {
+  if (const char* env = std::getenv("CRABBYCUT_EXPORT_PARALLEL")) {
+    if (*env) return static_cast<size_t>(std::max(1, std::min(8, std::atoi(env))));
   }
-  if (!bench) fs::remove(scriptPath);
+  const unsigned threads = std::max(1u, std::thread::hardware_concurrency());
+  size_t workers = std::max<size_t>(1, std::min<size_t>(3, threads / 4));
+#ifdef _WIN32
+  MEMORYSTATUSEX mem;
+  mem.dwLength = sizeof(mem);
+  if (GlobalMemoryStatusEx(&mem)) {
+    const double totalGb = static_cast<double>(mem.ullTotalPhys) / (1024.0 * 1024.0 * 1024.0);
+    const double pixels = static_cast<double>(std::max(1, settings.width)) * std::max(1, settings.height);
+    const double perWorkerGb = pixels > 1920.0 * 1080.0 * 1.5 ? 3.0 : 1.5;
+    workers = std::min(workers, std::max<size_t>(1, static_cast<size_t>(totalGb * 0.5 / perWorkerGb)));
+  }
+#else
+  (void)settings;
+  workers = 1;   // chưa có đường spawn không chờ cho macOS/Linux (xem RunBatchJobs)
+#endif
+  return workers;
+}
+
+/* Chạy các job, tối đa `concurrency` tiến trình cùng lúc (Windows: CreateProcessW không chờ +
+ * WaitForMultipleObjects; nơi khác: nối tiếp). Job lỗi được báo trong `codes`, không dừng job
+ * khác — nơi gọi quyết định chạy lại. */
+std::vector<int> RunBatchJobs(std::vector<BatchJob*>& jobs, const EncoderPlan& plan, size_t concurrency,
+                              const std::string& labelSuffix) {
+  std::vector<int> codes(jobs.size(), 0);
+  concurrency = std::max<size_t>(1, concurrency);
+#ifdef _WIN32
+  struct Active { size_t index; HANDLE process; ExportClock::time_point started; };
+  std::vector<Active> active;
+  size_t next = 0;
+  while (next < jobs.size() || !active.empty()) {
+    while (next < jobs.size() && active.size() < concurrency) {
+      BatchJob& job = *jobs[next];
+      const std::string runLabel = job.timing.label + labelSuffix;
+      const std::vector<std::string> cmd = JobCommandForRun(job, plan, runLabel);
+      Emit("progress", "Đang render " + job.progressText
+                       + (concurrency > 1 ? " — " + std::to_string(active.size() + 1) + " lượt chạy cùng lúc" : "") + "...");
+      int immediate = 0;
+      const auto started = ExportClock::now();
+      HANDLE process = SpawnIn(cmd, job.tempDir, immediate);
+      if (process) {
+        active.push_back({next, process, started});
+      } else if (immediate != 0) {
+        codes[next] = immediate;
+      } else {
+        // CreateProcessW hỏng: chạy chờ như RunIn (lùi về std::system).
+        codes[next] = RunIn(cmd, job.tempDir);
+        job.timing.runMs += MsSince(started);
+      }
+      if (!g_exportBenchDir.empty()) SetChildEnv("FFREPORT", "");
+      next++;
+    }
+    if (active.empty()) continue;
+    std::vector<HANDLE> handles;
+    for (const auto& a : active) handles.push_back(a.process);
+    const DWORD waited = WaitForMultipleObjects(static_cast<DWORD>(handles.size()), handles.data(), FALSE, INFINITE);
+    if (waited < WAIT_OBJECT_0 || waited >= WAIT_OBJECT_0 + handles.size()) {
+      // Không chờ được (không nên xảy ra): chờ lần lượt cho chắc.
+      for (const auto& a : active) WaitForSingleObject(a.process, INFINITE);
+    }
+    for (size_t i = 0; i < active.size();) {
+      if (WaitForSingleObject(active[i].process, 0) != WAIT_OBJECT_0) { i++; continue; }
+      DWORD exitCode = 1;
+      GetExitCodeProcess(active[i].process, &exitCode);
+      CloseHandle(active[i].process);
+      codes[active[i].index] = static_cast<int>(exitCode);
+      jobs[active[i].index]->timing.runMs += MsSince(active[i].started);
+      active.erase(active.begin() + static_cast<std::ptrdiff_t>(i));
+    }
+  }
+#else
+  (void)concurrency;
+  for (size_t i = 0; i < jobs.size(); i++) {
+    BatchJob& job = *jobs[i];
+    Emit("progress", "Đang render " + job.progressText + "...");
+    const std::vector<std::string> cmd = JobCommandForRun(job, plan, job.timing.label + labelSuffix);
+    const auto started = ExportClock::now();
+    codes[i] = RunIn(cmd, job.tempDir);
+    job.timing.runMs += MsSince(started);
+    if (!g_exportBenchDir.empty()) SetChildEnv("FFREPORT", "");
+  }
+#endif
+  return codes;
+}
+
+/* Chạy cả bộ job, tối đa `concurrency` tiến trình cùng lúc, rồi xử lý lỗi:
+ *  - job hình lỗi khi dùng bộ mã hoá PHẦN CỨNG:
+ *      chạy song song -> chạy lại từng cái MỘT bằng chính bộ mã hoá đó trước (lỗi có thể chỉ vì
+ *      nhiều phiên NVENC cùng lúc — GeForce có trần số phiên, dùng chung với OBS/ShadowPlay);
+ *      vẫn lỗi (hoặc chạy nối tiếp) -> chạy lại MỌI job hình của bộ bằng CPU. Không ghép lẫn
+ *      batch NVENC với batch libx264: ghép `-c copy` giữ SPS/PPS của batch đầu.
+ *  - lỗi khác, hoặc lỗi cả khi đã ở CPU: trả mã lỗi.
+ * Ghi timing của mọi job vào g_exportTiming theo thứ tự job; xoá filter script khi không đo. */
+int RunExportJobs(std::vector<BatchJob>& jobs, EncoderPlan& plan, size_t concurrency, const ExportSettings& settings) {
+  // Lượt tiếng khởi chạy TRƯỚC: nó nhẹ và chạy suốt, xong sớm thì nhường chỗ cho batch hình.
+  std::vector<size_t> order;
+  for (size_t i = 0; i < jobs.size(); i++) if (!jobs[i].video) order.push_back(i);
+  for (size_t i = 0; i < jobs.size(); i++) if (jobs[i].video) order.push_back(i);
+  std::vector<BatchJob*> all;
+  for (size_t i : order) all.push_back(&jobs[i]);
+  const std::vector<int> ordered = RunBatchJobs(all, plan, concurrency, "");
+  std::vector<int> codes(jobs.size(), 0);
+  for (size_t k = 0; k < order.size(); k++) codes[order[k]] = ordered[k];
+  int failure = 0;
+  std::vector<size_t> hardwareFailed;
+  for (size_t i = 0; i < jobs.size(); i++) {
+    if (codes[i] == 0) continue;
+    if (jobs[i].video && plan.hardware) hardwareFailed.push_back(i);
+    else failure = codes[i];
+  }
+  if (!failure && !hardwareFailed.empty()) {
+    bool needCpu = true;
+    if (concurrency > 1) {
+      Emit("progress", "Encoder phần cứng " + plan.videoEncoder + " lỗi ở " + std::to_string(hardwareFailed.size())
+                       + " lượt chạy cùng lúc — chạy lại lần lượt...");
+      std::vector<BatchJob*> retry;
+      for (size_t i : hardwareFailed) retry.push_back(&jobs[i]);
+      const std::vector<int> again = RunBatchJobs(retry, plan, 1, "_retry");
+      needCpu = false;
+      for (size_t k = 0; k < retry.size(); k++) {
+        codes[hardwareFailed[k]] = again[k];
+        if (again[k] != 0) needCpu = true;
+      }
+    }
+    if (needCpu) {
+      Emit("progress", "Encoder phần cứng " + plan.videoEncoder + " lỗi, chuyển batch export sang CPU...");
+      plan = CpuEncoderPlan(settings);
+      std::vector<BatchJob*> videoJobs;
+      std::vector<size_t> videoIndex;
+      for (size_t i = 0; i < jobs.size(); i++) {
+        if (!jobs[i].video) continue;
+        jobs[i].timing.cpuRetry = true;
+        videoJobs.push_back(&jobs[i]);
+        videoIndex.push_back(i);
+      }
+      const std::vector<int> cpu = RunBatchJobs(videoJobs, plan, concurrency, "_cpu");
+      for (size_t k = 0; k < videoJobs.size(); k++) {
+        codes[videoIndex[k]] = cpu[k];
+        if (cpu[k] != 0) failure = cpu[k];
+      }
+    }
+  }
+  for (size_t i = 0; i < jobs.size(); i++) {
+    jobs[i].timing.exitCode = codes[i];
+    g_exportTiming.runs.push_back(jobs[i].timing);
+  }
+  if (failure != 0) {
+    Emit("error", "ffmpeg batch export failed", failure);
+    return failure;
+  }
+  if (g_exportBenchDir.empty()) {
+    for (const auto& job : jobs) {
+      std::error_code ec;
+      fs::remove(job.scriptPath, ec);
+    }
+  }
   return 0;
+}
+
+// Một batch, chạy ngay (nối tiếp) — mọi đường xuất không song song.
+int ExportBatch(
+  const std::string& source,
+  const std::string& output,
+  const fs::path& tempDir,
+  const std::vector<ExportInterval>& intervals,
+  size_t offset,
+  size_t count,
+  size_t batchIndex,
+  size_t batchCount,
+  const ExportSettings& settings,
+  EncoderPlan& plan,
+  const std::vector<ExportOverlay>& overlays,
+  FilterScriptMode mode = FilterScriptMode::Full
+) {
+  std::vector<BatchJob> jobs(1);
+  if (!PrepareExportBatch(jobs[0], source, output, tempDir, intervals, offset, count, batchIndex, batchCount,
+                          settings, overlays, mode)) {
+    return 6;
+  }
+  return RunExportJobs(jobs, plan, 1, settings);
 }
 
 /* Xoá thư mục batch trung gian. Lỗi thì bỏ qua (Defender/trình xem file có thể đang giữ một
@@ -4746,7 +5042,27 @@ int CommandExportVideo(int argc, char** argv) {
     /* DỰ ÁN CÓ LỚP PHỦ — chia theo THỜI GIAN nếu cắt được (xem PlanOverlayBatches).
      * Không chia được thì `batches` có đúng một phần tử và mọi thứ chạy y như bản cũ. */
     const auto planStarted = ExportClock::now();
-    const std::vector<OverlayBatch> batches = PlanOverlayBatches(intervals, overlays, settings);
+    /* SONG SONG (mục 1.8, xem ExportParallelWorkers): dự án NGẮN hơn ngưỡng chia batch theo độ
+     * dài vẫn được chia thành 2 batch cho mỗi tiến trình (tối thiểu kParallelMinBatchSeconds mỗi
+     * batch) để chạy cùng lúc; batch nhiều hơn tiến trình để san tải — lớp phủ thường dồn ở một
+     * đoạn (Bin Tom: 15/19 lớp phủ ở 27 s đầu). Dự án dài giữ batch 180 s, chạy song song. */
+    const size_t workers = ExportParallelWorkers(settings);
+    const double totalSeconds = SequenceDuration(intervals, 0, intervals.size());
+    double batchTarget = kOverlayBatchTargetSeconds;
+    double batchMinTotal = kOverlayBatchMinTotalSeconds;
+    /* Chỉ cắt ở BIÊN CLIP: cắt giữa clip là nửa sau khởi động lại `fps` từ khung nguồn đầu tiên của
+     * nó — nguồn khác nhịp bản xuất (30 -> 25) thì chọn khung nguồn lệch pha (Test.crab: khung tệ
+     * nhất 13 dB so với bản một lượt). Dự án dài vẫn cắt giữa clip như trước (phim một clip). */
+    bool splitInsideClips = true;
+    if (workers > 1 && totalSeconds < kOverlayBatchMinTotalSeconds
+        && totalSeconds >= 2.0 * kParallelMinBatchSeconds) {
+      const double pieces = std::min(2.0 * static_cast<double>(workers), std::floor(totalSeconds / kParallelMinBatchSeconds));
+      batchTarget = totalSeconds / pieces;
+      batchMinTotal = 0.0;
+      splitInsideClips = false;
+    }
+    const std::vector<OverlayBatch> batches = PlanOverlayBatches(intervals, overlays, settings, batchTarget, batchMinTotal,
+                                                                 splitInsideClips);
     g_exportTiming.planMs = MsSince(planStarted);
     if (batches.size() <= 1) {
       int code = ExportBatch(source, output, tempDir, intervals, 0, intervals.size(), 0, 1, settings, plan, overlays);
@@ -4760,17 +5076,22 @@ int CommandExportVideo(int argc, char** argv) {
     fs::remove_all(batchDir);
     fs::create_directories(batchDir);
     const std::string ext = settings.codec == "prores" ? ".mov" : ".mp4";
-    Emit("progress", "Chia " + std::to_string(batches.size()) + " lượt render theo thời gian "
-                     + "(giữ chuỗi lớp phủ ngắn để render không chậm dần theo độ dài phim)...");
+    g_exportTiming.workers = workers;
+    Emit("progress", "Chia " + std::to_string(batches.size()) + " lượt render theo thời gian"
+                     + (workers > 1 ? ", chạy " + std::to_string(workers) + " lượt hình cùng lúc" : std::string())
+                     + "...");
 
+    /* Ghi MỌI filter script trước (tuần tự — xem BatchJob), rồi mới chạy. */
+    std::vector<BatchJob> jobs(batches.size() + 1);
     std::vector<std::string> batchPaths;
     for (size_t i = 0; i < batches.size(); i++) {
       const OverlayBatch& batch = batches[i];
       const std::vector<ExportOverlay> batchOverlays = OverlaysForBatch(overlays, batch, settings);
       fs::path batchPath = batchDir / ("batch_" + std::to_string(10000 + static_cast<int>(i)).substr(1) + ext);
-      int code = ExportBatch(source, batchPath.string(), tempDir, batch.intervals, 0, batch.intervals.size(),
-                             i, batches.size(), settings, plan, batchOverlays, FilterScriptMode::VideoOnly);
-      if (code != 0) return code;
+      if (!PrepareExportBatch(jobs[i], source, batchPath.string(), tempDir, batch.intervals, 0, batch.intervals.size(),
+                              i, batches.size(), settings, batchOverlays, FilterScriptMode::VideoOnly)) {
+        return 6;
+      }
       batchPaths.push_back(batchPath.string());
     }
 
@@ -4778,16 +5099,19 @@ int CommandExportVideo(int argc, char** argv) {
      * Xem khối chú thích ở FilterScriptMode — nối tiếng theo batch là mỗi mối ghép dài thêm
      * 23ms và nghe rõ chỗ ngắt. Lớp phủ lọc còn những cái CÓ TIẾNG và đánh số input lại
      * (xem OverlaysForAudioPass): nạp cả ảnh phụ đề vào lượt này là nổ dòng lệnh. */
-    Emit("progress", "Đang render tiếng (một lượt liền mạch cho cả phim)...");
     /* Đuôi theo CODEC TIẾNG, không phải theo thói quen: ProRes đi kèm `pcm_s16le` (xem
      * AppendEncoderArgsForMode), mà container mp4/m4a không chứa PCM — ffmpeg từ chối ngay
      * ở khâu mux. `.mov` chứa được cả hai. */
     fs::path audioPath = batchDir / (settings.codec == "prores" ? "audio.mov" : "audio.m4a");
+    if (!PrepareExportBatch(jobs.back(), source, audioPath.string(), tempDir, intervals, 0, intervals.size(),
+                            batches.size(), batches.size() + 1, settings,
+                            OverlaysForAudioPass(overlays), FilterScriptMode::AudioOnly)) {
+      return 6;
+    }
+    jobs.back().progressText = "tiếng (một lượt liền mạch cho cả phim)";
+    // Lượt tiếng nhẹ (bộ mã hoá AAC một luồng) — chạy kèm, không chiếm chỗ của một lượt hình.
     {
-      EncoderPlan audioPlan = plan;
-      int code = ExportBatch(source, audioPath.string(), tempDir, intervals, 0, intervals.size(),
-                             batches.size(), batches.size() + 1, settings, audioPlan,
-                             OverlaysForAudioPass(overlays), FilterScriptMode::AudioOnly);
+      const int code = RunExportJobs(jobs, plan, workers > 1 ? workers + 1 : 1, settings);
       if (code != 0) return code;
     }
 
@@ -4799,7 +5123,10 @@ int CommandExportVideo(int argc, char** argv) {
     fs::create_directories(fs::path(output).parent_path());
     Emit("progress", "Đang ghép " + std::to_string(batchPaths.size()) + " lượt hình với tiếng...");
     /* Hình `-c copy` (nối chính xác từng khung), tiếng cũng `-c copy` (đã encode một lượt ở
-     * trên). `-shortest` phòng khi hai luồng lệch nhau vài mili giây ở khung cuối.
+     * trên). KHÔNG `-shortest`: tiếng thường hết trước hình vài µs (29,97 khung/s, 42 s: tiếng
+     * 42,008625 s, hình 42,008633 s) và `-shortest` cắt luôn KHUNG HÌNH CUỐI — bản xuất nhiều batch
+     * mất khung cuối phim. Lượt một batch giữ nguyên độ dài cả hai luồng; lượt tiếng riêng nay ra
+     * đúng tiếng của lượt đó (đoạn hình giả, xem WriteFilterScript), nên ghép giữ nguyên là trùng.
      * `moov` ở đầu tệp bằng CHỖ DÀNH SẴN (xem MoovReserveBytes) thay cho `+faststart`; ffmpeg báo
      * thiếu chỗ thì ghép lại theo cách cũ. ProRes (.mov, tiếng PCM) giữ `+faststart`. */
     const auto concatStarted = ExportClock::now();
@@ -4808,7 +5135,7 @@ int CommandExportVideo(int argc, char** argv) {
         "ffmpeg", "-y", "-v", "error", "-nostdin",
         "-f", "concat", "-safe", "0", "-i", concatList.string(),
         "-i", audioPath.string(),
-        "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-shortest",
+        "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
       };
       if (reserveMoov) {
         cmd.insert(cmd.end(), {"-moov_size", std::to_string(MoovReserveBytes(
