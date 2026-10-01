@@ -360,6 +360,7 @@ const subtitleJobs = require('./subtitle-jobs.js');
 const ttsService = require('./tts-service.js');
 const modelDownloads = require('./model-downloads.js');
 const { createLogoAi } = require('./logo-ai.js');
+const { createRetouchFramesHandler } = require('./retouch-frames.js');
 /* PYTHON SIDECAR: cùng lý do — phép chọn interpreter và env UTF-8 nằm ở MỘT chỗ
  * (scripts/python_command.js), dùng chung với npm script lẫn test. Trước đây mỗi
  * chỗ tự chép một bản và mỗi bản thiếu một mảnh khác nhau. */
@@ -7022,6 +7023,13 @@ function createApp() {
    * Đo trên footage của dự án: 6 giây @30fps (1728x3072) = 4,4 giây phân tích, nhận diện
    * được mặt ở 180/180 frame.
    */
+  // Khung nguồn (RGBA) cho bước dựng Retouch khi xuất — ffmpeg giải mã tuần tự thay cho tua
+  // thẻ <video> từng khung. Cùng cổng an toàn nguồn với /api/retouch/track. Xem retouch-frames.js.
+  app.post('/api/retouch/frames', createRetouchFramesHandler({
+    resolveSource: resolveRetouchSource,
+    logStatus: (message) => logStatus(message),
+  }));
+
   app.post('/api/retouch/track', async (req, res) => {
     try {
       // NGUỒN: mặc định là lane chính (temp_input.mp4), nhưng nhận được đường dẫn asset

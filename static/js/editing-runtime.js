@@ -5994,7 +5994,10 @@
      * có `place` (khâu bake miếng vá overlay lấy place qua overlayItemPlacement) cũng vẽ
      * bằng ĐÚNG đoạn mã này — chép lại translate/rotate/scale ở chỗ khác là dựng bản cài
      * đặt thứ hai của cùng phép biến đổi. */
-    function blitLayerAt(ctx, drawable, w0, h0, place) {
+    /* `sub` (tuỳ chọn) = drawable chỉ là VÙNG {x,y,w,h} của texture fullW×fullH (khâu bake Retouch
+     * với khung đã cắt, xem retouchedDrawable): vẽ nó vào ĐÚNG phần tương ứng của hộp lớp, cùng
+     * phép biến đổi — điểm ảnh trong vùng ra y như vẽ cả texture. */
+    function blitLayerAt(ctx, drawable, w0, h0, place, sub = null) {
         if (!drawable || !(w0 > 0) || !(h0 > 0)) return;
         if (place.alpha <= 0.001 || place.sx === 0 || place.sy === 0) return;
         ctx.save();
@@ -6002,7 +6005,14 @@
         ctx.translate(place.cx, place.cy);
         ctx.rotate(place.rot);
         ctx.scale(place.sx, place.sy);
-        try { ctx.drawImage(drawable, -w0 / 2, -h0 / 2, w0, h0); } catch (_) {}
+        try {
+            if (sub) {
+                const kx = w0 / sub.fullW, ky = h0 / sub.fullH;
+                ctx.drawImage(drawable, -w0 / 2 + sub.x * kx, -h0 / 2 + sub.y * ky, sub.w * kx, sub.h * ky);
+            } else {
+                ctx.drawImage(drawable, -w0 / 2, -h0 / 2, w0, h0);
+            }
+        } catch (_) {}
         ctx.restore();
     }
 
@@ -6207,8 +6217,11 @@
         const draw = mainLaneFrameDrawSize(clip) || { width: texW, height: texH };
         // Phép đặt lấy từ `mainClipPlacement` — CÙNG hàm mà khâu bake miếng vá dùng để
         // tính hộp cắt, nên hộp và hình vẽ không thể lệch nhau.
+        // `options.sourceRect`: drawable là một VÙNG của khung (texW×texH là cỡ CẢ KHUNG) —
+        // chỉ khâu bake Retouch với `skipColor` (chuỗi màu tính theo cả khung).
         blitLayerAt(ctx, drawable, draw.width, draw.height,
-            mainClipPlacement(span, localT, seqW, seqH, mainLaneBaseSize(clip).height));
+            mainClipPlacement(span, localT, seqW, seqH, mainLaneBaseSize(clip).height),
+            options.sourceRect || null);
     }
 
     function ensureTransitionPreviewCanvas(root) {
@@ -8281,14 +8294,23 @@
      * lượt nạp chưa xong là bản xuất KHÔNG CÓ retouch mà không báo gì.
      * Ở đây chờ hẳn, có hạn — quá hạn thì caller phải NÓI RA, đừng lặng lẽ bỏ qua.
      */
+    // Tổng thời gian chờ bám mặt trong lượt vẽ trước đang chạy (exportPayload đặt về 0 rồi ghi
+    // vào số đo `retouch_faces_ms`): `retouch_ms` gồm cả phần này, mà nó là MediaPipe ở backend
+    // (lần đầu mở dự án), không phải khâu dựng khung.
+    let retouchFaceWaitMs = 0;
     async function awaitRetouchFaces(clip, timeoutMs = 60000) {
+        const started = performance.now();
         const deadline = Date.now() + timeoutMs;
-        for (;;) {
-            const store = await ensureRetouchFaces(clip);
-            if (store) return store;
-            if (retouchFaceCache.get(retouchClipKey(clip)) !== 'pending') return null;
-            if (Date.now() > deadline) return null;
-            await new Promise((resolve) => setTimeout(resolve, 100));
+        try {
+            for (;;) {
+                const store = await ensureRetouchFaces(clip);
+                if (store) return store;
+                if (retouchFaceCache.get(retouchClipKey(clip)) !== 'pending') return null;
+                if (Date.now() > deadline) return null;
+                await new Promise((resolve) => setTimeout(resolve, 100));
+            }
+        } finally {
+            retouchFaceWaitMs += performance.now() - started;
         }
     }
 
@@ -8370,6 +8392,10 @@
     // Canvas nháp để cắt vùng mặt ra lưới cục bộ. Một cái dùng lại mãi — tạo mới mỗi
     // frame là rác cho GC ngay trong vòng vẽ.
     let retouchScratch = null;
+    // Bản PHẦN MỀM cho khâu bake với khung đã cắt (`view`): nguồn là canvas phần mềm nên
+    // drawImage rẻ, và getImageData không phải chờ GPU (xem bakeCanvas). Preview vẫn dùng bản GPU
+    // ở trên (nguồn là <video> — xem ghi chú `willReadFrequently` bên dưới).
+    let retouchScratchCpu = null;
     let retouchLocalBuf = null;
 
     /* Khung này đang thuộc lúc PHÁT hay lúc DỪNG? Quyết định độ phân giải lưới cục bộ.
@@ -8390,7 +8416,22 @@
      * lớp thẩm mỹ áp LÊN kết quả đó — đúng thứ tự nghề, và cũng là thứ tự mà khâu bake
      * khi xuất sẽ phải theo.
      */
-    function retouchedDrawable(drawable, texW, texH, clip, sourceTime, aspect) {
+    /* `view` (chỉ khâu XUẤT, khung lấy từ backend đã cắt — xem eachSourceFrameFromBackend):
+     * drawable là VÙNG {x,y,w,h} của khung nguồn fullW×fullH, texW×texH là cỡ vùng. Landmark
+     * (chuẩn hoá theo CẢ KHUNG) đổi sang toạ độ chuẩn hoá của vùng; mọi phép tính của Retouch
+     * dùng toạ độ chuẩn hoá + tỉ lệ cạnh nên ra cùng hình trên cùng điểm ảnh — chỉ là canvas
+     * WebGL / texture cỡ vùng (~800×900) thay cho cỡ khung (1728×3072: đẩy 21 MB lên texture
+     * rồi chép về mỗi khung là 50–60 ms chờ GPU, đo trên "Yêu Con 1"). */
+    function faceToView(face, view) {
+        return face.map((p) => {
+            const q = p.slice();
+            q[0] = (p[0] * view.fullW - view.x) / view.w;
+            q[1] = (p[1] * view.fullH - view.y) / view.h;
+            return q;
+        });
+    }
+
+    function retouchedDrawable(drawable, texW, texH, clip, sourceTime, aspect, view = null) {
         if (!window.Retouch || !drawable || !clip) return drawable;
         // Đang giữ nút so sánh -> trả ảnh GỐC. Đặt ngay đầu hàm để không tốn một lượt
         // raster/shader nào; và vì mọi đường vẽ đều đi qua đây nên chỉ cần một chỗ.
@@ -8406,7 +8447,9 @@
             return drawable;
         }
         const r = Retouch.normalize(cfg);
-        const faces = Retouch.selectFaces(faceFrames, r.target);
+        // Chọn mặt trên toạ độ CẢ KHUNG (như preview), rồi mới đổi sang vùng cắt.
+        let faces = Retouch.selectFaces(faceFrames, r.target);
+        if (view) faces = faces.map((face) => faceToView(face, view));
         if (!faces.length) return drawable;
         // Khoá theo BLOCK: lane chính và từng media overlay mỗi thứ một bộ render riêng.
         const renderer = ensureRetouchRenderer(retouchClipKey(clip) || 'main');
@@ -8426,14 +8469,20 @@
             // đường tăng tốc của trình duyệt, còn lấy mẫu 256x256 bằng JS là 65k lần
             // gọi hàm ngay trong vòng vẽ.
             const G = renderer.grid;
-            if (!retouchScratch) retouchScratch = document.createElement('canvas');
-            if (retouchScratch.width !== G) { retouchScratch.width = G; retouchScratch.height = G; }
+            if (view && !retouchScratchCpu) {
+                retouchScratchCpu = document.createElement('canvas');
+                retouchScratchCpu.getContext('2d', { willReadFrequently: true });
+            }
+            if (!view && !retouchScratch) retouchScratch = document.createElement('canvas');
+            const scratch = view ? retouchScratchCpu : retouchScratch;
+            if (scratch.width !== G) { scratch.width = G; scratch.height = G; }
             // `willReadFrequently` CỐ Ý ĐỂ TẮT, dù ngay dưới đây có getImageData.
             // Bật cờ đó thì Chrome chuyển canvas sang đường PHẦN MỀM, và khi ấy
             // `drawImage` từ video 1728×3072 tốn 11.4 ms/khung thay vì 0.1 ms; đọc
             // ngược 256² chỉ tốn 0.9 ms. Đo được ở tests/manual/retouch_perf.html —
-            // đổi chác này lãi ~10 ms mỗi khung.
-            const ctx = retouchScratch.getContext('2d');
+            // đổi chác này lãi ~10 ms mỗi khung. (Bản `view` thì nguồn là canvas phần mềm, đổi
+            // chác ngược lại — xem retouchScratchCpu.)
+            const ctx = scratch.getContext('2d');
             if (!ctx) return drawable;
             const B = begun.bounds;
             const sw = Math.max(1, B.width * texW);
@@ -8560,11 +8609,14 @@
      * vẽ trước đây gọi retouchedDrawable nay gọi hàm này, để không đường nào quên logo.
      * Retouch đi TRƯỚC: nó cần chính thẻ <video> để biết đang phát hay dừng (chọn lưới
      * thấp/cao), và vùng mặt gần như không bao giờ chồng lên logo ở góc. */
-    function sourceFxDrawable(drawable, texW, texH, clip, sourceTime, aspect, key) {
+    // `view`: drawable chỉ là một vùng của khung nguồn (xem retouchedDrawable). Chỉ khâu bake
+    // Retouch truyền, và chỉ khi block KHÔNG xoá logo (xoá logo tính theo cả khung).
+    function sourceFxDrawable(drawable, texW, texH, clip, sourceTime, aspect, key, view = null) {
         let out = drawable;
         if (window.Retouch && clip?.retouch && !Retouch.isIdentity(clip.retouch)) {
-            out = retouchedDrawable(out, texW, texH, clip, sourceTime, aspect) || out;
+            out = retouchedDrawable(out, texW, texH, clip, sourceTime, aspect, view) || out;
         }
+        if (view) return out;
         return logoRemovedDrawable(out, texW, texH, clip, `logo:${key || 'default'}`, sourceTime);
     }
 
@@ -19653,9 +19705,17 @@
     const TRANSITION_JPEG_QUALITY = 0.95;   // JPEG cho khung ĐỤC của lane chính
     const bakeCanvasPool = {};              // vai trò -> canvas dùng lại
 
-    function bakeCanvas(role, w, h) {
+    /* `opts.cpu`: canvas PHẦN MỀM (`willReadFrequently`) — đọc ngược (getImageData/toBlob) không phải
+     * chờ GPU. Trên canvas GPU mỗi lần đọc ngược đợi tới lượt của tiến trình GPU (~một nhịp màn
+     * hình: toBlob nối tiếp 16,7 ms, đo trong Electron), mà khâu bake Retouch đọc ngược 2 lần mỗi
+     * khung. Thuộc tính ngữ cảnh chốt từ lần getContext ĐẦU, nên vai CPU phải là vai riêng. */
+    function bakeCanvas(role, w, h, opts = {}) {
         let c = bakeCanvasPool[role];
-        if (!c) { c = document.createElement('canvas'); bakeCanvasPool[role] = c; }
+        if (!c) {
+            c = document.createElement('canvas');
+            if (opts.cpu) c.getContext('2d', { willReadFrequently: true });
+            bakeCanvasPool[role] = c;
+        }
         // Gán width/height là RESET canvas, nên chỉ gán khi thật sự đổi. Trước đây chỉ so
         // width: hai lần dùng cùng bề rộng mà khác chiều cao thì chiều cao cũ được giữ
         // nguyên và ảnh ra sai cỡ trong im lặng. Miếng vá Retouch đổi cỡ theo từng block
@@ -19684,20 +19744,118 @@
         });
     }
 
+    function dataUrlToBlob(url) {
+        const [head, body] = String(url).split(',');
+        const mime = (/data:([^;]+)/.exec(head) || [])[1] || 'application/octet-stream';
+        const bin = atob(body || '');
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return new Blob([bytes], { type: mime });
+    }
+
     // Gom khung đã dựng: có collector -> đẩy ra 1 phần file multipart và nhớ TÊN; không có
     // -> data URL nội tuyến. Trả về object seq đúng dạng backend đọc được ở cả 2 đường.
-    function bakedFrameSink(collect, seqId, type, quality) {
+    //
+    // `options.pipeline` (chỉ khi có collector): KHÔNG chờ toBlob xong mới trả về. toBlob JPEG
+    // một miếng vá ~550×560 tốn 17–34 ms mà chỉ là CHỜ (mã hoá chạy ngoài luồng chính); chờ từng
+    // khung là bước dựng Retouch đứng im ~30 ms/khung (đo "Yêu Con 1"). Nay chép khung sang một
+    // canvas riêng rồi mã hoá song song với khung sau, tối đa PIPELINE_DEPTH khung cùng lúc.
+    // Tên khung vẫn ghi theo ĐÚNG thứ tự; caller PHẢI `await sink.flush()` trước `seq()`.
+    const PIPELINE_DEPTH = 6;
+
+    /* NHÓM WORKER MÃ HOÁ ẢNH cho sink pipeline. canvas.toBlob mã hoá trên MỘT luồng nền của
+     * Chromium: miếng vá Retouch ~550×560 JPEG 0,95 ra ~1 ảnh / 33 ms, chậm hơn nhịp dựng khung,
+     * nên hàng đợi đầy và vòng dựng đứng chờ (CPU profile "Yêu Con 1": luồng chính rảnh 50%).
+     * Ở đây mỗi worker vẽ ImageBitmap lên OffscreenCanvas rồi convertToBlob — ENCODE_WORKERS ảnh
+     * mã hoá cùng lúc. Môi trường thiếu Worker/OffscreenCanvas -> null, sink dùng toBlob như cũ. */
+    const ENCODE_WORKERS = 3;
+    let encodePool;
+    function imageEncodePool() {
+        if (encodePool !== undefined) return encodePool;
+        encodePool = null;
+        try {
+            if (typeof Worker !== 'function' || typeof OffscreenCanvas !== 'function' || typeof createImageBitmap !== 'function') return null;
+            const src = 'self.onmessage = async (e) => { const { id, bitmap, type, quality } = e.data;'
+                + ' try { const oc = new OffscreenCanvas(bitmap.width, bitmap.height);'
+                + ' oc.getContext("2d").drawImage(bitmap, 0, 0); bitmap.close();'
+                + ' const blob = await oc.convertToBlob({ type, quality }); self.postMessage({ id, blob }); }'
+                + ' catch (err) { self.postMessage({ id, error: String(err && err.message || err) }); } };';
+            const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+            const workers = Array.from({ length: ENCODE_WORKERS }, () => new Worker(url));
+            const waiting = new Map();
+            let nextId = 1;
+            let turn = 0;
+            workers.forEach((w) => {
+                w.onmessage = (e) => {
+                    const job = waiting.get(e.data.id);
+                    if (!job) return;
+                    waiting.delete(e.data.id);
+                    if (e.data.blob) job.resolve(e.data.blob); else job.reject(new Error(e.data.error || 'encode'));
+                };
+            });
+            encodePool = {
+                // `bitmap` được CHUYỂN quyền sang worker (đừng dùng lại sau khi gọi).
+                encode(bitmap, type, quality) {
+                    const id = nextId++;
+                    const w = workers[turn++ % workers.length];
+                    return new Promise((resolve, reject) => {
+                        waiting.set(id, { resolve, reject });
+                        w.postMessage({ id, bitmap, type, quality }, [bitmap]);
+                    });
+                },
+            };
+        } catch (_) {
+            encodePool = null;
+        }
+        return encodePool;
+    }
+
+    function bakedFrameSink(collect, seqId, type, quality, options = {}) {
         const ext = type === 'image/jpeg' ? 'jpg' : 'png';
         const frames = [];       // data URL (đường lùi)
         const frameFiles = [];   // tên phần file multipart
+        const pipeline = !!(options.pipeline && collect);
+        const inflight = [];     // Promise của các lần mã hoá đang chạy
+        const spare = [];        // canvas chép đã mã hoá xong, dùng lại
+        const encodeCopy = async (canvas, name) => {
+            // Bản chép PHẦN MỀM: toBlob khỏi phải đọc ngược từ GPU (xem bakeCanvas).
+            let copy = spare.pop();
+            if (!copy) { copy = document.createElement('canvas'); copy.getContext('2d', { willReadFrequently: true }); }
+            if (copy.width !== canvas.width || copy.height !== canvas.height) {
+                copy.width = canvas.width; copy.height = canvas.height;
+            }
+            const cctx = copy.getContext('2d');
+            cctx.clearRect(0, 0, copy.width, copy.height);
+            cctx.drawImage(canvas, 0, 0);
+            let blob = null;
+            const pool = imageEncodePool();
+            if (pool) {
+                try { blob = await pool.encode(await createImageBitmap(copy), type, quality); } catch (_) { blob = null; }
+            }
+            if (!blob) blob = await canvasToBlobAsync(copy, type, quality);
+            // Hiếm: toBlob trả null -> mã hoá đồng bộ qua data URL, vẫn ra một phần file.
+            collect(name, blob || dataUrlToBlob(copy.toDataURL(type, quality)));
+            spare.push(copy);
+        };
         return {
             async push(canvas, index) {
                 const name = `${seqId}__${String(index).padStart(4, '0')}.${ext}`;
+                if (pipeline) {
+                    frameFiles.push(name);
+                    const job = encodeCopy(canvas, name);
+                    inflight.push(job);
+                    job.finally(() => { const at = inflight.indexOf(job); if (at >= 0) inflight.splice(at, 1); });
+                    if (inflight.length >= PIPELINE_DEPTH) await Promise.race(inflight);
+                    return;
+                }
                 if (collect) {
                     const blob = await canvasToBlobAsync(canvas, type, quality);
                     if (blob) { collect(name, blob); frameFiles.push(name); return; }
                 }
                 frames.push(canvas.toDataURL(type, quality));
+            },
+            async flush() {
+                while (inflight.length) await Promise.all(inflight.slice());
             },
             seq(d, seqW, seqH, frameCount) {
                 const base = { start: 0, duration: d, width: seqW, height: seqH, frame_count: frameCount };
@@ -20132,6 +20290,133 @@
         }
     }
 
+    /* Pixel trên khung sequence -> toạ độ CHUẨN HOÁ 0..1 của lớp: phép NGƯỢC của
+     * layerPointToSequence, cùng layerPlacement. */
+    function sequencePointToLayer(x, y, w0, h0, place) {
+        const dx = x - place.cx, dy = y - place.cy;
+        const cos = Math.cos(place.rot), sin = Math.sin(place.rot);
+        const lx = dx * cos + dy * sin;
+        const ly = -dx * sin + dy * cos;
+        return { x: lx / (w0 * place.sx) + 0.5, y: ly / (h0 * place.sy) + 0.5 };
+    }
+
+    /* VÙNG NGUỒN mà bước dựng miếng vá Retouch đọc tới, theo pixel của texture (texW×texH) —
+     * để backend chỉ gửi vùng đó (khung DJI 1728×3072 RGBA là 21 MB; cả khung qua pipe + HTTP
+     * thì riêng khâu chuyển đã ~120 ms/khung). Hợp qua MỌI khung của:
+     *   - bốn góc miếng vá (`rect`, toạ độ sequence) đổi NGƯỢC qua phép đặt của khung đó —
+     *     phần drawMainClipLayer / blitLayerAt vẽ vào chỗ sẽ bị cắt làm miếng vá;
+     *   - hộp raster của Retouch (hộp landmark nới MASK_BOUNDS_PAD) — vùng retouchedDrawable
+     *     lấy mẫu lên lưới cục bộ;
+     * cộng lề 4% khung (backend thêm 8 px khi đổi sang pixel — nhân nội suy khi co giãn, biến dạng
+     * mặt lấy mẫu lệch chỗ). Ngoài vùng này canvas nguồn để trống, mà không pixel nào ngoài vùng
+     * tới được miếng vá. Trả toạ độ CHUẨN HOÁ 0..1 {x0,y0,x1,y1} — cỡ texture chỉ backend biết chắc.
+     * null = lấy cả khung (vùng chiếm quá nửa khung, phép đặt suy biến, hoặc không có miếng vá). */
+    function retouchSourceRegion({ times, faceAt, target, placeAt, rect, w0, h0 }) {
+        if (!rect || !(w0 > 0) || !(h0 > 0)) return null;
+        let u0 = Infinity, v0 = Infinity, u1 = -Infinity, v1 = -Infinity;
+        const add = (u, v) => { u0 = Math.min(u0, u); v0 = Math.min(v0, v); u1 = Math.max(u1, u); v1 = Math.max(v1, v); };
+        const corners = [[rect.x, rect.y], [rect.x + rect.w, rect.y], [rect.x, rect.y + rect.h], [rect.x + rect.w, rect.y + rect.h]];
+        for (let k = 0; k < times.length; k++) {
+            const place = placeAt(k);
+            if (!place || !place.sx || !place.sy) return null;
+            corners.forEach(([x, y]) => { const p = sequencePointToLayer(x, y, w0, h0, place); add(p.x, p.y); });
+            const faceFrames = faceAt(times[k]);
+            if (!faceFrames) continue;
+            Retouch.selectFaces(faceFrames, target).forEach((face) => {
+                const b = Retouch.faceBounds(face, Retouch.MASK_BOUNDS_PAD);
+                if (b) { add(b.x0, b.y0); add(b.x1, b.y1); }
+            });
+        }
+        if (!(Number.isFinite(u0) && u1 > u0 && v1 > v0)) return null;
+        const margin = 0.04;
+        const region = {
+            x0: Math.max(0, u0 - margin), y0: Math.max(0, v0 - margin),
+            x1: Math.min(1, u1 + margin), y1: Math.min(1, v1 + margin),
+        };
+        if ((region.x1 - region.x0) * (region.y1 - region.y0) > 0.6) return null;
+        return region;
+    }
+
+    /* KHUNG NGUỒN TỪ BACKEND (nhánh 1B của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md): ffmpeg giải mã
+     * TUẦN TỰ đoạn cần rồi gửi về từng khung RGBA đúng mốc (backend/retouch-frames.js). Tua thẻ
+     * <video> như eachSourceFrame thì mỗi khung trình duyệt giải mã lại từ khung khoá gần nhất:
+     * đo trên nguồn DJI HEVC 10-bit 1728×3072 59,94 fps là 81 ms/khung (song song 2–4 thẻ video
+     * cũng không nhanh hơn); ffmpeg tuần tự ~19 ms/khung. Không phụ thuộc cửa sổ có đang hiện hay
+     * không (fetch không bị bóp như hẹn giờ), và miếng vá lấy điểm ảnh từ CÙNG bộ giải mã với phần
+     * khung quanh nó ở sidecar.
+     * `crop` (retouchSourceRegion, toạ độ chuẩn hoá) = chỉ xin vùng đó; khi backend cắt thật thì
+     * `onFrame(canvas, i, fullW, fullH, view)` nhận canvas CỠ VÙNG và `view` = {x,y,w,h,fullW,fullH}
+     * (xem retouchedDrawable / blitLayerAt), không cắt thì `view` = null và canvas cỡ cả khung.
+     * Trả về SỐ KHUNG đã giao cho `onFrame` (theo thứ tự `times`); ném lỗi nếu chưa giao khung nào.
+     * Gọi qua eachSourceFrameBest để phần thiếu tự quay về đường tua. */
+    async function eachSourceFrameFromBackend(sourcePath, times, onFrame, crop = null) {
+        const resp = await fetch(`${API_BASE}/retouch/frames`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source_path: sourcePath || '', times, ...(crop ? { crop } : {}) }),
+        });
+        if (!resp.ok || !resp.body) throw new Error(`retouch/frames ${resp.status}`);
+        const W = Number(resp.headers.get('X-Frame-Width'));
+        const H = Number(resp.headers.get('X-Frame-Height'));
+        const SW = Number(resp.headers.get('X-Source-Width')) || W;
+        const SH = Number(resp.headers.get('X-Source-Height')) || H;
+        const CX = Number(resp.headers.get('X-Crop-X')) || 0;
+        const CY = Number(resp.headers.get('X-Crop-Y')) || 0;
+        if (!(W > 0 && H > 0)) throw new Error('retouch/frames: thiếu cỡ khung');
+        const frameBytes = W * H * 4;
+        const view = (W !== SW || H !== SH || CX || CY) ? { x: CX, y: CY, w: W, h: H, fullW: SW, fullH: SH } : null;
+        // Vùng cắt -> canvas PHẦN MỀM (xem bakeCanvas): putImageData là chép bộ nhớ, và các bước
+        // đọc ngược phía sau không phải chờ GPU. Cả khung thì giữ canvas GPU như đường tua.
+        const grab = view ? bakeCanvas('retouchSrcCpu', W, H, { cpu: true }) : bakeCanvas('retouchSrc', W, H);
+        const buf = new Uint8ClampedArray(frameBytes);
+        const reader = resp.body.getReader();
+        let filled = 0;
+        let index = 0;
+        try {
+            while (index < times.length) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                let off = 0;
+                while (off < value.length && index < times.length) {
+                    const take = Math.min(frameBytes - filled, value.length - off);
+                    buf.set(value.subarray(off, off + take), filled);
+                    filled += take;
+                    off += take;
+                    if (filled === frameBytes) {
+                        // putImageData CHÉP dữ liệu -> dùng lại `buf` cho khung sau được.
+                        grab.ctx.putImageData(new ImageData(buf, W, H), 0, 0);
+                        filled = 0;
+                        await onFrame(grab.canvas, index, SW, SH, view);
+                        index += 1;
+                    }
+                }
+            }
+        } catch (error) {
+            if (!index) throw error;
+            console.warn('[retouch] luồng khung từ backend đứt giữa chừng:', error);
+        } finally {
+            try { reader.cancel(); } catch (_) {}
+        }
+        return index;
+    }
+
+    /* Khung nguồn cho bước dựng Retouch: backend trước, phần thiếu (backend tắt, nguồn HDR, lỗi,
+     * đứt giữa chừng) tua thẻ <video> như cũ. `source.path` = đường dẫn gửi backend ('' = lane chính
+     * temp_input.mp4; null = không có tệp để gửi -> tua luôn), `source.url` = URL cho đường tua. */
+    async function eachSourceFrameBest(source, times, onFrame) {
+        let delivered = 0;
+        if (source.path !== null && source.path !== undefined) {
+            try {
+                delivered = await eachSourceFrameFromBackend(source.path, times, onFrame, source.crop || null);
+            } catch (error) {
+                console.warn('[retouch] không lấy được khung từ backend, tua <video>:', error?.message || error);
+            }
+        }
+        if (delivered >= times.length) return;
+        await eachSourceFrame(source.url, times.slice(delivered),
+            (frame, k, texW, texH) => onFrame(frame, k + delivered, texW, texH));
+    }
+
     /* Bake retouch cho MỘT block lane chính -> { seq, rect } hoặc null.
      * `rect` = null nghĩa là bake CẢ KHUNG (đường (b)). */
     async function bakeRetouchSequence(span, exportFps, seqW, seqH, srcUrl, collect, progress) {
@@ -20170,6 +20455,7 @@
         // chỉ đụng landmark nên rẻ; gộp vào lượt bake thì không biết cắt ở đâu.
         let rect = null;
         let featherPx = 0;
+        let sourceCrop = null;
         if (!fullFrame) {
             /* HỘP VÁ phải tính trong ĐÚNG cỡ mà lớp chiếm trên canvas — cùng số mà
              * drawMainClipLayer vẽ (khung nối × hệ số vừa-khung), không phải
@@ -20199,28 +20485,41 @@
             // với bake cả khung, mà lại thêm một đường mã để sai. Chuyển sang bake cả
             // khung: chậm hơn nhưng luôn đúng.
             if (!rect) fullFrame = true;
+            // Chỉ xin backend vùng nguồn miếng vá đọc tới. Xoá logo thì lấy cả khung: delogo / miếng
+            // vá AI lấy mẫu quanh vùng logo, có thể nằm ngoài vùng tính ở đây.
+            else if (!logoActive(clip)) {
+                sourceCrop = retouchSourceRegion({
+                    times, faceAt: (t) => retouchFacesAt(clip, t), target: r.target,
+                    placeAt: (k) => mainClipPlacement(span, k / exportFps, seqW, seqH, mainLaneBaseSize(clip).height),
+                    rect, w0: texW, h0: texH,
+                });
+            }
         }
 
         // ---- LƯỢT 2: giải mã + retouch + cắt ----
-        const sink = bakedFrameSink(collect, `retouch_${span.index}`, 'image/jpeg', RETOUCH_JPEG_QUALITY);
+        const sink = bakedFrameSink(collect, `retouch_${span.index}`, 'image/jpeg', RETOUCH_JPEG_QUALITY, { pipeline: true });
         let wrote = 0;
-        await eachSourceFrame(srcUrl, times, async (frame, k, texW, texH) => {
+        await eachSourceFrameBest({ path: '', url: srcUrl, crop: sourceCrop }, times, async (frame, k, texW, texH, view) => {
             const localT = k / exportFps;
             const srcT = times[k];
             // ĐÚNG hàm mà preview gọi -> không thể lệch với preview. Miếng vá phủ lên
             // [mainv] đã xoá logo, nên nó cũng phải xoá logo (sourceFxDrawable).
             await logoAiPrepareAt(clip, srcT);
-            const rt = sourceFxDrawable(frame, texW, texH, clip, srcT, texW / Math.max(1, texH), 'bakeRtMain');
-            const { canvas: comp, ctx } = bakeCanvas('retouchSeq', seqW, seqH);
+            // Khung từ backend đã cắt (`view`): Retouch chạy trên VÙNG, cỡ texture là cỡ vùng.
+            const fw = view ? view.w : texW, fh = view ? view.h : texH;
+            const rt = sourceFxDrawable(frame, fw, fh, clip, srcT, fw / Math.max(1, fh), 'bakeRtMain', view);
+            const { canvas: comp, ctx } = bakeCanvas(view ? 'retouchSeqCpu' : 'retouchSeq', seqW, seqH, { cpu: !!view });
             if (fullFrame) { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, seqW, seqH); }
             // fullFrame: để drawMainClipLayer áp luôn chuỗi màu (khung đã trọn vẹn nên
             // không có mép nào để lộ). Đường vá: KHÔNG áp màu ở đây — sidecar áp, cùng
-            // bộ lọc với phần khung xung quanh.
-            drawMainClipLayer(ctx, seqW, seqH, span, localT, rt, texW, texH, true, { skipColor: !fullFrame });
+            // bộ lọc với phần khung xung quanh. (Có `view` thì luôn là đường vá: sourceCrop chỉ
+            // tính khi có miếng vá.)
+            drawMainClipLayer(ctx, seqW, seqH, span, localT, rt, texW, texH, true,
+                { skipColor: !fullFrame, sourceRect: view });
             if (fullFrame) {
                 await sink.push(comp, k);
             } else {
-                const { canvas: patch, ctx: pctx } = bakeCanvas('retouchPatch', rect.w, rect.h);
+                const { canvas: patch, ctx: pctx } = bakeCanvas(view ? 'retouchPatchCpu' : 'retouchPatch', rect.w, rect.h, { cpu: !!view });
                 pctx.fillStyle = '#000'; pctx.fillRect(0, 0, rect.w, rect.h);
                 pctx.drawImage(comp, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.w, rect.h);
                 await sink.push(patch, k);
@@ -20228,9 +20527,11 @@
             wrote += 1;
             if (progress) progress(wrote, times.length);
         });
+        await sink.flush();   // mã hoá đang chạy dở (sink pipeline) phải xong trước khi trả về
         if (wrote < 2) return null;
         const sw = fullFrame ? seqW : rect.w;
         const sh = fullFrame ? seqH : rect.h;
+        await sink.flush();
         return { seq: sink.seq(span.duration, sw, sh, wrote), rect, fullFrame, feather: featherPx };
     }
 
@@ -20426,30 +20727,40 @@
         if (!found.rect) return { skip: _t('vùng mặt chiếm quá lớn trên khung') };
         const rect = found.rect;
         const featherPx = found.feather;
+        // Chỉ xin backend vùng nguồn miếng vá đọc tới (xem retouchSourceRegion); xoá logo thì cả khung.
+        const sourceCrop = logoActive(item) ? null : retouchSourceRegion({
+            times: runTimes, faceAt: (t) => retouchFacesAt(item, t), target: r.target,
+            placeAt, rect, w0, h0,
+        });
 
         const seqId = `rtov_${String(item.id).replace(/[^\w-]+/g, '_')}`;
-        const sink = bakedFrameSink(collect, seqId, 'image/png');
+        const sink = bakedFrameSink(collect, seqId, 'image/png', undefined, { pipeline: true });
         let wrote = 0;
-        await eachSourceFrame(asset.url, runTimes, async (frame, k, texW, texH) => {
+        await eachSourceFrameBest({ path: asset.path || null, url: asset.url, crop: sourceCrop }, runTimes, async (frame, k, texW, texH, view) => {
             // ĐÚNG hàm mà preview gọi -> không thể lệch với preview (kể cả xoá logo).
             await logoAiPrepareAt(item, runTimes[k]);
-            const rt = sourceFxDrawable(frame, texW, texH, item, runTimes[k], texW / Math.max(1, texH), 'bakeRtOvl');
-            const { canvas: comp, ctx } = bakeCanvas('rtOverlaySeq', seqW, seqH);
+            // Khung từ backend đã cắt (`view`): Retouch chạy trên VÙNG (xem retouchedDrawable).
+            const fw = view ? view.w : texW, fh = view ? view.h : texH;
+            const rt = sourceFxDrawable(frame, fw, fh, item, runTimes[k], fw / Math.max(1, fh), 'bakeRtOvl', view);
+            const { canvas: comp, ctx } = bakeCanvas(view ? 'rtOverlaySeqCpu' : 'rtOverlaySeq', seqW, seqH, { cpu: !!view });
             // KHÔNG tô nền: ngoài hình lớp phải TRONG SUỐT (xem ghi chú PNG ở trên).
             // KHÔNG áp màu: sidecar áp, cùng bộ lọc với chính item gốc.
             // Dùng CHÍNH phép đặt đã dùng để tính hộp cắt -> miếng vá không thể lệch hộp.
-            blitLayerAt(ctx, rt, w0, h0, placeAt(k));
-            const { canvas: patch, ctx: pctx } = bakeCanvas('rtOverlayPatch', rect.w, rect.h);
+            // Vùng cắt thì chỉ vẽ phần lớp tương ứng — phần còn lại nằm ngoài miếng vá.
+            blitLayerAt(ctx, rt, w0, h0, placeAt(k), view);
+            const { canvas: patch, ctx: pctx } = bakeCanvas(view ? 'rtOverlayPatchCpu' : 'rtOverlayPatch', rect.w, rect.h, { cpu: !!view });
             pctx.drawImage(comp, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.w, rect.h);
             await sink.push(patch, k);
             wrote += 1;
             if (progress) progress(wrote, best.len);
         });
+        await sink.flush();
         if (wrote < 2) return { skip: _t('không bắt đủ khung từ nguồn') };
         // Miếng vá chỉ phủ DẢI ĐỤC, nên mốc và độ dài của nó là của dải — không phải của
         // cả item. Mốc rơi đúng lưới khung: snapT(ts + first/fps) = round(ts·fps) + first.
         const runStart = ts + first / exportFps;
         const runDur = wrote / exportFps;
+        await sink.flush();
         return { seq: sink.seq(runDur, rect.w, rect.h, wrote), rect, runStart, runDur, feather: featherPx };
     }
 
@@ -20559,6 +20870,7 @@
         const timingSink = options.timing && typeof options.timing === 'object' ? options.timing : null;
         const timingMs = {};
         const timingCount = {};
+        retouchFaceWaitMs = 0;
         const timed = async (key, work) => {
             if (!timingSink) return work();
             const started = performance.now();
@@ -20730,6 +21042,7 @@
         // GĐ4: bake vùng chuyển cảnh LANE CHÍNH (full-res) -> overlay image-sequence trên track_main.
         await timed('transition', () => appendMainTransitionItems(items, exportFps, collectFile));
         if (timingSink) {
+            if (retouchFaceWaitMs > 0) timingSink.retouch_faces_ms = Math.round(retouchFaceWaitMs);
             for (const [key, ms] of Object.entries(timingMs)) {
                 timingSink[`${key}_ms`] = Math.round(ms);
                 timingSink[`${key}_calls`] = timingCount[key];
