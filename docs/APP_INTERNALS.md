@@ -5141,6 +5141,8 @@ HỆ QUẢ CÓ CHỦ Ý: trên desktop, chọn TỆP LẺ nay là LINK chứ kh�
   - prores dùng prores_ks profile 3.
 - Audio h264/hevc dùng AAC với bitrate 128k/192k/320k; ProRes dùng pcm_s16le.
 - Project report ghi lại encoder export thực tế qua dòng `[encoder]`.
+- Dựng hình bằng GPU (bộ lọc CUDA của bản ffmpeg riêng, đi cùng NVENC): xem mục
+  "Xuất video bằng GPU" ở cuối tệp; report có dòng `[render_device]`.
 ```
 
 ### Preset Và Quality Export
@@ -9992,3 +9994,15 @@ Bước vẽ trước dựng miếng vá Retouch bằng đúng hàm của previe
 - **Renderer** `eachSourceFrameBest`: backend trước (`eachSourceFrameFromBackend`), phần thiếu (tắt, HDR, lỗi, đứt giữa chừng) tua `<video>` như cũ. `retouchSourceRegion` tính vùng nguồn cần: hợp qua mọi khung của bốn góc miếng vá đổi NGƯỢC qua phép đặt (`sequencePointToLayer`) và hộp raster của Retouch (`Retouch.faceBounds(face, MASK_BOUNDS_PAD)`), lề 4%; xoá logo hoặc bake cả khung thì không cắt. Có vùng cắt thì `onFrame(canvas cỡ vùng, …, view)`: `retouchedDrawable(…, view)` đổi landmark sang toạ độ vùng (`faceToView`), `blitLayerAt(…, sub)` / `drawMainClipLayer({sourceRect})` vẽ vùng vào đúng phần hộp lớp. Canvas phụ là canvas phần mềm (`bakeCanvas(role, w, h, {cpu:true})`, `retouchScratchCpu`). `bakedFrameSink(…, {pipeline:true})` mã hoá bằng 3 worker (`imageEncodePool`) — caller phải `await sink.flush()`.
 - Kết quả "Yêu Con 1": phần dựng khung 28,3 → 18,0 s; miếng vá so đường cũ 47,4 dB cùng khung / 32–33 dB lệch ±1 khung. Phụ lợi: miếng vá lấy điểm ảnh từ cùng bộ giải mã với phần khung quanh nó (sidecar). Số đo `retouch_faces_ms` (chờ bám mặt) nay có trong `client_prebake_detail`.
 - Test `npm run test:retouch-frames` (quy tắc chọn khung, endpoint thật trên video mỗi khung một mức xám ở cả ba quy ước trục, vùng cắt trùng từng byte, các ca từ chối).
+
+## Xuất video bằng GPU — đồ thị CUDA của bản ffmpeg riêng (2026-10-02, mục 1.21)
+
+Người dùng chốt: máy có GPU thì xuất bằng GPU (Cài đặt › Xuất video › "Render bằng", mặc định GPU). Bộ lọc CUDA của CrabbyCut nằm trong bản ffmpeg riêng (`D:\CrabbyCut_ffmpeg`, nhánh `crabbycut-8.1.1`): `crabgeo_cuda` (cắt + co bicubic như swscale + đổi ma trận/dải màu + đặt vào khung, RGBA -> yuva420p có màu mép theo alpha) và `crabblend_cuda` (trộn lớp phủ trùng từng bit với `overlay=format=yuv420`, thêm `opacity`). Bản ffmpeg thường (Gyan/BtbN) không có hai bộ lọc này -> mọi thứ như cũ.
+
+- **Bật khi nào** (`CommandExportVideo`, dò song song với các phép dò khác): `render_device` != "cpu" (backend gửi theo cài đặt; env `CRABBYCUT_EXPORT_GPU=0|1` ép), codec không phải ProRes, bộ mã hoá là NVENC, và `GpuRenderAvailable` chạy được trọn chuỗi tải lên -> crabgeo -> NVENC. `NvdecDecodes` dò nguồn chính và từng video lớp phủ: giải mã được thì NVDEC ra thẳng khung CUDA, không thì giải mã CPU rồi `format=<GpuUploadFormat>,hwupload_cuda` sau `trim`.
+- **Theo từng batch** (`BatchGpuEligible`): mọi clip đi đường nhanh YUV (`MainLaneFastPlan`) và không chỉnh màu/xoá logo, mọi lớp phủ là loại "yuvStatic" (đứng yên, không xoay/keyframe/hoạt ảnh/màu/mặt nạ/mép mềm/lật/xoá logo), không co nhỏ quá ~15 lần (bảng lọc crabgeo ≤ 64 tap). Batch đạt được ghi thêm `export_filter_batch_N_gpu.txt`; batch khác đi đồ thị CPU trong cùng lượt (cùng NVENC nên ghép `-c copy` được).
+- **Lùi:** batch GPU lỗi -> chạy lại bằng đồ thị CPU (`gpu_fallback` trong timing) trước logic lùi NVENC -> libx264; khi lùi về libx264 thì mọi batch đi đồ thị CPU (libx264 không nhận khung CUDA).
+- **Chờ GPU từng khung** (`sync=1`, mặc định của crabgeo/crabblend; hwcontext_cuda chờ cả lúc tải lên): để GPU chạy không đồng bộ thì bản xuất có khung rách / lớp phủ lệch 2–6 khung khi luồng lọc chạy trước GPU — chỉ lộ khi ra thẳng NVENC và nhiều batch song song; ra FFV1 qua `hwdownload` thì che mất. Chờ không chậm hơn trên các phép đo.
+- **Số đo:** Bin Tom GPU 15,3–15,8 s so với CPU 14,9 s (GTX 1060: NVDEC giải mã H.264 1080p chậm hơn CPU 16 luồng) nhưng CPU chỉ 42%; Test.crab, Yêu Con chưa đi GPU (keyframe độ mờ, LUT — chờ bộ lọc CUDA tiếp theo).
+- Report: dòng `render_device` (thiết bị thật + cài đặt), mỗi lượt ffmpeg ghi ` gpu` / ` gpu_fallback`.
+- Test `npm run test:export-gpu` (so GPU với CPU từng khung ≥ 38 dB, 3 chuỗi khung đúng khung khi 3 batch song song, batch lẫn GPU/CPU, lùi khi đồ thị GPU hỏng — env chỉ cho test `CRABBYCUT_EXPORT_GPU_TEST_FAIL=1`, nguồn H.264 10-bit giải mã CPU). BỎ QUA khi ffmpeg không có bộ lọc CUDA của CrabbyCut.
