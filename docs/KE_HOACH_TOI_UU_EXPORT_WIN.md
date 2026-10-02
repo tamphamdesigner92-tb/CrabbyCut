@@ -1,6 +1,6 @@
 # Kế hoạch: Xuất video CrabbyCut nhanh ≥ 2× trên Windows và macOS — sửa lệnh ffmpeg + tự build ffmpeg
 
-> **Phiên 10 (2026-10-02):** 1.21 — G3 (sidecar dựng đồ thị GPU) + G4 (Cài đặt › Xuất video "Render bằng GPU/CPU") XONG; chữa chạy đua GPU ở bản ffmpeg riêng (`sync=1`); chữa `test:logo-ai` đỏ từ 83b8307. **Đọc "BÀN GIAO PHIÊN 10 -> 11" ở mục 21.**
+> **Phiên 10 (2026-10-02):** 1.21 — G3 (sidecar dựng đồ thị GPU) + G4 (Cài đặt › Xuất video "Render bằng GPU/CPU") XONG; chữa chạy đua GPU ở bản ffmpeg riêng (`sync=1`); chữa `test:logo-ai` đỏ từ 83b8307. Người dùng chốt G5: bản ffmpeg riêng phát hành ở **repo riêng `tamphamdesigner92-tb/ffmpeg-for-CrabbyCut`**. **Đọc "BÀN GIAO PHIÊN 10 -> 11" ở mục 21 (có "G5 — VIỆC CHO PHIÊN 11").**
 >
 > **Phiên 9 (2026-10-02):** 1.12 pha 2 BẬT mặc định. 1.21 (bộ ghép GPU riêng): G0 + G1 XONG (bản ffmpeg tự build qua 36/36 test), bộ lọc `crabgeo_cuda`/`crabblend_cuda` viết + kiểm xong, G3 (sidecar) ĐANG DỞ — **đọc "BÀN GIAO PHIÊN 9 -> 10" ở mục 20 trước khi làm tiếp.**
 >
@@ -85,7 +85,19 @@
     - **Bản ffmpeg riêng chưa ngang bản Gyan ở libvmaf:** không có model dựng sẵn (`export_fidelity.js` báo "could not load libvmaf model vmaf_v0.6.1") — chạy bộ so bằng ffmpeg khác, hoặc build libvmaf có model khi làm G5.
     - **Test:** `npm run test:export-gpu` (mới, `tests/scripts/export_gpu.js`) — dự án A: 3 batch song song, batch có clip chỉnh màu đi CPU, 3 chuỗi khung đúng khung, video lớp phủ 150% độ mờ 60%, ảnh tĩnh alpha toạ độ lẻ, nguồn không nhãn; đồ thị GPU hỏng -> lùi về CPU trùng từng khung; dự án B: H.264 10-bit (giải mã CPU, tải lên p010); dự án C: keyframe độ mờ. BỎ QUA khi ffmpeg không có bộ lọc CUDA của CrabbyCut. `export_fidelity.js` dựng được bản không mất mát từ lệnh GPU.
     - **Hồi quy cuối phiên (52 test = tests_all.env + export-parallel + export-gpu):** devbin GPU tự động 52/52; BtbN N-123955 52/52 (export-gpu tự bỏ qua). Lượt đầu trên devbin đỏ `image-proxy` (thiếu libmp3lame — đã thêm) và `logo-ai` (hồi quy 83b8307 — đã chữa).
-    - **Việc kế tiếp:** G2 tiếp (`crablut_cuda` cho Yêu Con; keyframe vị trí/cỡ + hoạt ảnh lớp phủ — keyframe độ mờ đã xong), rồi G5 (đưa build + bản vá vào repo, nơi phát hành bản build — **hỏi người dùng**). Hướng mở: Bin Tom chậm vì NVDEC bão hoà khi 3 batch cùng giải mã -> chia giải mã NVDEC/CPU giữa các batch.
+    - **Việc kế tiếp:** G5 (người dùng đã chốt nơi phát hành — xem ngay dưới) và G2 tiếp (`crablut_cuda` cho Yêu Con; keyframe vị trí/cỡ + hoạt ảnh lớp phủ — keyframe độ mờ đã xong). Thứ tự đề xuất: G5 trước (đóng gói được thứ đã xong, app thật mới dùng được GPU), rồi G2. Hướng mở: Bin Tom chậm vì NVDEC bão hoà khi 3 batch cùng giải mã -> chia giải mã NVDEC/CPU giữa các batch; lưu kết quả dò GPU giữa các lần xuất (−0,8 s).
+    - **G5 — người dùng chốt 2026-10-02: phương án B, repo riêng `https://github.com/tamphamdesigner92-tb/ffmpeg-for-CrabbyCut.git`** (đã loại: A asset trên Releases của repo CrabbyCut; C gói vào bộ cài). Lúc ghi, `git ls-remote` tới repo trả về rỗng = repo đã có nhưng **còn trống**.
+    - **G5 — VIỆC CHO PHIÊN 11 (theo thứ tự):**
+      1. **Hỏi người dùng nội dung repo** trước khi đẩy (ý kiến của phiên 10: (i) — nhẹ, dễ đọc, vẫn đủ nguồn):
+         - (i) chỉ kịch bản build + bản vá (`git format-patch n8.1.1..crabbycut-8.1.1`, bản vá nv-codec-headers) + README + giấy phép; người build tự clone ffmpeg `n8.1.1`;
+         - (ii) đẩy nguyên nhánh `crabbycut-8.1.1` của fork (`D:\CrabbyCut_ffmpeg\ffmpeg`, remote hiện chỉ trỏ `file:///E:/Dev/Windows_App/ffmpeg`) — lịch sử ffmpeg vài trăm MB.
+         Push là việc ra ngoài: **xin phép người dùng trước khi push**, máy không có `gh` nên tạo Release/tải asset lên do người dùng làm (hoặc dùng git + trình duyệt nếu họ bảo).
+      2. Gom về một chỗ trong repo mới những thứ đang nằm rải ở `D:\CrabbyCut_ffmpeg\` (KHÔNG dưới git): `build.sh` (đã có `--enable-libmp3lame`), `rebuild_bg.sh`, `make_bg.sh`, `devbin.sh` (chép DLL theo `ldd`), `register_filters.py`; các `patch_*.py` là công cụ một lần của phiên 9 — xem lại, bỏ cái đã vào commit. Kiểm: bản vá nv-codec-headers `91913cd` (`cuMemAllocHost/cuMemFreeHost`) chỉ phục vụ đường tải lên bộ đệm ghim đã BỎ ở `6dcb4c0` -> có thể không cần nữa (bỏ thì build lại + chạy lại test).
+      3. Kịch bản đóng gói: `devbin` -> zip (cấu trúc thư mục giống zip Gyan `ffmpeg-8.1.1-full_build-shared` mà `ffmpeg_pin.js` đang giải nén, hoặc sửa `ffmpeg_pin.js` cho khớp) + in SHA-256. Tên bản đề xuất `n8.1.1-crabbycut.N`. **Giấy phép:** build có `--enable-gpl --enable-version3` (x264, x265) -> bản nhị phân là GPLv3; repo phải có mã nguồn tương ứng (bản vá + kịch bản + phiên bản thư viện), kèm LICENSE/README nêu rõ. Không bật `nonfree`.
+      4. libvmaf có model dựng sẵn (hiện `export_fidelity.js` báo "could not load libvmaf model vmaf_v0.6.1") để ngang bản Gyan — chỉ công cụ đo dùng, app không cần.
+      5. `scripts/ffmpeg_pin.js`: `url` (dòng 29, đang là `GyanD/codexffmpeg/releases/download/8.1.1/...`) -> asset Release của repo mới, `sha256` (dòng 32) mới; kiểm `test:app-version`/test liên quan tới ghim nếu có. Máy KHÔNG có NVIDIA vẫn phải chạy được bản này (CUDA nạp động; đã thấy `export-gpu` tự bỏ qua khi GPU không dùng được — nên thử thêm một lượt với `CUDA_VISIBLE_DEVICES=-1` hoặc trên máy khác).
+      6. Chạy CẢ bộ hồi quy 52 test (tests_all.env + export-parallel + export-gpu) trên đúng bản zip đã giải nén, ở GPU tự động và `CRABBYCUT_EXPORT_GPU=0`; bộ đo Test.crab/Bin Tom một lượt để xác nhận số như phiên 10.
+      7. Ghi `docs/APP_INTERNALS.md` (mục "Xuất video bằng GPU": nguồn bản ffmpeg, cách build lại) + cập nhật mục này. macOS giữ đường hiện tại (Bước M).
 20. **Phiên 9 (2026-10-02): 1.21 bộ ghép GPU riêng — ĐANG LÀM.** Người dùng chốt **tự build ffmpeg + bộ lọc CUDA riêng** và **Cài đặt chọn GPU/CPU, mặc định GPU** (lý do + số đo ở mục 1.21).
     **BÀN GIAO PHIÊN 9 -> 10 (đọc trước khi làm tiếp):**
     - **Đã xong, đã commit:** `5b3066c` (1.12 pha 2 bật mặc định), `204b3b4` (doc 1.21). Repo ffmpeg riêng `D:\CrabbyCut_ffmpeg\ffmpeg` nhánh `crabbycut-8.1.1` commit `49ad133`; `D:\CrabbyCut_ffmpeg\nv-codec-headers` nhánh `crabbycut-12.2` commit `91913cd`. **Chưa push gì.** Phần người dùng đã stage (index.html, en.json, zh.json) vẫn nguyên — commit bằng `git commit -- <tệp>` để không gộp.
@@ -160,6 +172,7 @@
 | Bản hạ SDR (2026-09-29) | **Giữ trong cache có giới hạn** ngoài `TEMP_DIR` (kiểu `proxy_cache`, có trần và tự dọn), để mở lại dự án không phải hạ SDR lại (mục 1.15) |
 | 1.12 pha 2 (2026-10-02) | **Bật mặc định**: xuất nhỏ hơn sequence thì dựng cả đồ thị ở cỡ xuất. Miễn tiêu chí (a) "gần bản chuẩn ít nhất bằng bản cũ" cho mục này vì bản chuẩn chính là cách cũ (dựng ở cỡ sequence rồi co); (b) đạt (PSNR 49,9 dB, VMAF 97,6) |
 | GPU (2026-10-02) | **Máy có GPU thì dồn việc xuất sang GPU** (giải mã, ghép, mã hoá), chỉ máy không có GPU mới xuất bằng CPU. Người dùng thấy lúc xuất GPU chỉ 30–50% còn CPU gần 100% (mục 1.21) |
+| Nơi phát hành bản ffmpeg riêng (2026-10-02, G5 của 1.21) | **Repo riêng**: https://github.com/tamphamdesigner92-tb/ffmpeg-for-CrabbyCut.git (phương án B; đã loại A = asset trên Releases của repo CrabbyCut, C = gói vào bộ cài +~90 MB). Bộ cài vẫn tải bản ghim + kiểm SHA-256 như hiện nay, chỉ đổi nguồn (`scripts/ffmpeg_pin.js`) |
 | Bitrate bản xuất (2026-10-01) | **Ô "Bitrate" kiểu CapCut** thay ô "Chất lượng": Thấp hơn / Khuyến nghị (mặc định) / Cao hơn / Tùy chỉnh. Ba mức đầu **theo chất lượng, có trần** (NVENC `-cq` 23/19/16, CPU CRF 23/18/16; trần = bitrate cố định cũ của Cân bằng / Cao / 2×Cao). Tùy chỉnh nhập **Mbps** (trung bình, đỉnh ×1,5). Khoá khi ProRes (mục 1.20) |
 
 ## Chi phí đã xác định
@@ -773,7 +786,7 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
   - **G2 — bộ lọc CUDA của CrabbyCut** (`libavfilter/vf_*_crab_cuda`): co + cắt lẻ điểm ảnh + đổi ma trận/dải màu + đặt vào khung (một lượt cho hình học đường nhanh); trộn lớp phủ có độ mờ (biểu thức/keyframe), alpha chroma trung bình như `AlphaWeightedYuva420`, làm tròn như CPU; LUT 3D (+ trộn hai LUT theo cường độ); eq. Tải PNG lên bằng bộ đệm ghim, không đồng bộ.
   - **G3 — sidecar dựng đồ thị GPU** khi chế độ GPU: tính năng chưa có bản GPU thì `hwdownload` → bộ lọc CPU → `hwupload` (đúng trước, nhanh sau).
   - **G4 — Cài đặt › Xuất video: "Render bằng: GPU / CPU"**, mặc định GPU khi dò thấy GPU dùng được; payload mang lựa chọn xuống sidecar.
-  - **G5 — phát hành:** nơi đặt bản ffmpeg tự build (cần người dùng chốt), `ffmpeg_pin.js` trỏ sang bản đó. macOS giữ đường hiện tại (Bước M).
+  - **G5 — phát hành:** nơi đặt bản ffmpeg tự build — **người dùng chốt 2026-10-02: repo riêng `tamphamdesigner92-tb/ffmpeg-for-CrabbyCut`** (việc cụ thể: "G5 — VIỆC CHO PHIÊN 11" ở mục 21), `ffmpeg_pin.js` trỏ sang bản đó. macOS giữ đường hiện tại (Bước M).
   - Mỗi bước: test export xanh ở cả hai chế độ, bộ so 0.3, A/B ≥ 3 lượt.
 
 **Tương thích nhánh macOS:** phần riêng Windows (`-hwaccel cuda/d3d11va`, `CreateProcessW`) gói sau `#ifdef _WIN32` hoặc sau phép dò; phần trung lập viết để `git apply` sang `CrabbyCut_Private` được. Chi tiết macOS ở **Bước M**.
