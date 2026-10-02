@@ -13,7 +13,7 @@
  *      PSNR tụt hẳn, nên phép so bắt được sai vị trí;
  *   4. có lớp phủ (đuôi đồ thị nhánh overlay) và ProRes (yuv422p10le) cũng vậy;
  *   5. PHA 2 — cỡ xuất NHỎ hơn sequence: đồ thị dựng thẳng ở cỡ phần hình (ApplyOutputScaleToPayload
- *      của sidecar; CHƯA bật mặc định, test bật bằng CRABBYCUT_EXPORT_OUTSCALE=1), mọi số đo theo
+ *      của sidecar; bật mặc định, CRABBYCUT_EXPORT_OUTSCALE=0 để tắt), mọi số đo theo
  *      điểm ảnh sequence nhân hệ số. So với pha 1 (dựng ở cỡ sequence rồi co ở đuôi) trên từng khung: cùng cảnh,
  *      chỉ khác thứ tự lấy mẫu -> phải rất gần nhau. Mỗi ca dựng một nhóm số đo được nhân (vị trí
  *      tĩnh, scale, keyframe vị trí/scale, độ dời hoạt ảnh, mép mềm, clip vừa khung ở s = 2/3);
@@ -192,7 +192,7 @@ function checkBuildAtOutputSize() {
     const phase1 = exportOnce(`${c.name}_pha1`, source, c.seq, 'h264', frame, null,
       { scene, env: { CRABBYCUT_EXPORT_OUTSCALE: '0' } });
     const phase2 = exportOnce(`${c.name}_pha2`, source, c.seq, 'h264', frame, null,
-      { scene, env: { CRABBYCUT_EXPORT_OUTSCALE: '1' } });
+      { scene });   // mặc định = pha 2
     assert.strictEqual(phase1.graphSize, `${c.seq.w}x${c.seq.h}`, `${c.name}: env tắt phải dựng ở cỡ sequence`);
     assert.strictEqual(phase2.graphSize, `${frame.output_content_width}x${frame.output_content_height}`,
       `${c.name}: phải dựng ở cỡ phần hình`);

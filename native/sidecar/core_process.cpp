@@ -4896,17 +4896,17 @@ int CommandPreviewProxy(int argc, char** argv) {
  * hụt 0,015 px), còn tích không tròn thì ceil cho như cũ.
  * Phóng to (cỡ xuất lớn hơn sequence) giữ cách pha 1.
  *
- * CHƯA BẬT MẶC ĐỊNH (2026-10-01) — bật bằng CRABBYCUT_EXPORT_OUTSCALE=1. Đo: 4K -> 1080p (bản cắt
+ * BẬT MẶC ĐỊNH (người dùng chốt 2026-10-02) — tắt bằng CRABBYCUT_EXPORT_OUTSCALE=0. Đo: 4K -> 1080p (bản cắt
  * 300 s, 100 phụ đề) 81,5 -> 67,5 s (−17%); Test.crab 1080p -> 720p 17,0 -> 13,1 s (−23%); Bin Tom
  * 1080×1920 -> 720×1280 25,1 -> 22,7 s (−10%). Bộ so 0.3 trên Test.crab: (b) ĐẠT (mới/cũ 49,9 dB,
  * VMAF 97,6, khung tệ nhất 40,1) nhưng (a) TRƯỢT: so bản chuẩn 45,49 -> 42,86 dB. Bản chuẩn dựng từ
  * CHÍNH đồ thị pha 1 (dựng ở cỡ sequence ở độ chính xác cao rồi co lanczos), nên cách nào lấy mẫu
  * khác thứ tự đều "xa" nó hơn — chỗ lệch nhiều nhất là clip 4K ở 107%: pha 1 co hai lần (0,535 rồi
  * 2/3), pha 2 co một lần (0,357). Co bằng lanczos thay bicubic không thu hẹp (42,39 dB). Người dùng
- * quyết có nới tiêu chí (a) cho mục này không (xem mục 1.12 của kế hoạch). */
+ * chốt miễn tiêu chí (a) cho mục này vì (b) đạt (xem mục 1.12 của kế hoạch). */
 bool OutputScaleEnabled() {
   const char* env = std::getenv("CRABBYCUT_EXPORT_OUTSCALE");
-  return env && std::string(env) == "1";
+  return !(env && std::string(env) == "0");
 }
 
 bool ApplyOutputScaleToPayload(ExportSettings& settings, std::vector<ExportInterval>& intervals,

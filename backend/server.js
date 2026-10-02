@@ -4717,8 +4717,8 @@ const EXPORT_FPS_VALUES = new Set(['source', '23.976', '24', '25', '29.97', '30'
 
 /* CỠ BẢN XUẤT THEO Ô "ĐỘ PHÂN GIẢI" (mục 1.12). Trước đây ô này vô tác dụng: sequence luôn đè.
  * Phần hình cỡ `output_content_*` = khung sequence co đều theo `output_scale`, đệm đen cho đủ
- * `output_*`. Sidecar dựng đồ thị ở cỡ sequence rồi co ở đuôi (pha 1, OutputColorFilters); pha 2
- * (dựng thẳng ở cỡ phần hình khi co nhỏ, ApplyOutputScaleToPayload) đang sau env, chờ người dùng.
+ * `output_*`. Phóng to: sidecar dựng đồ thị ở cỡ sequence rồi co ở đuôi (pha 1, OutputColorFilters);
+ * co nhỏ: dựng thẳng ở cỡ phần hình (pha 2, ApplyOutputScaleToPayload — bật mặc định 2026-10-02).
  *   'fit'   — như Premiere (Scale To Fit): đúng cỡ preset, hình co vừa, khổ lệch thì có viền đen;
  *   'short' — như CapCut: giữ khổ sequence, preset chỉ quy định cạnh ngắn, không viền.
  * Trả null = xuất đúng cỡ sequence ('source', 'custom', hoặc preset trùng cỡ sequence).
