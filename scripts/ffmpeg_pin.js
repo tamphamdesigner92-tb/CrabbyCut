@@ -10,29 +10,41 @@
  * Trước đây bộ cài tải `ffmpeg-master-latest` và chỉ kiểm `-version`, nên máy cài mới nhận
  * đúng bản hỏng mà không ai biết.
  *
- * VÌ SAO BẢN NÀY: Gyan 8.1.1 full_build, gói `-shared` (101 MB, nhẹ hơn 2,5 lần bản tĩnh):
- *   - có đủ filter CrabbyCut dùng: zscale, libplacebo, lut3d, scale_cuda, drawtext,
- *     sendcmd, tpad, xfade (bản "essentials" của gyan.dev THIẾU libplacebo — đừng đổi sang);
- *   - NVENC chạy trên GTX 1060 driver 582.28; hwaccel cuda/d3d11va/qsv/amf đều có;
+ * VÌ SAO BẢN NÀY (từ 2026-10-03): bản CrabbyCut TỰ DỰNG — FFmpeg n8.1.1 + bộ lọc CUDA
+ * `crabgeo_cuda`/`crabblend_cuda` để máy có GPU NVIDIA xuất video trên GPU (mục 1.21 của
+ * docs/KE_HOACH_TOI_UU_EXPORT_WIN.md, "Xuất video bằng GPU" trong docs/APP_INTERNALS.md).
+ * Kịch bản build + bản vá ở `sourceUrl`; README.txt trong zip ghi commit FFmpeg, mã băm bản vá
+ * và phiên bản từng thư viện đi kèm. Gói `-shared` như bản Gyan 8.1.1 dùng trước đó:
+ *   - có đủ filter CrabbyCut dùng: zscale, libplacebo, lut3d, scale_cuda, drawtext, sendcmd,
+ *     tpad, xfade, crabgeo_cuda, crabblend_cuda (build.sh từ chối đóng gói nếu thiếu);
+ *   - nv-codec-headers 12.2 (không phải 13.x): NVENC chạy trên GTX 1060 driver 582.28;
+ *   - CUDA/NVENC/NVDEC/AMF/QSV nạp động; DLL nhập tĩnh chỉ là DLL của Windows (build.sh kiểm),
+ *     kèm cả bộ nạp Vulkan vì libplacebo nhập tĩnh nó — máy không có driver Vulkan vẫn chạy được,
+ *     chỉ tonemap HDR lùi về zscale;
  *   - `-shared` = ffmpeg/ffprobe dùng chung các DLL nằm cạnh exe trong `bin/`. Windows nạp
  *     DLL từ thư mục của exe trước, nên chép nguyên `bin/` là đủ.
+ * Bản ghim trước: Gyan 8.1.1 full_build-shared (id `gyan-8.1.1-full_build-shared`) — muốn quay lại
+ * thì lấy bốn trường cũ trong lịch sử git của tệp này.
  *
- * ĐỔI BẢN GHIM: sửa cả bốn trường, tự tính SHA-256 của file tải về và so với digest GitHub
- * công bố (API releases), chạy lại toàn bộ test export trên bản mới. `id` đổi thì
- * `verifyRuntimeQuick()` coi bản đã cài là lỗi thời và cửa sổ thiết lập tải bản mới — các
- * thư viện AI đã cài KHÔNG bị tải lại.
+ * ĐỔI BẢN GHIM: sửa mọi trường (build.sh của repo nguồn in sẵn ở cuối bước package), tự tính
+ * SHA-256 của file TẢI VỀ từ `url` và so với số build.sh in ra, chạy lại toàn bộ test export
+ * trên bản mới. `id` đổi thì `verifyRuntimeQuick()` coi bản đã cài là lỗi thời và cửa sổ thiết
+ * lập tải bản mới — các thư viện AI đã cài KHÔNG bị tải lại.
  */
 'use strict';
 
 const FFMPEG_PIN = {
-  id: 'gyan-8.1.1-full_build-shared',
-  url: 'https://github.com/GyanD/codexffmpeg/releases/download/8.1.1/ffmpeg-8.1.1-full_build-shared.zip',
-  fileName: 'ffmpeg-8.1.1-full_build-shared.zip',
-  // Tự tính 2026-09-27, khớp digest GitHub công bố cho asset này.
-  sha256: '4296b396bdfd5fbc3dfc75ab4c8703354a56963232d65c4182993543df2d2f45',
-  sizeBytes: 101083228,
+  id: 'n8.1.1-crabbycut.1-win64-gpl-shared',
+  url: 'https://github.com/tamphamdesigner92-tb/ffmpeg-for-CrabbyCut/releases/download/n8.1.1-crabbycut.1/ffmpeg-n8.1.1-crabbycut.1-win64-gpl-shared.zip',
+  fileName: 'ffmpeg-n8.1.1-crabbycut.1-win64-gpl-shared.zip',
+  // build.sh tính lúc đóng gói (2026-10-03); phải khớp file tải về từ `url`.
+  sha256: '44ec6411ef4e5bad87d2da34ea324f39f65bd349ebf39db222c2d898c415ff88',
+  sizeBytes: 33494956,
   // Dòng đầu của `ffmpeg -version` phải bắt đầu bằng chuỗi này (kiểm sau khi giải nén).
-  versionPrefix: 'ffmpeg version 8.1.1-full_build-www.gyan.dev',
+  // Dấu cách cuối để `crabbycut.1` không khớp `crabbycut.10`.
+  versionPrefix: 'ffmpeg version n8.1.1-crabbycut.1 ',
+  // Mã nguồn tương ứng của bản dựng (kịch bản build + bản vá), dẫn trong THIRD-PARTY-NOTICES.md.
+  sourceUrl: 'https://github.com/tamphamdesigner92-tb/ffmpeg-for-CrabbyCut/tree/n8.1.1-crabbycut.1',
 };
 
 module.exports = { FFMPEG_PIN };

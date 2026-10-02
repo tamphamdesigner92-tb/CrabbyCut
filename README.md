@@ -494,5 +494,7 @@ nguyên bạn tự nạp vào `library/` thuộc giấy phép của chính nó.
 
 CrabbyCut **không liên kết** thư viện FFmpeg. Nó chạy `ffmpeg` và `ffprobe` như **tiến
 trình riêng** qua dòng lệnh. Bộ cài tải về một bản dựng **ghim phiên bản** (kiểm SHA-256):
-FFmpeg 8.1.1 `full_build-shared` của [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)
-(GPL-3.0-or-later), mã nguồn FFmpeg tại [FFmpeg/FFmpeg](https://github.com/FFmpeg/FFmpeg).
+bản CrabbyCut tự dựng — FFmpeg 8.1.1 cộng bộ lọc CUDA để xuất video trên GPU NVIDIA
+(GPL-3.0-or-later). Kịch bản build và bản vá:
+[ffmpeg-for-CrabbyCut](https://github.com/tamphamdesigner92-tb/ffmpeg-for-CrabbyCut); mã nguồn
+FFmpeg tại [FFmpeg/FFmpeg](https://github.com/FFmpeg/FFmpeg).

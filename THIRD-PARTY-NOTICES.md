@@ -20,11 +20,11 @@ header chuẩn của C++ và `<windows.h>`, không có `libavcodec`/`libavformat
 Bước thiết lập tải về một build FFmpeg **ghim phiên bản** (kiểm SHA-256, xem
 `scripts/ffmpeg_pin.js`):
 
-- **Bản dựng:** `ffmpeg-8.1.1-full_build-shared.zip` của gyan.dev (FFmpeg 8.1.1-full_build-www.gyan.dev)
-- **Tải từ:** https://github.com/GyanD/codexffmpeg/releases/download/8.1.1/ffmpeg-8.1.1-full_build-shared.zip
-- **Trang bản dựng:** https://www.gyan.dev/ffmpeg/builds/
-- **Mã nguồn FFmpeg:** https://github.com/FFmpeg/FFmpeg (commit ghi trong `README.txt` đi kèm gói)
-- **Giấy phép:** GPL-3.0-or-later (build này bật `--enable-gpl --enable-version3`)
+- **Bản dựng:** `ffmpeg-n8.1.1-crabbycut.1-win64-gpl-shared.zip` — bản CrabbyCut tự dựng (FFmpeg n8.1.1-crabbycut.1: FFmpeg n8.1.1 + bộ lọc CUDA của CrabbyCut)
+- **Tải từ:** https://github.com/tamphamdesigner92-tb/ffmpeg-for-CrabbyCut/releases/download/n8.1.1-crabbycut.1/ffmpeg-n8.1.1-crabbycut.1-win64-gpl-shared.zip
+- **Mã nguồn tương ứng:** https://github.com/tamphamdesigner92-tb/ffmpeg-for-CrabbyCut/tree/n8.1.1-crabbycut.1 (kịch bản build + bản vá; `README.txt` đi kèm gói ghi commit FFmpeg, mã băm bản vá và phiên bản từng thư viện đi kèm)
+- **Mã nguồn FFmpeg:** https://github.com/FFmpeg/FFmpeg
+- **Giấy phép:** GPL-3.0-or-later (build này bật `--enable-gpl --enable-version3`); giấy phép từng thư viện đi kèm nằm trong thư mục `licenses/` của gói
 
 Electron cũng kèm `ffmpeg.dll` bản LGPL của riêng nó; xem `LICENSE.electron.txt` và
 `LICENSES.chromium.html` trong thư mục cài đặt.
