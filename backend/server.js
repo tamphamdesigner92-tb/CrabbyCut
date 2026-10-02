@@ -1507,6 +1507,9 @@ async function writeProjectReport(reason) {
   const sidecarTiming = render?.sidecar_timing;
   // Cỡ khung mà đồ thị dựng: khác `sequence` khi xuất nhỏ hơn sequence (mục 1.12 pha 2).
   lines.push(reportLine(2, 'graph_size', sidecarTiming?.graph_size || null));
+  // Thiết bị render thật của lượt xuất (mục 1.21): "gpu" khi ít nhất một batch đi đồ thị GPU.
+  lines.push(reportLine(2, 'render_device', sidecarTiming?.render
+    ? `${sidecarTiming.render}${render?.render_device ? ` (cài đặt: ${render.render_device})` : ''}` : null));
   lines.push(reportLine(2, 'sidecar_probe_ms', sidecarTiming?.probe_ms));
   lines.push(reportLine(2, 'sidecar_plan_ms', sidecarTiming?.plan_ms));
   lines.push(reportLine(2, 'sidecar_concat_ms', sidecarTiming?.concat_ms));
@@ -1519,6 +1522,7 @@ async function writeProjectReport(reason) {
       `${run.mode} run_ms=${run.run_ms} intervals=${run.intervals} overlays=${run.overlays} `
       + `seq_sec=${run.sequence_duration} source=${run.source_from}..${run.source_to}`
       + `${run.seek_to ? ` seek=${run.seek_to}` : ''}`
+      + `${run.gpu ? ' gpu' : ''}${run.gpu_fallback ? ' gpu_fallback' : ''}`
       + `${run.cpu_retry ? ' cpu_retry' : ''}${run.exit ? ` exit=${run.exit}` : ''}`));
   }
   lines.push(reportLine(2, 'output_path', render?.output_path));
@@ -7381,6 +7385,8 @@ function createApp() {
       }
       const timeline = JSON.parse(req.body.timeline_json || '[]');
       const exportSettings = normalizeExportSettings(req.body);
+      // Cài đặt › Xuất video › "Render bằng" (mục 1.21): sidecar dựng đồ thị GPU khi máy dùng được.
+      exportSettings.render_device = readAppSettings().export.renderDevice;
       const exportRaw = typeof req.body.export_settings === 'string' && req.body.export_settings.trim()
         ? JSON.parse(req.body.export_settings)
         : (req.body.export_settings || {});

@@ -143,7 +143,11 @@ const json = (v) => JSON.stringify(v);
 /* ---------- Các mục cài đặt ngoài Auto Sound Effects ---------- */
 {
   const d = AppSettings.defaults();
-  assert.deepStrictEqual(Object.keys(d).sort(), ['autoSave', 'autoSfx', 'general', 'preview', 'shortcuts', 'textEffects', 'version']);
+  assert.deepStrictEqual(Object.keys(d).sort(), ['autoSave', 'autoSfx', 'export', 'general', 'preview', 'shortcuts', 'textEffects', 'version']);
+  // Xuất video: mặc định render bằng GPU (người dùng chốt 2026-10-02), giá trị lạ -> GPU.
+  assert.strictEqual(d.export.renderDevice, 'gpu');
+  assert.strictEqual(AppSettings.normalize({ export: { renderDevice: 'cpu' } }).export.renderDevice, 'cpu');
+  assert.strictEqual(AppSettings.normalize({ export: { renderDevice: 'tpu' } }).export.renderDevice, 'gpu');
 
   // Kẹp số + giá trị lạ rơi về mặc định.
   const out = AppSettings.normalize({
@@ -170,6 +174,7 @@ const json = (v) => JSON.stringify(v);
   assert.deepStrictEqual(legacy.autoSave, AppSettings.DEFAULTS.autoSave);
   assert.deepStrictEqual(legacy.shortcuts, {});
   assert.deepStrictEqual(legacy.textEffects, [], 'cấu hình cũ chưa có thư viện hiệu ứng -> rỗng');
+  assert.deepStrictEqual(legacy.export, { renderDevice: 'gpu' }, 'cấu hình cũ chưa có mục Xuất video -> GPU');
 }
 
 /* ---------- Thư viện "Hiệu ứng chữ" người dùng tự lưu ---------- */
