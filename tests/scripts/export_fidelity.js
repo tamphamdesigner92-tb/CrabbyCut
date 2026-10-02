@@ -212,6 +212,12 @@ function renderFromCommands(runDir, { gold = false } = {}) {
       scriptPath = path.join(workDir, `${label}.filter.txt`);
       fs.writeFileSync(scriptPath, transformed.text, 'utf8');
       note = ` (${transformed.changes} filter đổi sang yuv444p10)`;
+    } else if (args.includes('-init_hw_device')) {
+      // Đồ thị GPU (mục 1.21): khung [v] nằm trên GPU — tải về RAM rồi mới vào FFV1.
+      const text = fs.readFileSync(scriptPath, 'utf8').replace(/(setparams=[^;[]*)\[v\]/, '$1,hwdownload,format=yuv420p[v]');
+      scriptPath = path.join(workDir, `${label}.filter.txt`);
+      fs.writeFileSync(scriptPath, text, 'utf8');
+      note = ' (đồ thị GPU, tải về trước FFV1)';
     }
     const cutAt = args.lastIndexOf('-dn');
     assert.ok(cutAt > 0, `${file}: không tìm thấy -dn để thay encoder`);

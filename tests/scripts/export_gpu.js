@@ -15,6 +15,10 @@
  * Dự án A: nguồn 1280×720 25 khung/s KHÔNG gắn nhãn màu (crabgeo đọc theo bt709 như UntaggedColorFix),
  * sequence 640×360 ở nhịp lẻ của "Bin Tom" (1218000/40601); clip co 50% / 37% đặt lệch lẻ / 80% cắt một
  * phần / 65%; ảnh tĩnh có alpha ở toạ độ lẻ; video lớp phủ 150% độ mờ 60%.
+ * Dự án C: lớp phủ chỉ có keyframe ĐỘ MỜ (biểu thức `opacity` của crabblend). Không so với CPU được:
+ * đường CPU ghép lớp đó ở RGB (format=gbrap) nên kéo CẢ batch qua YUV -> RGB -> YUV (lệch ~35 dB
+ * trên testsrc2, kể cả trước khi lớp phủ hiện) — so với chính đồ thị GPU ở độ mờ tĩnh: keyframe
+ * "2 s đầu 50%, sau đó 100%" phải trùng bản 50% ở đoạn đầu và bản 100% ở đoạn sau.
  *
  * Cần bản ffmpeg có crabgeo_cuda + GPU NVIDIA; thiếu thì BỎ QUA.
  * Chạy: npm run test:export-gpu
@@ -260,6 +264,59 @@ function scenarioB() {
   console.log(`  ok  dự án B (H.264 10-bit, giải mã CPU): ${p.count} khung, tệ nhất ${p.worst[1].toFixed(1)} dB`);
 }
 
+function scenarioC(assets) {
+  const dir = path.join(TEST_DIR, 'C');
+  fs.mkdirSync(dir, { recursive: true });
+  const source = path.join(dir, 'temp_input.mp4');
+  makeSource(source, 9, false);
+  const intervals = [
+    { index: 0, script_index: 0, text: 'c0', start: 0, end: 4, scale: 50 },
+    { index: 1, script_index: 1, text: 'c1', start: 4.5, end: 8.5, scale: 50 },
+  ];
+  const START = 1;
+  const overlay = (extra) => [{ index: 0, id: 'still', type: 'media', asset_type: 'text_image', asset_path: assets.still,
+    source_start: 0, timeline_start: START, duration: 5, scale: 200, opacity: 100, position_x: -101, position_y: -51,
+    muted: true, volume: 0, has_audio: false, ...extra }];
+  const variants = {
+    kf: { kf_opacity_expr: 'if(lt(LOCALT,2),50,100)' },
+    op50: { opacity: 50 },
+    op100: { opacity: 100 },
+  };
+  const out = {};
+  for (const [name, extra] of Object.entries(variants)) {
+    const timelineFile = path.join(dir, `timeline_${name}.json`);
+    writeTimeline(timelineFile, intervals, overlay(extra));
+    out[name] = path.join(dir, `${name}.mp4`);
+    const r = exportOnce(dir, source, timelineFile, out[name], { CRABBYCUT_EXPORT_GPU: '1' });
+    assert.ok(videoRuns(r.timing).every((run) => run.gpu), `dự án C (${name}): phải đi đồ thị GPU`);
+  }
+  // Bỏ 2 khung ở mỗi mép (mốc đổi độ mờ có thể rơi giữa hai khung).
+  const range = (a, b) => [Math.ceil(a * FPS) + 2, Math.floor(b * FPS) - 2];
+  const window = (rows, [a, b]) => rows.filter((r) => r[0] >= a && r[0] <= b);
+  const rowsOf = (a, b, tag) => {
+    const log = `${tag}_psnr.log`;
+    run('ffmpeg', ['-v', 'error', '-i', a, '-i', b, '-lavfi', `[0:v][1:v]psnr=stats_file=${log}`, '-f', 'null', '-'], { cwd: TEST_DIR });
+    const file = path.join(TEST_DIR, log);
+    const rows = fs.readFileSync(file, 'utf8').trim().split(/\r?\n/).map((l) => {
+      const p = /psnr_avg:([\d.]+|inf)/.exec(l)[1];
+      return [Number(/n:(\d+)/.exec(l)[1]) - 1, p === 'inf' ? 99 : Number(p)];
+    });
+    fs.rmSync(file, { force: true });
+    return rows;
+  };
+  const half = range(START, START + 2);
+  const full = range(START + 2, START + 5);
+  const vs50 = rowsOf(out.kf, out.op50, 'c50');
+  const vs100 = rowsOf(out.kf, out.op100, 'c100');
+  const min = (rows) => Math.min(...rows.map((r) => r[1]));
+  const max = (rows) => Math.max(...rows.map((r) => r[1]));
+  assert.ok(min(window(vs50, half)) >= 45, `keyframe 50%: phải trùng bản độ mờ 50% (tệ nhất ${min(window(vs50, half)).toFixed(1)} dB)`);
+  assert.ok(min(window(vs100, full)) >= 45, `keyframe 100%: phải trùng bản độ mờ 100% (tệ nhất ${min(window(vs100, full)).toFixed(1)} dB)`);
+  assert.ok(max(window(vs100, half)) < 40, 'đoạn 50% phải khác bản 100% (kiểm độ nhạy)');
+  console.log(`  ok  dự án C (keyframe độ mờ): đoạn 50% trùng bản 50% (≥ ${min(window(vs50, half)).toFixed(1)} dB), `
+    + `đoạn 100% trùng bản 100% (≥ ${min(window(vs100, full)).toFixed(1)} dB)`);
+}
+
 function main() {
   if (!fs.existsSync(SIDECAR)) {
     console.log('export_gpu: BỎ QUA — chưa build sidecar (npm run build:sidecar)');
@@ -278,6 +335,7 @@ function main() {
     return;
   }
   scenarioB();
+  scenarioC(assets);
   if (!process.env.KEEP_TEST_DIR) fs.rmSync(TEST_DIR, { recursive: true, force: true });
   console.log('export gpu ok');
 }

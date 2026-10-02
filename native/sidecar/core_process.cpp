@@ -1142,6 +1142,21 @@ bool GpuRenderAvailable(const std::string& nvencEncoder) {
                    "-c:v", nvencEncoder, "-f", "null", "-"}) == 0;
 }
 
+/* DÒ GỘP cho nguồn chính: giải mã hai khung bằng NVDEC -> crabgeo -> NVENC trong MỘT tiến trình.
+ * Mỗi lệnh dò tốn ~0,5 s khởi tạo CUDA/NVENC, chạy song song thì tranh nhau (Test.crab: khâu dò
+ * 0,4 -> 1,4 s với hai lệnh riêng). Đúng thì vừa "GPU dùng được" vừa "NVDEC giải mã được nguồn";
+ * sai thì nơi gọi dò riêng GpuRenderAvailable. Khung ra cố định 640×360 (co ≤ 12 lần với nguồn 8K,
+ * đủ lớn cho cỡ tối thiểu của NVENC với nguồn nhỏ). */
+bool GpuRenderAvailableWithNvdec(const std::string& nvencEncoder, const std::string& source) {
+  if (!HasFfmpegFilter("crabgeo_cuda") || !HasFfmpegFilter("crabblend_cuda")) return false;
+  return RunQuiet({"ffmpeg", "-hide_banner", "-v", "error", "-nostdin",
+                   "-init_hw_device", "cuda=cu", "-filter_hw_device", "cu",
+                   "-hwaccel", "cuda", "-hwaccel_device", "cu", "-hwaccel_output_format", "cuda",
+                   "-i", source, "-frames:v", "2", "-an", "-sn", "-dn",
+                   "-vf", "crabgeo_cuda=w=640:h=360:passthrough=0:sync=1",
+                   "-c:v", nvencEncoder, "-f", "null", "-"}) == 0;
+}
+
 /* Tệp giải mã được bằng NVDEC ra thẳng khung CUDA. NVDEC không giải mã được (AV1 trên GTX 10xx,
  * H.264 10-bit, 4:2:2…) thì `-hwaccel cuda` lặng lẽ lùi về giải mã CPU, khung ra ở RAM và
  * `crabgeo_cuda` (chỉ nhận khung CUDA) không nối được -> lệnh lỗi. Chỉ thử hai khung đầu. Co một
@@ -4099,7 +4114,8 @@ void WriteVisualOverlayFilter(
 }
 
 /* LỚP PHỦ TRÊN ĐỒ THỊ GPU (mục 1.21). Chỉ cho lớp phủ "yuvStatic" của đường CPU — đứng yên, không
- * xoay/keyframe/hoạt ảnh/màu/mặt nạ/mép mềm/lật (OverlayGpuEligible). Cùng phép tính với nhánh
+ * xoay/keyframe hình học/hoạt ảnh/màu/mặt nạ/mép mềm/lật (OverlayGpuEligible); keyframe ĐỘ MỜ thì
+ * đi biểu thức `opacity` của crabblend (đường CPU ghép lớp đó ở RGBA). Cùng phép tính với nhánh
  * yuvStatic của WriteVisualOverlayFilter: cỡ `max(2,ceil(iw*s/2)*2)`, đệm 4 điểm ảnh trong suốt ở
  * toạ độ `mod(...,2)`, toạ độ trộn chẵn, cùng cửa sổ `enable`/`eof_action`/khung đuôi. Khác ở:
  *  - scale + format=rgba + pad + đổi bt709 + yuva420p gộp vào MỘT crabgeo_cuda; ảnh/chuỗi khung
@@ -4158,7 +4174,14 @@ void WriteVisualOverlayFilterGpu(
          << "x='" << bx << "-mod(" << bx << ",2)':y='" << by << "-mod(" << by << ",2)'"
          << ":enable='between(t," << FfmpegDouble(OverlayEnableStart(start, settings)) << "," << FfmpegDouble(end) << ")'"
          << ":eof_action=" << ((OverlayIsImageSequence(overlay) && seqTail == 0) ? "repeat" : "pass");
-  if (opacityValue < 0.999) script << ":opacity=" << FfmpegDouble(opacityValue);
+  if (!overlay.kfOpacityExpr.empty()) {
+    /* Keyframe độ mờ (đơn vị %, LOCALT = t − start) THAY giá trị tĩnh — như KfOpacityFilter của
+     * đường CPU (ở đó sendcmd tính theo mốc khung lớp phủ, ở đây theo mốc khung nền: lớp phủ khác
+     * nhịp xuất thì lệch dưới một khung về thời gian của đường cong độ mờ). */
+    script << ":opacity='clip((" << SubstituteLocalTimeVar(overlay.kfOpacityExpr, start, "t") << ")/100,0,1)'";
+  } else if (opacityValue < 0.999) {
+    script << ":opacity=" << FfmpegDouble(opacityValue);
+  }
   script << outputLabel << ";\n";
 }
 
@@ -4191,7 +4214,9 @@ bool OverlayGpuEligible(const ExportOverlay& overlay, const ExportSettings& sett
   const double scaleValue = std::max(0.01, (overlay.scale / 100.0) * overlayFit);
   const bool image = OverlayIsImageLike(overlay) || OverlayIsImageSequence(overlay);
   if (scaleValue < (image ? kGpuMinScaleRgba : kGpuMinScale)) return false;
-  if (HasKeyframeExpr(overlay.kfScaleExpr, overlay.kfRotExpr, overlay.kfOpacityExpr, overlay.kfXExpr, overlay.kfYExpr)
+  // Keyframe ĐỘ MỜ một mình thì được: crabblend nhận biểu thức `opacity` theo `t` (xem
+  // WriteVisualOverlayFilterGpu). Keyframe vị trí/cỡ/xoay thì chưa.
+  if (HasKeyframeExpr(overlay.kfScaleExpr, overlay.kfRotExpr, "", overlay.kfXExpr, overlay.kfYExpr)
       || HasAnimGeomExpr(overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr) || !overlay.animXExpr.empty()
       || overlay.animInDur > 0.001 || overlay.animOutDur > 0.001) return false;
   if (std::abs(overlay.rotation) > 1e-6 || overlay.flipX || overlay.flipY || overlay.featherPx > 0) return false;
@@ -5407,11 +5432,11 @@ int CommandExportVideo(int argc, char** argv) {
   const bool gpuWanted = GpuRenderWanted(settings) && settings.codec != "prores";
   const std::string nvencName = std::string(settings.codec == "hevc" ? "hevc" : "h264") + "_nvenc";
   const auto crabFilters = [gpuWanted]() { return gpuWanted && HasFfmpegFilter("crabgeo_cuda"); };
-  auto gpuProbe = std::async(std::launch::async, [crabFilters, nvencName]() {
-    return crabFilters() && HasFfmpegEncoder(nvencName) && GpuRenderAvailable(nvencName);
-  });
-  auto nvdecProbe = std::async(std::launch::async, [crabFilters, &source]() {
-    return crabFilters() && NvdecDecodes(source);
+  // 0 = không dùng được GPU, 1 = GPU được nhưng NVDEC không giải mã được nguồn chính, 2 = cả hai.
+  auto gpuProbe = std::async(std::launch::async, [crabFilters, nvencName, &source]() {
+    if (!crabFilters() || !HasFfmpegEncoder(nvencName)) return 0;
+    if (GpuRenderAvailableWithNvdec(nvencName, source)) return 2;
+    return GpuRenderAvailable(nvencName) ? 1 : 0;
   });
   const size_t kGpuOverlayProbes = 8;
   std::vector<std::string> overlayVideoPaths;
@@ -5459,8 +5484,9 @@ int CommandExportVideo(int argc, char** argv) {
     Emit("progress", "FFmpeg hiện tại không có drawtext; text overlay sẽ bị bỏ qua khi export.");
   }
   // Kết quả dò GPU (chạy song song từ đầu lượt, xem gpuProbe). Đồ thị GPU chỉ đi cùng NVENC.
-  g_gpuRender = gpuProbe.get() && plan.mode == "nvenc";
-  g_gpuMainNvdec = nvdecProbe.get() && g_gpuRender;
+  const int gpuProbed = gpuProbe.get();
+  g_gpuRender = gpuProbed > 0 && plan.mode == "nvenc";
+  g_gpuMainNvdec = gpuProbed == 2 && g_gpuRender;
   for (size_t k = 0; k < overlayNvdecProbes.size(); k++) {
     const bool nvdec = overlayNvdecProbes[k].get() && g_gpuRender;
     for (auto& overlay : overlays) {
