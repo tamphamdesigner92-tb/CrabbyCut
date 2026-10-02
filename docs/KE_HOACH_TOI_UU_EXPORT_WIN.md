@@ -71,6 +71,7 @@
 17. **Phiên 7 (2026-10-01): 1.6 + 1.4 — xong.** Fixture `test_temp/bench_export/test_crab` (bản sao Test.crab ở `test_temp/testcrab_src/`): **55,6 → 14,2 s (3,9×)** — `geq` độ mờ keyframe −43 s, cắt trước khi phóng to −2,6 s. "Yêu Con 1": mép mềm Retouch −3 s. 1.7: sửa lỗi cắt batch qua chuỗi màu có LOCALT/sendcmd (phần tối ưu còn lại chờ 1.11). 1.10: các dự án mẫu chỉ có `lut3d` đã gộp sẵn ở frontend (HSL + LUT bake thành một .cube) — không có gì để gộp, bỏ. **Nhánh 1B (Retouch) xong**: dựng khung miếng vá 28,3 → 18,0 s trên Yêu Con. Việc kế tiếp: 1.10 → 1.12 pha 2 → 1.2 → phần còn lại của 1.8 → 1.9 → 1.13 → 1.14; Retouch vẽ trước ở renderer (27–42 s trên Yêu Con) đáng đo riêng.
 18. **Phiên 8 (2026-10-01): 1.12 pha 2 (dựng đồ thị ở cỡ xuất khi co nhỏ) — đã viết mã + test; BẬT mặc định từ phiên 9 (người dùng chốt 2026-10-02)** (`CRABBYCUT_EXPORT_OUTSCALE=0` để tắt): 4K → 1080p −17%, 1080p → 720p −10..−23%; bộ so 0.3 (b) đạt, (a) trượt 2,6 dB vì bản chuẩn là đồ thị pha 1 (chi tiết mục 1.12). Bộ đo có `--resolution <preset>` để phát lại payload sẵn có ở cỡ xuất khác.
 19. **Phiên 8: 1.8 xuất song song nhiều tiến trình — xong, BẬT mặc định** (`CRABBYCUT_EXPORT_PARALLEL=1` để tắt). Bin Tom −35%, Yêu Con −13%, phim 4K AV1 không đổi (đã bão hoà CPU). Bản chia batch trùng từng khung + từng mẫu với bản một lượt sau khi chữa 6 lỗi có sẵn của đường nhiều batch (chi tiết mục 1.8) — trong đó **chuỗi khung chữ động ở mọi bản xuất từng chạy sớm 1 khung và mất khung đầu**: nay đúng khung như preview, nên bản một lượt cũng đổi ở các khung hoạt ảnh. 1.2 tạm bỏ qua: trên máy này không lợi (HEVC 10-bit NVDEC 50,2 so với 50,4 s; GTX 1060 không giải mã AV1) và không có máy để kiểm ca có lợi (AV1 trên RTX 30+). Việc kế tiếp: 1.9 → 1.13 → 1.14; hướng mở: ở lượt một batch chỉ đổi RGBA trong cửa sổ của lớp phủ RGBA (xem cuối mục 1.8); bake chữ ở mật độ cỡ xuất nếu 1.12 pha 2 được bật.
+20. **Phiên 9 (2026-10-02): 1.21 bộ ghép GPU riêng — ĐANG LÀM.** Người dùng muốn máy có GPU thì xuất bằng GPU. Đo: bộ lọc CUDA sẵn có của ffmpeg làm Bin Tom chậm 1,8×, cách lai cuvid chỉ −13..−23% → người dùng chốt **tự build ffmpeg + bộ lọc CUDA riêng** và **Cài đặt chọn GPU/CPU, mặc định GPU**. Việc kế tiếp: G0 (bản tự build qua 36/36 test) → G1 → G2 → G3 → G4 (chi tiết mục 1.21).
 - **Câu hỏi 1.12 pha 2 — người dùng trả lời 2026-10-02: BẬT** (miễn tiêu chí (a) cho mục đổi thứ tự lấy mẫu vì (b) đạt). 36/36 test export xanh với pha 2 mặc định. Các câu trước: (a)–(e) trả lời 2026-09-29, khổ lệch của 1.12 trả lời 2026-09-30, ô Bitrate của 1.20 trả lời 2026-10-01 (xem bảng "Quyết định đã chốt").
 - `CrabbyCut_Private`: chưa port gì của phiên 2–3. Mục trung lập để port (M.2): phần đo (sidecar + backend + renderer), 1.15, 1.1a, 1.17, 1.3, 1.5, ảnh tĩnh một lần.
 
@@ -596,7 +597,7 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
 - Áp tương tự cho video lớp phủ (hiện giải mã từ 0, `:2617, 2964`). Tiếng của chúng dùng chung seek khi S ≤ sourceStart − 2 khung AAC.
 - ⚠️ Bắt buộc qua `test:seam`, `test:frame-grid`, `test:sequence-fps`, `test:clip-speed`, `test:main-lane-concat` + soát khung ở điểm nối.
 
-**1.2 Giải mã phần cứng** (hạ ưu tiên theo số đo, trừ nguồn nặng). Env: `CRABBYCUT_HWACCEL_DECODE=0`.
+**1.2 Giải mã phần cứng** (hạ ưu tiên theo số đo, trừ nguồn nặng). Env: `CRABBYCUT_HWACCEL_DECODE=0`. — **THAY BẰNG 1.21 (2026-10-02)**; số đo NVDEC trên GTX 1060 ở đó.
 - Chỉ cho nguồn/lớp phủ HEVC, 10-bit, **AV1**, hoặc độ phân giải cao được `-c copy`. Với H.264 8-bit đã chuẩn hoá thì NVDEC chậm hơn CPU.
 - **AV1** là ca nặng nhất ("Ca thật 2": dav1d 4K ~238 khung/s, ăn ~12 lõi).
   - GPU có giải mã AV1: NVIDIA RTX 30 trở lên, AMD RX 6000 trở lên, Intel Arc/Xe (Gen12+), Apple M3 trở lên.
@@ -704,6 +705,42 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
 - Đoạn lane chính không lớp phủ, không màu, không đổi cỡ, cùng codec/tham số với bản xuất thì `-c copy` theo GOP. Chỉ mã hoá lại phần GOP dở ở hai mép.
 - Chỉ có ích cho dự án cắt trơn không phụ đề.
 - Khó ở chỗ khớp SPS/PPS giữa phần chép và phần mã hoá lại. Chỉ làm nếu Bước 0 cho thấy loại dự án này đủ phổ biến.
+
+**1.21 (mới, 2026-10-02) Bộ ghép GPU riêng — máy có GPU thì xuất bằng GPU** (thay cho 1.2). — **ĐANG LÀM** (phiên 9: đo + dựng bộ công cụ build).
+- **Yêu cầu (người dùng, 2026-10-02):** "máy có GPU thì render tận dụng 100% GPU, chỉ máy không có GPU mới render bằng CPU". Lúc xuất người dùng thấy GPU 30–50%, CPU gần 100%. Số đo bên dưới cho thấy 30–50% đó là NVENC đang **chờ khung**: CPU nghẽn ở giải mã + bộ lọc.
+- **Người dùng chốt (2026-10-02):**
+  - (1) **Tự viết bộ ghép GPU riêng**: tự build ffmpeg (Bước 2) kèm bộ lọc CUDA của CrabbyCut, chấp nhận nhiều phiên và tự bảo trì bản ffmpeg riêng thay cho bản ghim Gyan.
+  - (2) **Bảng cài đặt render cho người dùng chọn GPU/CPU, mặc định GPU nếu máy có GPU**, kể cả với nguồn mà GPU giải mã chậm hơn CPU.
+  - Cho phép tải công cụ build: MSYS2 vào `D:\msys64`, mã nguồn + build ở `D:\CrabbyCut_ffmpeg` (ổ E: chỉ còn 8 GB).
+- **CPU tốn vào đâu** (1 lượt phát lại, `threadprof` đọc CPU từng luồng ffmpeg; bản BtbN):
+
+  | Dự án | Thời gian | CPU-giây | Giải mã (CPU) | Lọc | NVENC dùng |
+  |---|---|---|---|---|---|
+  | Bin Tom (H.264 1080×1920) | 13,5 s | 80 | 44% (+ PNG) | 41% | 19% |
+  | Yêu Con (HEVC 10-bit 1728×3072 @ 59,94) | 51,8 s | 527 | 44% | 55% | 5% |
+  | Test.crab (H.264 4K) | 13,5 s | 130 | 34% | 62% | 16% |
+  | Phim 4K AV1 (cắt 300 s) | 59 s | 692 | 72% (dav1d) | 20% | 52% |
+
+- **Thông lượng GPU trên GTX 1060** (600 khung, `-benchmark`): NVDEC 4K H.264 **~175–180 khung/s** (CPU 360 khung/s nhưng ăn 11 lõi); 1080×1920 H.264 664 khung/s (CPU 1.040); **HEVC 10-bit 1728×3072: NVDEC 281 khung/s, 0,6 CPU-giây — CPU 145 khung/s, 90 CPU-giây**. Giải mã Vulkan 4K H.264 155 khung/s. AV1: không có (cần RTX 30+). Khởi động CUDA ~0,34 s (CPU 0,38 s) — không phải chi phí.
+- **Đã thử và LOẠI (chậm hơn hoặc vỡ):**
+  - **Ghép toàn GPU bằng bộ lọc CUDA sẵn có** (`hwupload_cuda` + `scale_cuda` + `overlay_cuda`, NVENC nhận khung CUDA): Bin Tom 7,4 → **13,3 s** (4 lượt song song), tuần tự 10,8 → 20,5 s; giải mã thẳng ra khung CUDA vẫn chậm hơn (batch 4: 1,32 → 1,81 s). Chép CPU↔GPU đồng bộ từng khung trên luồng lọc + NVDEC H.264 chậm hơn CPU.
+  - **NVDEC ra RAM** (`-hwaccel cuda`, bộ lọc CPU như cũ): Yêu Con 42,6 → 38,3 s (−10%), Bin Tom 7,8 / 7,8 s, Test.crab 12,3 → 13,5 s (chậm hơn).
+  - Vulkan/libplacebo: chạy được, nhưng tải lên/tải về của hwcontext Vulkan chậm (4K: ~8 ms/khung); nối CUDA↔Vulkan (`hwmap`/`hwupload`) báo "Invalid argument".
+- **Lai — NVDEC cắt + co trong phần cứng, khung nhỏ về CPU** (`h264_cuvid`/`hevc_cuvid -crop -resize`): HEVC 10-bit → 1080×1920: 10,2 s / 118 CPU-giây → **4,17 s / 1,5 CPU-giây**; 4K H.264 → 1080p 2,79 s / 30,2 → 3,45 s / 3,1 (trần NVDEC). Chất lượng phép co phần cứng trên footage 4K máy ảnh: so lanczos 46,1 dB, **hơn** bicubic của swscale (44,6). Trọn lượt: Yêu Con 44,6 → 34,2 s (−23%, bản `scale_cuda`), Test.crab 12,9 → 11,25 s (−13%). Lợi nhỏ vì phần còn lại (hiệu ứng, ghép RGB, đổi định dạng) vẫn ở luồng lọc CPU — đó là lý do người dùng chọn tự viết bộ ghép.
+- **Bẫy đã gặp (bộ ghép riêng phải xử lý):**
+  - **`HWACCEL_CHANGED` của fftools** (`ffmpeg_filter.c:3238-3241`): khung mang `hw_frames_ctx` mới (NVDEC khởi tạo lại sau khi tua, ở chỗ đổi SPS) là **luôn** dựng lại cả đồ thị, kể cả có `-reinit_filter 0` → trim/concat mất trạng thái. Bản ffmpeg riêng phải vá: cùng định dạng + cỡ thì chỉ đổi tham chiếu.
+  - **cuvid hỏng ở chỗ nối của `temp_input.mp4`** (nối `-c copy` các nguồn cùng chữ ký, mỗi đoạn mang SPS riêng): giải mã vắt qua chỗ nối (kể cả chỉ phần tua lùi từ keyframe trước) thì 6 khung cuối đoạn trước mang hình đoạn sau và 6 khung cuối dải bị mất; dừng hẳn trước chỗ nối thì trùng từng bit với CPU. Input `-t` KHÔNG cắt ở bộ tách luồng khi giải mã (chỉ `trim` trong đồ thị) nên không chặn được. Cần bảng đoạn (`concatSegmentTable` của backend, lưu `main_lane_segments` trong .crab) đi theo payload xuất.
+  - **NVENC nhận khung CUDA từ nhiều vùng nhớ** (mỗi `scale_cuda` một pool) → "Could not register an input HW frame"; chép về MỘT vùng nhớ ở đuôi thì chạy.
+  - **`scale_cuda` chép cả trường crop của khung vào** (`av_frame_copy_props`) → `crop` thứ hai trên khung CUDA cộng dồn, hình lệch hẳn (PSNR 8 dB).
+  - `overlay_cuda`: alpha của chroma lấy theo điểm (CPU lấy trung bình 2×2), cắt phần lẻ thay vì làm tròn, không có độ mờ; chỉ 8-bit. `scale_cuda`/`colorspace_cuda` không đổi ma trận màu (nguồn bt601 full-range như DSCF3442 phải đổi).
+- **Kế hoạch (bộ ghép GPU riêng, NVIDIA trước):**
+  - **G0 — bộ công cụ + bản build tương đương bản ghim:** MSYS2 UCRT64, ffmpeg `n8.1.1` (nhánh `crabbycut-8.1.1` ở `D:\CrabbyCut_ffmpeg\ffmpeg`), nv-codec-headers `n12.2.72.0` (13.x đòi driver ≥ 610), `--enable-cuda-llvm` (clang dịch kernel, không cần CUDA Toolkit). Chỉ bật thư viện CrabbyCut dùng: zimg, libplacebo/Vulkan/shaderc, freetype/fribidi/harfbuzz/fontconfig, libass, dav1d, x264, x265, vmaf, libvpl, AMF, NVENC/NVDEC/cuvid, d3d11va. Đích: 36/36 test export xanh trên bản tự build trước khi thêm gì.
+  - **G1 — vá fftools:** bỏ dựng lại đồ thị khi chỉ `hw_frames_ctx` đổi mà định dạng/cỡ giữ nguyên → giải mã NVDEC ra thẳng khung CUDA, không chép.
+  - **G2 — bộ lọc CUDA của CrabbyCut** (`libavfilter/vf_*_crab_cuda`): co + cắt lẻ điểm ảnh + đổi ma trận/dải màu + đặt vào khung (một lượt cho hình học đường nhanh); trộn lớp phủ có độ mờ (biểu thức/keyframe), alpha chroma trung bình như `AlphaWeightedYuva420`, làm tròn như CPU; LUT 3D (+ trộn hai LUT theo cường độ); eq. Tải PNG lên bằng bộ đệm ghim, không đồng bộ.
+  - **G3 — sidecar dựng đồ thị GPU** khi chế độ GPU: tính năng chưa có bản GPU thì `hwdownload` → bộ lọc CPU → `hwupload` (đúng trước, nhanh sau).
+  - **G4 — Cài đặt › Xuất video: "Render bằng: GPU / CPU"**, mặc định GPU khi dò thấy GPU dùng được; payload mang lựa chọn xuống sidecar.
+  - **G5 — phát hành:** nơi đặt bản ffmpeg tự build (cần người dùng chốt), `ffmpeg_pin.js` trỏ sang bản đó. macOS giữ đường hiện tại (Bước M).
+  - Mỗi bước: test export xanh ở cả hai chế độ, bộ so 0.3, A/B ≥ 3 lượt.
 
 **Tương thích nhánh macOS:** phần riêng Windows (`-hwaccel cuda/d3d11va`, `CreateProcessW`) gói sau `#ifdef _WIN32` hoặc sau phép dò; phần trung lập viết để `git apply` sang `CrabbyCut_Private` được. Chi tiết macOS ở **Bước M**.
 
