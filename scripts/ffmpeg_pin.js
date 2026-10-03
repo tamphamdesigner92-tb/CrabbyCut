@@ -34,17 +34,18 @@
 'use strict';
 
 const FFMPEG_PIN = {
-  id: 'n8.1.1-crabbycut.1-win64-gpl-shared',
-  url: 'https://github.com/tamphamdesigner92-tb/ffmpeg-for-CrabbyCut/releases/download/n8.1.1-crabbycut.1/ffmpeg-n8.1.1-crabbycut.1-win64-gpl-shared.zip',
-  fileName: 'ffmpeg-n8.1.1-crabbycut.1-win64-gpl-shared.zip',
-  // build.sh tính lúc đóng gói (2026-10-03); phải khớp file tải về từ `url`.
-  sha256: '44ec6411ef4e5bad87d2da34ea324f39f65bd349ebf39db222c2d898c415ff88',
-  sizeBytes: 33494956,
+  // .2 (2026-10-03): crabgeo_cuda có LUT 3D (lut/lut2/mix) — clip/lớp phủ có LUT xuất được trên GPU.
+  id: 'n8.1.1-crabbycut.2-win64-gpl-shared',
+  url: 'https://github.com/tamphamdesigner92-tb/ffmpeg-for-CrabbyCut/releases/download/n8.1.1-crabbycut.2/ffmpeg-n8.1.1-crabbycut.2-win64-gpl-shared.zip',
+  fileName: 'ffmpeg-n8.1.1-crabbycut.2-win64-gpl-shared.zip',
+  // build.sh tính lúc đóng gói (2026-10-03); đã so với file tải về từ `url`: khớp.
+  sha256: '410ae0b571aa73957c97bd7c7a7ea18fd0245d6c477d9e7e9f27baf8e9b776e9',
+  sizeBytes: 33504908,
   // Dòng đầu của `ffmpeg -version` phải bắt đầu bằng chuỗi này (kiểm sau khi giải nén).
   // Dấu cách cuối để `crabbycut.1` không khớp `crabbycut.10`.
-  versionPrefix: 'ffmpeg version n8.1.1-crabbycut.1 ',
+  versionPrefix: 'ffmpeg version n8.1.1-crabbycut.2 ',
   // Mã nguồn tương ứng của bản dựng (kịch bản build + bản vá), dẫn trong THIRD-PARTY-NOTICES.md.
-  sourceUrl: 'https://github.com/tamphamdesigner92-tb/ffmpeg-for-CrabbyCut/tree/n8.1.1-crabbycut.1',
+  sourceUrl: 'https://github.com/tamphamdesigner92-tb/ffmpeg-for-CrabbyCut/tree/n8.1.1-crabbycut.2',
 };
 
 module.exports = { FFMPEG_PIN };
