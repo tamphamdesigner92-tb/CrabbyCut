@@ -3061,7 +3061,7 @@ KIẾN TRÚC (chốt sau khảo sát, xem lý do bên dưới):
   PHA — mặt bám sau chuyển động thật, quay đầu nhanh là thấy. Chỉ làm mượt trong đoạn
   LIÊN TỤC có mặt và khi SỐ MẶT ổn định (bắc cầu qua chỗ mất dấu = kéo mặt cũ sang
   cảnh mới; ghép nhầm mặt A với mặt B khi số mặt đổi).
-- `/api/retouch/track` + cache đĩa `temp_uploads/retouch_faces/`.
+- `/api/retouch/track` + cache đĩa `<USER_DATA_ROOT>/retouch_cache/` (từ 2026-10-03; trước đó `temp_uploads/retouch_faces/` nên mở lại dự án là bám lại — "Yêu Con" 11 s mỗi lần, lượt xuất thật 48,5 -> 37,9 s khi đã có cache). Khoá = đường dẫn + size + mtime nguồn + block + tham số; temp_input.mp4 khôi phục bằng liên kết cứng nên giữ mtime. Mục quá 30 ngày không dùng bị dọn lúc khởi động (`pruneRetouchCache`), dọn tay ở Cài đặt › Bộ nhớ đệm › "Bám khuôn mặt (Retouch)". Test đặt `CRAB_TEMP_DIR` mà không đặt `CRAB_RETOUCH_CACHE_DIR` thì cache ở lại trong temp như cũ.
   KHOÁ CACHE GỒM CẢ mtime+size CỦA NGUỒN: dự án ghi đè `temp_input.mp4` mỗi lần ingest,
   chỉ băm đường dẫn là lần sau dùng lại landmark của video CŨ -> mặt nạ dán sai chỗ.
 - `static/js/retouch.js`: mô hình 13 thông số chia 3 nhóm kỹ thuật + vùng FaceMesh +

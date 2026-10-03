@@ -76,9 +76,16 @@ const LUT_DIR = path.join(LIBRARY_DIR, 'luts');
 // .cube do frontend BAKE (HSL 8 dải ∘ LUT người dùng) cho từng block khi export.
 // Nằm trong temp_uploads vì là dữ liệu của một lần xuất, không phải tài sản dự án.
 const COLOR_LUT_BAKE_DIR = path.join(TEMP_DIR, 'color_luts');
-// Cache landmark khuôn mặt cho Retouch (xem retouchCachePath). Đặt trong TEMP_DIR nên
-// được dọn cùng dữ liệu tạm của dự án.
-const RETOUCH_CACHE_DIR = path.join(TEMP_DIR, 'retouch_faces');
+/* Cache landmark khuôn mặt cho Retouch (xem retouchCachePath). Trước 2026-10-03 nằm trong TEMP_DIR: mở lại dự
+ * án là mất, lượt xuất/preview đầu tiên sau đó bám lại khuôn mặt — "Yêu Con" (6 block Retouch) 11,2 s mỗi lần.
+ * Nay đặt ngoài temp_uploads như peaks_cache/proxy_cache: khoá gồm đường dẫn + size + mtime của nguồn, mà
+ * temp_input.mp4 khôi phục từ cache nối bằng liên kết cứng nên giữ nguyên mtime. Dọn mục quá 30 ngày lúc khởi
+ * động (pruneRetouchCache), dọn tay ở Cài đặt › Bộ nhớ đệm. CRAB_RETOUCH_CACHE_DIR chỉ cho TEST; test đặt
+ * CRAB_TEMP_DIR mà không đặt biến này thì cache ở lại trong TEMP_DIR như cũ (mỗi lượt test bám lại thật). */
+const RETOUCH_CACHE_DIR = process.env.CRAB_RETOUCH_CACHE_DIR
+  ? path.resolve(process.env.CRAB_RETOUCH_CACHE_DIR)
+  : (process.env.CRAB_TEMP_DIR ? path.join(TEMP_DIR, 'retouch_faces') : path.join(USER_DATA_ROOT, 'retouch_cache'));
+const RETOUCH_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /* XOÁ LOGO BẰNG AI: miếng vá theo từng khung (xem backend/logo-ai.js). Đặt NGOÀI temp_uploads
  * như proxy_cache: một lượt AI tốn vài phút, asset thư viện dùng lại qua nhiều dự án không được
  * bắt chạy lại. Khoá gồm mtime+size của nguồn nên nguồn đổi là tự ra khoá mới; khoá lâu không
@@ -3336,6 +3343,19 @@ function prewarmAudioPeaksForAssets(assets) {
     if (asset.type === 'media_image') continue;
     queueAudioPeaks(asset.path);
   }
+}
+
+// Dọn landmark Retouch quá hạn lúc khởi động (cache dẫn xuất, mất là bám lại được). mtime = lần dùng cuối.
+function pruneRetouchCache() {
+  try {
+    if (!fs.existsSync(RETOUCH_CACHE_DIR)) return;
+    const now = Date.now();
+    for (const name of fs.readdirSync(RETOUCH_CACHE_DIR)) {
+      if (!/^face_[0-9a-f]+\.json$/.test(name)) continue;
+      const item = path.join(RETOUCH_CACHE_DIR, name);
+      if ((now - fs.statSync(item).mtimeMs) > RETOUCH_CACHE_TTL_MS) fs.rmSync(item, { force: true });
+    }
+  } catch (_) { /* cache dọn được thì tốt, không thì bỏ qua */ }
 }
 
 // Dọn peak cũ lúc khởi động (cache dẫn xuất, mất là sinh lại được).
@@ -6622,6 +6642,8 @@ function createApp() {
     sdr: { dir: SDR_CACHE_DIR, label: () => _t('Bản SDR của video HDR'), clearable: true },
     // Dọn được: lượt xuất sau render lại đủ (chỉ chậm hơn). Không dọn lúc đang xuất — bước ghép đang đọc nó.
     render: { dir: RENDER_CACHE_DIR, label: () => _t('Bản render để xuất lại'), clearable: true },
+    // Dọn được: Retouch bám lại khuôn mặt ở lượt preview/xuất sau (chỉ chậm hơn).
+    retouch: { dir: RETOUCH_CACHE_DIR, label: () => _t('Bám khuôn mặt (Retouch)'), clearable: true },
     /* Model lồng tiếng (F5 ~1,4 GB, VieNeu ~0,9 GB): dọn được — lượt lồng tiếng sau tự tải lại
      * (có thanh tiến trình). Tệp đang được server TTS nạp dở thì Windows không cho xoá, bỏ qua. */
     tts_models: { dir: ttsService.modelDir(), label: () => _t('Mô hình lồng tiếng'), clearable: true },
@@ -7081,7 +7103,8 @@ function createApp() {
 
       const cachePath = retouchCachePath(sourceVideoPath, clips, options);
       if (fs.existsSync(cachePath)) {
-        // Trúng cache -> trả thẳng, KHÔNG chạm vào sidecar.
+        // Trúng cache -> trả thẳng, KHÔNG chạm vào sidecar. Chạm mtime = lần dùng cuối (pruneRetouchCache).
+        try { const now = new Date(); fs.utimesSync(cachePath, now, now); } catch (_) { /* chỉ mất thứ tự hạn dùng */ }
         return res.json({ status: 'success', cached: true, ...JSON.parse(fs.readFileSync(cachePath, 'utf8')) });
       }
       setStatus(_t('Đang bám khuôn mặt cho Retouch...'));
@@ -7571,6 +7594,7 @@ function createApp() {
 function start() {
   cleanGeneratedTextAssets(); // dọn PNG sequence hoạt ảnh còn sót từ phiên trước
   prunePeaksCache();          // dọn cache sóng âm quá hạn + file .tmp/.raw của job bị kill
+  pruneRetouchCache();        // dọn landmark Retouch quá 30 ngày không dùng
   pruneConcatCache();         // dọn bản đã nối quá hạn (mỗi mục là một file vài trăm MB)
   pruneSdrCache();            // dọn bản hạ SDR quá hạn / vượt trần dung lượng
   pruneAssetProxyCache();     // dọn proxy LQ quá hạn + file .part.mp4 của job bị kill
