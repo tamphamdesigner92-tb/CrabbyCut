@@ -3029,16 +3029,20 @@ bool IntervalHasColorAdjust(const ExportInterval& item) {
   return BlockHasColorAdjust(item);
 }
 
-/* TẦNG MÀU CHỈ LÀ LUT -> tuỳ chọn LUT của crabgeo_cuda (đồ thị GPU, mục 1.21; cần GpuLutAvailable).
- * Đạt khi trong mọi tầng màu của block (của chính nó, lớp Điều chỉnh, các lớp thêm) có NHIỀU NHẤT một
- * tầng không rỗng, và tầng đó là:
- *  - keyframe cường độ LUT (ColorAdjustLutBlend: 2 cube + biểu thức trộn), không kèm filter khác ->
- *    `lut=A:lut2=B:mix=<biểu thức>`; hoặc
- *  - đúng một `lut3d=file='…':interp=trilinear` (HSL + LUT đã bake ở frontend), có thể kèm
- *    `:enable='…'` khi lớp Điều chỉnh chỉ phủ một phần block -> `lut=A[:mix=<enable>]`.
- * eq/curves/vignette/mặt nạ màu… -> không đạt (block đi đồ thị CPU). `ok` = đạt (kể cả khi không có
- * tầng màu nào: `any` = false). Biểu thức theo thời gian thay LOCALT bằng (t − start), như đường CPU
- * (crabgeo tính `mix` theo mốc khung của chính nó). Không ghi gì ra đĩa (khác ColorAdjustChain). */
+/* TẦNG MÀU -> tuỳ chọn LUT của crabgeo_cuda (đồ thị GPU, mục 1.21; cần GpuLutAvailable).
+ * Mọi phép màu TĨNH theo từng điểm ảnh của block — eq (số), colorbalance, curves, lut3d (HSL + LUT đã
+ * bake ở frontend), qua mọi tầng (của chính block, lớp Điều chỉnh, các lớp thêm), đúng thứ tự áp — gộp
+ * thành MỘT LUT: một lut3d đơn lẻ thì dùng thẳng tệp của nó, còn lại BAKE (BakeColorLut) — cho ảnh Hald
+ * đồng nhất chạy qua chính chuỗi filter CPU đó rồi đọc ra .cube. Thêm được:
+ *  - một tầng keyframe cường độ LUT (ColorAdjustLutBlend: 2 cube + biểu thức) ĐỨNG CUỐI: các phép tĩnh
+ *    trước nó bake vào cả hai cube -> `lut=A':lut2=B':mix=<biểu thức>` (trộn sau LUT nên đúng như CPU:
+ *    phép trước -> split -> hai lut3d -> blend). Phép đứng SAU tầng trộn thì không gộp được;
+ *  - `:enable='…'` CHUNG cho mọi filter (lớp Điều chỉnh chỉ phủ một phần block) -> `mix=<enable>`
+ *    (crabgeo: gốc + (LUT − gốc)·mix, mix 0/1 = tắt/bật).
+ * Không đạt (block đi đồ thị CPU): keyframe thông số màu (eq theo biểu thức, filter có nhãn `@` mà
+ * sendcmd trỏ tới), mặt nạ màu, hiệu ứng không gian (unsharp/blur/noise/vignette), enable khác nhau.
+ * `ok` = đạt (kể cả khi không có tầng màu nào: `any` = false). Biểu thức theo thời gian thay LOCALT bằng
+ * (t − start), như đường CPU (crabgeo tính `mix` theo mốc khung của chính nó). */
 struct GpuLutSpec {
   bool ok = true;
   bool any = false;
@@ -3046,6 +3050,140 @@ struct GpuLutSpec {
   std::string lut2;
   std::string mix;
 };
+
+// Thư mục ghi LUT bake (thư mục tạm của dự án) — CommandExportVideo đặt; rỗng = không bake được.
+static fs::path g_gpuLutBakeDir;
+
+/* Tách chuỗi filter theo dấu phẩy ở cấp ngoài cùng: trong nháy đơn mọi ký tự là chữ (cả `,` và `\`),
+ * ngoài nháy `\` thoát ký tự sau — như av_get_token của lavfi. */
+std::vector<std::string> SplitFilterChain(const std::string& chain) {
+  std::vector<std::string> out;
+  std::string cur;
+  bool quoted = false;
+  for (size_t i = 0; i < chain.size(); i++) {
+    const char ch = chain[i];
+    if (!quoted && ch == '\\' && i + 1 < chain.size()) {
+      cur += ch;
+      cur += chain[++i];
+      continue;
+    }
+    if (ch == '\'') quoted = !quoted;
+    if (ch == ',' && !quoted) {
+      if (!cur.empty()) out.push_back(cur);
+      cur.clear();
+      continue;
+    }
+    cur += ch;
+  }
+  if (!cur.empty()) out.push_back(cur);
+  return out;
+}
+
+/* Filter màu tĩnh theo từng điểm ảnh, bake được: eq / colorbalance / curves / lut3d, KHÔNG nhãn `@`
+ * (nhãn = có lệnh sendcmd keyframe trỏ tới), không biểu thức thời gian. `:enable='…'` ở cuối tách ra. */
+bool BakeableColorFilter(const std::string& filter, std::string& core, std::string& enable) {
+  core = filter;
+  enable.clear();
+  const std::string en = ":enable='";
+  const size_t at = filter.rfind(en);
+  if (at != std::string::npos && filter.size() > at + en.size() && filter.back() == '\'') {
+    enable = filter.substr(at + en.size(), filter.size() - at - en.size() - 1);
+    core = filter.substr(0, at);
+    if (enable.empty() || enable.find('\'') != std::string::npos) return false;
+  }
+  const std::string name = core.substr(0, core.find('='));
+  if (name != "eq" && name != "colorbalance" && name != "curves" && name != "lut3d") return false;
+  if (core.find("LOCALT") != std::string::npos) return false;
+  // eq từ frontend chỉ có số; có nháy/eval là biểu thức theo thời gian (ColorAdjustEqFilter).
+  if (name == "eq" && (core.find('\'') != std::string::npos || core.find("eval") != std::string::npos)) return false;
+  return true;
+}
+
+/* BAKE chuỗi màu tĩnh thành LUT 3D cho crabgeo_cuda (lưới 33³, thứ tự r nhanh nhất như .cube).
+ * Lưới RGB đồng nhất 16-bit do sidecar tự dựng — ảnh gbrp16le N²×N, điểm (x, y) = ô r = x % N,
+ * g = x / N, b = y (haldclutsrc chỉ ra rgb24: làm tròn lưới về 8-bit) — chạy qua CHÍNH chuỗi filter
+ * của đường CPU trong một lượt ffmpeg. Có `eq` (chỉ chạy trên YUV 8-bit) thì đổi lưới sang YUV
+ * bt709/tv trước — đúng miền nguồn mà eq thấy ở đường CPU — các bước đổi sau đó theo nhãn khung.
+ * Đo 2026-10-03 trên nguồn DJI 10-bit, chuỗi eq + colorbalance + curves: GPU so CPU 46,9 dB; so bản
+ * chuẩn của bộ so 0.3 thì 39,2 dB so với CPU 40,7 — bản chuẩn chạy eq 8-bit TRÊN TỪNG ĐIỂM ẢNH nên
+ * mang đúng bậc làm tròn của đường CPU, LUT nào cũng không tái tạo được (đã thử: áp bảng eq đo được
+ * bằng nội suy 38,9; eq trên lưới rgb24 của haldclutsrc 39,5). Không có eq: GPU hơn CPU ~5 dB.
+ * Tên tệp theo băm của chuỗi (đường dẫn cube của backend đã mang băm nội dung) -> dùng lại qua các
+ * lượt xuất. Lỗi -> "" (block đi đồ thị CPU). */
+constexpr int kBakeLutSize = 33;
+
+std::string BakeColorLut(const std::string& chain) {
+  static std::map<std::string, std::string> memo;
+  if (g_gpuLutBakeDir.empty()) return "";
+  const auto known = memo.find(chain);
+  if (known != memo.end()) return known->second;
+  std::error_code ec;
+  fs::create_directories(g_gpuLutBakeDir, ec);
+  char stemBuf[48];
+  std::snprintf(stemBuf, sizeof(stemBuf), "gpu_bake_%016llx", static_cast<unsigned long long>(Fnv1a64("v2|" + chain)));
+  const std::string stem = stemBuf;
+  const fs::path cube = g_gpuLutBakeDir / (stem + ".cube");
+  if (fs::exists(cube, ec)) return memo[chain] = cube.string();
+
+  const int n = kBakeLutSize;
+  const size_t cells = static_cast<size_t>(n) * n * n;
+  const fs::path in = g_gpuLutBakeDir / (stem + ".in.raw");
+  const fs::path out = g_gpuLutBakeDir / (stem + ".out.raw");
+  const fs::path graph = g_gpuLutBakeDir / (stem + ".txt");
+  {
+    std::vector<std::uint16_t> planes(cells * 3);   // gbrp: G, B, R
+    size_t i = 0;
+    for (int b = 0; b < n; b++) {
+      for (int g = 0; g < n; g++) {
+        for (int r = 0; r < n; r++, i++) {
+          const auto q = [n](int v) { return static_cast<std::uint16_t>(std::lround(v * 65535.0 / (n - 1))); };
+          planes[i] = q(g);
+          planes[cells + i] = q(b);
+          planes[2 * cells + i] = q(r);
+        }
+      }
+    }
+    bool hasEq = false;
+    for (const std::string& f : SplitFilterChain(chain)) hasEq = hasEq || f.compare(0, 3, "eq=") == 0;
+    std::ofstream fin(in, std::ios::binary | std::ios::trunc);
+    fin.write(reinterpret_cast<const char*>(planes.data()), static_cast<std::streamsize>(planes.size() * 2));
+    std::ofstream g(graph, std::ios::trunc);
+    if (hasEq) g << "scale=out_color_matrix=bt709:out_range=tv,format=yuv444p16le,";
+    g << chain << ",format=gbrp16le";
+    if (!fin || !g) return memo[chain] = "";
+  }
+  const std::string size = std::to_string(n * n) + "x" + std::to_string(n);
+  const int code = RunQuiet({"ffmpeg", "-hide_banner", "-v", "error", "-nostdin", "-y", "-f", "rawvideo",
+                             "-pix_fmt", "gbrp16le", "-s", size, "-i", in.string(), "-/vf", graph.string(),
+                             "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gbrp16le", out.string()}, 30000);
+  std::vector<std::uint16_t> planes;
+  if (code == 0) {
+    std::ifstream f(out, std::ios::binary);
+    planes.resize(cells * 3);
+    f.read(reinterpret_cast<char*>(planes.data()), static_cast<std::streamsize>(planes.size() * 2));
+    if (!f || f.gcount() != static_cast<std::streamsize>(planes.size() * 2)) planes.clear();
+  }
+  fs::remove(in, ec);
+  fs::remove(out, ec);
+  fs::remove(graph, ec);
+  if (planes.empty()) return memo[chain] = "";
+
+  const fs::path part = g_gpuLutBakeDir / (stem + ".cube.part");
+  {
+    std::ofstream f(part, std::ios::trunc);
+    f << "TITLE \"CrabbyCut GPU bake\"\nLUT_3D_SIZE " << n << "\n";
+    char line[64];
+    for (size_t i = 0; i < cells; i++) {
+      std::snprintf(line, sizeof(line), "%.6f %.6f %.6f\n", planes[2 * cells + i] / 65535.0,
+                    planes[i] / 65535.0, planes[cells + i] / 65535.0);
+      f << line;
+    }
+    if (!f) return memo[chain] = "";
+  }
+  fs::rename(part, cube, ec);
+  if (ec) return memo[chain] = "";
+  return memo[chain] = cube.string();
+}
 
 // `lut3d=file='<đường dẫn đã thoát>':interp=trilinear[:enable='<biểu thức>']` — đúng dạng backend sinh.
 bool ParseStaticLut(const std::string& chain, std::string& path, std::string& enable) {
@@ -3066,48 +3204,115 @@ bool ParseStaticLut(const std::string& chain, std::string& path, std::string& en
   return !path.empty() && enable.find('\'') == std::string::npos;
 }
 
-void AddGpuLutStage(GpuLutSpec& spec, double start, const std::string& filters, const std::string& filtersPost,
-                    const std::string& lutA, const std::string& lutB, const std::string& mixExpr,
-                    const std::string& eqC, const std::string& eqB, const std::string& eqS,
-                    const std::string& mask) {
-  if (filters.empty() && filtersPost.empty() && lutA.empty() && lutB.empty() && mixExpr.empty()
-      && eqC.empty() && eqB.empty() && eqS.empty() && mask.empty()) return;
-  if (spec.any || !eqC.empty() || !eqB.empty() || !eqS.empty() || !mask.empty()) {
-    spec.ok = false;
-    return;
+// Một tầng màu của block (các trường giống ColorAdjustChain).
+struct GpuColorStage {
+  const std::string* filters;
+  const std::string* post;
+  const std::string* lutA;
+  const std::string* lutB;
+  const std::string* mix;
+  bool eqExpr;
+  bool mask;
+};
+
+/* Gom các tầng (đúng thứ tự áp) thành GpuLutSpec — xem khối chú thích ở GpuLutSpec. `bake` = false: chỉ
+ * xét có đạt không, không chạy ffmpeg (nhưng một tầng cần bake vẫn tính là đạt). */
+GpuLutSpec GpuLutFromStages(const std::vector<GpuColorStage>& stages, double start, bool bake) {
+  GpuLutSpec spec;
+  std::vector<std::string> pre;   // phép tĩnh (đã bỏ enable) trước tầng trộn LUT / toàn bộ nếu không có
+  std::string enable;
+  size_t withEnable = 0;
+  const GpuColorStage* mixStage = nullptr;
+  for (const GpuColorStage& st : stages) {
+    if (st.filters->empty() && st.post->empty() && st.lutA->empty() && st.lutB->empty() && st.mix->empty()
+        && !st.eqExpr && !st.mask) continue;
+    spec.any = true;
+    const bool isMix = !st.lutA->empty() && !st.lutB->empty() && !st.mix->empty();
+    // Keyframe thông số màu, mặt nạ màu, nửa sau tầng trộn LUT, phép đứng SAU tầng trộn: không gộp được.
+    if (st.eqExpr || st.mask || !st.post->empty() || mixStage || (!isMix && !st.mix->empty())) {
+      spec.ok = false;
+      return spec;
+    }
+    for (const std::string& f : SplitFilterChain(*st.filters)) {
+      std::string core;
+      std::string en;
+      if (!BakeableColorFilter(f, core, en)) {
+        spec.ok = false;
+        return spec;
+      }
+      if (!en.empty()) {
+        if (withEnable > 0 && en != enable) {
+          spec.ok = false;
+          return spec;
+        }
+        enable = en;
+        withEnable++;
+      }
+      pre.push_back(core);
+    }
+    if (isMix) mixStage = &st;
   }
-  spec.any = true;
-  if (!lutA.empty() && !lutB.empty() && !mixExpr.empty()) {
-    if (!filters.empty() || !filtersPost.empty()) spec.ok = false;
-    spec.lut = FilterPath(lutA);
-    spec.lut2 = FilterPath(lutB);
-    spec.mix = SubstituteLocalTimeVar(mixExpr, start, "t");
-    return;
+  if (!spec.any) return spec;
+  // enable phải phủ MỌI phép (một hàm thời gian duy nhất), và không đi cùng tầng trộn LUT.
+  if (withEnable > 0 && (withEnable != pre.size() || mixStage)) {
+    spec.ok = false;
+    return spec;
+  }
+  std::string chain;
+  for (const std::string& f : pre) chain += (chain.empty() ? "" : ",") + f;
+  const auto bakeOrFail = [&](const std::string& c, std::string& out) {
+    if (!bake) {
+      out = "?";
+      return true;
+    }
+    const std::string path = BakeColorLut(c);
+    if (path.empty()) return false;
+    out = FilterPath(path);
+    return true;
+  };
+  if (mixStage) {
+    if (chain.empty()) {
+      spec.lut = FilterPath(*mixStage->lutA);
+      spec.lut2 = FilterPath(*mixStage->lutB);
+    } else {
+      const auto lutOf = [&](const std::string& p) { return chain + ",lut3d=file='" + FilterPath(p) + "':interp=trilinear"; };
+      if (!bakeOrFail(lutOf(*mixStage->lutA), spec.lut) || !bakeOrFail(lutOf(*mixStage->lutB), spec.lut2)) {
+        spec.ok = false;
+        return spec;
+      }
+    }
+    spec.mix = SubstituteLocalTimeVar(*mixStage->mix, start, "t");
+    return spec;
   }
   std::string path;
-  std::string enable;
-  if (!filtersPost.empty() || !mixExpr.empty() || !ParseStaticLut(filters, path, enable)) {
+  std::string unusedEnable;
+  if (pre.size() == 1 && ParseStaticLut(pre[0], path, unusedEnable)) {
+    spec.lut = path;   // một lut3d đơn lẻ: tệp của chính nó
+  } else if (!bakeOrFail(chain, spec.lut)) {
     spec.ok = false;
-    return;
+    return spec;
   }
-  spec.lut = path;
-  if (!enable.empty()) spec.mix = SubstituteLocalTimeVar(enable, start, "t");
+  if (withEnable > 0) spec.mix = SubstituteLocalTimeVar(enable, start, "t");
+  return spec;
 }
 
 template <typename Block>
-GpuLutSpec BlockGpuLut(const Block& b, double start) {
-  GpuLutSpec spec;
-  AddGpuLutStage(spec, start, b.adjustFilters, b.adjustFiltersPost, b.adjustLutAPath, b.adjustLutBPath,
-                 b.adjustLutMixExpr, b.adjEqContrastExpr, b.adjEqBrightnessExpr, b.adjEqSaturationExpr,
-                 b.adjustMaskPath);
-  AddGpuLutStage(spec, start, b.adjustLayerFilters, b.adjustLayerFiltersPost, b.adjustLayerLutAPath,
-                 b.adjustLayerLutBPath, b.adjustLayerLutMixExpr, b.adjLayerEqContrastExpr,
-                 b.adjLayerEqBrightnessExpr, b.adjLayerEqSaturationExpr, "");
+GpuLutSpec BlockGpuLut(const Block& b, double start, bool bake = true) {
+  std::vector<GpuColorStage> stages;
+  stages.push_back({&b.adjustFilters, &b.adjustFiltersPost, &b.adjustLutAPath, &b.adjustLutBPath, &b.adjustLutMixExpr,
+                    !b.adjEqContrastExpr.empty() || !b.adjEqBrightnessExpr.empty() || !b.adjEqSaturationExpr.empty(),
+                    !b.adjustMaskPath.empty()});
+  stages.push_back({&b.adjustLayerFilters, &b.adjustLayerFiltersPost, &b.adjustLayerLutAPath, &b.adjustLayerLutBPath,
+                    &b.adjustLayerLutMixExpr,
+                    !b.adjLayerEqContrastExpr.empty() || !b.adjLayerEqBrightnessExpr.empty()
+                      || !b.adjLayerEqSaturationExpr.empty(),
+                    false});
   for (const auto& layer : b.extraAdjustLayers) {
-    AddGpuLutStage(spec, start, layer.filters, layer.filtersPost, layer.lutAPath, layer.lutBPath, layer.lutMixExpr,
-                   layer.eqContrastExpr, layer.eqBrightnessExpr, layer.eqSaturationExpr, "");
+    stages.push_back({&layer.filters, &layer.filtersPost, &layer.lutAPath, &layer.lutBPath, &layer.lutMixExpr,
+                      !layer.eqContrastExpr.empty() || !layer.eqBrightnessExpr.empty() || !layer.eqSaturationExpr.empty(),
+                      false});
   }
-  return spec;
+  return GpuLutFromStages(stages, start, bake);
 }
 
 // Tuỳ chọn LUT nối vào sau tham số của crabgeo_cuda (rỗng khi block không có tầng màu).
@@ -3123,8 +3328,10 @@ std::string GpuLutOptions(const GpuLutSpec& spec) {
 template <typename Block>
 bool BlockColorGpuReady(const Block& b) {
   if (!BlockHasColorAdjust(b)) return true;
+  if (!GpuLutAvailable()) return false;
+  // Bake ngay ở đây (có cache): bake lỗi thì block đi CPU thay vì đồ thị GPU hỏng.
   const GpuLutSpec spec = BlockGpuLut(b, 0.0);
-  return spec.ok && spec.any && GpuLutAvailable();
+  return spec.ok && spec.any;
 }
 
 /* ===== CẮT TRƯỚC KHI PHÓNG TO (mục 1.4, docs/KE_HOACH_TOI_UU_EXPORT_WIN.md) =====
@@ -5768,6 +5975,7 @@ int CommandExportVideo(int argc, char** argv) {
    * dùng luôn, không thì dò (NVDEC từng video lớp phủ chạy song song với phép dò nguồn chính) rồi
    * ghi cache. Env CRABBYCUT_EXPORT_GPU_PROBE_CACHE=0: luôn dò. */
   g_gpuLutKnown = -1;
+  g_gpuLutBakeDir = tempDir / "gpu_color_luts";   // LUT bake của chuỗi màu tĩnh (BakeColorLut)
   const fs::path gpuCacheFile = tempDir / kGpuProbeCacheName;
   const char* cacheEnv = std::getenv("CRABBYCUT_EXPORT_GPU_PROBE_CACHE");
   const bool gpuCacheOn = !(cacheEnv && std::string(cacheEnv) == "0");

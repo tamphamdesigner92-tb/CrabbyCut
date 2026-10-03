@@ -8,7 +8,7 @@
  *   2. chuỗi khung (mỗi khung một mức xám) hiện ĐÚNG khung dự định ở bản GPU — bản đầu của đồ thị GPU
  *      để GPU chạy không đồng bộ thì lớp phủ chữ hiện khung cũ hơn 6 / mới hơn 2 khi 3 lượt chạy song
  *      song (2026-10-02), nên dự án có 3 chuỗi khung ở 3 batch chạy cùng lúc;
- *   3. batch có clip chỉnh màu (chưa có bản GPU) đi đồ thị CPU, batch còn lại đi GPU, trong cùng lượt;
+ *   3. batch có clip mang hiệu ứng chưa có bản GPU (vignette) đi đồ thị CPU, batch còn lại đi GPU, trong cùng lượt;
  *   4. đồ thị GPU lỗi (CRABBYCUT_EXPORT_GPU_TEST_FAIL=1) -> batch đó chạy lại bằng đồ thị CPU, bản xuất
  *      trùng từng khung với bản CPU;
  *   5. nguồn NVDEC không giải mã được (H.264 10-bit) -> giải mã CPU, tải lên dạng p010.
@@ -189,7 +189,7 @@ function scenarioA(assets) {
     clip(0, 0, 50, 0, 0),
     clip(1, 5, 37, 13, -7),
     clip(2, 10, 80, -101, 33),
-    clip(3, 15, 50, 0, 0, { adj_filters: 'eq=saturation=1.3' }),   // chưa có bản GPU -> batch này đi CPU
+    clip(3, 15, 50, 0, 0, { adj_filters: 'vignette=angle=0.600000' }),   // hiệu ứng không gian: chưa có bản GPU -> batch này đi CPU
     clip(4, 20, 65, 7, 3),
     clip(5, 25, 50, 0, 0),
   ];
@@ -367,8 +367,12 @@ function scenarioD(lutOk) {
   const dir = path.join(TEST_DIR, 'D');
   fs.mkdirSync(dir, { recursive: true });
   const source = path.join(dir, 'temp_input.mp4');
-  makeSource(source, 10, false);
+  makeSource(source, 21, false);
   const gamma = (k) => (r, g, b) => [r ** k, g ** k, b ** k];
+  // Chuỗi màu tĩnh frontend sinh (Phơi sáng/Tương phản/Bão hoà, Nhiệt độ, đường cong): sidecar BAKE thành LUT.
+  const grade = "eq=contrast=1.200000:brightness=0.030000:saturation=1.300000,"
+    + "colorbalance=rs=0.100000:gm=-0.050000,curves=all='0/0 0.5/0.6 1/1'";
+  const gated = (chain, expr) => chain.split(/,(?=[a-z]+=)/).map((f) => `${f}:enable='${expr}'`).join(',');
   const lutC = writeCube(path.join(dir, 'static.cube'), gamma(1.15));
   const lutA = writeCube(path.join(dir, 'mix_a.cube'), gamma(0.9));
   /* Âm bản: tuyến tính (nội suy ba chiều đúng tuyệt đối), đi qua xám ở mix 0,5 nên `mix` lệch thời
@@ -381,6 +385,14 @@ function scenarioD(lutOk) {
       adj_filters: `lut3d=file='${filterPath(lutC)}':interp=trilinear` },
     // Lớp Điều chỉnh có keyframe cường độ LUT: A -> B trong 2 s đầu của clip.
     { index: 1, script_index: 1, text: 'c1', start: 4.5, end: 8.5, scale: 43, position_x: 9, position_y: -5,
+      adj_layer_lut_a_path: lutA, adj_layer_lut_b_path: lutB, adj_layer_lut_mix_expr: 'clip(LOCALT/2,0,1)' },
+    // eq + colorbalance + curves tĩnh -> một LUT bake.
+    { index: 2, script_index: 2, text: 'c2', start: 9, end: 12, scale: 50, adj_filters: grade },
+    // Lớp Điều chỉnh chỉ phủ 1..2,5 s của clip (enable chung) -> LUT bake + mix theo enable.
+    { index: 3, script_index: 3, text: 'c3', start: 12.5, end: 16, scale: 50,
+      adj_layer_filters: gated(grade, 'between(LOCALT,1,2.5)') },
+    // Phép tĩnh của chính block TRƯỚC lớp Điều chỉnh trộn LUT: bake vào cả hai cube (lut + lut2).
+    { index: 4, script_index: 4, text: 'c4', start: 16.5, end: 20, scale: 50, adj_filters: 'eq=contrast=1.150000:brightness=0.000000:saturation=1.200000',
       adj_layer_lut_a_path: lutA, adj_layer_lut_b_path: lutB, adj_layer_lut_mix_expr: 'clip(LOCALT/2,0,1)' },
   ];
   const timelineFile = path.join(dir, 'timeline.json');
@@ -397,7 +409,7 @@ function scenarioD(lutOk) {
   }
   assert.ok(runs.length && runs.every((r) => r.gpu && !r.gpu_fallback), `clip chỉ có LUT phải đi đồ thị GPU: ${JSON.stringify(runs)}`);
   const p = videoFramesCheck(cpuOut, gpuOut, 'lut');
-  console.log(`  ok  dự án D (LUT tĩnh + LUT trộn theo keyframe): ${p.count} khung GPU, tệ nhất ${p.worst[1].toFixed(1)} dB (khung ${p.worst[0]})`);
+  console.log(`  ok  dự án D (LUT tĩnh, LUT trộn theo keyframe, chuỗi màu bake, enable phủ một phần): ${p.count} khung GPU, tệ nhất ${p.worst[1].toFixed(1)} dB (khung ${p.worst[0]})`);
 }
 
 function scenarioE(assets) {
