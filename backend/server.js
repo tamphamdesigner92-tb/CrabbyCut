@@ -7456,12 +7456,14 @@ function createApp() {
         sdrAssetOverrides,
       ));
       const timelineFile = path.join(TEMP_DIR, 'export_timeline.json');
+      /* KHÔNG ghi `editingItems`: sidecar không đọc nó (lớp phủ đã chuẩn hoá nằm ở `overlays`), mà item thô
+       * còn nguyên ảnh chữ base64 + khung hoạt ảnh — "Bin Tom" 92 MB: backend stringify + ghi 92 MB, sidecar
+       * quét cả tệp mất ~1 s mỗi lượt xuất (đo 2026-10-03, khâu dò nguồn 1,4 s so với 0,6 s của dự án khác). */
       await fsp.writeFile(timelineFile, JSON.stringify(jsonSafe({
         version: editingPayload.overlays.length ? 4 : 3,
         sequence: sequenceSettings,
         intervals: exportIntervals,
         editingTracks: editingPayload.tracks,
-        editingItems: editingPayload.items,
         assets: editingPayload.assets,
         main_audio_volume: editingPayload.mainAudioVolume,
         overlays: editingPayload.overlays,
