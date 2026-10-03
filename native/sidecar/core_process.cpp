@@ -1157,6 +1157,13 @@ bool GpuRenderAvailableWithNvdec(const std::string& nvencEncoder, const std::str
                    "-c:v", nvencEncoder, "-f", "null", "-"}) == 0;
 }
 
+/* crabgeo_cuda có LUT 3D (`lut`/`lut2`/`mix`, bản n8.1.1-crabbycut.2 trở đi): clip/lớp phủ chỉ có
+ * tầng màu là LUT (lớp Điều chỉnh, HSL + LUT đã bake) đi được đồ thị GPU — xem BlockGpuLut. */
+bool GpuLutAvailable() {
+  static const bool has = CommandOutput({"ffmpeg", "-hide_banner", "-h", "filter=crabgeo_cuda"}).find("lut2") != std::string::npos;
+  return has;
+}
+
 /* Tệp giải mã được bằng NVDEC ra thẳng khung CUDA. NVDEC không giải mã được (AV1 trên GTX 10xx,
  * H.264 10-bit, 4:2:2…) thì `-hwaccel cuda` lặng lẽ lùi về giải mã CPU, khung ra ở RAM và
  * `crabgeo_cuda` (chỉ nhận khung CUDA) không nối được -> lệnh lỗi. Chỉ thử hai khung đầu. Co một
@@ -2890,6 +2897,104 @@ bool IntervalHasColorAdjust(const ExportInterval& item) {
   return BlockHasColorAdjust(item);
 }
 
+/* TẦNG MÀU CHỈ LÀ LUT -> tuỳ chọn LUT của crabgeo_cuda (đồ thị GPU, mục 1.21; cần GpuLutAvailable).
+ * Đạt khi trong mọi tầng màu của block (của chính nó, lớp Điều chỉnh, các lớp thêm) có NHIỀU NHẤT một
+ * tầng không rỗng, và tầng đó là:
+ *  - keyframe cường độ LUT (ColorAdjustLutBlend: 2 cube + biểu thức trộn), không kèm filter khác ->
+ *    `lut=A:lut2=B:mix=<biểu thức>`; hoặc
+ *  - đúng một `lut3d=file='…':interp=trilinear` (HSL + LUT đã bake ở frontend), có thể kèm
+ *    `:enable='…'` khi lớp Điều chỉnh chỉ phủ một phần block -> `lut=A[:mix=<enable>]`.
+ * eq/curves/vignette/mặt nạ màu… -> không đạt (block đi đồ thị CPU). `ok` = đạt (kể cả khi không có
+ * tầng màu nào: `any` = false). Biểu thức theo thời gian thay LOCALT bằng (t − start), như đường CPU
+ * (crabgeo tính `mix` theo mốc khung của chính nó). Không ghi gì ra đĩa (khác ColorAdjustChain). */
+struct GpuLutSpec {
+  bool ok = true;
+  bool any = false;
+  std::string lut;    // đã thoát cho filter script (FilterPath)
+  std::string lut2;
+  std::string mix;
+};
+
+// `lut3d=file='<đường dẫn đã thoát>':interp=trilinear[:enable='<biểu thức>']` — đúng dạng backend sinh.
+bool ParseStaticLut(const std::string& chain, std::string& path, std::string& enable) {
+  const std::string head = "lut3d=file='";
+  const std::string interp = ":interp=trilinear";
+  if (chain.compare(0, head.size(), head) != 0) return false;
+  const size_t close = chain.find('\'', head.size());
+  if (close == std::string::npos) return false;
+  path = chain.substr(head.size(), close - head.size());
+  std::string rest = chain.substr(close + 1);
+  if (rest.compare(0, interp.size(), interp) != 0) return false;
+  rest = rest.substr(interp.size());
+  enable.clear();
+  if (rest.empty()) return !path.empty();
+  const std::string en = ":enable='";
+  if (rest.compare(0, en.size(), en) != 0 || rest.back() != '\'' || rest.size() <= en.size() + 1) return false;
+  enable = rest.substr(en.size(), rest.size() - en.size() - 1);
+  return !path.empty() && enable.find('\'') == std::string::npos;
+}
+
+void AddGpuLutStage(GpuLutSpec& spec, double start, const std::string& filters, const std::string& filtersPost,
+                    const std::string& lutA, const std::string& lutB, const std::string& mixExpr,
+                    const std::string& eqC, const std::string& eqB, const std::string& eqS,
+                    const std::string& mask) {
+  if (filters.empty() && filtersPost.empty() && lutA.empty() && lutB.empty() && mixExpr.empty()
+      && eqC.empty() && eqB.empty() && eqS.empty() && mask.empty()) return;
+  if (spec.any || !eqC.empty() || !eqB.empty() || !eqS.empty() || !mask.empty()) {
+    spec.ok = false;
+    return;
+  }
+  spec.any = true;
+  if (!lutA.empty() && !lutB.empty() && !mixExpr.empty()) {
+    if (!filters.empty() || !filtersPost.empty()) spec.ok = false;
+    spec.lut = FilterPath(lutA);
+    spec.lut2 = FilterPath(lutB);
+    spec.mix = SubstituteLocalTimeVar(mixExpr, start, "t");
+    return;
+  }
+  std::string path;
+  std::string enable;
+  if (!filtersPost.empty() || !mixExpr.empty() || !ParseStaticLut(filters, path, enable)) {
+    spec.ok = false;
+    return;
+  }
+  spec.lut = path;
+  if (!enable.empty()) spec.mix = SubstituteLocalTimeVar(enable, start, "t");
+}
+
+template <typename Block>
+GpuLutSpec BlockGpuLut(const Block& b, double start) {
+  GpuLutSpec spec;
+  AddGpuLutStage(spec, start, b.adjustFilters, b.adjustFiltersPost, b.adjustLutAPath, b.adjustLutBPath,
+                 b.adjustLutMixExpr, b.adjEqContrastExpr, b.adjEqBrightnessExpr, b.adjEqSaturationExpr,
+                 b.adjustMaskPath);
+  AddGpuLutStage(spec, start, b.adjustLayerFilters, b.adjustLayerFiltersPost, b.adjustLayerLutAPath,
+                 b.adjustLayerLutBPath, b.adjustLayerLutMixExpr, b.adjLayerEqContrastExpr,
+                 b.adjLayerEqBrightnessExpr, b.adjLayerEqSaturationExpr, "");
+  for (const auto& layer : b.extraAdjustLayers) {
+    AddGpuLutStage(spec, start, layer.filters, layer.filtersPost, layer.lutAPath, layer.lutBPath, layer.lutMixExpr,
+                   layer.eqContrastExpr, layer.eqBrightnessExpr, layer.eqSaturationExpr, "");
+  }
+  return spec;
+}
+
+// Tuỳ chọn LUT nối vào sau tham số của crabgeo_cuda (rỗng khi block không có tầng màu).
+std::string GpuLutOptions(const GpuLutSpec& spec) {
+  if (!spec.ok || !spec.any) return "";
+  std::string out = ":lut='" + spec.lut + "'";
+  if (!spec.lut2.empty()) out += ":lut2='" + spec.lut2 + "'";
+  if (!spec.mix.empty()) out += ":mix='" + spec.mix + "'";
+  return out;
+}
+
+// Tầng màu của block có bản GPU (không có tầng màu, hoặc chỉ là LUT và bản ffmpeg có LUT trong crabgeo).
+template <typename Block>
+bool BlockColorGpuReady(const Block& b) {
+  if (!BlockHasColorAdjust(b)) return true;
+  const GpuLutSpec spec = BlockGpuLut(b, 0.0);
+  return spec.ok && spec.any && GpuLutAvailable();
+}
+
 /* ===== CẮT TRƯỚC KHI PHÓNG TO (mục 1.4, docs/KE_HOACH_TOI_UU_EXPORT_WIN.md) =====
  *
  * Clip phóng to thì đường nhanh co CẢ khung nguồn lên rồi mới cắt lấy cửa sổ sequence. Test.crab:
@@ -3202,6 +3307,33 @@ void WriteClipVideoFilters(
   } else {
     AppendLogoRemovalFilters(script, item.logoMode, item.logoRects, "logoc" + idx + "_");
   }
+  if (gpuClip) {
+    /* ĐỒ THỊ GPU (mục 1.21): clip không xoá logo, tầng màu rỗng hoặc chỉ là LUT (BatchGpuEligible).
+     * Một crabgeo_cuda thay cả hình học đường nhanh — co nguyên khung nguồn về w×h rồi đặt ở (x, y)
+     * trên khung sequence, mẫu màu tính đúng vị trí nên không cần mẹo dời chroma / 4:4:4 / cắt
+     * trước như đường CPU (bộ lọc chỉ lấy mẫu phần thấy được). Cỡ + vị trí CÙNG phép tính với
+     * MainLaneFastPlan. LUT (BlockGpuLut) áp lên nội dung SAU phép co — như "màu sau khi co" của
+     * đường CPU (mục 1.19), tính float từ khung nguồn 10-bit chứ không qua RGB 8-bit. Nguồn giải mã
+     * CPU: tải lên sau `trim` (chỉ khung được dùng), trước `tpad` (khung nhân bản ở đuôi là khung
+     * GPU, không tải lại). */
+    const double s = std::stod(FfmpegDouble(scaleValue));
+    const int gw = static_cast<int>(std::max(2.0, std::ceil(settings.sourceWidth * s / 2) * 2));
+    const int gh = static_cast<int>(std::max(2.0, std::ceil(settings.sourceHeight * s / 2) * 2));
+    const int gx = static_cast<int>((seqW - gw) / 2.0 + std::stod(FfmpegDouble(item.positionX)));
+    const int gy = static_cast<int>((seqH - gh) / 2.0 + std::stod(FfmpegDouble(item.positionY)));
+    if (!g_gpuMainNvdec) script << ",format=" << GpuUploadFormat(settings.sourcePixFmt) << ",hwupload_cuda";
+    script << ",tpad=stop=-1:stop_mode=clone,crabgeo_cuda=w=" << gw << ":h=" << gh
+           << ":ow=" << seqW << ":oh=" << seqH << ":x=" << gx << ":y=" << gy << ":format=yuv420p";
+    if (settings.sourceColorUntagged) script << ":in_matrix=bt709";
+    script << GpuLutOptions(BlockGpuLut(item, 0.0)) << ",setsar=1[fc" << idx << "];\n";
+    script << "color=c=black:s=" << seqW << "x" << seqH
+           << ":d=" << FixedSeconds(baseDuration)
+           << ":r=" << settings.renderFps << ",format=yuv420p,hwupload_cuda[fk" << idx << "];\n";
+    script << "[fc" << idx << "][fk" << idx << "]concat=n=2:v=1:a=0,trim=end_frame=" << item.renderFrames
+           << "[v" << idx << "];\n";
+    g_fastClipCount++;
+    return;
+  }
   // Clip lane chính đã setpts 0-based -> LOCALT trừ mốc 0.
   // Lớp Điều chỉnh là tầng THỨ HAI, mặt nạ RỖNG: nó nối sau nhánh mặt nạ của chính block (đã
   // đóng ở tầng đầu), đúng như preview áp lượt 2 lên TOÀN khung. Dựng qua ColorAdjustChain như
@@ -3212,31 +3344,6 @@ void WriteClipVideoFilters(
     : (!clipDynTransform && item.videoMaskPath.empty() && scaleValue < 1.0);
   const SplitColorStages color = SplitColorStagesForScale(
     BlockColorStages(item, 0.0, "adjc" + idx + "_", "adjl" + idx + "_"), colorAfterScale);
-  if (gpuClip) {
-    /* ĐỒ THỊ GPU (mục 1.21): clip không có tầng màu/xoá logo (BatchGpuEligible). Một crabgeo_cuda
-     * thay cả hình học đường nhanh — co nguyên khung nguồn về w×h rồi đặt ở (x, y) trên khung
-     * sequence, mẫu màu tính đúng vị trí nên không cần mẹo dời chroma / 4:4:4 / cắt trước như
-     * đường CPU (bộ lọc chỉ lấy mẫu phần thấy được). Cỡ + vị trí CÙNG phép tính với
-     * MainLaneFastPlan. Nguồn giải mã CPU: tải lên sau `trim` (chỉ khung được dùng), trước `tpad`
-     * (khung nhân bản ở đuôi là khung GPU, không tải lại). */
-    const double s = std::stod(FfmpegDouble(scaleValue));
-    const int gw = static_cast<int>(std::max(2.0, std::ceil(settings.sourceWidth * s / 2) * 2));
-    const int gh = static_cast<int>(std::max(2.0, std::ceil(settings.sourceHeight * s / 2) * 2));
-    const int gx = static_cast<int>((seqW - gw) / 2.0 + std::stod(FfmpegDouble(item.positionX)));
-    const int gy = static_cast<int>((seqH - gh) / 2.0 + std::stod(FfmpegDouble(item.positionY)));
-    if (!g_gpuMainNvdec) script << ",format=" << GpuUploadFormat(settings.sourcePixFmt) << ",hwupload_cuda";
-    script << ",tpad=stop=-1:stop_mode=clone,crabgeo_cuda=w=" << gw << ":h=" << gh
-           << ":ow=" << seqW << ":oh=" << seqH << ":x=" << gx << ":y=" << gy << ":format=yuv420p";
-    if (settings.sourceColorUntagged) script << ":in_matrix=bt709";
-    script << ",setsar=1[fc" << idx << "];\n";
-    script << "color=c=black:s=" << seqW << "x" << seqH
-           << ":d=" << FixedSeconds(baseDuration)
-           << ":r=" << settings.renderFps << ",format=yuv420p,hwupload_cuda[fk" << idx << "];\n";
-    script << "[fc" << idx << "][fk" << idx << "]concat=n=2:v=1:a=0,trim=end_frame=" << item.renderFrames
-           << "[v" << idx << "];\n";
-    g_fastClipCount++;
-    return;
-  }
   if (fast.ok) script << fast.preCrop;
   script << color.pre;
   if (fast.ok) {
@@ -3944,12 +4051,18 @@ std::string OverlayTimingChain(const ExportOverlay& overlay, const ExportSetting
   return timing.str();
 }
 
+// Cách lớp phủ đi trên đồ thị GPU — xem OverlayGpuModeFor.
+enum class OverlayGpu { None, Native, CpuYuv, CpuCanvas };
+
+/* `gpu` (đồ thị GPU, xem OverlayGpuModeFor): CpuYuv = chuỗi CPU này tới yuva420p rồi tải lên +
+ * crabblend; CpuCanvas = ghép RGBA lên khung trong suốt rồi tải lên + crabblend. None = đồ thị CPU. */
 void WriteVisualOverlayFilter(
   std::ofstream& script,
   const ExportOverlay& overlay,
   const std::string& inputLabel,
   const std::string& outputLabel,
-  const ExportSettings& settings
+  const ExportSettings& settings,
+  OverlayGpu gpu = OverlayGpu::None
 ) {
   // VIDEO overlay có hoạt ảnh: opacity qua fade, dịch chuyển qua overlay x/y theo t,
   // thu phóng/xoay qua nhánh AppendKfTransformFilters (khi hiệu ứng có dùng hai kênh đó).
@@ -4068,6 +4181,8 @@ void WriteVisualOverlayFilter(
      * như không đổi (52,50 -> 52,53 dB). Video lớp phủ đục hoàn toàn nên cũng đổi thẳng. */
     if (stillOnce && AlphaChromaEnabled()) script << AlphaWeightedYuva420("ov" + id);
     else script << ",scale=out_color_matrix=bt709:out_range=tv,format=yuva420p";
+    // Đồ thị GPU: tải lên TRƯỚC loop/tpad — khung lặp lại chỉ là tham chiếu tới khung GPU đã tải.
+    if (gpu == OverlayGpu::CpuYuv) script << ",hwupload_cuda";
   }
   if (stillOnce) {
     script << ",loop=loop=-1:size=1,trim=duration=" << FixedSeconds(overlay.duration) << ",";
@@ -4078,7 +4193,26 @@ void WriteVisualOverlayFilter(
   if (seqTail > 0) script << ",tpad=stop=" << seqTail << ":stop_mode=clone";
   script << "[ov" << id << "];\n";
 
-  script << inputLabel << "[ov" << id << "]overlay=";
+  if (gpu == OverlayGpu::CpuCanvas) {
+    /* Khung trong suốt cỡ sequence ĐÚNG lưới khung của luồng chính (setpts dời số khung nguyên trên
+     * timebase 1/r), phủ từ một khung trước cửa sổ `enable` tới hai khung sau mép cuối — lớp phủ ghép
+     * lên nó y như ghép lên luồng chính ở đường CPU (cùng mốc, cùng `t` cho x/y/enable).
+     * `overlay=format=rgb` lên nền alpha 0: vf_overlay bù alpha nền (UNPREMULTIPLY_ALPHA) nên màu
+     * ra đúng màu lớp phủ, alpha ra đúng alpha lớp phủ — khung ra là RGBA "thẳng" như crabblend cần. */
+    const double fps = ParseFpsValue(settings.renderFps);
+    long long n0 = 0;
+    double span = end + 1.0;
+    if (fps > 0.0) {
+      n0 = std::max(0LL, static_cast<long long>(std::floor(OverlayEnableStart(start, settings) * fps)) - 1);
+      const long long n1 = static_cast<long long>(std::ceil(end * fps)) + 2;
+      span = static_cast<double>(std::max(1LL, n1 - n0)) / fps;
+    }
+    script << "color=c=black@0:s=" << seqW << "x" << seqH << ":r=" << settings.renderFps
+           << ":d=" << FixedSeconds(span) << ",format=rgba,setpts=PTS+" << n0 << "[cv" << id << "];\n";
+    script << "[cv" << id << "][ov" << id << "]overlay=";
+  } else {
+    script << inputLabel << "[ov" << id << "]" << (gpu == OverlayGpu::CpuYuv ? "crabblend_cuda=" : "overlay=");
+  }
   if (yuvStatic) {
     // `w`/`h` ở đây là cỡ ĐÃ ĐỆM (+4). Toạ độ gốc trunc(...) trừ đi phần đệm trái/trên -> chẵn.
     const std::string bx = "trunc((" + std::to_string(seqW) + "-(w-4))/2+" + posX + ")";
@@ -4105,17 +4239,31 @@ void WriteVisualOverlayFilter(
          // biến mất 1–3 frame ở cuối cửa sổ gây "nháy"; enable window vẫn gate hiển thị.
          // Nay giữ bằng các khung nhân bản ở đuôi chuỗi (SequenceTailFrames) + pass; chỉ
          // khi không biết số khung mới dùng repeat (đắt, xem SequenceTailFrames).
-         << ":eof_action=" << ((OverlayIsImageSequence(overlay) && seqTail == 0) ? "repeat" : "pass")
-         << ":format=" << (yuvStatic ? "yuv420" : "auto");
-  // Lớp phủ động trong chuỗi YUV: ghép RGBA như cũ rồi về ngay yuv420p BT.709/tv, để lớp sau
-  // (và cả phần còn lại của chuỗi) không phải kéo luồng chính qua RGBA.
-  if (yuvChain && !yuvStatic) script << ",scale=out_color_matrix=bt709:out_range=tv,format=yuv420p";
+         << ":eof_action=" << ((OverlayIsImageSequence(overlay) && seqTail == 0) ? "repeat" : "pass");
+  // crabblend (CpuYuv) không có tuỳ chọn format: nó chỉ trộn yuva420p lên yuv420p, trùng từng bit
+  // với overlay=format=yuv420.
+  if (gpu == OverlayGpu::CpuCanvas) script << ":format=rgb";
+  else if (gpu != OverlayGpu::CpuYuv) script << ":format=" << (yuvStatic ? "yuv420" : "auto");
+  if (gpu == OverlayGpu::CpuCanvas) {
+    /* Ghép xong thì dời khung trong suốt SỚM 1 ms trước khi trộn: mốc khung luồng chính ở chỗ trộn
+     * đã qua timebase µs của các bộ trộn trước (6,666666 s cho khung 200), mốc n/r đúng thì muộn hơn
+     * 1 µs và crabblend lấy khung trong suốt TRƯỚC đó — đo trên "Yêu Con": chuỗi khung có keyframe cỡ
+     * hiện chậm một khung ở 2/3 số khung đầu và cuối cửa sổ (28 dB so với CPU). Dời TRƯỚC khi ghép thì
+     * sai chỗ khác: ảnh/video lớp phủ chỉ sớm 0,1 ms (kOverlayTieEpsilon) nên khung đầu bị bỏ. */
+    script << ",settb=AVTB,setpts=PTS-round(0.001/TB)";
+    script << ",hwupload_cuda,crabgeo_cuda=format=yuva420p:bg=transparent:alpha_chroma=1:passthrough=0[ovu" << id << "];\n";
+    script << inputLabel << "[ovu" << id << "]crabblend_cuda=x=0:y=0:eof_action=pass";
+  } else if (yuvChain && !yuvStatic) {
+    // Lớp phủ động trong chuỗi YUV: ghép RGBA như cũ rồi về ngay yuv420p BT.709/tv, để lớp sau
+    // (và cả phần còn lại của chuỗi) không phải kéo luồng chính qua RGBA.
+    script << ",scale=out_color_matrix=bt709:out_range=tv,format=yuv420p";
+  }
   script << outputLabel << ";\n";
 }
 
 /* LỚP PHỦ TRÊN ĐỒ THỊ GPU (mục 1.21). Chỉ cho lớp phủ "yuvStatic" của đường CPU — đứng yên, không
- * xoay/keyframe hình học/hoạt ảnh/màu/mặt nạ/mép mềm/lật (OverlayGpuEligible); keyframe ĐỘ MỜ thì
- * đi biểu thức `opacity` của crabblend (đường CPU ghép lớp đó ở RGBA). Cùng phép tính với nhánh
+ * xoay/keyframe hình học/hoạt ảnh/mặt nạ/mép mềm/lật, màu chỉ là LUT (OverlayGpuNative); keyframe ĐỘ
+ * MỜ thì đi biểu thức `opacity` của crabblend (đường CPU ghép lớp đó ở RGBA). Cùng phép tính với nhánh
  * yuvStatic của WriteVisualOverlayFilter: cỡ `max(2,ceil(iw*s/2)*2)`, đệm 4 điểm ảnh trong suốt ở
  * toạ độ `mod(...,2)`, toạ độ trộn chẵn, cùng cửa sổ `enable`/`eof_action`/khung đuôi. Khác ở:
  *  - scale + format=rgba + pad + đổi bt709 + yuva420p gộp vào MỘT crabgeo_cuda; ảnh/chuỗi khung
@@ -4160,6 +4308,8 @@ void WriteVisualOverlayFilterGpu(
   // Video không gắn nhãn ma trận: đọc theo bt709 như UntaggedColorFix của đường CPU.
   if (!image && overlay.colorUntagged) script << ":in_matrix=bt709";
   if (stillOnce && AlphaChromaEnabled()) script << ":alpha_chroma=1";
+  // LUT (lớp Điều chỉnh / HSL + LUT): mốc thời gian tuyệt đối sau setpts -> LOCALT = t − start.
+  script << GpuLutOptions(BlockGpuLut(overlay, start));
   if (stillOnce) {
     script << ",loop=loop=-1:size=1,trim=duration=" << FixedSeconds(overlay.duration) << ",";
     WriteOverlaySetpts(script, overlay, settings);
@@ -4185,18 +4335,18 @@ void WriteVisualOverlayFilterGpu(
   script << outputLabel << ";\n";
 }
 
-/* BATCH ĐI ĐỒ THỊ GPU ĐƯỢC KHÔNG (mục 1.21). Bộ lọc CUDA hiện có hình học tĩnh (crabgeo) và phép
- * trộn có độ mờ (crabblend): clip phải đi đường nhanh YUV của CPU (MainLaneFastPlan) và không có
- * tầng màu / xoá logo; lớp phủ phải là "yuvStatic" của đường CPU — đứng yên, không xoay/keyframe/
- * hoạt ảnh/màu/mặt nạ/mép mềm/lật/xoá logo. Một thứ không đạt là CẢ batch đi đồ thị CPU (chưa có
- * đường tải xuống -> bộ lọc CPU -> tải lên giữa đồ thị).
+/* BATCH ĐI ĐỒ THỊ GPU ĐƯỢC KHÔNG (mục 1.21). Bộ lọc CUDA hiện có hình học tĩnh + LUT (crabgeo) và
+ * phép trộn có độ mờ (crabblend): clip phải đi đường nhanh YUV của CPU (MainLaneFastPlan), không xoá
+ * logo, tầng màu rỗng hoặc chỉ là LUT (BlockGpuLut); lớp phủ nào cũng đi được (OverlayGpuModeFor —
+ * chưa có bản GPU thì dựng bằng CPU rồi tải lên), trừ text. Một clip không đạt là CẢ batch đi đồ
+ * thị CPU (giải mã NVDEC ra khung CUDA cho cả input, chưa có đường tải xuống giữa đồ thị).
  * crabgeo co nhỏ tối đa ~15,7 lần mỗi mặt phẳng (bicubic: ceil(4·tỉ lệ)+1 ≤ 64 tap). Mặt phẳng màu
  * của nguồn RGBA (ảnh) co gấp đôi mặt phẳng sáng khi ra 4:2:0 -> ảnh chỉ tới ~7,8 lần. */
 const double kGpuMinScale = 1.0 / 15.0;
 const double kGpuMinScaleRgba = 2.0 / 15.0;
 
 bool ClipGpuEligible(const ExportInterval& item, const ExportSettings& settings) {
-  if (BlockHasColorAdjust(item) || !item.logoAiDir.empty() || !item.logoRects.empty()) return false;
+  if (!BlockColorGpuReady(item) || !item.logoAiDir.empty() || !item.logoRects.empty()) return false;
   if (!g_gpuMainNvdec && GpuUploadFormat(settings.sourcePixFmt).empty()) return false;
   // Cùng các cờ mà WriteClipVideoFilters đưa vào MainLaneFastPlan.
   const bool dynamicClip = HasKeyframeExpr(item.kfScaleExpr, item.kfRotExpr, item.kfOpacityExpr, item.kfXExpr, item.kfYExpr)
@@ -4208,20 +4358,52 @@ bool ClipGpuEligible(const ExportInterval& item, const ExportSettings& settings)
   return MainLaneFastPlan(item, settings, dynamicClip, scaleValue, opacityValue).ok;
 }
 
-bool OverlayGpuEligible(const ExportOverlay& overlay, const ExportSettings& settings) {
+/* Lớp phủ có bản GPU riêng (WriteVisualOverlayFilterGpu): đứng yên, không xoay/lật/mép mềm/mặt nạ/
+ * xoá logo, tầng màu rỗng hoặc chỉ là LUT. Keyframe ĐỘ MỜ một mình thì được: crabblend nhận biểu thức
+ * `opacity` theo `t`. Keyframe vị trí/cỡ/xoay, hoạt ảnh -> không (đi OverlayGpu::CpuCanvas). */
+bool OverlayGpuNative(const ExportOverlay& overlay, const ExportSettings& settings) {
   if (!YuvCompositeEnabled(settings) || overlay.type == "text") return false;
   const double overlayFit = (overlay.fitScale > 0.0) ? overlay.fitScale : 1.0;
   const double scaleValue = std::max(0.01, (overlay.scale / 100.0) * overlayFit);
   const bool image = OverlayIsImageLike(overlay) || OverlayIsImageSequence(overlay);
   if (scaleValue < (image ? kGpuMinScaleRgba : kGpuMinScale)) return false;
-  // Keyframe ĐỘ MỜ một mình thì được: crabblend nhận biểu thức `opacity` theo `t` (xem
-  // WriteVisualOverlayFilterGpu). Keyframe vị trí/cỡ/xoay thì chưa.
   if (HasKeyframeExpr(overlay.kfScaleExpr, overlay.kfRotExpr, "", overlay.kfXExpr, overlay.kfYExpr)
       || HasAnimGeomExpr(overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr) || !overlay.animXExpr.empty()
       || overlay.animInDur > 0.001 || overlay.animOutDur > 0.001) return false;
   if (std::abs(overlay.rotation) > 1e-6 || overlay.flipX || overlay.flipY || overlay.featherPx > 0) return false;
-  if (BlockHasColorAdjust(overlay) || !overlay.videoMaskPath.empty()) return false;
+  if (!overlay.videoMaskPath.empty() || !BlockColorGpuReady(overlay)) return false;
+  // Ảnh tĩnh xử lý một lần: crabgeo chạy trên khung duy nhất (mốc 0) -> LUT có `mix` theo thời gian sai.
+  if (BlockHasColorAdjust(overlay) && OverlayStillOnce(overlay)) return false;
   return overlay.logoAiDir.empty() && overlay.logoRects.empty();
+}
+
+/* Lớp phủ "yuvStatic" của đường CPU (WriteVisualOverlayFilter): chuỗi riêng của lớp phủ ra yuva420p
+ * đã đệm, trộn bằng `overlay=format=yuv420` ở toạ độ chẵn. */
+bool OverlayYuvStatic(const ExportOverlay& overlay, const ExportSettings& settings) {
+  const bool overlayKf = HasKeyframeExpr(overlay.kfScaleExpr, overlay.kfRotExpr, overlay.kfOpacityExpr,
+                                         overlay.kfXExpr, overlay.kfYExpr);
+  return YuvCompositeEnabled(settings) && !overlayKf && overlay.animXExpr.empty()
+      && !HasAnimGeomExpr(overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr)
+      && std::abs(overlay.rotation) <= 1e-6;
+}
+
+/* LỚP PHỦ TRÊN ĐỒ THỊ GPU — bốn cách (WriteFilterScript):
+ *  Native    bản GPU riêng (WriteVisualOverlayFilterGpu): crabgeo + crabblend.
+ *  CpuYuv    lớp phủ yuvStatic chưa có bản GPU (mép mềm, chuỗi màu, mặt nạ, lật, xoá logo…): CHÍNH
+ *            chuỗi CPU của nó (giải mã + xử lý ở cỡ lớp phủ, thường nhỏ) tới yuva420p đã đệm, rồi
+ *            `hwupload_cuda` và crabblend thay `overlay=format=yuv420` — trùng từng bit với CPU.
+ *  CpuCanvas lớp phủ động (keyframe vị trí/cỡ/xoay, hoạt ảnh): đường CPU ghép RGBA lên luồng chính ở
+ *            toạ độ/cỡ đổi theo khung. Ở đây ghép RGBA lên một khung TRONG SUỐT cỡ sequence (chỉ trong
+ *            cửa sổ của lớp phủ), tải lên, crabgeo đổi yuva420p (màu mép theo trọng số alpha), rồi
+ *            crabblend ở (0, 0) — luồng chính không phải đi vòng YUV -> RGB -> YUV như đường CPU.
+ *  None      text (drawtext) -> cả batch đi đồ thị CPU.
+ * Trước đây (phiên 10) mọi lớp phủ không Native kéo cả batch về CPU — dự án "Yêu Con" có 2 miếng vá
+ * Retouch mép mềm + một chuỗi khung có keyframe cỡ nên batch 45 s của nó không bao giờ đi GPU.
+ * (enum OverlayGpu khai ở trên WriteVisualOverlayFilter.) */
+OverlayGpu OverlayGpuModeFor(const ExportOverlay& overlay, const ExportSettings& settings) {
+  if (!YuvCompositeEnabled(settings) || overlay.type == "text") return OverlayGpu::None;
+  if (OverlayGpuNative(overlay, settings)) return OverlayGpu::Native;
+  return OverlayYuvStatic(overlay, settings) ? OverlayGpu::CpuYuv : OverlayGpu::CpuCanvas;
 }
 
 // Lượt xuất này dựng đồ thị GPU cho batch đạt — CommandExportVideo đặt sau các phép dò.
@@ -4239,7 +4421,7 @@ bool BatchGpuEligible(const std::vector<ExportInterval>& intervals, size_t offse
     if (!OverlayIsVisual(overlay)) continue;
     if (overlay.type != "text" && overlay.assetInputIndex < 0) continue;
     if (overlay.type == "text" && !TextOverlaySupported()) continue;
-    if (!OverlayGpuEligible(overlay, settings)) return false;
+    if (OverlayGpuModeFor(overlay, settings) == OverlayGpu::None) return false;
   }
   return true;
 }
@@ -4459,7 +4641,9 @@ bool WriteFilterScript(
     if (overlay.type == "text") {
       WriteTextOverlayFilter(script, overlay, currentVideo, outputLabel, settings);
     } else if (g_gpuGraph) {
-      WriteVisualOverlayFilterGpu(script, overlay, currentVideo, outputLabel, settings);
+      const OverlayGpu mode = OverlayGpuModeFor(overlay, settings);
+      if (mode == OverlayGpu::Native) WriteVisualOverlayFilterGpu(script, overlay, currentVideo, outputLabel, settings);
+      else WriteVisualOverlayFilter(script, overlay, currentVideo, outputLabel, settings, mode);
     } else {
       WriteVisualOverlayFilter(script, overlay, currentVideo, outputLabel, settings);
     }
@@ -4671,6 +4855,7 @@ void AppendOverlayInputArgs(
   const std::vector<ExportOverlay>& overlays,
   double sequenceDuration,
   const fs::path& baseDir,
+  const ExportSettings& settings,
   bool gpuGraph = false
 ) {
   for (const auto& overlay : overlays) {
@@ -4706,7 +4891,10 @@ void AppendOverlayInputArgs(
        * khi không được dựng lại, nên tiếng giữ hành vi cũ.
        * Test: tests/scripts/export_concat_video_overlay.js. */
       cmd.insert(cmd.end(), {"-reinit_filter:v", "0"});
-      if (gpuGraph && overlay.gpuNvdec) AppendNvdecInputArgs(cmd);
+      // NVDEC chỉ cho lớp phủ có bản GPU riêng: CpuYuv/CpuCanvas xử lý khung ở CPU.
+      if (gpuGraph && overlay.gpuNvdec && OverlayGpuModeFor(overlay, settings) == OverlayGpu::Native) {
+        AppendNvdecInputArgs(cmd);
+      }
       cmd.insert(cmd.end(), {"-i", assetPath});
     }
   }
@@ -4887,7 +5075,7 @@ bool PrepareExportBatch(
       }
       if (nvdec) AppendNvdecInputArgs(cmd);
       cmd.insert(cmd.end(), {"-i", source});
-      AppendOverlayInputArgs(cmd, overlays, sequenceDuration, tempDir, gpuGraph);
+      AppendOverlayInputArgs(cmd, overlays, sequenceDuration, tempDir, settings, gpuGraph);
       for (size_t k = firstExtraRange; k < ranges.seekTo.size(); k++) {
         cmd.insert(cmd.end(), {"-reinit_filter", "0"});
         if (ranges.seekTo[k] > 0.0) {
@@ -5435,6 +5623,7 @@ int CommandExportVideo(int argc, char** argv) {
   // 0 = không dùng được GPU, 1 = GPU được nhưng NVDEC không giải mã được nguồn chính, 2 = cả hai.
   auto gpuProbe = std::async(std::launch::async, [crabFilters, nvencName, &source]() {
     if (!crabFilters() || !HasFfmpegEncoder(nvencName)) return 0;
+    GpuLutAvailable();   // dò sẵn (cache tĩnh) để BatchGpuEligible ở luồng chính khỏi chờ
     if (GpuRenderAvailableWithNvdec(nvencName, source)) return 2;
     return GpuRenderAvailable(nvencName) ? 1 : 0;
   });

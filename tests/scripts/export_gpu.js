@@ -19,6 +19,13 @@
  * đường CPU ghép lớp đó ở RGB (format=gbrap) nên kéo CẢ batch qua YUV -> RGB -> YUV (lệch ~35 dB
  * trên testsrc2, kể cả trước khi lớp phủ hiện) — so với chính đồ thị GPU ở độ mờ tĩnh: keyframe
  * "2 s đầu 50%, sau đó 100%" phải trùng bản 50% ở đoạn đầu và bản 100% ở đoạn sau.
+ * Dự án D: clip có LUT tĩnh (`lut3d` trong adj_filters) và LUT trộn theo keyframe cường độ (adj_lut_a/b
+ * + biểu thức) — tuỳ chọn lut/lut2/mix của crabgeo (bản n8.1.1-crabbycut.2 trở đi; bản cũ thì batch đó
+ * phải đi CPU). LUT B đổi kênh màu: `mix` lệch thời gian là lệch hẳn khỏi CPU.
+ * Dự án E: lớp phủ chưa có bản GPU vẫn để batch đi GPU — video mép mềm (dựng bằng CPU tới yuva420p rồi
+ * tải lên, phải trùng CPU), chuỗi khung có keyframe cỡ và ảnh xoay (ghép RGBA lên khung trong suốt rồi
+ * tải lên). Nền phẳng: đường CPU ghép lớp động ở RGB, vòng YUV -> RGB -> YUV trên nền phẳng gần như
+ * không sai số. Chuỗi khung phải hiện ĐÚNG khung.
  *
  * Cần bản ffmpeg có crabgeo_cuda + GPU NVIDIA; thiếu thì BỎ QUA.
  * Chạy: npm run test:export-gpu
@@ -89,14 +96,14 @@ function makeSource(file, seconds, tenBit) {
     '-c:a', 'aac', '-b:a', '128k', '-shortest', file], 'nguồn');
 }
 
-function writeTimeline(file, intervals, overlays) {
+function writeTimeline(file, intervals, overlays, renderFps = FPS_TEXT) {
   fs.writeFileSync(file, JSON.stringify({
     version: 4,
     sequence: { width: W, height: H, fps: 'source' },
     intervals,
     editingTracks: [], editingItems: [], assets: [], main_audio_volume: 100, overlays,
     settings: { resolution: 'sequence', width: W, height: H, fps: 'source', codec: 'h264', quality: 'high',
-      rate_mode: 'custom', rate_mbps: 60, audio_bitrate: '128k', render_fps: FPS_TEXT },
+      rate_mode: 'custom', rate_mbps: 60, audio_bitrate: '128k', render_fps: renderFps },
   }), 'utf8');
 }
 
@@ -317,6 +324,146 @@ function scenarioC(assets) {
     + `đoạn 100% trùng bản 100% (≥ ${min(window(vs100, full)).toFixed(1)} dB)`);
 }
 
+// .cube 17³, r chạy nhanh nhất; `fn(r, g, b)` -> [r, g, b] trên thang 0..1.
+function writeCube(file, fn) {
+  const n = 17;
+  const lines = ['TITLE "export_gpu"', `LUT_3D_SIZE ${n}`, ''];
+  for (let b = 0; b < n; b++) {
+    for (let g = 0; g < n; g++) {
+      for (let r = 0; r < n; r++) lines.push(fn(r / (n - 1), g / (n - 1), b / (n - 1)).map((v) => v.toFixed(6)).join(' '));
+    }
+  }
+  fs.writeFileSync(file, `${lines.join('\n')}\n`);
+  return file;
+}
+
+// Đường dẫn bên trong filtergraph như backend ghi (ColorAdjust.filterPath): `/` và `\:`.
+const filterPath = (p) => p.replace(/\\/g, '/').replace(/:/g, '\\:');
+
+// `allow`: chỉ số khung được phép khác CPU (kèm lý do ở nơi gọi).
+function videoFramesCheck(cpuOut, gpuOut, tag, allow = []) {
+  const p = framePsnr(gpuOut, cpuOut, tag);
+  assert.strictEqual(p.count, frameHashes(cpuOut).length, `${tag}: số khung`);
+  const bad = p.bad.filter((r) => !allow.includes(r[0]));
+  assert.deepStrictEqual(bad.map((r) => `${r[0]}:${r[1].toFixed(1)}`), [], `${tag}: khung GPU khác CPU (dưới ${MIN_PSNR} dB)`);
+  return p;
+}
+
+// Mức Y trung bình của ô 16×16 tại (x, y) ở khung `n`.
+function lumaAt(file, n, x, y) {
+  const r = mustRun('ffmpeg', ['-v', 'info', '-i', file, '-vf',
+    `trim=start_frame=${n}:end_frame=${n + 1},crop=16:16:${x}:${y},format=yuv420p,signalstats,`
+    + 'metadata=print:key=lavfi.signalstats.YAVG', '-f', 'null', '-'], 'signalstats');
+  return Number(/lavfi\.signalstats\.YAVG=([\d.]+)/.exec(r.stderr)[1]);
+}
+
+function scenarioD(lutOk) {
+  const dir = path.join(TEST_DIR, 'D');
+  fs.mkdirSync(dir, { recursive: true });
+  const source = path.join(dir, 'temp_input.mp4');
+  makeSource(source, 10, false);
+  const gamma = (k) => (r, g, b) => [r ** k, g ** k, b ** k];
+  const lutC = writeCube(path.join(dir, 'static.cube'), gamma(1.15));
+  const lutA = writeCube(path.join(dir, 'mix_a.cube'), gamma(0.9));
+  /* Âm bản: tuyến tính (nội suy ba chiều đúng tuyệt đối), đi qua xám ở mix 0,5 nên `mix` lệch thời
+   * gian là lệch hẳn. KHÔNG dùng LUT đổi kênh (g, b, r): độ sáng ra lấy gần hết từ kênh màu, nên khác
+   * biệt cách nâng/hạ mẫu màu 4:2:0 giữa crabgeo và swscale (vốn đã có, ~40 dB ở mép màu testsrc2)
+   * dồn vào độ sáng -> 29 dB ở mép, dù cả hai bản đều đúng. */
+  const lutB = writeCube(path.join(dir, 'mix_b.cube'), (r, g, b) => [1 - r, 1 - g, 1 - b]);
+  const intervals = [
+    { index: 0, script_index: 0, text: 'c0', start: 0, end: 4, scale: 50,
+      adj_filters: `lut3d=file='${filterPath(lutC)}':interp=trilinear` },
+    // Lớp Điều chỉnh có keyframe cường độ LUT: A -> B trong 2 s đầu của clip.
+    { index: 1, script_index: 1, text: 'c1', start: 4.5, end: 8.5, scale: 43, position_x: 9, position_y: -5,
+      adj_layer_lut_a_path: lutA, adj_layer_lut_b_path: lutB, adj_layer_lut_mix_expr: 'clip(LOCALT/2,0,1)' },
+  ];
+  const timelineFile = path.join(dir, 'timeline.json');
+  writeTimeline(timelineFile, intervals, []);
+  const cpuOut = path.join(dir, 'cpu.mp4');
+  const gpuOut = path.join(dir, 'gpu.mp4');
+  exportOnce(dir, source, timelineFile, cpuOut, { CRABBYCUT_EXPORT_GPU: '0' });
+  const gpu = exportOnce(dir, source, timelineFile, gpuOut, { CRABBYCUT_EXPORT_GPU: '1' });
+  const runs = videoRuns(gpu.timing);
+  if (!lutOk) {
+    assert.ok(runs.every((r) => !r.gpu), 'ffmpeg chưa có LUT trong crabgeo: clip có LUT phải đi đồ thị CPU');
+    console.log('  ok  dự án D (LUT): ffmpeg chưa có lut/lut2/mix -> đồ thị CPU');
+    return;
+  }
+  assert.ok(runs.length && runs.every((r) => r.gpu && !r.gpu_fallback), `clip chỉ có LUT phải đi đồ thị GPU: ${JSON.stringify(runs)}`);
+  const p = videoFramesCheck(cpuOut, gpuOut, 'lut');
+  console.log(`  ok  dự án D (LUT tĩnh + LUT trộn theo keyframe): ${p.count} khung GPU, tệ nhất ${p.worst[1].toFixed(1)} dB (khung ${p.worst[0]})`);
+}
+
+function scenarioE(assets) {
+  const dir = path.join(TEST_DIR, 'E');
+  fs.mkdirSync(dir, { recursive: true });
+  const source = path.join(dir, 'temp_input.mp4');
+  mustRun('ffmpeg', ['-y', '-v', 'error',
+    '-f', 'lavfi', '-i', 'color=c=0x5a7a9a:s=1280x720:rate=25:duration=12',
+    '-f', 'lavfi', '-i', 'sine=frequency=330:duration=12:sample_rate=48000',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '50', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '128k', '-shortest', source], 'nguồn phẳng');
+  const intervals = [
+    { index: 0, script_index: 0, text: 'c0', start: 0, end: 5, scale: 50 },
+    { index: 1, script_index: 1, text: 'c1', start: 5.5, end: 10.5, scale: 60 },
+  ];
+  const base = { source_start: 0, scale: 100, opacity: 100, muted: true, volume: 0, has_audio: false };
+  /* 30 khung/s tròn + một chuỗi khung (timebase µs) trộn TRƯỚC, gần điều kiện của "Yêu Con". Lỗi
+   * khung trong suốt chậm một khung ở đó (2026-10-03, chữa bằng cách dời sớm 1 ms trước crabblend)
+   * CHƯA tái hiện được ở dự án tổng hợp này — bản đột biến bỏ bước dời vẫn qua; phép kiểm của nó là
+   * bộ so 0.3 trên "Yêu Con" (khung 200–210 tụt 28 dB khi lỗi). */
+  const EFPS = 30;
+  const seq = { start: 60, x: 120, y: 50, base: 20 };
+  const overlays = [
+    // Mép mềm: OverlayGpu::CpuYuv (chuỗi CPU tới yuva420p, crabblend thay overlay=yuv420).
+    { ...base, id: 'feather', type: 'media', asset_type: 'media_video', asset_path: assets.clip,
+      timeline_start: 1, duration: 4, scale: 120, feather_px: 10, position_x: -150, position_y: -60 },
+    { ...base, id: 'seq', type: 'media', asset_type: 'image_seq',
+      asset_path: path.join(assets.seqDirs[1], 'frame_%04d.png'), seq_fps: EFPS, frame_count: SEQ_FRAMES,
+      timeline_start: 1.5, duration: SEQ_FRAMES / EFPS, position_x: -60, position_y: 100 },
+    // Keyframe cỡ trên chuỗi khung: OverlayGpu::CpuCanvas. Cỡ ≥ 100% nên ô đo giữa chuỗi luôn nằm trong.
+    { ...base, id: 'kfseq', type: 'media', asset_type: 'image_seq',
+      asset_path: path.join(assets.seqDirs[0], 'frame_%04d.png'), seq_fps: EFPS, frame_count: SEQ_FRAMES,
+      timeline_start: seq.start / EFPS, duration: SEQ_FRAMES / EFPS, position_x: seq.x, position_y: seq.y,
+      kf_scale_expr: '100+LOCALT*60' },
+    // Ảnh tĩnh xoay: không còn là lớp phủ đứng yên -> CpuCanvas.
+    { ...base, id: 'rot', type: 'media', asset_type: 'text_image', asset_path: assets.still,
+      timeline_start: 6, duration: 3, scale: 200, rotation: 20, position_x: -120, position_y: 40 },
+  ].map((o, i) => ({ ...o, index: i }));
+  const timelineFile = path.join(dir, 'timeline.json');
+  writeTimeline(timelineFile, intervals, overlays, String(EFPS));
+  const cpuOut = path.join(dir, 'cpu.mp4');
+  const gpuOut = path.join(dir, 'gpu.mp4');
+  exportOnce(dir, source, timelineFile, cpuOut, { CRABBYCUT_EXPORT_GPU: '0' });
+  const gpu = exportOnce(dir, source, timelineFile, gpuOut, { CRABBYCUT_EXPORT_GPU: '1' });
+  const runs = videoRuns(gpu.timing);
+  assert.ok(runs.length && runs.every((r) => r.gpu && !r.gpu_fallback),
+    `lớp phủ mép mềm / keyframe cỡ / xoay không được kéo batch về CPU: ${JSON.stringify(runs)}`);
+  /* Khung cuối cửa sổ của ảnh xoay (6..9 s): ảnh tĩnh lặp ở 25 khung/s, khung lặp cuối bắt đầu ở
+   * 8,96 s; khung nền 269 (8,967 s) vẫn trong cửa sổ. Đường CPU (và bản GPU riêng — crabblend như
+   * overlay) đã tắt ảnh ở khung này: `eof_action=pass` coi khung lặp cuối hết hạn ngay ở mốc của nó.
+   * Đường khung trong suốt hiện đủ cửa sổ [6, 9) — đúng ý người dùng hơn, nên được phép khác CPU ở
+   * đúng khung đó, và phải CÓ ảnh ở đó. */
+  const rotLast = Math.ceil(9 * EFPS) - 1;
+  const p = videoFramesCheck(cpuOut, gpuOut, 'fallback', [rotLast]);
+  const rotX = Math.trunc(W / 2 - 120) - 8;
+  const rotY = Math.trunc(H / 2 + 40) - 8;
+  assert.ok(Math.abs(lumaAt(gpuOut, rotLast, rotX, rotY) - lumaAt(gpuOut, rotLast - 1, rotX, rotY)) < 3,
+    `ảnh xoay phải còn ở khung cuối cửa sổ (${rotLast})`);
+  assert.ok(Math.abs(lumaAt(gpuOut, rotLast + 1, rotX, rotY) - lumaAt(gpuOut, rotLast - 1, rotX, rotY)) > 10,
+    `ảnh xoay phải hết ở khung ${rotLast + 1}`);
+  // Chuỗi khung có keyframe cỡ hiện đúng khung dự định ở bản GPU.
+  const toY = (l) => 16 + (l * 219) / 255;
+  const lumas = seqLumas(gpuOut, seq, seq.start, seq.start + SEQ_FRAMES - 1);
+  assert.strictEqual(lumas.length, SEQ_FRAMES, 'đọc mức xám chuỗi keyframe cỡ');
+  lumas.forEach((y, k) => {
+    assert.ok(Math.abs(y - toY(level(seq, k))) <= 1.5,
+      `chuỗi keyframe cỡ: khung nền ${seq.start + k} phải hiện khung ${k} (Y ${y.toFixed(1)})`);
+  });
+  console.log(`  ok  dự án E (lớp phủ dựng bằng CPU rồi tải lên): ${runs.length} batch GPU, ${p.count} khung, `
+    + `tệ nhất ${p.worst[1].toFixed(1)} dB (khung ${p.worst[0]}); chuỗi keyframe cỡ đúng khung`);
+}
+
 function main() {
   if (!fs.existsSync(SIDECAR)) {
     console.log('export_gpu: BỎ QUA — chưa build sidecar (npm run build:sidecar)');
@@ -336,6 +483,9 @@ function main() {
   }
   scenarioB();
   scenarioC(assets);
+  const lutOk = /lut2/.test(run('ffmpeg', ['-hide_banner', '-h', 'filter=crabgeo_cuda']).stdout || '');
+  scenarioD(lutOk);
+  scenarioE(assets);
   if (!process.env.KEEP_TEST_DIR) fs.rmSync(TEST_DIR, { recursive: true, force: true });
   console.log('export gpu ok');
 }

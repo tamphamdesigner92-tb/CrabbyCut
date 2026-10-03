@@ -153,6 +153,12 @@ const GOLD_FORMAT = {
   rgba: 'scale=out_color_matrix=bt709:out_range=tv,format=yuva444p10le',
   yuva420p: 'scale=out_color_matrix=bt709:out_range=tv,format=yuva444p10le',
   yuv420p: 'format=yuv444p10le',
+  /* Chuỗi màu (LUT, blend trộn LUT) của đường CPU kết thúc bằng `format=rgb24`: lut3d đàm phán định
+   * dạng theo bộ lọc sau nó nên nhận luôn rgb24 — nguồn 10-bit bị hạ về RGB 8-bit TRƯỚC khi qua LUT.
+   * Bản chuẩn giữ nguyên chữ đó thì mắc y lỗi ấy: đo 2026-10-03 trên "Yêu Con" (LUT tĩnh), so một
+   * bản dựng float thật, đường CPU 39,4 dB, bản chuẩn cũ 39,5 dB, đồ thị GPU (LUT tính float) 49,3 dB
+   * — bộ so chấm ngược. Float thì lut3d/blend chạy float từ đầu tới cuối. */
+  rgb24: 'format=gbrpf32le',
 };
 
 function goldFilter(body) {
