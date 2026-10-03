@@ -17,6 +17,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <regex>
 #include <sstream>
@@ -1187,6 +1188,10 @@ struct GpuProbeResult {
 
 const char* const kGpuProbeCacheName = "gpu_probe_cache.txt";
 constexpr long long kGpuProbeCacheMaxAgeSeconds = 3LL * 24 * 3600;
+/* Kết quả ÂM TÍNH (GPU/bộ mã hoá không dùng được) chỉ nhớ 10 phút: lỗi lúc dò có thể là tạm thời
+ * (NVENC hết phiên vì ứng dụng khác đang mã hoá, driver đang khởi động lại) — nhớ 3 ngày là 3 ngày
+ * xuất bằng CPU dù máy có GPU, mà đường CPU không có lỗi nào để xoá cache. */
+constexpr long long kProbeNegativeMaxAgeSeconds = 600;
 
 std::uint64_t Fnv1a64(const std::string& text) {
   std::uint64_t h = 1469598103934665603ULL;
@@ -1240,7 +1245,8 @@ bool ReadGpuProbeCache(const fs::path& file, const std::string& key, size_t over
     else if (name == "ov") r.overlayNvdec.push_back(value == "1");
   }
   const long long age = UnixNowSeconds() - time;
-  if (cachedKey != key || !haveMain || r.main < 0 || r.main > 2 || age < 0 || age > kGpuProbeCacheMaxAgeSeconds
+  const long long maxAge = r.main == 0 ? kProbeNegativeMaxAgeSeconds : kGpuProbeCacheMaxAgeSeconds;
+  if (cachedKey != key || !haveMain || r.main < 0 || r.main > 2 || age < 0 || age > maxAge
       || r.overlayNvdec.size() != overlayCount) return false;
   r.cached = true;
   out = r;
@@ -1447,6 +1453,75 @@ EncoderPlan CpuEncoderPlan(const ExportSettings& settings) {
   return plan;
 }
 
+/* CHỌN BỘ MÃ HOÁ PHẦN CỨNG BẰNG PHÉP THỬ THẬT (mục 1.9). Bản ffmpeg nào cũng BIÊN DỊCH SẴN
+ * h264_nvenc/qsv/amf, nên trước đây máy AMD/Intel luôn chọn NVENC (có trong `-encoders`), lỗi ở từng
+ * batch rồi lùi thẳng về libx264 — không bao giờ dùng AMF/QSV của chính máy. Nay mã hoá thử 3 khung
+ * theo thứ tự nvenc -> qsv -> amf, lấy bộ đầu tiên chạy được. Kết quả lưu ở
+ * `%TEMP%/crabbycut_encoder_probe.txt` theo (vân tay ffmpeg, h264/hevc), sống 3 ngày, XOÁ khi bộ mã
+ * hoá phần cứng lỗi lúc xuất (RunExportJobs) — đổi GPU/driver thì lượt sau dò lại. Chưa có máy AMD/
+ * Intel để kiểm AMF/QSV chạy thật trong lượt xuất (tham số giữ như cũ, xem AppendHardwareEncoderArgs). */
+fs::path EncoderProbeCacheFile() {
+  std::error_code ec;
+  return fs::temp_directory_path(ec) / "crabbycut_encoder_probe.txt";
+}
+
+bool EncoderWorks(const std::string& encoder) {
+  return RunQuiet({"ffmpeg", "-hide_banner", "-v", "error", "-nostdin", "-f", "lavfi",
+                   "-i", "color=c=black:s=256x256:r=25:d=0.2", "-frames:v", "3", "-an",
+                   "-c:v", encoder, "-f", "null", "-"}, 15000) == 0;
+}
+
+// "" = không bộ mã hoá phần cứng nào chạy được.
+std::string WorkingHardwareEncoder(const std::string& prefix) {
+  static std::mutex lock;
+  static std::map<std::string, std::string> memo;
+  std::lock_guard<std::mutex> guard(lock);
+  const auto known = memo.find(prefix);
+  if (known != memo.end()) return known->second;
+  std::ostringstream keyStream;
+  keyStream << "v1|" << std::hex << Fnv1a64(FfmpegEncoders()) << std::dec << "|" << prefix;
+  const std::string key = keyStream.str();
+  const fs::path file = EncoderProbeCacheFile();
+  {
+    std::ifstream in(file);
+    std::string line;
+    while (std::getline(in, line)) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      // key \t unix_time \t encoder
+      const size_t a = line.find('\t');
+      const size_t b = a == std::string::npos ? a : line.find('\t', a + 1);
+      if (b == std::string::npos || line.substr(0, a) != key) continue;
+      const long long age = UnixNowSeconds() - std::atoll(line.substr(a + 1, b - a - 1).c_str());
+      const std::string cached = line.substr(b + 1);
+      // Âm tính chỉ nhớ ngắn: NVENC có thể tạm bận (OBS chiếm phiên — card thường giới hạn số phiên).
+      const long long maxAge = cached.empty() ? kProbeNegativeMaxAgeSeconds : kGpuProbeCacheMaxAgeSeconds;
+      if (age >= 0 && age <= maxAge) return memo[prefix] = cached;
+    }
+  }
+  std::string chosen;
+  for (const char* kind : {"_nvenc", "_qsv", "_amf"}) {
+    const std::string encoder = prefix + kind;
+    if (HasFfmpegEncoder(encoder) && EncoderWorks(encoder)) {
+      chosen = encoder;
+      break;
+    }
+  }
+  // Ghi đè dòng cùng khoá, giữ dòng của khoá khác (h264 và hevc).
+  std::vector<std::string> keep;
+  {
+    std::ifstream in(file);
+    std::string line;
+    while (std::getline(in, line)) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      if (!line.empty() && line.compare(0, key.size() + 1, key + "\t") != 0) keep.push_back(line);
+    }
+  }
+  std::ofstream out(file, std::ios::trunc);
+  for (const std::string& line : keep) out << line << "\n";
+  out << key << "\t" << UnixNowSeconds() << "\t" << chosen << "\n";
+  return memo[prefix] = chosen;
+}
+
 EncoderPlan SelectEncoderPlan(const ExportSettings& settings) {
   EncoderPlan cpu = CpuEncoderPlan(settings);
   if (!HardwareExportEnabled()) return cpu;
@@ -1466,12 +1541,10 @@ EncoderPlan SelectEncoderPlan(const ExportSettings& settings) {
   if (HasFfmpegEncoder(vt)) return {"videotoolbox", vt, true};
 #endif
 #ifdef _WIN32
-  const std::string nvenc = prefix + "_nvenc";
-  const std::string qsv = prefix + "_qsv";
-  const std::string amf = prefix + "_amf";
-  if (HasFfmpegEncoder(nvenc)) return {"nvenc", nvenc, true};
-  if (HasFfmpegEncoder(qsv)) return {"qsv", qsv, true};
-  if (HasFfmpegEncoder(amf)) return {"amf", amf, true};
+  const std::string hw = WorkingHardwareEncoder(prefix);
+  if (hw == prefix + "_nvenc") return {"nvenc", hw, true};
+  if (hw == prefix + "_qsv") return {"qsv", hw, true};
+  if (hw == prefix + "_amf") return {"amf", hw, true};
 #endif
   return cpu;
 }
@@ -5636,6 +5709,9 @@ int RunExportJobs(std::vector<BatchJob>& jobs, EncoderPlan& plan, size_t concurr
     }
     if (needCpu) {
       Emit("progress", "Encoder phần cứng " + plan.videoEncoder + " lỗi, chuyển batch export sang CPU...");
+      // Kết quả thử bộ mã hoá đã lưu có thể đã cũ (driver/GPU đổi) -> lượt sau thử lại (WorkingHardwareEncoder).
+      std::error_code probeEc;
+      fs::remove(EncoderProbeCacheFile(), probeEc);
       plan = CpuEncoderPlan(settings);
       std::vector<BatchJob*> videoJobs;
       std::vector<size_t> videoIndex;
@@ -5971,6 +6047,16 @@ int CommandExportVideo(int argc, char** argv) {
   auto seekSafeProbe = std::async(std::launch::async, [&source]() {
     return BatchSeekEnabled() ? SourceSeekSafe(source) : false;
   });
+  // Thử bộ mã hoá phần cứng (WorkingHardwareEncoder, có cache) song song với các phép dò khác;
+  // SelectEncoderPlan ở dưới đọc lại kết quả đã nhớ.
+  auto encoderProbe = std::async(std::launch::async, [codec = settings.codec]() {
+#ifdef _WIN32
+    if (HardwareExportEnabled() && codec != "prores") {
+      WorkingHardwareEncoder(codec == "hevc" ? "hevc" : "h264");
+    }
+#endif
+    return 0;
+  });
   /* ĐỒ THỊ GPU (mục 1.21, xem GpuRenderWanted): dò cùng lúc với các phép dò trên — bản ffmpeg có bộ
    * lọc CUDA của CrabbyCut và chạy được chuỗi CUDA -> NVENC; nguồn chính và từng video lớp phủ có
    * giải mã được bằng NVDEC không. Bản ffmpeg thường (không có crabgeo_cuda) thì không chạy lệnh dò
@@ -6038,6 +6124,7 @@ int CommandExportVideo(int argc, char** argv) {
   for (auto& overlay : overlays) {
     if (OverlayNeedsInput(overlay)) overlay.assetInputIndex = nextOverlayInput++;
   }
+  encoderProbe.get();
   EncoderPlan plan = SelectEncoderPlan(settings);
   Emit("progress", "Export encoder: " + plan.videoEncoder + (plan.hardware ? " (hardware)" : " (CPU)"));
   if (std::any_of(overlays.begin(), overlays.end(), [](const ExportOverlay& overlay) { return overlay.type == "text"; })

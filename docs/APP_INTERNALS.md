@@ -5143,6 +5143,7 @@ HỆ QUẢ CÓ CHỦ Ý: trên desktop, chọn TỆP LẺ nay là LINK chứ kh�
   - h264_nvenc/hevc_nvenc nếu có NVIDIA NVENC.
   - h264_qsv/hevc_qsv nếu có Intel Quick Sync.
   - h264_amf/hevc_amf nếu FFmpeg build có AMD AMF.
+  - CHỌN BẰNG PHÉP THỬ THẬT (sửa 2026-10-03, mục 1.9 của kế hoạch export, `WorkingHardwareEncoder`): bản ffmpeg nào cũng biên dịch sẵn cả ba nên chỉ xem `-encoders` thì máy AMD/Intel luôn chọn NVENC, lỗi từng batch rồi lùi thẳng về libx264. Nay mã hoá thử 3 khung theo thứ tự nvenc -> qsv -> amf, lấy bộ đầu tiên chạy được; chạy song song với các phép dò ở đầu lượt xuất. Kết quả nhớ ở `%TEMP%/crabbycut_encoder_probe.txt` theo (vân tay ffmpeg, h264/hevc): dương tính 3 ngày (xoá khi bộ mã hoá phần cứng lỗi lúc xuất), ÂM TÍNH chỉ 10 phút (NVENC có thể tạm bận — OBS chiếm phiên, driver khởi động lại; đường CPU không có lỗi nào để xoá cache). Cache dò GPU (`gpu_probe_cache.txt`) cũng nhớ âm tính chỉ 10 phút. Đã kiểm: máy có NVIDIA chọn h264_nvenc; giấu CUDA (`CUDA_VISIBLE_DEVICES=-1`) chọn libx264 ngay, không còn lượt NVENC lỗi. Chưa có máy AMD/Intel để kiểm AMF/QSV chạy thật.
 - Nếu encoder phần cứng không có hoặc chạy lỗi, sidecar retry batch đó bằng CPU và chuyển các batch sau sang CPU.
 - CPU fallback:
   - h264 dùng libx264.
