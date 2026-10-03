@@ -233,10 +233,14 @@ function scenarioA(assets) {
   checkSequences(gpuOut, 'GPU');
 
   // Đồ thị GPU hỏng -> batch GPU chạy lại bằng đồ thị CPU, bản xuất trùng bản CPU.
+  const cacheFile = path.join(dir, 'gpu_probe_cache.txt');
+  assert.ok(fs.existsSync(cacheFile), 'lượt GPU phải lưu kết quả dò GPU (gpu_probe_cache.txt)');
   const fail = exportOnce(dir, source, timelineFile, failOut, { CRABBYCUT_EXPORT_GPU: '1', CRABBYCUT_EXPORT_GPU_TEST_FAIL: '1' });
   const failRuns = videoRuns(fail.timing);
   assert.strictEqual(failRuns.filter((r) => r.gpu_fallback).length, gpuRuns, 'mọi batch GPU phải lùi về CPU');
   assert.strictEqual(fail.timing.render, 'cpu', 'lùi hết về CPU -> render "cpu"');
+  assert.strictEqual(fail.timing.gpu_probe_cached, true, 'lượt sau dùng kết quả dò đã lưu');
+  assert.ok(!fs.existsSync(cacheFile), 'đồ thị GPU lỗi -> phải xoá kết quả dò đã lưu (lượt sau dò lại)');
   const c = frameHashes(failOut);
   const same = c.length === a.length && c.every((h, i) => h === a[i]);
   if (!same) {
@@ -290,12 +294,14 @@ function scenarioC(assets) {
     op100: { opacity: 100 },
   };
   const out = {};
-  for (const [name, extra] of Object.entries(variants)) {
+  for (const [i, [name, extra]] of Object.entries(variants).entries()) {
     const timelineFile = path.join(dir, `timeline_${name}.json`);
     writeTimeline(timelineFile, intervals, overlay(extra));
     out[name] = path.join(dir, `${name}.mp4`);
     const r = exportOnce(dir, source, timelineFile, out[name], { CRABBYCUT_EXPORT_GPU: '1' });
     assert.ok(videoRuns(r.timing).every((run) => run.gpu), `dự án C (${name}): phải đi đồ thị GPU`);
+    // Cùng nguồn, cùng bản ffmpeg: lượt đầu dò, các lượt sau dùng kết quả đã lưu (GpuProbeResult).
+    assert.strictEqual(r.timing.gpu_probe_cached, i > 0, `dự án C (${name}): gpu_probe_cached`);
   }
   // Bỏ 2 khung ở mỗi mép (mốc đổi độ mờ có thể rơi giữa hai khung).
   const range = (a, b) => [Math.ceil(a * FPS) + 2, Math.floor(b * FPS) - 2];

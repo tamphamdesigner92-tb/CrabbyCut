@@ -1159,9 +1159,97 @@ bool GpuRenderAvailableWithNvdec(const std::string& nvencEncoder, const std::str
 
 /* crabgeo_cuda có LUT 3D (`lut`/`lut2`/`mix`, bản n8.1.1-crabbycut.2 trở đi): clip/lớp phủ chỉ có
  * tầng màu là LUT (lớp Điều chỉnh, HSL + LUT đã bake) đi được đồ thị GPU — xem BlockGpuLut. */
+// -1 = chưa biết (dò bằng lệnh); 0/1 = lấy từ cache dò GPU của lượt trước (xem GpuProbeCache).
+static int g_gpuLutKnown = -1;
+
 bool GpuLutAvailable() {
+  if (g_gpuLutKnown >= 0) return g_gpuLutKnown == 1;
   static const bool has = CommandOutput({"ffmpeg", "-hide_banner", "-h", "filter=crabgeo_cuda"}).find("lut2") != std::string::npos;
   return has;
+}
+
+/* KẾT QUẢ DÒ GPU LƯU GIỮA CÁC LẦN XUẤT (mục 1.21). Mỗi lượt xuất là một tiến trình sidecar mới, mà
+ * phép dò (khởi tạo CUDA + NVENC, giải mã thử NVDEC nguồn chính và từng video lớp phủ, hỏi crabgeo
+ * có LUT) tốn ~0,8 s — Test.crab: khâu dò 0,4 -> 1,2 s khi bật GPU, trên lượt xuất ~11 s. Kết quả
+ * lưu ở `<temp dự án>/gpu_probe_cache.txt`, dùng lại khi KHOÁ trùng và chưa quá 3 ngày. Khoá: dấu
+ * vân tay bản ffmpeg (FNV-1a của danh sách filter + encoder), tên NVENC, đường dẫn + cỡ + mốc sửa
+ * của nguồn và từng video lớp phủ được dò. Driver/GPU đổi mà khoá không đổi: batch GPU lỗi thì
+ * RunExportJobs chạy lại bằng đồ thị CPU (như mọi lỗi GPU) và XOÁ cache — lượt sau dò lại. */
+struct GpuProbeResult {
+  int main = 0;                    // 0 = không dùng được GPU, 1 = GPU được nhưng NVDEC không giải mã được nguồn, 2 = cả hai
+  bool lut = false;                // crabgeo_cuda có LUT
+  std::vector<bool> overlayNvdec;  // theo thứ tự danh sách video lớp phủ được dò
+  bool cached = false;
+};
+
+const char* const kGpuProbeCacheName = "gpu_probe_cache.txt";
+constexpr long long kGpuProbeCacheMaxAgeSeconds = 3LL * 24 * 3600;
+
+std::uint64_t Fnv1a64(const std::string& text) {
+  std::uint64_t h = 1469598103934665603ULL;
+  for (unsigned char ch : text) {
+    h ^= ch;
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+std::string FileStamp(const std::string& path) {
+  std::error_code ec;
+  const std::uintmax_t size = fs::file_size(path, ec);
+  if (ec) return path + "|?";
+  const auto mtime = fs::last_write_time(path, ec);
+  return path + "|" + std::to_string(size) + "|" + (ec ? std::string("?") : std::to_string(mtime.time_since_epoch().count()));
+}
+
+std::string GpuProbeKey(const std::string& nvenc, const std::string& source, const std::vector<std::string>& overlayVideos) {
+  std::ostringstream key;
+  key << "v1|" << std::hex << Fnv1a64(FfmpegFilters() + "\n" + FfmpegEncoders()) << std::dec << "|" << nvenc
+      << "|" << FileStamp(source);
+  for (const std::string& path : overlayVideos) key << "|" << FileStamp(path);
+  std::string out = key.str();
+  std::replace(out.begin(), out.end(), '\n', ' ');
+  return out;
+}
+
+long long UnixNowSeconds() {
+  return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+bool ReadGpuProbeCache(const fs::path& file, const std::string& key, size_t overlayCount, GpuProbeResult& out) {
+  std::ifstream in(file);
+  if (!in) return false;
+  std::string line;
+  std::string cachedKey;
+  long long time = 0;
+  GpuProbeResult r;
+  bool haveMain = false;
+  while (std::getline(in, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    const size_t tab = line.find('\t');
+    if (tab == std::string::npos) continue;
+    const std::string name = line.substr(0, tab);
+    const std::string value = line.substr(tab + 1);
+    if (name == "key") cachedKey = value;
+    else if (name == "time") time = std::atoll(value.c_str());
+    else if (name == "main") { r.main = std::atoi(value.c_str()); haveMain = true; }
+    else if (name == "lut") r.lut = value == "1";
+    else if (name == "ov") r.overlayNvdec.push_back(value == "1");
+  }
+  const long long age = UnixNowSeconds() - time;
+  if (cachedKey != key || !haveMain || r.main < 0 || r.main > 2 || age < 0 || age > kGpuProbeCacheMaxAgeSeconds
+      || r.overlayNvdec.size() != overlayCount) return false;
+  r.cached = true;
+  out = r;
+  return true;
+}
+
+void WriteGpuProbeCache(const fs::path& file, const std::string& key, const GpuProbeResult& r) {
+  std::ofstream outFile(file, std::ios::trunc);
+  if (!outFile) return;
+  outFile << "key\t" << key << "\n" << "time\t" << UnixNowSeconds() << "\n"
+          << "main\t" << r.main << "\n" << "lut\t" << (r.lut ? 1 : 0) << "\n";
+  for (bool nvdec : r.overlayNvdec) outFile << "ov\t" << (nvdec ? 1 : 0) << "\n";
 }
 
 /* Tệp giải mã được bằng NVDEC ra thẳng khung CUDA. NVDEC không giải mã được (AV1 trên GTX 10xx,
@@ -1248,6 +1336,8 @@ struct ExportTimingLog {
   size_t workers = 1;   // số lượt ffmpeg hình chạy cùng lúc (mục 1.8)
   // "gpu" / "cpu" — thiết bị render của lượt xuất (mục 1.21); "gpu" khi ít nhất một batch đi GPU.
   std::string render = "cpu";
+  // Kết quả dò GPU lấy từ cache của lượt trước (ReadGpuProbeCache) thay vì chạy lệnh dò.
+  bool gpuProbeCached = false;
   std::vector<ExportRunTiming> runs;
 };
 
@@ -1302,6 +1392,7 @@ std::string ExportTimingJson(const std::string& encoder) {
       << ",\"graph_size\":\"" << EscapeJson(g_exportTiming.graphSize) << "\""
       << ",\"workers\":" << g_exportTiming.workers
       << ",\"render\":\"" << g_exportTiming.render << "\""
+      << ",\"gpu_probe_cached\":" << (g_exportTiming.gpuProbeCached ? "true" : "false")
       << ",\"runs\":[";
   for (size_t i = 0; i < g_exportTiming.runs.size(); i++) {
     const ExportRunTiming& run = g_exportTiming.runs[i];
@@ -5275,6 +5366,9 @@ int RunExportJobs(std::vector<BatchJob>& jobs, EncoderPlan& plan, size_t concurr
   }
   if (!gpuFailed.empty()) {
     Emit("progress", "Đồ thị GPU lỗi ở " + std::to_string(gpuFailed.size()) + " lượt — chạy lại bằng CPU...");
+    // Kết quả dò GPU đã lưu có thể đã cũ (driver/GPU đổi) -> lượt sau dò lại (xem GpuProbeResult).
+    std::error_code cacheEc;
+    fs::remove(jobs[gpuFailed.front()].tempDir / kGpuProbeCacheName, cacheEc);
     std::vector<BatchJob*> retry;
     for (size_t i : gpuFailed) {
       UseCpuGraph(jobs[i]);
@@ -5652,13 +5746,6 @@ int CommandExportVideo(int argc, char** argv) {
   const bool gpuWanted = GpuRenderWanted(settings) && settings.codec != "prores";
   const std::string nvencName = std::string(settings.codec == "hevc" ? "hevc" : "h264") + "_nvenc";
   const auto crabFilters = [gpuWanted]() { return gpuWanted && HasFfmpegFilter("crabgeo_cuda"); };
-  // 0 = không dùng được GPU, 1 = GPU được nhưng NVDEC không giải mã được nguồn chính, 2 = cả hai.
-  auto gpuProbe = std::async(std::launch::async, [crabFilters, nvencName, &source]() {
-    if (!crabFilters() || !HasFfmpegEncoder(nvencName)) return 0;
-    GpuLutAvailable();   // dò sẵn (cache tĩnh) để BatchGpuEligible ở luồng chính khỏi chờ
-    if (GpuRenderAvailableWithNvdec(nvencName, source)) return 2;
-    return GpuRenderAvailable(nvencName) ? 1 : 0;
-  });
   const size_t kGpuOverlayProbes = 8;
   std::vector<std::string> overlayVideoPaths;
   for (const auto& overlay : overlays) {
@@ -5668,12 +5755,29 @@ int CommandExportVideo(int argc, char** argv) {
     if (overlayVideoPaths.size() >= kGpuOverlayProbes) break;
     overlayVideoPaths.push_back(overlay.assetPath);
   }
-  std::vector<std::future<bool>> overlayNvdecProbes;
-  for (const std::string& path : overlayVideoPaths) {
-    overlayNvdecProbes.push_back(std::async(std::launch::async, [crabFilters, path]() {
-      return crabFilters() && NvdecDecodes(path);
-    }));
-  }
+  /* Cả khâu dò GPU trong MỘT luồng song song: cache của lượt trước (GpuProbeResult) trùng khoá thì
+   * dùng luôn, không thì dò (NVDEC từng video lớp phủ chạy song song với phép dò nguồn chính) rồi
+   * ghi cache. Env CRABBYCUT_EXPORT_GPU_PROBE_CACHE=0: luôn dò. */
+  g_gpuLutKnown = -1;
+  const fs::path gpuCacheFile = tempDir / kGpuProbeCacheName;
+  const char* cacheEnv = std::getenv("CRABBYCUT_EXPORT_GPU_PROBE_CACHE");
+  const bool gpuCacheOn = !(cacheEnv && std::string(cacheEnv) == "0");
+  auto gpuProbe = std::async(std::launch::async, [crabFilters, nvencName, &source, overlayVideoPaths, gpuCacheFile, gpuCacheOn]() {
+    GpuProbeResult r;
+    r.overlayNvdec.assign(overlayVideoPaths.size(), false);
+    if (!crabFilters() || !HasFfmpegEncoder(nvencName)) return r;
+    const std::string key = GpuProbeKey(nvencName, source, overlayVideoPaths);
+    if (gpuCacheOn && ReadGpuProbeCache(gpuCacheFile, key, overlayVideoPaths.size(), r)) return r;
+    std::vector<std::future<bool>> overlayNvdec;
+    for (const std::string& path : overlayVideoPaths) {
+      overlayNvdec.push_back(std::async(std::launch::async, [path]() { return NvdecDecodes(path); }));
+    }
+    r.lut = GpuLutAvailable();
+    r.main = GpuRenderAvailableWithNvdec(nvencName, source) ? 2 : (GpuRenderAvailable(nvencName) ? 1 : 0);
+    for (size_t k = 0; k < overlayNvdec.size(); k++) r.overlayNvdec[k] = overlayNvdec[k].get();
+    if (gpuCacheOn) WriteGpuProbeCache(gpuCacheFile, key, r);
+    return r;
+  });
   settings.sourceColorUntagged = MediaColorUntagged(source);
   settings.videoStart = videoStartProbe.get();
   settings.audioStart = audioStartProbe.get();
@@ -5705,11 +5809,13 @@ int CommandExportVideo(int argc, char** argv) {
     Emit("progress", "FFmpeg hiện tại không có drawtext; text overlay sẽ bị bỏ qua khi export.");
   }
   // Kết quả dò GPU (chạy song song từ đầu lượt, xem gpuProbe). Đồ thị GPU chỉ đi cùng NVENC.
-  const int gpuProbed = gpuProbe.get();
-  g_gpuRender = gpuProbed > 0 && plan.mode == "nvenc";
-  g_gpuMainNvdec = gpuProbed == 2 && g_gpuRender;
-  for (size_t k = 0; k < overlayNvdecProbes.size(); k++) {
-    const bool nvdec = overlayNvdecProbes[k].get() && g_gpuRender;
+  const GpuProbeResult gpuProbed = gpuProbe.get();
+  g_exportTiming.gpuProbeCached = gpuProbed.cached;
+  if (gpuProbed.cached) g_gpuLutKnown = gpuProbed.lut ? 1 : 0;
+  g_gpuRender = gpuProbed.main > 0 && plan.mode == "nvenc";
+  g_gpuMainNvdec = gpuProbed.main == 2 && g_gpuRender;
+  for (size_t k = 0; k < overlayVideoPaths.size(); k++) {
+    const bool nvdec = gpuProbed.overlayNvdec[k] && g_gpuRender;
     for (auto& overlay : overlays) {
       if (overlay.assetPath == overlayVideoPaths[k]) overlay.gpuNvdec = nvdec;
     }
