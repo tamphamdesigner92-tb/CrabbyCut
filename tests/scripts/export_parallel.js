@@ -53,6 +53,13 @@ const SCENARIOS = [
   { name: 'A', audioRate: 48000, spacing: 10, clips: [7, 7, 7, 7, 7, 7], stills: [[10, 10]] },
   { name: 'B', audioRate: 44100, spacing: 5, clips: [3.1, 3.7, 2.9, 4.3, 3.3, 3.9, 2.7, 4.1, 3.5, 3.0, 3.6, 4.2],
     stills: [[8, 4], [20, 3], [36, 4]] },
+  /* Mốc cắt sát chuỗi khung (OverlayStraddles): biên clip ĐÚNG khung đầu của chuỗi (C) và ngay sau khung cuối
+   * của nó (D). Không khung nào của chuỗi nằm ở cả hai phía nên phải cắt được ở đó; luật cũ nới một khung mỗi
+   * đầu và chặn cả hai mốc ("Yêu Con": phụ đề động sát biên clip làm batch đầu dài 25,9/37,8 s). */
+  { name: 'C', audioRate: 48000, spacing: 16, clips: [SEQ_START_FRAME / FPS, SEQ_FRAMES / FPS, 12.9, 12.5],
+    stills: [[4, 4]], firstCut: SEQ_START_FRAME },
+  { name: 'D', audioRate: 48000, spacing: 17, clips: [(SEQ_START_FRAME + SEQ_FRAMES) / FPS, 12.9, 12.5],
+    stills: [[4, 4], [20, 3]], firstCut: SEQ_START_FRAME + SEQ_FRAMES },
 ];
 
 function run(cmd, args, opts = {}) {
@@ -192,6 +199,11 @@ function checkScenario(scenario, assets) {
   const videoRuns = (t) => (t?.runs || []).filter((r) => r.mode === 'video' || r.mode === 'full');
   assert.strictEqual(videoRuns(tSingle).length, 1, `${tag}, PARALLEL=1: một lượt`);
   assert.ok(videoRuns(tParallel).length >= 3, `${tag}, PARALLEL=3: phải chia ≥ 3 batch, đang ${videoRuns(tParallel).length}`);
+  if (scenario.firstCut) {
+    const firstBatch = videoRuns(tParallel)[0].sequence_duration;
+    assert.ok(Math.abs(firstBatch - scenario.firstCut / FPS) < 0.002,
+      `${tag}: phải cắt sát chuỗi khung ở khung ${scenario.firstCut} (${(scenario.firstCut / FPS).toFixed(3)} s), batch đầu dài ${firstBatch} s`);
+  }
   assert.strictEqual(tParallel.workers, 3, `${tag}, PARALLEL=3: 3 lượt hình cùng lúc`);
 
   const a = frameHashes(single);

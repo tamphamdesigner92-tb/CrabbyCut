@@ -4075,11 +4075,27 @@ bool OverlayTouchesWindow(const ExportOverlay& overlay, double from, double to, 
   return end > from && start < to;
 }
 
-// Lớp phủ nằm VẮT QUA mốc `at` (không phải chỉ chạm đúng hai đầu).
+/* Lớp phủ VẮT QUA mốc cắt `at` = có khung HIỆN ở cả hai phía. `at` là biên khung (khung ở `at` thuộc batch
+ * sau); khung hiện = khung có mốc trong cửa sổ `enable` của lớp phủ: mở ở start − nửa khung
+ * (OverlayEnableStart), đóng ở end (video), end − nửa khung (ảnh tĩnh, OverlayEnableEnd), start + duration −
+ * nửa khung chuỗi (chuỗi khung, seqEndTrim của WriteVisualOverlayFilter). Hiện ở phía trước <=> mép mở ≤ khung
+ * at − 1/fps; hiện ở phía sau <=> mép đóng ≥ at; chừa một phần tư khung cho sai số µs của mốc khung.
+ * Trước đây nới cả hai đầu MỘT KHUNG: phụ đề động bắt đầu sau biên clip một khung (11,73 so với 11,7 s) hay
+ * kết thúc trước biên một khung vẫn bị coi là vắt qua — "Yêu Con" không cắt được ở 4/5 biên clip, batch đầu
+ * dài 25,9/37,8 s và quyết định cả thời gian xuất. */
 bool OverlayStraddles(const ExportOverlay& overlay, double at, double fps) {
-  const double pad = (fps > 0.0) ? (1.0 / fps) : 0.04;
-  return (overlay.timelineStart - pad) < at
-      && (overlay.timelineStart + std::max(0.05, overlay.duration) + pad) > at;
+  if (!(fps > 0.0)) {
+    return (overlay.timelineStart - 0.04) < at && (overlay.timelineStart + std::max(0.05, overlay.duration) + 0.04) > at;
+  }
+  const double start = overlay.timelineStart;
+  const double first = start - 0.5 / fps;
+  double last = start + std::max(0.05, overlay.duration);
+  if (OverlayIsImageSequence(overlay) && overlay.seqFps > 1.0) {
+    last = start + std::max(0.05, overlay.duration - 0.5 / overlay.seqFps);
+  } else if (OverlayIsImageLike(overlay)) {
+    last -= 0.5 / fps;
+  }
+  return first < at - 0.75 / fps && last > at - 0.25 / fps;
 }
 
 /* MỐC CẮT MONG MUỐN KẾ TIẾP — theo LƯỚI CỐ ĐỊNH k × target trên trục sequence (mục 1.13), không
@@ -5415,7 +5431,7 @@ void AppendEncoderArgsForMode(std::vector<std::string>& cmd, const ExportSetting
  * ở mỗi lần mở dự án / mỗi lượt xuất với nội dung y hệt. Tệp nhỏ (≤ 16 MB) băm cả tệp; tệp lớn (video)
  * băm cỡ + 5 khúc 1 MB (đầu, 1/4, 1/2, 3/4, cuối) — mã hoá lại một video luôn đổi cỡ hoặc `moov`.
  * Bật khi backend truyền CRABBYCUT_RENDER_CACHE_DIR (Cài đặt › Xuất video); sidecar chạy tay/test
- * không truyền thì tắt. Chỉ áp cho batch HÌNH của lượt xuất nhiều batch; lượt tiếng luôn chạy lại. */
+ * không truyền thì tắt. Áp cho các batch hình + lượt tiếng của lượt xuất nhiều batch (lượt một batch ghi thẳng ra đích). */
 constexpr const char* kRenderCacheFormat = "crabbycut-render-cache-1";
 constexpr std::uintmax_t kRenderCacheFullHashBytes = 16ULL * 1024 * 1024;
 constexpr std::uintmax_t kRenderCacheSampleBytes = 1024ULL * 1024;
@@ -5898,7 +5914,7 @@ struct BatchJob {
   bool gpu = false;
   fs::path gpuScriptPath;
   std::function<std::vector<std::string>(const EncoderPlan&, const std::string&)> buildCmdCpu;
-  /* CACHE RENDER (mục 1.13): chỉ batch hình của lượt xuất nhiều batch (`cacheable`). RunBatchJobs
+  /* CACHE RENDER (mục 1.13): batch hình + lượt tiếng của lượt xuất nhiều batch (`cacheable`). RunBatchJobs
    * tính `cacheKey` theo đúng dòng lệnh sắp chạy; trùng thì `cacheHit` = tệp trong cache, không chạy
    * ffmpeg. Lượt xuất xong thì RenderCacheStore cất `output` của batch vừa render vào cache. */
   fs::path output;
@@ -5956,12 +5972,12 @@ std::string RenderCacheKey(const BatchJob& job, const std::vector<std::string>& 
 }
 
 bool IsRenderCacheEntryName(const std::string& name) {
-  if (name.size() != 68) return false;   // 64 hex + ".mp4"/".mov"
+  if (name.size() != 68) return false;   // 64 hex + ".mp4"/".mov"/".m4a"
   for (size_t i = 0; i < 64; i++) {
     if (!std::isxdigit(static_cast<unsigned char>(name[i]))) return false;
   }
   const std::string ext = name.substr(64);
-  return ext == ".mp4" || ext == ".mov";
+  return ext == ".mp4" || ext == ".mov" || ext == ".m4a";
 }
 
 /* Dọn cache: bỏ mục quá 30 ngày không dùng, rồi giữ các mục MỚI DÙNG nhất trong trần dung lượng
@@ -6241,7 +6257,7 @@ void RenderCachePrefetch(std::vector<BatchJob*>& jobs, const EncoderPlan& plan, 
   std::vector<fs::path> paths;
   g_renderCacheCollect = &paths;
   for (BatchJob* job : jobs) {
-    if (job->cacheable && job->video) RenderCacheKey(*job, job->buildCmd(plan, job->timing.label + labelSuffix));
+    if (job->cacheable) RenderCacheKey(*job, job->buildCmd(plan, job->timing.label + labelSuffix));
   }
   g_renderCacheCollect = nullptr;
   RenderCacheHashFiles(std::move(paths));
@@ -6255,7 +6271,7 @@ bool RenderCacheLookup(BatchJob& job, const EncoderPlan& plan, const std::string
   job.cacheHit.clear();
   job.cacheKey.clear();
   job.timing.cacheHit = false;
-  if (g_renderCacheDir.empty() || !job.cacheable || !job.video) return false;
+  if (g_renderCacheDir.empty() || !job.cacheable) return false;
   const auto started = ExportClock::now();
   job.cacheKey = RenderCacheKey(job, job.buildCmd(plan, runLabel));
   g_exportTiming.cacheKeyMs += MsSince(started);
@@ -6935,6 +6951,10 @@ int CommandExportVideo(int argc, char** argv) {
       return 6;
     }
     jobs.back().progressText = "tiếng (một lượt liền mạch cho cả phim)";
+    /* Cache render cho cả lượt tiếng: xuất lại sau khi sửa phụ đề/màu thì tiếng không đổi, mà lượt tiếng
+     * chiếm phần lớn thời gian còn lại (Bin Tom 2,3/5,7 s, phim 300 s 6/10,6 s). Khoá theo dòng lệnh +
+     * filter script + tệp tiếng như batch hình — đổi âm lượng, nhạc nền, khử ồn… là đổi khoá. */
+    jobs.back().cacheable = true;
     // Lượt tiếng nhẹ (bộ mã hoá AAC một luồng) — chạy kèm, không chiếm chỗ của một lượt hình.
     {
       const int code = RunExportJobs(jobs, plan, workers > 1 ? workers + 1 : 1, settings);
@@ -6944,6 +6964,7 @@ int CommandExportVideo(int argc, char** argv) {
     for (size_t i = 0; i < batches.size(); i++) {
       if (!jobs[i].cacheHit.empty()) batchPaths[i] = jobs[i].cacheHit.string();
     }
+    if (!jobs.back().cacheHit.empty()) audioPath = jobs.back().cacheHit;
 
     fs::path concatList = tempDir / "concat_export_batches_native.txt";
     if (!WriteConcatList(concatList, batchPaths)) {
@@ -6990,7 +7011,7 @@ int CommandExportVideo(int argc, char** argv) {
     }
     /* Dọn các batch trung gian NGAY khi đã ghép xong: chúng to bằng chính bản xuất (dự án
      * phụ đề 4K 39 phút: ~11,5 GB) và trước đây nằm lại trong thư mục tạm tới lượt xuất sau.
-     * Cache render bật thì batch hình được cất vào cache trước (đổi tên, xem RenderCacheStore). */
+     * Cache render bật thì batch hình + lượt tiếng được cất vào cache trước (đổi tên, xem RenderCacheStore). */
     RenderCacheStore(jobs);
     RemoveExportBatches(batchDir);
     EmitExportTiming(plan.videoEncoder);
