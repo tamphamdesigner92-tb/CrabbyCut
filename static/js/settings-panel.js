@@ -504,6 +504,10 @@
                 </label>
             </div>
             <p class="set-note">${_t('GPU dùng card NVIDIA để giải mã, dựng hình và mã hoá — máy rảnh tay hơn hẳn trong lúc xuất. Máy không dùng được GPU thì tự render bằng CPU. Đoạn có hiệu ứng chưa có bản GPU (chỉnh màu, keyframe, xoay, mặt nạ…) vẫn render bằng CPU trong cùng lượt xuất.')}</p>
+        </section>
+        <section class="set-sec"><h4>${_t('Xuất lại')}</h4>
+            ${checkboxRowHtml(_t('Dùng lại phần đã render khi xuất lại'), 'renderCache', e.renderCache,
+                _t('Xuất lại cùng cài đặt thì chỉ render những đoạn đã sửa; đoạn không đổi lấy lại từ lượt xuất trước, giống hệt từng khung. Dự án ngắn chỉ có lợi trên máy nhiều nhân. Bộ nhớ đệm tối đa 20 GB, dọn ở mục Bộ nhớ đệm.'))}
         </section>`;
     }
 
@@ -783,6 +787,7 @@
         'pvTransition': (el) => { draft.preview.transitionQuality = el.value; return false; },
         'frameStep': (el) => { draft.preview.frameStep = Number(el.value); return false; },
         'renderDevice': (el) => { draft.export.renderDevice = el.value; return false; },
+        'renderCache': (el) => { draft.export.renderCache = el.checked; return false; },
         'sc-search': (el) => { keyFilter = el.value; return false; },
     };
 

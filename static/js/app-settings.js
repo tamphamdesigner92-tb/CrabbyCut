@@ -142,9 +142,11 @@
     /* Xuất video (mục 1.21 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md, người dùng chốt 2026-10-02):
      * render bằng GPU (bộ lọc CUDA của bản ffmpeg riêng + NVDEC/NVENC) hay CPU. Mặc định GPU kể
      * cả khi với một nguồn cụ thể GPU không nhanh hơn; máy không dùng được GPU thì sidecar tự
-     * render bằng CPU (GpuRenderAvailable). Backend gửi xuống sidecar ở `render_device`. */
+     * render bằng CPU (GpuRenderAvailable). Backend gửi xuống sidecar ở `render_device`.
+     * `renderCache` (mục 1.13): dùng lại batch hình đã render ở lượt xuất trước khi nội dung không
+     * đổi — ra đúng từng khung như render lại, nên bật sẵn. Backend bỏ thư mục cache khi tắt. */
     const RENDER_DEVICES = ['gpu', 'cpu'];
-    const DEFAULT_EXPORT = { renderDevice: 'gpu' };
+    const DEFAULT_EXPORT = { renderDevice: 'gpu', renderCache: true };
 
     const DEFAULTS = {
         version: SCHEMA_VERSION,
@@ -452,6 +454,7 @@
         const s = raw && typeof raw === 'object' ? raw : {};
         return {
             renderDevice: RENDER_DEVICES.includes(s.renderDevice) ? s.renderDevice : DEFAULT_EXPORT.renderDevice,
+            renderCache: typeof s.renderCache === 'boolean' ? s.renderCache : DEFAULT_EXPORT.renderCache,
         };
     }
 

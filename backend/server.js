@@ -140,6 +140,19 @@ const SDR_CACHE_DIR = process.env.CRAB_SDR_CACHE_DIR
 const SDR_CACHE_VERSION = 1;   // tăng khi ĐỔI chuỗi tonemap/mã hoá bản SDR -> khoá cũ hết hiệu lực
 const SDR_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const SDR_CACHE_MAX_BYTES = 20 * 1024 * 1024 * 1024;
+/* BỘ NHỚ ĐỆM RENDER CHO LƯỢT XUẤT LẠI (mục 1.13 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md) — kiểu
+ * "Use Previews" của Premiere: batch hình của lượt xuất trước được dùng lại khi khoá trùng (sidecar
+ * tính khoá theo nội dung, xem RenderCacheKey trong core_process.cpp), nên chỉ đoạn đã đổi phải render
+ * lại. Cùng ổ với temp_uploads (cùng USER_DATA_ROOT) để sidecar cất batch bằng đổi tên. Sidecar tự dọn
+ * theo trần + hạn 30 ngày; Cài đặt › Bộ nhớ đệm dọn tay.
+ * CRAB_RENDER_CACHE_DIR chỉ dùng cho TEST. Test đặt CRAB_TEMP_DIR mà không đặt biến này thì cache TẮT:
+ * lượt xuất của test phải render thật (đo thời gian, kiểm đường lùi GPU/CPU), không lấy batch của lần
+ * chạy trước. */
+const RENDER_CACHE_DIR = process.env.CRAB_RENDER_CACHE_DIR
+  ? path.resolve(process.env.CRAB_RENDER_CACHE_DIR)
+  : path.join(USER_DATA_ROOT, 'render_cache');
+const RENDER_CACHE_ALLOWED = Boolean(process.env.CRAB_RENDER_CACHE_DIR) || !process.env.CRAB_TEMP_DIR;
+const RENDER_CACHE_MAX_BYTES = 20 * 1024 * 1024 * 1024;
 const LIBRARY_CATEGORIES = { video: 'Video', elements: 'Elements', sfxs: 'SFXs', music: 'Music' };
 // Cài đặt ứng dụng (bảng Cài đặt trong Menu). Đặt ở gốc dự án — KHÔNG phải dữ liệu runtime
 // như temp_uploads/peaks_cache — để cấu hình đi theo thư mục dự án và sao lưu được.
@@ -1513,6 +1526,8 @@ async function writeProjectReport(reason) {
   lines.push(reportLine(2, 'sidecar_probe_ms', sidecarTiming?.probe_ms));
   lines.push(reportLine(2, 'sidecar_plan_ms', sidecarTiming?.plan_ms));
   lines.push(reportLine(2, 'sidecar_concat_ms', sidecarTiming?.concat_ms));
+  // Cache render (mục 1.13): batch dùng lại ghi ` cache` ở dòng của nó; đây là số batch mới cất vào.
+  lines.push(reportLine(2, 'render_cache_stored', sidecarTiming ? (sidecarTiming.cache_stored ?? null) : null));
   const sidecarRuns = Array.isArray(sidecarTiming?.runs) ? sidecarTiming.runs : [];
   lines.push(reportLine(2, 'ffmpeg_run_count', sidecarTiming ? sidecarRuns.length : null));
   for (const run of sidecarRuns) {
@@ -1522,7 +1537,7 @@ async function writeProjectReport(reason) {
       `${run.mode} run_ms=${run.run_ms} intervals=${run.intervals} overlays=${run.overlays} `
       + `seq_sec=${run.sequence_duration} source=${run.source_from}..${run.source_to}`
       + `${run.seek_to ? ` seek=${run.seek_to}` : ''}`
-      + `${run.gpu ? ' gpu' : ''}${run.gpu_fallback ? ' gpu_fallback' : ''}`
+      + `${run.cache_hit ? ' cache' : ''}${run.gpu ? ' gpu' : ''}${run.gpu_fallback ? ' gpu_fallback' : ''}`
       + `${run.cpu_retry ? ' cpu_retry' : ''}${run.exit ? ` exit=${run.exit}` : ''}`));
   }
   lines.push(reportLine(2, 'output_path', render?.output_path));
@@ -6605,6 +6620,8 @@ function createApp() {
     // Dọn được: lượt xuất/xem trước sau tự hạ SDR lại. Bản đang dùng trong dự án mở vẫn còn
     // (liên kết cứng trong temp_uploads) — xoá mục cache chỉ gỡ một liên kết.
     sdr: { dir: SDR_CACHE_DIR, label: () => _t('Bản SDR của video HDR'), clearable: true },
+    // Dọn được: lượt xuất sau render lại đủ (chỉ chậm hơn). Không dọn lúc đang xuất — bước ghép đang đọc nó.
+    render: { dir: RENDER_CACHE_DIR, label: () => _t('Bản render để xuất lại'), clearable: true },
     /* Model lồng tiếng (F5 ~1,4 GB, VieNeu ~0,9 GB): dọn được — lượt lồng tiếng sau tự tải lại
      * (có thanh tiến trình). Tệp đang được server TTS nạp dở thì Windows không cho xoá, bỏ qua. */
     tts_models: { dir: ttsService.modelDir(), label: () => _t('Mô hình lồng tiếng'), clearable: true },
@@ -6632,6 +6649,7 @@ function createApp() {
       const target = CACHE_TARGETS[id];
       if (!target) return httpError(res, 400, _t('Bộ nhớ đệm không hợp lệ.'));
       if (!target.clearable) return httpError(res, 400, _t('Không dọn được "{label}" — đây là dữ liệu của dự án đang mở.', { label: target.label() }));
+      if (id === 'render' && exportInFlight) return httpError(res, 409, _t('Đang xuất video — đợi xong rồi hãy dọn mục này.'));
       let removed = 0;
       let names = [];
       try { names = fs.readdirSync(target.dir); } catch (_) { names = []; }
@@ -7456,6 +7474,10 @@ function createApp() {
       const renderStartedAt = clientStartedAt || Date.now();
       const serverRenderStartedAt = Date.now();
       stageMs.prepare_ms = serverRenderStartedAt - handlerStartedAt;
+      // Cài đặt › Xuất video › "Dùng lại phần đã render" (mục 1.13): không truyền thư mục = sidecar tắt cache.
+      const renderCacheEnv = RENDER_CACHE_ALLOWED && readAppSettings().export.renderCache
+        ? { CRABBYCUT_RENDER_CACHE_DIR: RENDER_CACHE_DIR, CRABBYCUT_RENDER_CACHE_MAX_BYTES: String(RENDER_CACHE_MAX_BYTES) }
+        : {};
       const sidecarEvents = await timeStage('sidecar_ms', () => runSidecar([
         'export-video',
         sourceVideoPath,
@@ -7464,7 +7486,7 @@ function createApp() {
         TEMP_DIR,
         exportSettings.resolution,
         exportSettings.fps,
-      ]));
+      ], { env: renderCacheEnv }));
       /* CHỐT CHẶN: FILE XUẤT RA PHẢI DÀI ĐÚNG BẰNG TIMELINE.
        *
        * ffmpeg có thể kết thúc với mã 0 mà vẫn NUỐT MẤT phần cuối phim: chỉ cần nguồn đổi

@@ -3,6 +3,7 @@
 
 #include <cstdlib>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <clocale>
 #include <cstdint>
@@ -1339,6 +1340,7 @@ struct ExportRunTiming {
   bool cpuRetry = false;
   bool gpu = false;           // lượt chạy bằng đồ thị GPU (mục 1.21)
   bool gpuFallback = false;   // đồ thị GPU lỗi -> chạy lại bằng đồ thị CPU
+  bool cacheHit = false;      // dùng lại batch trong cache render (mục 1.13), không chạy ffmpeg
 };
 
 struct ExportTimingLog {
@@ -1353,6 +1355,9 @@ struct ExportTimingLog {
   std::string render = "cpu";
   // Kết quả dò GPU lấy từ cache của lượt trước (ReadGpuProbeCache) thay vì chạy lệnh dò.
   bool gpuProbeCached = false;
+  // Cache render (mục 1.13): thời gian tính khoá, số batch cất vào cache sau lượt này.
+  double cacheKeyMs = 0.0;
+  size_t cacheStored = 0;
   std::vector<ExportRunTiming> runs;
 };
 
@@ -1408,6 +1413,8 @@ std::string ExportTimingJson(const std::string& encoder) {
       << ",\"workers\":" << g_exportTiming.workers
       << ",\"render\":\"" << g_exportTiming.render << "\""
       << ",\"gpu_probe_cached\":" << (g_exportTiming.gpuProbeCached ? "true" : "false")
+      << ",\"cache_key_ms\":" << g_exportTiming.cacheKeyMs
+      << ",\"cache_stored\":" << g_exportTiming.cacheStored
       << ",\"runs\":[";
   for (size_t i = 0; i < g_exportTiming.runs.size(); i++) {
     const ExportRunTiming& run = g_exportTiming.runs[i];
@@ -1424,7 +1431,8 @@ std::string ExportTimingJson(const std::string& encoder) {
         << ",\"run_ms\":" << run.runMs << ",\"exit\":" << run.exitCode
         << ",\"cpu_retry\":" << (run.cpuRetry ? "true" : "false")
         << ",\"gpu\":" << (run.gpu ? "true" : "false")
-        << ",\"gpu_fallback\":" << (run.gpuFallback ? "true" : "false") << "}";
+        << ",\"gpu_fallback\":" << (run.gpuFallback ? "true" : "false")
+        << ",\"cache_hit\":" << (run.cacheHit ? "true" : "false") << "}";
   }
   out << "]}";
   return out.str();
@@ -2475,9 +2483,12 @@ bool HasAnimGeomExpr(const std::string& sx, const std::string& sy, const std::st
   return !sx.empty() || !sy.empty() || !rot.empty();
 }
 
-// File lệnh phụ của filter script đang ghi (lutmix_*.cmd, kfop_*.cmd): nằm cạnh script, số thứ tự
-// chạy suốt tiến trình nên mỗi file một tên.
+// File lệnh phụ của filter script đang ghi (lutmix_*.cmd, kfop_*.cmd): nằm cạnh script, tên mang tiền
+// tố là tên script nên mỗi file một tên. Số thứ tự (cũng là tên bộ lọc trong đồ thị: `blend@…lm`,
+// `colorchannelmixer@kfopN`) ĐẾM LẠI TỪ 0 cho mỗi script: đếm suốt tiến trình thì thêm một lớp phủ
+// động ở batch 1 làm đổi chữ của mọi batch sau -> khoá cache render (mục 1.13) của chúng đổi theo.
 static fs::path g_filterAuxDir;   // thư mục của filter script đang ghi (xem WriteFilterScript)
+static std::string g_filterAuxPrefix;   // "<tên script>_"
 static int g_filterAuxSeq = 0;
 
 /* ĐỘ MỜ CÓ KEYFRAME (mục 1.6 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md).
@@ -2501,7 +2512,7 @@ std::string KfOpacityFilter(const std::string& kfOpacityExpr, double start) {
   if (!KfOpacityMixerEnabled()) return geq;
   const std::string tag = "kfop" + std::to_string(++g_filterAuxSeq);
   const fs::path dir = g_filterAuxDir.empty() ? fs::temp_directory_path() : g_filterAuxDir;
-  const fs::path cmdPath = dir / (tag + ".cmd");
+  const fs::path cmdPath = dir / (g_filterAuxPrefix + tag + ".cmd");
   {
     std::ofstream cmd{cmdPath};
     if (!cmd) return geq;
@@ -2712,7 +2723,7 @@ std::string ColorAdjustLutBlend(double start, const std::string& aPath, const st
   if (aPath.empty() || bPath.empty() || mixExpr.empty()) return "";
   const std::string mix = SubstituteLocalTimeVar(mixExpr, start, "T");
   const fs::path dir = g_filterAuxDir.empty() ? fs::temp_directory_path() : g_filterAuxDir;
-  const fs::path cmdPath = dir / ("lutmix_" + tag + std::to_string(++g_filterAuxSeq) + ".cmd");
+  const fs::path cmdPath = dir / (g_filterAuxPrefix + "lutmix_" + tag + std::to_string(++g_filterAuxSeq) + ".cmd");
   {
     std::ofstream cmd{cmdPath};
     if (!cmd) return "";   // không ghi được -> bỏ tầng trộn (thà thiếu LUT động còn hơn hỏng graph)
@@ -3925,6 +3936,22 @@ double OverlayEnableStart(double start, const ExportSettings& settings) {
   return std::max(0.0, start - 0.5 / fps);
 }
 
+/* ẢNH TĨNH HẾT ĐÚNG MÉP CUỐI (sửa 2026-10-03 — lộ ra khi đổi mốc cắt batch ở mục 1.13). Luồng ảnh tĩnh
+ * chạy theo nhịp của chính nó (PNG: 25 khung/s): `trim=duration=D` cho khung ảnh cuối ở start + D − 1/25,
+ * và framesync coi lớp phủ đã HẾT ngay ở mốc khung đó (eof_action=pass) — khung nền trong 1/25 s cuối của
+ * cửa sổ mất lớp phủ: 1–2 khung ở 30 khung/s, 2–3 khung ở 60 khung/s (hai phụ đề nối liền nháy trống ở
+ * chỗ chuyển). Ở batch, `setpts=…+start/TB` còn cắt phần lẻ trên timebase 1/25 nên chuỗi ảnh sớm thêm tới
+ * 1/25 s và bản chia batch mất thêm một khung so với bản một lượt (test:export-parallel, kịch bản B).
+ * Nay luồng ảnh dài dư kStillTailSeconds và một mình `enable` chặn mép cuối, lùi nửa khung như mép đầu:
+ * khung nền hiện lớp phủ khi mốc của nó thuộc [start, end) — như preview và Premiere. */
+constexpr double kStillTailSeconds = 0.25;
+
+double OverlayEnableEnd(const ExportOverlay& overlay, double end, const ExportSettings& settings) {
+  const double fps = ParseFpsValue(settings.renderFps);
+  if (!OverlayIsImageLike(overlay) || !(fps > 0.0)) return end;
+  return end - 0.5 / fps;
+}
+
 /* ===== CHIA LƯỢT XUẤT THEO THỜI GIAN KHI DỰ ÁN CÓ LỚP PHỦ ======================
  *
  * VÌ SAO PHẢI CHIA (đo thật, không suy đoán). Mọi lớp phủ được nối thành MỘT chuỗi
@@ -4055,6 +4082,15 @@ bool OverlayStraddles(const ExportOverlay& overlay, double at, double fps) {
       && (overlay.timelineStart + std::max(0.05, overlay.duration) + pad) > at;
 }
 
+/* MỐC CẮT MONG MUỐN KẾ TIẾP — theo LƯỚI CỐ ĐỊNH k × target trên trục sequence (mục 1.13), không
+ * theo "đầu batch + target". Theo đầu batch thì một mốc bị đẩy lùi (lớp phủ động vắt qua, cắt ở biên
+ * clip) kéo lệch MỌI mốc sau nó -> mọi batch phía sau đổi nội dung, cache render lỡ hết. Theo lưới thì
+ * mốc sau quay về đúng chỗ cũ. Mốc lưới gần đầu batch hơn nửa target thì lấy mốc kế tiếp: batch dài
+ * trong khoảng [0,5; 1,5] × target. */
+double NextBatchMark(double batchStart, double target) {
+  return (std::floor((batchStart + 0.5 * target) / target) + 1.0) * target;
+}
+
 /* Chia cả lượt xuất thành các cửa sổ thời gian cắt được AN TOÀN (ba điều kiện ở khối chú
  * thích đầu mục). Trả về một phần tử duy nhất = không cắt được chỗ nào, nơi gọi chạy y như
  * bản cũ. */
@@ -4123,7 +4159,7 @@ std::vector<OverlayBatch> PlanOverlayBatches(
     /* Cắt BÊN TRONG một clip chỉ được phép khi clip đó không có hiệu ứng biến thiên. Vòng
      * lặp: chừng nào clip hiện tại còn vắt qua mốc cắt mong muốn thì xén một khúc ra. */
     while (splitInsideClips && !IntervalIsTimeVarying(item) && item.renderFrames > 1) {
-      const double want = batchStart + targetSeconds;
+      const double want = NextBatchMark(batchStart, targetSeconds);
       const double itemEnd = itemStart + (static_cast<double>(item.renderFrames) / fps);
       if (want >= itemEnd) break;                       // mốc mong muốn nằm sau clip này
       long long frame = std::llround((want - itemStart) * fps);
@@ -4146,7 +4182,7 @@ std::vector<OverlayBatch> PlanOverlayBatches(
     }
     current.intervals.push_back(item);
     // Biên giữa hai clip cũng là một mốc cắt hợp lệ, nếu batch đã đủ dài và mốc đó an toàn.
-    if (cursor - batchStart >= targetSeconds && safeToCutAt(cursor)
+    if (cursor >= NextBatchMark(batchStart, targetSeconds) - 1e-6 && safeToCutAt(cursor)
         && cursor < total - 0.5) {
       closeBatch(cursor);
     }
@@ -4468,7 +4504,8 @@ std::string OverlayTimingChain(const ExportOverlay& overlay, const ExportSetting
      * timebase µs thì hai luồng ra cùng PTS. */
     if (!overlay.logoAiDir.empty()) timing << "settb=AVTB,";
   } else {
-    timing << "trim=duration=" << FixedSeconds(overlay.duration) << ",";
+    // Dài dư qua mép cuối: `enable` chặn mép (xem kStillTailSeconds).
+    timing << "trim=duration=" << FixedSeconds(overlay.duration + kStillTailSeconds) << ",";
   }
   WriteOverlaySetpts(timing, overlay, settings);
   return timing.str();
@@ -4608,7 +4645,7 @@ void WriteVisualOverlayFilter(
     if (gpu == OverlayGpu::CpuYuv) script << ",hwupload";
   }
   if (stillOnce) {
-    script << ",loop=loop=-1:size=1,trim=duration=" << FixedSeconds(overlay.duration) << ",";
+    script << ",loop=loop=-1:size=1,trim=duration=" << FixedSeconds(overlay.duration + kStillTailSeconds) << ",";
     writeSetpts(script);
   }
   // Chuỗi khung: nối khung nhân bản ở đuôi thay cho eof_action=repeat (xem SequenceTailFrames).
@@ -4657,7 +4694,8 @@ void WriteVisualOverlayFilter(
            << ":y=(" << seqH << "-h)/2"
            << (overlay.positionY >= 0 ? "+" : "") << FfmpegDouble(overlay.positionY);
   }
-  script << ":enable='between(t," << FfmpegDouble(OverlayEnableStart(start, settings)) << "," << FfmpegDouble(end) << ")'"
+  script << ":enable='between(t," << FfmpegDouble(OverlayEnableStart(start, settings)) << ","
+         << FfmpegDouble(OverlayEnableEnd(overlay, end, settings)) << ")'"
          // Sequence hoạt ảnh: GIỮ frame cuối sau EOF — nếu pass mà chuỗi hết sớm, text
          // biến mất 1–3 frame ở cuối cửa sổ gây "nháy"; enable window vẫn gate hiển thị.
          // Nay giữ bằng các khung nhân bản ở đuôi chuỗi (SequenceTailFrames) + pass; chỉ
@@ -4734,7 +4772,7 @@ void WriteVisualOverlayFilterGpu(
   // LUT (lớp Điều chỉnh / HSL + LUT): mốc thời gian tuyệt đối sau setpts -> LOCALT = t − start.
   script << GpuLutOptions(BlockGpuLut(overlay, start));
   if (stillOnce) {
-    script << ",loop=loop=-1:size=1,trim=duration=" << FixedSeconds(overlay.duration) << ",";
+    script << ",loop=loop=-1:size=1,trim=duration=" << FixedSeconds(overlay.duration + kStillTailSeconds) << ",";
     WriteOverlaySetpts(script, overlay, settings);
   }
   const int seqTail = SequenceTailFrames(overlay);
@@ -4745,7 +4783,8 @@ void WriteVisualOverlayFilterGpu(
   const std::string by = "trunc((" + std::to_string(seqH) + "-(h-4))/2+" + posY + ")";
   script << inputLabel << "[ov" << id << "]crabblend_cuda="
          << "x='" << bx << "-mod(" << bx << ",2)':y='" << by << "-mod(" << by << ",2)'"
-         << ":enable='between(t," << FfmpegDouble(OverlayEnableStart(start, settings)) << "," << FfmpegDouble(end) << ")'"
+         << ":enable='between(t," << FfmpegDouble(OverlayEnableStart(start, settings)) << ","
+         << FfmpegDouble(OverlayEnableEnd(overlay, end, settings)) << ")'"
          << ":eof_action=" << ((OverlayIsImageSequence(overlay) && seqTail == 0) ? "repeat" : "pass");
   if (!overlay.kfOpacityExpr.empty()) {
     /* Keyframe độ mờ (đơn vị %, LOCALT = t − start) THAY giá trị tĩnh — như KfOpacityFilter của
@@ -4986,6 +5025,8 @@ bool WriteFilterScript(
   std::ofstream script(scriptPath);
   if (!script) return false;
   g_filterAuxDir = scriptPath.parent_path();   // file lệnh phụ (lutmix_*.cmd) nằm cạnh script
+  g_filterAuxPrefix = scriptPath.stem().string() + "_";
+  g_filterAuxSeq = 0;
   g_fastClipCount = 0;
   const double renderFpsValue = ParseFpsValue(settings.renderFps);
   /* LƯỢT CHỈ-TIẾNG NỐI KÈM ĐOẠN HÌNH GIẢ (mục 1.8). Ở lượt có hình, `concat` nối hình CÙNG tiếng
@@ -5360,6 +5401,485 @@ void AppendEncoderArgsForMode(std::vector<std::string>& cmd, const ExportSetting
   AppendEncoderArgs(cmd, settings, plan);
 }
 
+/* ===== BỘ NHỚ ĐỆM RENDER CHO LƯỢT XUẤT LẠI (mục 1.13, docs/KE_HOACH_TOI_UU_EXPORT_WIN.md) =====
+ * Kiểu "Use Previews" của Premiere / "Use render cached images" của Resolve, nhưng KHÔNG có đánh đổi
+ * chất lượng: một batch hình chỉ được dùng lại khi KHOÁ của nó trùng, mà khoá là SHA-256 của MỌI
+ * thứ ffmpeg nhìn thấy khi render batch đó:
+ *  - dòng lệnh (trừ tham số đo và tệp ra), tức cả tham số bộ mã hoá, mốc seek, `-t` của lớp phủ;
+ *  - nội dung filter script, trong đó mọi đường dẫn tệp (LUT, mặt nạ, tệp lệnh sendcmd, danh sách
+ *    ffconcat của Retouch) được thay bằng ĐỊNH DANH NỘI DUNG của tệp — xem RenderCacheScriptId;
+ *  - định danh nội dung của mọi tệp `-i` (nguồn, ảnh lớp phủ, chuỗi khung) — RenderCacheFileId;
+ *  - vân tay bản ffmpeg (`-version` + cỡ/mtime của exe và DLL), bản dựng sidecar (__DATE__ __TIME__:
+ *    đổi ở mọi lần biên dịch tệp này) và driver GPU khi bộ mã hoá/bộ lọc là phần cứng.
+ * Định danh theo NỘI DUNG chứ không theo đường dẫn/mtime: temp_input.mp4 và ảnh phụ đề được dựng lại
+ * ở mỗi lần mở dự án / mỗi lượt xuất với nội dung y hệt. Tệp nhỏ (≤ 16 MB) băm cả tệp; tệp lớn (video)
+ * băm cỡ + 5 khúc 1 MB (đầu, 1/4, 1/2, 3/4, cuối) — mã hoá lại một video luôn đổi cỡ hoặc `moov`.
+ * Bật khi backend truyền CRABBYCUT_RENDER_CACHE_DIR (Cài đặt › Xuất video); sidecar chạy tay/test
+ * không truyền thì tắt. Chỉ áp cho batch HÌNH của lượt xuất nhiều batch; lượt tiếng luôn chạy lại. */
+constexpr const char* kRenderCacheFormat = "crabbycut-render-cache-1";
+constexpr std::uintmax_t kRenderCacheFullHashBytes = 16ULL * 1024 * 1024;
+constexpr std::uintmax_t kRenderCacheSampleBytes = 1024ULL * 1024;
+constexpr std::uintmax_t kRenderCacheDefaultMaxBytes = 20ULL * 1024 * 1024 * 1024;
+// Giữ lại batch mà ổ còn ít hơn chừng này thì thôi — cache không được làm đầy ổ của người dùng.
+constexpr std::uintmax_t kRenderCacheDefaultMinFreeBytes = 5ULL * 1024 * 1024 * 1024;
+constexpr long long kRenderCacheMaxAgeSeconds = 30LL * 24 * 3600;
+
+struct Sha256 {
+  std::uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+  unsigned char buf[64] = {};
+  size_t used = 0;
+  std::uint64_t bytes = 0;
+
+  static std::uint32_t Rotr(std::uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
+  void Block(const unsigned char* p) {
+    static const std::uint32_t k[64] = {
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+      0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+    std::uint32_t w[64];
+    for (int i = 0; i < 16; i++) {
+      w[i] = (std::uint32_t(p[4 * i]) << 24) | (std::uint32_t(p[4 * i + 1]) << 16)
+           | (std::uint32_t(p[4 * i + 2]) << 8) | std::uint32_t(p[4 * i + 3]);
+    }
+    for (int i = 16; i < 64; i++) {
+      const std::uint32_t s0 = Rotr(w[i - 15], 7) ^ Rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+      const std::uint32_t s1 = Rotr(w[i - 2], 17) ^ Rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+      w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    std::uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+    for (int i = 0; i < 64; i++) {
+      const std::uint32_t t1 = hh + (Rotr(e, 6) ^ Rotr(e, 11) ^ Rotr(e, 25)) + ((e & f) ^ (~e & g)) + k[i] + w[i];
+      const std::uint32_t t2 = (Rotr(a, 2) ^ Rotr(a, 13) ^ Rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
+      hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+  }
+  void Update(const void* data, size_t len) {
+    const unsigned char* p = static_cast<const unsigned char*>(data);
+    bytes += len;
+    while (len > 0) {
+      if (used == 0 && len >= 64) { Block(p); p += 64; len -= 64; continue; }
+      const size_t take = std::min(len, sizeof(buf) - used);
+      std::memcpy(buf + used, p, take);
+      used += take; p += take; len -= take;
+      if (used == sizeof(buf)) { Block(buf); used = 0; }
+    }
+  }
+  void Update(const std::string& text) { Update(text.data(), text.size()); }
+  std::string Hex() {
+    const std::uint64_t bits = bytes * 8;
+    const unsigned char one = 0x80, zero = 0;
+    Update(&one, 1);
+    while (used != 56) Update(&zero, 1);
+    unsigned char length[8];
+    for (int i = 0; i < 8; i++) length[i] = static_cast<unsigned char>(bits >> (56 - 8 * i));
+    Update(length, 8);
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (std::uint32_t v : h) out << std::setw(8) << v;
+    return out.str();
+  }
+};
+
+std::string Sha256Hex(const std::string& text) {
+  Sha256 sha;
+  sha.Update(text);
+  return sha.Hex();
+}
+
+/* xxHash64 (thuật toán công khai của Yann Collet) — băm NỘI DUNG TỆP cho định danh cache. SHA-256 tự viết
+ * chỉ ~170 MB/s: "Yêu Con" có hàng trăm MB khung PNG chữ động, khâu tính khoá mất 7,3 s và chặn việc khởi
+ * chạy batch. xxHash64 nhanh hơn hàng chục lần; định danh dùng hai hạt giống (128 bit) + cỡ tệp, khoá tổng
+ * vẫn là SHA-256 trên các định danh đó. */
+std::uint64_t XxHash64(const unsigned char* p, size_t len, std::uint64_t seed) {
+  constexpr std::uint64_t P1 = 0x9E3779B185EBCA87ULL, P2 = 0xC2B2AE3D27D4EB4FULL, P3 = 0x165667B19E3779F9ULL,
+                          P4 = 0x85EBCA77C2B2AE63ULL, P5 = 0x27D4EB2F165667C5ULL;
+  const auto rotl = [](std::uint64_t x, int r) { return (x << r) | (x >> (64 - r)); };
+  const auto read64 = [](const unsigned char* q) { std::uint64_t v; std::memcpy(&v, q, 8); return v; };
+  const auto read32 = [](const unsigned char* q) { std::uint32_t v; std::memcpy(&v, q, 4); return v; };
+  const auto mix = [&](std::uint64_t acc, std::uint64_t input) { acc += input * P2; acc = rotl(acc, 31); return acc * P1; };
+  const auto merge = [&](std::uint64_t acc, std::uint64_t value) { acc ^= mix(0, value); return acc * P1 + P4; };
+  const unsigned char* end = p + len;
+  std::uint64_t h;
+  if (len >= 32) {
+    std::uint64_t v1 = seed + P1 + P2, v2 = seed + P2, v3 = seed, v4 = seed - P1;
+    const unsigned char* limit = end - 32;
+    do {
+      v1 = mix(v1, read64(p)); v2 = mix(v2, read64(p + 8)); v3 = mix(v3, read64(p + 16)); v4 = mix(v4, read64(p + 24));
+      p += 32;
+    } while (p <= limit);
+    h = rotl(v1, 1) + rotl(v2, 7) + rotl(v3, 12) + rotl(v4, 18);
+    h = merge(h, v1); h = merge(h, v2); h = merge(h, v3); h = merge(h, v4);
+  } else {
+    h = seed + P5;
+  }
+  h += static_cast<std::uint64_t>(len);
+  for (; p + 8 <= end; p += 8) { h ^= mix(0, read64(p)); h = rotl(h, 27) * P1 + P4; }
+  if (p + 4 <= end) { h ^= static_cast<std::uint64_t>(read32(p)) * P1; h = rotl(h, 23) * P2 + P3; p += 4; }
+  for (; p < end; p++) { h ^= static_cast<std::uint64_t>(*p) * P5; h = rotl(h, 11) * P1; }
+  h ^= h >> 33; h *= P2; h ^= h >> 29; h *= P3; h ^= h >> 32;
+  return h;
+}
+
+std::string ContentHash(const std::string& data) {
+  const auto* bytes = reinterpret_cast<const unsigned char*>(data.data());
+  std::ostringstream out;
+  out << std::hex << std::setfill('0') << std::setw(16) << XxHash64(bytes, data.size(), 0)
+      << std::setw(16) << XxHash64(bytes, data.size(), 0x2545F4914F6CDD1DULL);
+  return out.str();
+}
+
+fs::path g_renderCacheDir;   // rỗng = tắt (xem RenderCacheConfigure)
+std::uintmax_t g_renderCacheMaxBytes = kRenderCacheDefaultMaxBytes;
+std::uintmax_t g_renderCacheMinFreeBytes = kRenderCacheDefaultMinFreeBytes;
+std::map<std::string, std::string> g_renderCacheIds;   // đường dẫn -> định danh (một lượt xuất)
+
+std::uintmax_t EnvBytes(const char* name, std::uintmax_t fallback) {
+  const char* env = std::getenv(name);
+  if (!env || !*env) return fallback;
+  char* end = nullptr;
+  const unsigned long long value = std::strtoull(env, &end, 10);
+  return (end && end != env) ? static_cast<std::uintmax_t>(value) : fallback;
+}
+
+void RenderCacheLoadStamps();
+
+void RenderCacheConfigure() {
+  g_renderCacheDir.clear();
+  const char* dir = std::getenv("CRABBYCUT_RENDER_CACHE_DIR");
+  if (!dir || !*dir) return;
+  std::error_code ec;
+  fs::create_directories(fs::path(dir), ec);
+  if (ec || !fs::is_directory(fs::path(dir), ec)) return;
+  g_renderCacheDir = fs::path(dir);
+  g_renderCacheMaxBytes = EnvBytes("CRABBYCUT_RENDER_CACHE_MAX_BYTES", kRenderCacheDefaultMaxBytes);
+  g_renderCacheMinFreeBytes = EnvBytes("CRABBYCUT_RENDER_CACHE_MIN_FREE_BYTES", kRenderCacheDefaultMinFreeBytes);
+  RenderCacheLoadStamps();
+}
+
+// Vân tay bản ffmpeg: `-version` (phiên bản + cấu hình + bản thư viện) và cỡ/mtime của exe + DLL.
+std::string FfmpegFingerprint() {
+  static const std::string fingerprint = [] {
+    std::string out = CommandOutput({"ffmpeg", "-version"});
+#ifdef _WIN32
+    wchar_t found[MAX_PATH * 2];
+    const DWORD n = SearchPathW(nullptr, L"ffmpeg.exe", nullptr, MAX_PATH * 2, found, nullptr);
+    if (n > 0 && n < MAX_PATH * 2) {
+      const fs::path exe(found);
+      std::vector<std::string> stamps;
+      std::error_code ec;
+      for (const auto& entry : fs::directory_iterator(exe.parent_path(), ec)) {
+        const std::string name = entry.path().filename().string();
+        const std::string ext = entry.path().extension().string();
+        if (ext == ".dll" || entry.path() == exe) stamps.push_back(name + "|" + FileStamp(entry.path().string()));
+      }
+      std::sort(stamps.begin(), stamps.end());
+      for (const auto& s : stamps) out += "\n" + s;
+    }
+#endif
+    return out;
+  }();
+  return fingerprint;
+}
+
+// Driver GPU (bộ mã hoá phần cứng / bộ lọc CUDA): driver mới có thể đổi SPS/PPS của NVENC, mà ghép
+// `-c copy` giữ SPS/PPS của batch đầu — batch cũ không được ghép với batch của driver khác.
+std::string GpuDriverFingerprint() {
+  static const std::string fingerprint = [] {
+    std::string out;
+#ifdef _WIN32
+    wchar_t system[MAX_PATH];
+    const UINT n = GetSystemDirectoryW(system, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+      const fs::path dir(system);
+      for (const wchar_t* dll : {L"nvcuda.dll", L"nvEncodeAPI64.dll", L"amfrt64.dll", L"libmfxhw64.dll", L"libvpl.dll"}) {
+        std::error_code ec;
+        const fs::path p = dir / dll;
+        if (fs::is_regular_file(p, ec)) out += FileStamp(p.string()) + "\n";
+      }
+    }
+#endif
+    return out;
+  }();
+  return fingerprint;
+}
+
+bool ReadFileRange(const fs::path& path, std::uintmax_t offset, std::uintmax_t length, std::string& out) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return false;
+  in.seekg(static_cast<std::streamoff>(offset));
+  out.assign(static_cast<size_t>(length), '\0');
+  in.read(&out[0], static_cast<std::streamsize>(length));
+  out.resize(static_cast<size_t>(in.gcount()));
+  return in.gcount() == static_cast<std::streamsize>(length);
+}
+
+std::string RenderCacheFileId(const fs::path& path, int depth = 0);
+
+/* Danh sách ffconcat (khung miếng vá Retouch nạp bằng `movie=…:format_name=concat`): định danh gồm
+ * nội dung từng tệp nó liệt kê, không chỉ chữ của danh sách. "" = có tệp không đọc được. */
+std::string RenderCacheConcatListId(const fs::path& list, const std::string& text, int depth) {
+  std::istringstream lines(text);
+  std::string line;
+  Sha256 sha;
+  while (std::getline(lines, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    size_t at = line.find_first_not_of(" \t");
+    if (at != std::string::npos && line.compare(at, 5, "file ") == 0) {
+      std::string name = line.substr(at + 5);
+      name.erase(0, name.find_first_not_of(" \t"));
+      if (name.size() >= 2 && name.front() == '\'' && name.back() == '\'') name = name.substr(1, name.size() - 2);
+      fs::path p = fs::path(name);
+      if (p.is_relative()) p = list.parent_path() / p;
+      const std::string id = RenderCacheFileId(p, depth + 1);
+      if (id.empty()) return "";
+      line = "file " + id;
+    }
+    sha.Update(line + "\n");
+  }
+  return sha.Hex();
+}
+
+/* Định danh nội dung một tệp (không đụng biến toàn cục — chạy được trên nhiều luồng, xem
+ * RenderCacheHashFiles). Danh sách ffconcat thì trả "" + `isList` (định danh của nó cần định danh từng tệp
+ * nó liệt kê, nơi gọi tính tiếp trên luồng chính). */
+std::string RenderCacheHashContent(const fs::path& path, std::uintmax_t size, bool& isList, std::string* listText) {
+  isList = false;
+  if (size <= kRenderCacheFullHashBytes) {
+    std::string text;
+    if (!ReadFileRange(path, 0, size, text)) return "";
+    if (path.extension() == ".ffconcat" || text.compare(0, 8, "ffconcat") == 0) {
+      isList = true;
+      if (listText) *listText = std::move(text);
+      return "";
+    }
+    return "f" + std::to_string(size) + ":" + ContentHash(text);
+  }
+  std::string samples;
+  const std::uintmax_t last = size - kRenderCacheSampleBytes;
+  for (const std::uintmax_t offset : {std::uintmax_t(0), last / 4, last / 2, last / 4 * 3, last}) {
+    std::string chunk;
+    if (!ReadFileRange(path, offset, kRenderCacheSampleBytes, chunk)) return "";
+    samples += chunk;
+  }
+  return "b" + std::to_string(size) + ":" + ContentHash(samples);
+}
+
+/* ĐỊNH DANH NHỚ GIỮA CÁC LƯỢT XUẤT (`file_ids.tsv` trong thư mục cache): (đường dẫn, cỡ, mtime) -> định
+ * danh nội dung, như index của git. Đo trên "Yêu Con": lượt xuất lại tốn 2,0 s chỉ để đọc lại hàng nghìn
+ * khung PNG chữ động không đổi. Tệp ghi lại (mtime mới) thì băm lại — ảnh bake lại với nội dung y hệt vẫn
+ * ra cùng định danh, chỉ tốn lần đọc. Mục không dùng quá 30 ngày thì bỏ khi ghi lại tệp. */
+struct RenderCacheStamp {
+  std::uintmax_t size = 0;
+  long long mtime = 0;
+  std::string id;
+  long long used = 0;
+};
+std::map<std::string, RenderCacheStamp> g_renderCacheStamps;
+bool g_renderCacheStampsDirty = false;
+// Khác null = lượt GOM: RenderCacheFileId chỉ ghi lại đường dẫn cần băm (xem RenderCachePrefetch).
+std::vector<fs::path>* g_renderCacheCollect = nullptr;
+
+fs::path RenderCacheStampFile() { return g_renderCacheDir / "file_ids.tsv"; }
+
+void RenderCacheLoadStamps() {
+  g_renderCacheStamps.clear();
+  g_renderCacheStampsDirty = false;
+  std::ifstream in(RenderCacheStampFile(), std::ios::binary);
+  std::string line;
+  while (std::getline(in, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    std::istringstream fields(line);
+    RenderCacheStamp stamp;
+    std::string size, mtime, used, path;
+    if (!std::getline(fields, stamp.id, '\t') || !std::getline(fields, size, '\t')
+        || !std::getline(fields, mtime, '\t') || !std::getline(fields, used, '\t') || !std::getline(fields, path)) {
+      continue;
+    }
+    stamp.size = static_cast<std::uintmax_t>(std::strtoull(size.c_str(), nullptr, 10));
+    stamp.mtime = std::strtoll(mtime.c_str(), nullptr, 10);
+    stamp.used = std::strtoll(used.c_str(), nullptr, 10);
+    if (!stamp.id.empty() && !path.empty()) g_renderCacheStamps[path] = stamp;
+  }
+}
+
+void RenderCacheSaveStamps() {
+  if (g_renderCacheDir.empty() || !g_renderCacheStampsDirty) return;
+  const long long now = UnixNowSeconds();
+  const fs::path file = RenderCacheStampFile();
+  const fs::path tmp = fs::path(file.string() + ".tmp");
+  {
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+    if (!out) return;
+    for (const auto& [path, stamp] : g_renderCacheStamps) {
+      if (now - stamp.used > kRenderCacheMaxAgeSeconds) continue;
+      out << stamp.id << '\t' << stamp.size << '\t' << stamp.mtime << '\t' << stamp.used << '\t' << path << '\n';
+    }
+  }
+  std::error_code ec;
+  fs::rename(tmp, file, ec);
+  if (ec) fs::remove(tmp, ec);
+  g_renderCacheStampsDirty = false;
+}
+
+bool RenderCacheStat(const fs::path& path, std::uintmax_t& size, long long& mtime) {
+  std::error_code ec;
+  if (!fs::is_regular_file(path, ec)) return false;
+  size = fs::file_size(path, ec);
+  if (ec) return false;
+  const auto time = fs::last_write_time(path, ec);
+  if (ec) return false;
+  mtime = static_cast<long long>(time.time_since_epoch().count());
+  return true;
+}
+
+void RenderCacheRemember(const std::string& key, std::uintmax_t size, long long mtime, const std::string& id) {
+  g_renderCacheIds[key] = id;
+  RenderCacheStamp& stamp = g_renderCacheStamps[key];
+  stamp.size = size;
+  stamp.mtime = mtime;
+  stamp.id = id;
+  stamp.used = UnixNowSeconds();
+  g_renderCacheStampsDirty = true;
+}
+
+std::string RenderCacheFileId(const fs::path& path, int depth) {
+  const std::string key = path.string();
+  const auto memo = g_renderCacheIds.find(key);
+  if (memo != g_renderCacheIds.end()) return memo->second;
+  std::uintmax_t size = 0;
+  long long mtime = 0;
+  if (depth > 2 || !RenderCacheStat(path, size, mtime)) return "";
+  const auto stamp = g_renderCacheStamps.find(key);
+  if (stamp != g_renderCacheStamps.end() && stamp->second.size == size && stamp->second.mtime == mtime) {
+    stamp->second.used = UnixNowSeconds();
+    g_renderCacheStampsDirty = true;
+    g_renderCacheIds[key] = stamp->second.id;
+    return stamp->second.id;
+  }
+  // Lượt gom: tệp thường để dành băm song song; danh sách ffconcat đọc ngay để gom các tệp nó liệt kê.
+  if (g_renderCacheCollect && path.extension() != ".ffconcat") {
+    g_renderCacheCollect->push_back(path);
+    return "?";
+  }
+  bool isList = false;
+  std::string listText;
+  std::string id = RenderCacheHashContent(path, size, isList, &listText);
+  if (isList) {
+    const std::string listId = RenderCacheConcatListId(path, listText, depth);
+    if (listId.empty()) return "";
+    id = "l" + std::to_string(size) + ":" + listId;
+  }
+  if (id.empty()) return "";
+  if (g_renderCacheCollect) return id;   // định danh của danh sách lúc gom dựa trên "?" -> không nhớ
+  RenderCacheRemember(key, size, mtime, id);
+  return id;
+}
+
+/* Băm song song các tệp đã gom (khung PNG chữ động: hàng nghìn tệp vừa ghi — lần mở đầu tiên của mỗi tệp
+ * tốn chủ yếu ở trình quét virus, không ở phép băm). Danh sách ffconcat lộ ra lúc này thì bỏ qua: luồng
+ * chính tính nó sau, bằng đường thường. */
+void RenderCacheHashFiles(std::vector<fs::path> paths) {
+  std::sort(paths.begin(), paths.end());
+  paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
+  struct Item { fs::path path; std::uintmax_t size = 0; long long mtime = 0; std::string id; };
+  std::vector<Item> todo;
+  for (const auto& path : paths) {
+    if (g_renderCacheIds.count(path.string())) continue;
+    Item item;
+    item.path = path;
+    if (RenderCacheStat(path, item.size, item.mtime)) todo.push_back(std::move(item));
+  }
+  if (todo.empty()) return;
+  std::atomic<size_t> next{0};
+  const auto worker = [&] {
+    for (size_t i = next++; i < todo.size(); i = next++) {
+      bool isList = false;
+      todo[i].id = RenderCacheHashContent(todo[i].path, todo[i].size, isList, nullptr);
+    }
+  };
+  const size_t threads = std::min<size_t>({8, todo.size(), std::max<size_t>(1, std::thread::hardware_concurrency())});
+  std::vector<std::thread> pool;
+  for (size_t t = 1; t < threads; t++) pool.emplace_back(worker);
+  worker();
+  for (auto& thread : pool) thread.join();
+  for (const auto& item : todo) {
+    if (!item.id.empty()) RenderCacheRemember(item.path.string(), item.size, item.mtime, item.id);
+  }
+}
+
+/* Tham số `-i`: tệp, hoặc mẫu chuỗi khung (`…%05d.png`, đánh số từ 0 — xem AppendOverlayInputArgs). */
+std::string RenderCacheInputId(const std::string& arg, const fs::path& baseDir) {
+  fs::path path(arg);
+  if (path.is_relative()) path = baseDir / path;
+  std::error_code ec;
+  if (fs::is_regular_file(path, ec)) return RenderCacheFileId(path);
+  const std::string text = path.string();
+  const size_t pct = text.rfind('%');
+  if (pct == std::string::npos) return "";
+  size_t end = pct + 1;
+  int width = 0;
+  while (end < text.size() && std::isdigit(static_cast<unsigned char>(text[end]))) {
+    width = width * 10 + (text[end] - '0');
+    end++;
+  }
+  if (end >= text.size() || text[end] != 'd') return "";
+  Sha256 sha;
+  int count = 0;
+  for (int n = 0;; n++) {
+    std::string number = std::to_string(n);
+    if (static_cast<int>(number.size()) < width) number.insert(0, static_cast<size_t>(width) - number.size(), '0');
+    const fs::path frame(text.substr(0, pct) + number + text.substr(end + 1));
+    if (!fs::is_regular_file(frame, ec)) break;
+    const std::string id = RenderCacheFileId(frame);
+    if (id.empty()) return "";
+    sha.Update(id + "\n");
+    count++;
+  }
+  return count > 0 ? "s" + std::to_string(count) + ":" + sha.Hex() : "";
+}
+
+/* Filter script: mọi đoạn trong nháy đơn mà là đường dẫn tới một tệp có thật (FilterPath và
+ * filterPath() của frontend luôn đặt đường dẫn trong nháy, `:` escape thành `\:`) được thay bằng định
+ * danh nội dung — tên tệp phụ (lutmix_*.cmd, LUT bake theo từng lượt) đổi mà nội dung không đổi thì
+ * khoá vẫn trùng. Đoạn nào không phải tệp thì giữ nguyên chữ, nên đọc nhầm chỉ làm lỡ cache chứ
+ * không bao giờ cho trùng khoá sai. */
+std::string RenderCacheScriptId(const fs::path& scriptPath) {
+  std::string text;
+  std::error_code ec;
+  const std::uintmax_t size = fs::file_size(scriptPath, ec);
+  if (ec || !ReadFileRange(scriptPath, 0, size, text)) return "";
+  std::string normalized;
+  normalized.reserve(text.size());
+  size_t i = 0;
+  while (i < text.size()) {
+    const size_t open = text.find('\'', i);
+    if (open == std::string::npos) { normalized.append(text, i, std::string::npos); break; }
+    const size_t close = text.find('\'', open + 1);
+    if (close == std::string::npos) { normalized.append(text, i, std::string::npos); break; }
+    normalized.append(text, i, open - i + 1);
+    const std::string quoted = text.substr(open + 1, close - open - 1);
+    std::string unescaped;
+    for (size_t k = 0; k < quoted.size(); k++) {
+      if (quoted[k] == '\\' && k + 1 < quoted.size()) { unescaped.push_back(quoted[++k]); continue; }
+      unescaped.push_back(quoted[k]);
+    }
+    const bool looksLikePath = unescaped.find('/') != std::string::npos || unescaped.find('\\') != std::string::npos;
+    const fs::path candidate(unescaped);
+    std::string id;
+    if (looksLikePath && candidate.is_absolute() && fs::is_regular_file(candidate, ec)) id = RenderCacheFileId(candidate);
+    normalized += id.empty() ? quoted : "<" + id + ">";
+    normalized.push_back('\'');
+    i = close + 1;
+  }
+  return "c" + std::to_string(normalized.size()) + ":" + Sha256Hex(normalized);
+}
+
 /* MỘT LƯỢT FFMPEG ĐÃ CHUẨN BỊ, CHƯA CHẠY (mục 1.8). PrepareExportBatch ghi filter script và dựng
  * sẵn mọi thứ của dòng lệnh trừ bộ mã hoá; `buildCmd(plan, nhãn)` ghép nốt phần bộ mã hoá — lỗi
  * phần cứng thì dựng lại với plan CPU. Tách hai bước để nhiều batch chạy SONG SONG được: bước
@@ -5378,6 +5898,13 @@ struct BatchJob {
   bool gpu = false;
   fs::path gpuScriptPath;
   std::function<std::vector<std::string>(const EncoderPlan&, const std::string&)> buildCmdCpu;
+  /* CACHE RENDER (mục 1.13): chỉ batch hình của lượt xuất nhiều batch (`cacheable`). RunBatchJobs
+   * tính `cacheKey` theo đúng dòng lệnh sắp chạy; trùng thì `cacheHit` = tệp trong cache, không chạy
+   * ffmpeg. Lượt xuất xong thì RenderCacheStore cất `output` của batch vừa render vào cache. */
+  fs::path output;
+  bool cacheable = false;
+  std::string cacheKey;
+  fs::path cacheHit;
 };
 
 void UseCpuGraph(BatchJob& job) {
@@ -5385,6 +5912,126 @@ void UseCpuGraph(BatchJob& job) {
   job.gpu = false;
   job.timing.gpu = false;
   job.buildCmd = job.buildCmdCpu;
+}
+
+fs::path RenderCacheEntry(const std::string& key, const fs::path& output) {
+  return g_renderCacheDir / (key + output.extension().string());
+}
+
+// "" = không tính được (có tệp vào không đọc được) -> batch chạy như không có cache.
+std::string RenderCacheKey(const BatchJob& job, const std::vector<std::string>& cmd) {
+  if (cmd.size() < 2) return "";
+  Sha256 sha;
+  const auto add = [&](const std::string& part) { sha.Update(part); sha.Update("\n", 1); };
+  add(kRenderCacheFormat);
+  add(std::string("sidecar ") + __DATE__ + " " + __TIME__);
+  add(FfmpegFingerprint());
+  bool hardware = false;
+  const size_t outputIndex = cmd.size() - 1;
+  for (size_t i = 1; i < outputIndex; i++) {
+    const std::string& arg = cmd[i];
+    if (arg == "-benchmark") continue;
+    if ((arg == "-progress" || arg == "-print_graphs_file") && i + 1 < outputIndex) { i++; continue; }
+    if (arg == "-i" && i + 1 < outputIndex) {
+      const std::string id = RenderCacheInputId(cmd[++i], job.tempDir);
+      if (id.empty()) return "";
+      add("-i " + id);
+      continue;
+    }
+    if (arg == "-/filter_complex" && i + 1 < outputIndex) {
+      const std::string id = RenderCacheScriptId(fs::path(cmd[++i]));
+      if (id.empty()) return "";
+      add("-/filter_complex " + id);
+      continue;
+    }
+    if (arg.find("_nvenc") != std::string::npos || arg.find("_qsv") != std::string::npos
+        || arg.find("_amf") != std::string::npos || arg == "-init_hw_device") {
+      hardware = true;
+    }
+    add(arg);
+  }
+  if (hardware) add(GpuDriverFingerprint());
+  add("out " + fs::path(cmd[outputIndex]).extension().string());
+  return sha.Hex();
+}
+
+bool IsRenderCacheEntryName(const std::string& name) {
+  if (name.size() != 68) return false;   // 64 hex + ".mp4"/".mov"
+  for (size_t i = 0; i < 64; i++) {
+    if (!std::isxdigit(static_cast<unsigned char>(name[i]))) return false;
+  }
+  const std::string ext = name.substr(64);
+  return ext == ".mp4" || ext == ".mov";
+}
+
+/* Dọn cache: bỏ mục quá 30 ngày không dùng, rồi giữ các mục MỚI DÙNG nhất trong trần dung lượng
+ * (mtime = lần dùng cuối, xem RenderCacheStore). Tệp `.part` sót lại (sidecar bị tắt giữa lúc chép)
+ * quá một ngày thì xoá. */
+void RenderCachePrune() {
+  if (g_renderCacheDir.empty()) return;
+  struct Entry { fs::path path; std::uintmax_t size; fs::file_time_type time; };
+  std::vector<Entry> entries;
+  std::error_code ec;
+  const auto now = fs::file_time_type::clock::now();
+  for (const auto& item : fs::directory_iterator(g_renderCacheDir, ec)) {
+    std::error_code itemEc;
+    if (!item.is_regular_file(itemEc)) continue;
+    const fs::path path = item.path();
+    const auto time = fs::last_write_time(path, itemEc);
+    if (itemEc) continue;
+    const long long age = std::chrono::duration_cast<std::chrono::seconds>(now - time).count();
+    if (path.extension() == ".part") {
+      if (age > 24 * 3600) fs::remove(path, itemEc);
+      continue;
+    }
+    if (!IsRenderCacheEntryName(path.filename().string())) continue;
+    if (age > kRenderCacheMaxAgeSeconds) { fs::remove(path, itemEc); continue; }
+    const std::uintmax_t size = item.file_size(itemEc);
+    if (!itemEc) entries.push_back({path, size, time});
+  }
+  std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) { return a.time > b.time; });
+  std::uintmax_t kept = 0;
+  for (const auto& entry : entries) {
+    if (kept + entry.size > g_renderCacheMaxBytes) { fs::remove(entry.path, ec); continue; }
+    kept += entry.size;
+  }
+}
+
+/* Sau khi GHÉP XONG (bước ghép đọc chính các tệp batch): cất batch vừa render vào cache bằng ĐỔI TÊN
+ * (cache nằm cạnh temp_uploads trong thư mục dữ liệu người dùng -> cùng ổ, tức thì), chạm mtime các
+ * mục vừa dùng lại (LRU), rồi dọn. Ổ còn ít hơn g_renderCacheMinFreeBytes thì không giữ gì: batch bị
+ * xoá như trước (RemoveExportBatches). Khác ổ thì chép, khi ổ đích còn đủ chỗ. */
+void RenderCacheStore(const std::vector<BatchJob>& jobs) {
+  if (g_renderCacheDir.empty()) return;
+  const auto now = fs::file_time_type::clock::now();
+  for (const auto& job : jobs) {
+    if (!job.cacheable || job.cacheKey.empty()) continue;
+    std::error_code ec;
+    if (!job.cacheHit.empty()) {
+      fs::last_write_time(job.cacheHit, now, ec);
+      continue;
+    }
+    if (job.timing.exitCode != 0) continue;
+    const std::uintmax_t size = fs::file_size(job.output, ec);
+    if (ec || size == 0) continue;
+    const fs::space_info space = fs::space(g_renderCacheDir, ec);
+    if (ec || space.available < g_renderCacheMinFreeBytes) continue;
+    const fs::path entry = RenderCacheEntry(job.cacheKey, job.output);
+    const fs::path part = fs::path(entry.string() + ".part");
+    fs::rename(job.output, part, ec);
+    if (ec) {
+      if (space.available < size + g_renderCacheMinFreeBytes) continue;
+      ec.clear();
+      fs::copy_file(job.output, part, fs::copy_options::overwrite_existing, ec);
+      if (ec) { fs::remove(part, ec); continue; }
+    }
+    fs::rename(part, entry, ec);
+    if (ec) { fs::remove(part, ec); continue; }
+    fs::last_write_time(entry, now, ec);
+    g_exportTiming.cacheStored++;
+  }
+  RenderCachePrune();
+  RenderCacheSaveStamps();
 }
 
 bool PrepareExportBatch(
@@ -5481,6 +6128,7 @@ bool PrepareExportBatch(
   }
   job.scriptPath = scriptPath;
   job.tempDir = tempDir;
+  job.output = fs::path(output);
   job.video = mode != FilterScriptMode::AudioOnly;
   job.progressText = "batch " + std::to_string(batchIndex + 1) + "/" + std::to_string(batchCount)
                    + " (" + std::to_string(count) + " đoạn)";
@@ -5584,9 +6232,54 @@ size_t ExportParallelWorkers(const ExportSettings& settings) {
 /* Chạy các job, tối đa `concurrency` tiến trình cùng lúc (Windows: CreateProcessW không chờ +
  * WaitForMultipleObjects; nơi khác: nối tiếp). Job lỗi được báo trong `codes`, không dừng job
  * khác — nơi gọi quyết định chạy lại. */
+/* Băm TRƯỚC, song song, mọi tệp mà khoá của các job sắp chạy cần (lượt "gom" của RenderCacheKey ghi lại
+ * đường dẫn thay vì băm). Không có bước này thì khoá của từng job tính tuần tự ngay trước khi khởi chạy job
+ * đó: "Bin Tom" lượt đầu 6,8 s chặn việc khởi chạy batch (lần mở đầu tiên của ~1.600 khung PNG vừa ghi). */
+void RenderCachePrefetch(std::vector<BatchJob*>& jobs, const EncoderPlan& plan, const std::string& labelSuffix) {
+  if (g_renderCacheDir.empty()) return;
+  const auto started = ExportClock::now();
+  std::vector<fs::path> paths;
+  g_renderCacheCollect = &paths;
+  for (BatchJob* job : jobs) {
+    if (job->cacheable && job->video) RenderCacheKey(*job, job->buildCmd(plan, job->timing.label + labelSuffix));
+  }
+  g_renderCacheCollect = nullptr;
+  RenderCacheHashFiles(std::move(paths));
+  g_exportTiming.cacheKeyMs += MsSince(started);
+}
+
+/* Tra cache ngay trước khi chạy một job (mọi lần chạy, kể cả lượt chạy lại bằng đồ thị CPU / bộ mã hoá
+ * CPU: khoá tính theo dòng lệnh của CHÍNH lần chạy đó, nên lùi về libx264 là tra khoá libx264 — không
+ * bao giờ ghép batch NVENC cũ với batch libx264 mới). true = trùng, không cần chạy ffmpeg. */
+bool RenderCacheLookup(BatchJob& job, const EncoderPlan& plan, const std::string& runLabel) {
+  job.cacheHit.clear();
+  job.cacheKey.clear();
+  job.timing.cacheHit = false;
+  if (g_renderCacheDir.empty() || !job.cacheable || !job.video) return false;
+  const auto started = ExportClock::now();
+  job.cacheKey = RenderCacheKey(job, job.buildCmd(plan, runLabel));
+  g_exportTiming.cacheKeyMs += MsSince(started);
+  if (job.cacheKey.empty()) return false;
+  const fs::path entry = RenderCacheEntry(job.cacheKey, job.output);
+  std::error_code ec;
+  if (!fs::is_regular_file(entry, ec) || fs::file_size(entry, ec) == 0 || ec) return false;
+  job.cacheHit = entry;
+  job.timing.cacheHit = true;
+  Emit("progress", "Dùng lại " + job.progressText + " đã render ở lượt xuất trước.");
+  return true;
+}
+
 std::vector<int> RunBatchJobs(std::vector<BatchJob*>& jobs, const EncoderPlan& plan, size_t concurrency,
                               const std::string& labelSuffix) {
   std::vector<int> codes(jobs.size(), 0);
+  /* Gom + băm cho cache render ngay trước job CÓ CACHE đầu tiên — tức SAU khi lượt tiếng (đứng đầu thứ
+   * tự, xem RunExportJobs) đã chạy: phần băm (~1 s ở lượt đầu) chồng lên lượt tiếng thay vì đứng trước nó. */
+  bool prefetched = false;
+  const auto prefetchBefore = [&](const BatchJob& job) {
+    if (prefetched || !job.cacheable) return;
+    prefetched = true;
+    RenderCachePrefetch(jobs, plan, labelSuffix);
+  };
   concurrency = std::max<size_t>(1, concurrency);
 #ifdef _WIN32
   struct Active { size_t index; HANDLE process; ExportClock::time_point started; };
@@ -5596,6 +6289,8 @@ std::vector<int> RunBatchJobs(std::vector<BatchJob*>& jobs, const EncoderPlan& p
     while (next < jobs.size() && active.size() < concurrency) {
       BatchJob& job = *jobs[next];
       const std::string runLabel = job.timing.label + labelSuffix;
+      prefetchBefore(job);
+      if (RenderCacheLookup(job, plan, runLabel)) { codes[next++] = 0; continue; }
       const std::vector<std::string> cmd = JobCommandForRun(job, plan, runLabel);
       Emit("progress", "Đang render " + job.progressText
                        + (concurrency > 1 ? " — " + std::to_string(active.size() + 1) + " lượt chạy cùng lúc" : "") + "...");
@@ -5636,6 +6331,8 @@ std::vector<int> RunBatchJobs(std::vector<BatchJob*>& jobs, const EncoderPlan& p
   (void)concurrency;
   for (size_t i = 0; i < jobs.size(); i++) {
     BatchJob& job = *jobs[i];
+    prefetchBefore(job);
+    if (RenderCacheLookup(job, plan, job.timing.label + labelSuffix)) { codes[i] = 0; continue; }
     Emit("progress", "Đang render " + job.progressText + "...");
     const std::vector<std::string> cmd = JobCommandForRun(job, plan, job.timing.label + labelSuffix);
     const auto started = ExportClock::now();
@@ -5731,7 +6428,7 @@ int RunExportJobs(std::vector<BatchJob>& jobs, EncoderPlan& plan, size_t concurr
   }
   for (size_t i = 0; i < jobs.size(); i++) {
     jobs[i].timing.exitCode = codes[i];
-    if (jobs[i].gpu && codes[i] == 0) g_exportTiming.render = "gpu";
+    if (jobs[i].gpu && codes[i] == 0 && jobs[i].cacheHit.empty()) g_exportTiming.render = "gpu";
     g_exportTiming.runs.push_back(jobs[i].timing);
   }
   if (failure != 0) {
@@ -6012,6 +6709,8 @@ int CommandExportVideo(int argc, char** argv) {
   std::string fps = argv[7];
   g_exportTiming = ExportTimingLog{};
   g_exportBenchDir.clear();
+  RenderCacheConfigure();
+  g_renderCacheIds.clear();
   if (ExportBenchRequested()) {
     g_exportBenchDir = tempDir / "export_bench";
     std::error_code ec;
@@ -6177,7 +6876,13 @@ int CommandExportVideo(int argc, char** argv) {
     if (workers > 1 && totalSeconds < kOverlayBatchMinTotalSeconds
         && totalSeconds >= 2.0 * kParallelMinBatchSeconds) {
       const double pieces = std::min(2.0 * static_cast<double>(workers), std::floor(totalSeconds / kParallelMinBatchSeconds));
-      batchTarget = totalSeconds / pieces;
+      /* Làm tròn XUỐNG theo bậc (8, 10, 12, 15, 20 … s): độ dài batch theo đúng tổng/số phần thì sửa
+       * dài/ngắn timeline một chút là đổi mọi mốc cắt, kể cả các batch TRƯỚC chỗ sửa -> cache render
+       * (mục 1.13) lỡ hết. Theo bậc thì các batch trước chỗ sửa giữ nguyên. */
+      batchTarget = kParallelMinBatchSeconds;
+      for (const double step : {10.0, 12.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0, 80.0, 100.0, 120.0}) {
+        if (step <= totalSeconds / pieces) batchTarget = step;
+      }
       batchMinTotal = 0.0;
       splitInsideClips = false;
     }
@@ -6212,6 +6917,7 @@ int CommandExportVideo(int argc, char** argv) {
                               i, batches.size(), settings, batchOverlays, FilterScriptMode::VideoOnly)) {
         return 6;
       }
+      jobs[i].cacheable = true;   // cache render (mục 1.13)
       batchPaths.push_back(batchPath.string());
     }
 
@@ -6233,6 +6939,10 @@ int CommandExportVideo(int argc, char** argv) {
     {
       const int code = RunExportJobs(jobs, plan, workers > 1 ? workers + 1 : 1, settings);
       if (code != 0) return code;
+    }
+    // Batch trùng khoá cache: ghép thẳng tệp trong cache (xem RenderCacheLookup), không chép ra.
+    for (size_t i = 0; i < batches.size(); i++) {
+      if (!jobs[i].cacheHit.empty()) batchPaths[i] = jobs[i].cacheHit.string();
     }
 
     fs::path concatList = tempDir / "concat_export_batches_native.txt";
@@ -6279,7 +6989,9 @@ int CommandExportVideo(int argc, char** argv) {
       return code;
     }
     /* Dọn các batch trung gian NGAY khi đã ghép xong: chúng to bằng chính bản xuất (dự án
-     * phụ đề 4K 39 phút: ~11,5 GB) và trước đây nằm lại trong thư mục tạm tới lượt xuất sau. */
+     * phụ đề 4K 39 phút: ~11,5 GB) và trước đây nằm lại trong thư mục tạm tới lượt xuất sau.
+     * Cache render bật thì batch hình được cất vào cache trước (đổi tên, xem RenderCacheStore). */
+    RenderCacheStore(jobs);
     RemoveExportBatches(batchDir);
     EmitExportTiming(plan.videoEncoder);
     Emit("result", "export complete", 0, output);

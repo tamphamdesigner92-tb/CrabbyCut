@@ -20,7 +20,11 @@
  * (được xén theo batch). Hai kịch bản vì mỗi bố cục làm lộ một nhóm lỗi khác (đã thử bằng đột biến):
  *   A. 6 clip × 7 s, tiếng 48 kHz, ảnh tĩnh 10–20 s vắt qua mốc 14 s;
  *   B. 12 clip dài lẻ (2,7–4,3 s), tiếng 44,1 kHz (đổi mẫu lên 48 kHz -> độ dài đoạn tiếng lẻ mẫu), ảnh
- *      tĩnh 8–12 s vắt qua mốc 9,7 s và một ảnh ở batch cuối.
+ *      tĩnh 8–12 s vắt qua mốc 9,7 s, một ảnh ở batch giữa (20–23 s; mốc cắt theo lưới của mục 1.13 là
+ *      9,7 / 17,3 / 28 s) và một ảnh ở batch cuối.
+ * Ở cả hai kịch bản, ảnh tĩnh phải hiện ĐÚNG [start, end) của timeline: luồng ảnh 25 khung/s từng hết
+ * ở khung ảnh cuối (end − 1/25 s) nên mất khung nền cuối của cửa sổ, và ở batch còn sớm thêm một khung
+ * (setpts cắt phần lẻ) — xem kStillTailSeconds ở sidecar.
  * Batch nào cũng có lớp phủ: ProRes ghép mọi lớp phủ ở RGBA, nên ở bản một lượt CẢ luồng đi vòng
  * YUV -> RGBA -> YUV; batch không có lớp phủ nào thì khỏi vòng đó (đúng hơn, nhưng khác bản một lượt).
  *
@@ -48,7 +52,7 @@ const level = (k) => 20 + 5 * k;   // mức xám (RGB) của khung k trong chu�
 const SCENARIOS = [
   { name: 'A', audioRate: 48000, spacing: 10, clips: [7, 7, 7, 7, 7, 7], stills: [[10, 10]] },
   { name: 'B', audioRate: 44100, spacing: 5, clips: [3.1, 3.7, 2.9, 4.3, 3.3, 3.9, 2.7, 4.1, 3.5, 3.0, 3.6, 4.2],
-    stills: [[8, 4], [36, 4]] },
+    stills: [[8, 4], [20, 3], [36, 4]] },
 ];
 
 function run(cmd, args, opts = {}) {
@@ -152,6 +156,16 @@ function pcm(file) {
     { encoding: 'buffer', maxBuffer: 512 * 1024 * 1024 }).stdout;
 }
 
+// Mức Y trung bình (8-bit, dải tv) của vùng ảnh tĩnh thứ i (40×20, vị trí như writeTimeline), khung [from, to].
+function stillLumas(file, from, to, i) {
+  const x = W / 2 + (i ? 80 : -100) - 20;
+  const y = H / 2 + (i ? -60 : -50) - 10;
+  const r = mustRun('ffmpeg', ['-v', 'info', '-i', file, '-vf',
+    `select='between(n\\,${from}\\,${to})',crop=40:20:${x}:${y},format=yuv420p,signalstats,`
+    + 'metadata=print:key=lavfi.signalstats.YAVG', '-f', 'null', '-'], 'signalstats');
+  return [...r.stderr.matchAll(/lavfi\.signalstats\.YAVG=([\d.]+)/g)].map((m) => Number(m[1]));
+}
+
 // Mức Y trung bình (8-bit, dải tv) ở giữa vùng chuỗi khung, cho từng khung trong [from, to].
 function seqLumas(file, from, to) {
   const x = (W - SEQ_SIZE) / 2 + 16;
@@ -205,6 +219,16 @@ function checkScenario(scenario, assets) {
   assert.ok(Math.abs(lumas[0] - toY(level(0))) > 1.5, `${tag}: khung ${s - 1} chưa có chuỗi (Y ${lumas[0].toFixed(1)})`);
   assert.ok(Math.abs(lumas[SEQ_FRAMES + 1] - toY(level(SEQ_FRAMES - 1))) > 1.5,
     `${tag}: khung ${s + SEQ_FRAMES} chuỗi đã hết (Y ${lumas[SEQ_FRAMES + 1].toFixed(1)})`);
+  // Ảnh tĩnh: khung nền đầu tiên có mốc >= start và khung cuối có mốc < end hiện ảnh, hai khung kề ngoài
+  // thì không (so mức Y với khung kề: ảnh vàng đục 85% khác hẳn nền testsrc2).
+  scenario.stills.forEach(([start, duration], i) => {
+    const first = Math.ceil(start * FPS - 1e-9);
+    const last = Math.ceil((start + duration) * FPS - 1e-9) - 1;
+    const [outA, inA] = stillLumas(single, first - 1, first, i);
+    const [inB, outB] = stillLumas(single, last, last + 1, i);
+    assert.ok(Math.abs(inA - outA) > 20, `${tag}: ảnh tĩnh ${i} phải hiện từ khung ${first} (Y ${outA} -> ${inA})`);
+    assert.ok(Math.abs(inB - outB) > 20, `${tag}: ảnh tĩnh ${i} phải hiện tới khung ${last} (Y ${inB} -> ${outB})`);
+  });
   console.log(`  ok  ${tag}: ${a.length} khung + tiếng trùng nhau; song song ${videoRuns(tParallel).length} batch, `
     + `${tParallel.workers} lượt cùng lúc; chuỗi khung ${SEQ_FRAMES} khung đúng từ khung ${s}`);
 }

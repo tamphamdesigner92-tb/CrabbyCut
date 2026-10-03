@@ -174,7 +174,11 @@ const json = (v) => JSON.stringify(v);
   assert.deepStrictEqual(legacy.autoSave, AppSettings.DEFAULTS.autoSave);
   assert.deepStrictEqual(legacy.shortcuts, {});
   assert.deepStrictEqual(legacy.textEffects, [], 'cấu hình cũ chưa có thư viện hiệu ứng -> rỗng');
-  assert.deepStrictEqual(legacy.export, { renderDevice: 'gpu' }, 'cấu hình cũ chưa có mục Xuất video -> GPU');
+  assert.deepStrictEqual(legacy.export, { renderDevice: 'gpu', renderCache: true },
+    'cấu hình cũ chưa có mục Xuất video -> GPU, dùng lại phần đã render');
+  // Cache render (mục 1.13): chỉ nhận boolean; giá trị lạ về mặc định (bật).
+  assert.strictEqual(AppSettings.normalize({ export: { renderCache: false } }).export.renderCache, false);
+  assert.strictEqual(AppSettings.normalize({ export: { renderCache: 'no' } }).export.renderCache, true);
 }
 
 /* ---------- Thư viện "Hiệu ứng chữ" người dùng tự lưu ---------- */
