@@ -1138,7 +1138,7 @@ bool GpuRenderAvailable(const std::string& nvencEncoder) {
   return RunQuiet({"ffmpeg", "-hide_banner", "-v", "error", "-nostdin",
                    "-init_hw_device", "cuda=cu", "-filter_hw_device", "cu",
                    "-f", "lavfi", "-i", "color=c=black:s=256x256:r=25:d=0.2",
-                   "-vf", "format=yuv420p,hwupload_cuda,crabgeo_cuda=w=128:h=128:ow=256:oh=256:x=64:y=64:passthrough=0:sync=1",
+                   "-vf", "format=yuv420p,hwupload,crabgeo_cuda=w=128:h=128:ow=256:oh=256:x=64:y=64:passthrough=0:sync=1",
                    "-c:v", nvencEncoder, "-f", "null", "-"}) == 0;
 }
 
@@ -1146,13 +1146,16 @@ bool GpuRenderAvailable(const std::string& nvencEncoder) {
  * Mỗi lệnh dò tốn ~0,5 s khởi tạo CUDA/NVENC, chạy song song thì tranh nhau (Test.crab: khâu dò
  * 0,4 -> 1,4 s với hai lệnh riêng). Đúng thì vừa "GPU dùng được" vừa "NVDEC giải mã được nguồn";
  * sai thì nơi gọi dò riêng GpuRenderAvailable. Khung ra cố định 640×360 (co ≤ 12 lần với nguồn 8K,
- * đủ lớn cho cỡ tối thiểu của NVENC với nguồn nhỏ). */
+ * đủ lớn cho cỡ tối thiểu của NVENC với nguồn nhỏ).
+ * `-xerror` + `-t 2` ở input: NVDEC không giải mã được codec (AV1 trên GTX 10xx) thì bộ giải mã báo
+ * lỗi ở TỪNG gói mà ffmpeg vẫn đọc tiếp — trước đây lệnh dò đọc hết nguồn tới khi chạm thời gian chờ
+ * 20 s (phim 4K AV1 640 MB: khâu dò 20,8 s). Nay thoát ngay ở lỗi đầu (~0,3 s). */
 bool GpuRenderAvailableWithNvdec(const std::string& nvencEncoder, const std::string& source) {
   if (!HasFfmpegFilter("crabgeo_cuda") || !HasFfmpegFilter("crabblend_cuda")) return false;
-  return RunQuiet({"ffmpeg", "-hide_banner", "-v", "error", "-nostdin",
+  return RunQuiet({"ffmpeg", "-hide_banner", "-v", "error", "-nostdin", "-xerror",
                    "-init_hw_device", "cuda=cu", "-filter_hw_device", "cu",
                    "-hwaccel", "cuda", "-hwaccel_device", "cu", "-hwaccel_output_format", "cuda",
-                   "-i", source, "-frames:v", "2", "-an", "-sn", "-dn",
+                   "-t", "2", "-i", source, "-frames:v", "2", "-an", "-sn", "-dn",
                    "-vf", "crabgeo_cuda=w=640:h=360:passthrough=0:sync=1",
                    "-c:v", nvencEncoder, "-f", "null", "-"}) == 0;
 }
@@ -1256,18 +1259,24 @@ void WriteGpuProbeCache(const fs::path& file, const std::string& key, const GpuP
  * H.264 10-bit, 4:2:2…) thì `-hwaccel cuda` lặng lẽ lùi về giải mã CPU, khung ra ở RAM và
  * `crabgeo_cuda` (chỉ nhận khung CUDA) không nối được -> lệnh lỗi. Chỉ thử hai khung đầu. Co một
  * nửa chứ không co về cỡ tí hon: crabgeo chỉ co tối đa ~15 lần (bảng lọc ≤ 64 tap, xem
- * kGpuMinScale) — `w=16` trên nguồn 4K là lỗi của phép thử chứ không phải của NVDEC. */
+ * kGpuMinScale) — `w=16` trên nguồn 4K là lỗi của phép thử chứ không phải của NVDEC.
+ * `-xerror` + `-t 2`: xem GpuRenderAvailableWithNvdec (codec NVDEC không hỗ trợ -> thoát ngay). */
 bool NvdecDecodes(const std::string& path) {
-  return RunQuiet({"ffmpeg", "-hide_banner", "-v", "error", "-nostdin",
+  return RunQuiet({"ffmpeg", "-hide_banner", "-v", "error", "-nostdin", "-xerror",
                    "-init_hw_device", "cuda=cu", "-filter_hw_device", "cu",
                    "-hwaccel", "cuda", "-hwaccel_device", "cu", "-hwaccel_output_format", "cuda",
-                   "-i", path, "-frames:v", "2", "-an", "-sn", "-dn",
+                   "-t", "2", "-i", path, "-frames:v", "2", "-an", "-sn", "-dn",
                    "-vf", "crabgeo_cuda=w=trunc(iw/4)*2:h=trunc(ih/4)*2", "-f", "null", "-"}) == 0;
 }
 
-/* Định dạng tải khung giải mã CPU lên GPU (`format=<…>,hwupload_cuda`) cho từng pix_fmt nguồn,
+/* Định dạng tải khung giải mã CPU lên GPU (`format=<…>,hwupload`) cho từng pix_fmt nguồn,
  * trong số định dạng crabgeo_cuda nhận. Rỗng = không có đường rẻ (4:2:2, RGB, có alpha…) -> clip
- * đi đồ thị CPU. 10/12-bit 4:2:0 đổi sang p010 (chỉ dồn lại hai mặt phẳng màu, giữ 10 bit). */
+ * đi đồ thị CPU. 10/12-bit 4:2:0 đổi sang p010 (chỉ dồn lại hai mặt phẳng màu, giữ 10 bit).
+ * TẢI LÊN BẰNG `hwupload`, KHÔNG BẰNG `hwupload_cuda` (sửa 2026-10-03): hwupload_cuda bỏ qua
+ * -filter_hw_device và TỰ TẠO một ngữ cảnh CUDA mới cho mỗi lần xuất hiện (~0,25 s + bộ nhớ GPU mỗi
+ * cái) — mỗi ảnh/chuỗi lớp phủ, mỗi dải đen đệm của clip, nguồn chính đều có một cái. Phim 4K AV1
+ * có 48 phụ đề mỗi batch: 48 hwupload_cuda tốn 13,2 s so với 1,3 s bằng hwupload (dùng thiết bị
+ * `cu` của lệnh, chung với crabgeo/crabblend/NVENC). */
 std::string GpuUploadFormat(const std::string& pixFmt) {
   if (pixFmt == "yuv420p" || pixFmt == "yuvj420p") return "yuv420p";
   if (pixFmt == "nv12") return "nv12";
@@ -3000,7 +3009,7 @@ static std::vector<int> g_clipVideoInput;
  * thị đổi sang bộ lọc CUDA của bản ffmpeg riêng: crabgeo_cuda (cắt + co + đổi màu + đặt vào
  * khung), crabblend_cuda (trộn lớp phủ, trùng từng bit với overlay=format=yuv420). Chỉ bật khi
  * BatchGpuEligible đã chắc mọi clip/lớp phủ của batch có bản GPU. `g_gpuMainNvdec`: nguồn chính
- * giải mã bằng NVDEC ra thẳng khung CUDA; sai thì giải mã CPU rồi `hwupload_cuda` sau `trim`. */
+ * giải mã bằng NVDEC ra thẳng khung CUDA; sai thì giải mã CPU rồi `hwupload` sau `trim`. */
 static bool g_gpuGraph = false;
 static bool g_gpuMainNvdec = false;
 
@@ -3444,14 +3453,14 @@ void WriteClipVideoFilters(
     const int gh = static_cast<int>(std::max(2.0, std::ceil(settings.sourceHeight * s / 2) * 2));
     const int gx = static_cast<int>((seqW - gw) / 2.0 + std::stod(FfmpegDouble(item.positionX)));
     const int gy = static_cast<int>((seqH - gh) / 2.0 + std::stod(FfmpegDouble(item.positionY)));
-    if (!g_gpuMainNvdec) script << ",format=" << GpuUploadFormat(settings.sourcePixFmt) << ",hwupload_cuda";
+    if (!g_gpuMainNvdec) script << ",format=" << GpuUploadFormat(settings.sourcePixFmt) << ",hwupload";
     script << ",tpad=stop=-1:stop_mode=clone,crabgeo_cuda=w=" << gw << ":h=" << gh
            << ":ow=" << seqW << ":oh=" << seqH << ":x=" << gx << ":y=" << gy << ":format=yuv420p";
     if (settings.sourceColorUntagged) script << ":in_matrix=bt709";
     script << GpuLutOptions(BlockGpuLut(item, 0.0)) << ",setsar=1[fc" << idx << "];\n";
     script << "color=c=black:s=" << seqW << "x" << seqH
            << ":d=" << FixedSeconds(baseDuration)
-           << ":r=" << settings.renderFps << ",format=yuv420p,hwupload_cuda[fk" << idx << "];\n";
+           << ":r=" << settings.renderFps << ",format=yuv420p,hwupload[fk" << idx << "];\n";
     script << "[fc" << idx << "][fk" << idx << "]concat=n=2:v=1:a=0,trim=end_frame=" << item.renderFrames
            << "[v" << idx << "];\n";
     g_fastClipCount++;
@@ -4305,7 +4314,7 @@ void WriteVisualOverlayFilter(
     if (stillOnce && AlphaChromaEnabled()) script << AlphaWeightedYuva420("ov" + id);
     else script << ",scale=out_color_matrix=bt709:out_range=tv,format=yuva420p";
     // Đồ thị GPU: tải lên TRƯỚC loop/tpad — khung lặp lại chỉ là tham chiếu tới khung GPU đã tải.
-    if (gpu == OverlayGpu::CpuYuv) script << ",hwupload_cuda";
+    if (gpu == OverlayGpu::CpuYuv) script << ",hwupload";
   }
   if (stillOnce) {
     script << ",loop=loop=-1:size=1,trim=duration=" << FixedSeconds(overlay.duration) << ",";
@@ -4374,7 +4383,7 @@ void WriteVisualOverlayFilter(
      * hiện chậm một khung ở 2/3 số khung đầu và cuối cửa sổ (28 dB so với CPU). Dời TRƯỚC khi ghép thì
      * sai chỗ khác: ảnh/video lớp phủ chỉ sớm 0,1 ms (kOverlayTieEpsilon) nên khung đầu bị bỏ. */
     script << ",settb=AVTB,setpts=PTS-round(0.001/TB)";
-    script << ",hwupload_cuda,crabgeo_cuda=format=yuva420p:bg=transparent:alpha_chroma=1:passthrough=0[ovu" << id << "];\n";
+    script << ",hwupload,crabgeo_cuda=format=yuva420p:bg=transparent:alpha_chroma=1:passthrough=0[ovu" << id << "];\n";
     script << inputLabel << "[ovu" << id << "]crabblend_cuda=x=0:y=0:eof_action=pass";
   } else if (yuvChain && !yuvStatic) {
     // Lớp phủ động trong chuỗi YUV: ghép RGBA như cũ rồi về ngay yuv420p BT.709/tv, để lớp sau
@@ -4420,8 +4429,8 @@ void WriteVisualOverlayFilterGpu(
   script << "[" << inputIndex << ":v]" << (stillOnce ? std::string("null") : OverlayTimingChain(overlay, settings));
   /* Ảnh/chuỗi khung (PNG, JPG): đổi RGBA ở CPU rồi tải lên. Video NVDEC không giải mã được: tải
    * lên dạng yuva420p — giữ alpha nếu nguồn có (ProRes 4444…); đường CPU cũng hạ về RGBA 8-bit. */
-  if (image) script << ",format=rgba,hwupload_cuda";
-  else if (!overlay.gpuNvdec) script << ",format=yuva420p,hwupload_cuda";
+  if (image) script << ",format=rgba,hwupload";
+  else if (!overlay.gpuNvdec) script << ",format=yuva420p,hwupload";
   // `w`/`h` của crabgeo = cỡ ảnh nội dung đã co (chính là `iw`/`ih` của `pad` ở đường CPU).
   script << ",crabgeo_cuda=w='max(2,ceil(iw*" << S << "/2)*2)':h='max(2,ceil(ih*" << S << "/2)*2)'"
          << ":ow=w+4:oh=h+4"
@@ -4514,7 +4523,7 @@ bool OverlayYuvStatic(const ExportOverlay& overlay, const ExportSettings& settin
  *  Native    bản GPU riêng (WriteVisualOverlayFilterGpu): crabgeo + crabblend.
  *  CpuYuv    lớp phủ yuvStatic chưa có bản GPU (mép mềm, chuỗi màu, mặt nạ, lật, xoá logo…): CHÍNH
  *            chuỗi CPU của nó (giải mã + xử lý ở cỡ lớp phủ, thường nhỏ) tới yuva420p đã đệm, rồi
- *            `hwupload_cuda` và crabblend thay `overlay=format=yuv420` — trùng từng bit với CPU.
+ *            `hwupload` và crabblend thay `overlay=format=yuv420` — trùng từng bit với CPU.
  *  CpuCanvas lớp phủ động (keyframe vị trí/cỡ/xoay, hoạt ảnh): đường CPU ghép RGBA lên luồng chính ở
  *            toạ độ/cỡ đổi theo khung. Ở đây ghép RGBA lên một khung TRONG SUỐT cỡ sequence (chỉ trong
  *            cửa sổ của lớp phủ), tải lên, crabgeo đổi yuva420p (màu mép theo trọng số alpha), rồi
