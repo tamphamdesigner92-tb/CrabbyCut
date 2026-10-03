@@ -3008,10 +3008,15 @@ static std::vector<int> g_clipVideoInput;
 /* ĐANG GHI BẢN ĐỒ THỊ GPU (mục 1.21, xem PrepareExportBatch). Các hàm ghi clip/lớp phủ/đuôi đồ
  * thị đổi sang bộ lọc CUDA của bản ffmpeg riêng: crabgeo_cuda (cắt + co + đổi màu + đặt vào
  * khung), crabblend_cuda (trộn lớp phủ, trùng từng bit với overlay=format=yuv420). Chỉ bật khi
- * BatchGpuEligible đã chắc mọi clip/lớp phủ của batch có bản GPU. `g_gpuMainNvdec`: nguồn chính
- * giải mã bằng NVDEC ra thẳng khung CUDA; sai thì giải mã CPU rồi `hwupload` sau `trim`. */
+ * BatchGpuEligible đã cho batch đi GPU. `g_gpuMainNvdec`: NVDEC giải mã được nguồn chính (dò một lần
+ * cho cả lượt xuất). `g_gpuBatchNvdec`: batch đang ghi giải mã nguồn bằng NVDEC ra thẳng khung CUDA —
+ * chỉ khi mọi clip của batch có bản GPU (ClipGpuNative); batch có clip dựng bằng CPU thì giải mã CPU
+ * (bộ lọc CPU không nhận khung CUDA), clip GPU `hwupload` sau `trim`. */
 static bool g_gpuGraph = false;
 static bool g_gpuMainNvdec = false;
+static bool g_gpuBatchNvdec = false;
+
+bool ClipGpuNative(const ExportInterval& item, const ExportSettings& settings, bool nvdec);   // xem dưới BatchGpuEligible
 
 // Clip/lớp phủ có chuỗi màu nào (của chính nó, lớp Điều chỉnh, các lớp thêm) — xem MainLaneFastPlan.
 template <typename Block>
@@ -3638,7 +3643,13 @@ void WriteClipVideoFilters(
     timing << ",trim=end_frame=" << item.renderFrames;
   }
   // Đồ thị GPU: nguồn không nhãn được crabgeo đọc theo bt709 (`in_matrix`) thay cho setparams.
-  const bool gpuClip = fast.ok && g_gpuGraph;
+  const bool gpuClip = fast.ok && g_gpuGraph && ClipGpuNative(item, settings, g_gpuBatchNvdec);
+  /* Clip chưa có bản GPU trong batch GPU (keyframe zoom/pan, xoay, mặt nạ, hiệu ứng không gian, xoá
+   * logo…): chuỗi CPU như cũ, cuối cùng đổi về đúng bt709/tv như đầu ra crabgeo (từ FFmpeg 7.1 ma
+   * trận/dải màu được đàm phán theo liên kết, mà khung CUDA không tự đổi được) rồi tải lên. Batch đó
+   * giải mã nguồn bằng CPU (g_gpuBatchNvdec). */
+  const std::string cpuClipToGpu = (g_gpuGraph && !gpuClip)
+    ? ",scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,hwupload" : "";
   script << "[" << videoInput << ":v]" << (gpuClip ? std::string() : UntaggedColorFix(settings.sourceColorUntagged))
          << timing.str();
   if (!item.logoAiDir.empty()) {
@@ -3660,7 +3671,7 @@ void WriteClipVideoFilters(
     const int gh = static_cast<int>(std::max(2.0, std::ceil(settings.sourceHeight * s / 2) * 2));
     const int gx = static_cast<int>((seqW - gw) / 2.0 + std::stod(FfmpegDouble(item.positionX)));
     const int gy = static_cast<int>((seqH - gh) / 2.0 + std::stod(FfmpegDouble(item.positionY)));
-    if (!g_gpuMainNvdec) script << ",format=" << GpuUploadFormat(settings.sourcePixFmt) << ",hwupload";
+    if (!g_gpuBatchNvdec) script << ",format=" << GpuUploadFormat(settings.sourcePixFmt) << ",hwupload";
     script << ",tpad=stop=-1:stop_mode=clone,crabgeo_cuda=w=" << gw << ":h=" << gh
            << ":ow=" << seqW << ":oh=" << seqH << ":x=" << gx << ":y=" << gy << ":format=yuv420p";
     if (settings.sourceColorUntagged) script << ":in_matrix=bt709";
@@ -3710,7 +3721,7 @@ void WriteClipVideoFilters(
            << ":d=" << FixedSeconds(baseDuration)
            << ":r=" << settings.renderFps << "[fk" << idx << "];\n";
     script << "[fc" << idx << "][fk" << idx << "]concat=n=2:v=1:a=0,trim=end_frame=" << item.renderFrames
-           << "[v" << idx << "];\n";
+           << cpuClipToGpu << "[v" << idx << "];\n";
     g_fastClipCount++;
     return;
   }
@@ -3769,7 +3780,7 @@ void WriteClipVideoFilters(
     script << "x=(" << seqW << "-w)/2" << (item.positionX >= 0 ? "+" : "") << FfmpegDouble(item.positionX)
            << ":y=(" << seqH << "-h)/2" << (item.positionY >= 0 ? "+" : "") << FfmpegDouble(item.positionY);
   }
-  script << ":format=auto,setsar=1," << ClipPixelFormat(settings) << "[v" << idx << "];\n";
+  script << ":format=auto,setsar=1," << ClipPixelFormat(settings) << cpuClipToGpu << "[v" << idx << "];\n";
 }
 
 bool OverlayNeedsInput(const ExportOverlay& overlay) {
@@ -4684,9 +4695,12 @@ void WriteVisualOverlayFilterGpu(
 const double kGpuMinScale = 1.0 / 15.0;
 const double kGpuMinScaleRgba = 2.0 / 15.0;
 
-bool ClipGpuEligible(const ExportInterval& item, const ExportSettings& settings) {
+/* Clip có bản GPU riêng (crabgeo, WriteClipVideoFilters): đi đường nhanh YUV, không xoá logo, tầng
+ * màu rỗng hoặc gộp được thành LUT, không co nhỏ quá ~15 lần; `nvdec` sai thì nguồn phải tải lên được
+ * (GpuUploadFormat). Clip không đạt vẫn ở trong batch GPU — dựng bằng chuỗi CPU rồi tải lên. */
+bool ClipGpuNative(const ExportInterval& item, const ExportSettings& settings, bool nvdec) {
   if (!BlockColorGpuReady(item) || !item.logoAiDir.empty() || !item.logoRects.empty()) return false;
-  if (!g_gpuMainNvdec && GpuUploadFormat(settings.sourcePixFmt).empty()) return false;
+  if (!nvdec && GpuUploadFormat(settings.sourcePixFmt).empty()) return false;
   // Cùng các cờ mà WriteClipVideoFilters đưa vào MainLaneFastPlan.
   const bool dynamicClip = HasKeyframeExpr(item.kfScaleExpr, item.kfRotExpr, item.kfOpacityExpr, item.kfXExpr, item.kfYExpr)
     || HasAnimGeomExpr(item.animSxExpr, item.animSyExpr, item.animRotExpr) || !item.animXExpr.empty();
@@ -4748,12 +4762,16 @@ OverlayGpu OverlayGpuModeFor(const ExportOverlay& overlay, const ExportSettings&
 // Lượt xuất này dựng đồ thị GPU cho batch đạt — CommandExportVideo đặt sau các phép dò.
 static bool g_gpuRender = false;
 
+/* Batch đi đồ thị GPU: mọi clip (clip chưa có bản GPU dựng bằng CPU rồi tải lên — ClipGpuNative) và
+ * mọi lớp phủ trừ text. Trước 2026-10-03 một clip có keyframe zoom/pan, xoay, mặt nạ, hiệu ứng không
+ * gian hay xoá logo kéo CẢ batch về CPU. Đặt `g_gpuBatchNvdec` cho lượt ghi kịch bản GPU của batch. */
 bool BatchGpuEligible(const std::vector<ExportInterval>& intervals, size_t offset, size_t count,
                       const std::vector<ExportOverlay>& overlays, const ExportSettings& settings) {
   if (!g_gpuRender || count == 0) return false;
   if (OutputResized(settings) && !settings.builtAtOutputScale) return false;
-  for (size_t i = 0; i < count; i++) {
-    if (!ClipGpuEligible(intervals[offset + i], settings)) return false;
+  g_gpuBatchNvdec = g_gpuMainNvdec;
+  for (size_t i = 0; g_gpuBatchNvdec && i < count; i++) {
+    if (!ClipGpuNative(intervals[offset + i], settings, true)) g_gpuBatchNvdec = false;
   }
   // Cùng phép lọc lớp phủ với WriteFilterScript (lớp nào bị bỏ qua ở đó thì không tính).
   for (const auto& overlay : overlays) {
@@ -5400,8 +5418,9 @@ bool PrepareExportBatch(
      theo giá trị): lớp phủ của batch là biến tạm ở nơi gọi. */
   const double sequenceDuration = timing.sequenceDuration;
   /* Đồ thị GPU: thiết bị CUDA `cu` khởi tạo một lần cho cả lệnh (bộ lọc dùng qua -filter_hw_device,
-   * NVDEC qua -hwaccel_device) để mọi khung chung một ngữ cảnh CUDA với NVENC. */
-  const bool nvdecMain = g_gpuMainNvdec;
+   * NVDEC qua -hwaccel_device) để mọi khung chung một ngữ cảnh CUDA với NVENC. NVDEC theo batch
+   * (BatchGpuEligible đặt g_gpuBatchNvdec ngay trước khi ghi kịch bản GPU ở trên). */
+  const bool nvdecMain = gpu && g_gpuBatchNvdec;
   const auto makeBuildCmd = [=](bool gpuGraph) {
     const fs::path graphPath = gpuGraph ? gpuScriptPath : scriptPath;
     const bool nvdec = gpuGraph && nvdecMain;

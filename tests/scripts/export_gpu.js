@@ -8,7 +8,8 @@
  *   2. chuỗi khung (mỗi khung một mức xám) hiện ĐÚNG khung dự định ở bản GPU — bản đầu của đồ thị GPU
  *      để GPU chạy không đồng bộ thì lớp phủ chữ hiện khung cũ hơn 6 / mới hơn 2 khi 3 lượt chạy song
  *      song (2026-10-02), nên dự án có 3 chuỗi khung ở 3 batch chạy cùng lúc;
- *   3. batch có clip mang hiệu ứng chưa có bản GPU (vignette) đi đồ thị CPU, batch còn lại đi GPU, trong cùng lượt;
+ *   3. clip mang hiệu ứng chưa có bản GPU (vignette) dựng bằng chuỗi CPU rồi tải lên NGAY TRONG batch GPU
+ *      (batch đó giải mã nguồn bằng CPU) — mọi batch đi GPU;
  *   4. đồ thị GPU lỗi (CRABBYCUT_EXPORT_GPU_TEST_FAIL=1) -> batch đó chạy lại bằng đồ thị CPU, bản xuất
  *      trùng từng khung với bản CPU;
  *   5. nguồn NVDEC không giải mã được (H.264 10-bit) -> giải mã CPU, tải lên dạng p010.
@@ -189,9 +190,9 @@ function scenarioA(assets) {
     clip(0, 0, 50, 0, 0),
     clip(1, 5, 37, 13, -7),
     clip(2, 10, 80, -101, 33),
-    clip(3, 15, 50, 0, 0, { adj_filters: 'vignette=angle=0.600000' }),   // hiệu ứng không gian: chưa có bản GPU -> batch này đi CPU
+    clip(3, 15, 50, 0, 0, { adj_filters: 'vignette=angle=0.600000' }),   // hiệu ứng không gian: chưa có bản GPU -> dựng bằng CPU rồi tải lên
     clip(4, 20, 65, 7, 3),
-    clip(5, 25, 50, 0, 0),
+    clip(5, 25, 50, 0, 0, { kf_scale_expr: '50+LOCALT*8' }),   // keyframe zoom: không đi đường nhanh -> dựng bằng CPU rồi tải lên
   ];
   const base = { source_start: 0, scale: 100, opacity: 100, muted: true, volume: 0, has_audio: false };
   const overlays = [
@@ -220,8 +221,8 @@ function scenarioA(assets) {
   const runs = videoRuns(gpu.timing);
   assert.ok(runs.length >= 3, `GPU=1: phải chia ≥ 3 batch, đang ${runs.length}`);
   const gpuRuns = runs.filter((r) => r.gpu).length;
-  assert.ok(gpuRuns >= 2 && gpuRuns < runs.length,
-    `batch có clip chỉnh màu đi CPU, còn lại GPU: ${runs.map((r) => (r.gpu ? 'gpu' : 'cpu')).join(',')}`);
+  assert.strictEqual(gpuRuns, runs.length,
+    `clip chưa có bản GPU không được kéo batch về CPU: ${runs.map((r) => (r.gpu ? 'gpu' : 'cpu')).join(',')}`);
   assert.ok(runs.every((r) => !r.gpu_fallback), 'GPU=1: không batch nào phải lùi về CPU');
 
   const a = frameHashes(cpuOut);
