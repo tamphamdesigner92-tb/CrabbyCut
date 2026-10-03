@@ -2503,6 +2503,37 @@ std::string ColorAdjustEqFilter(double start,
 //  - Biến thời gian của sendcmd [expr] là T (giây của khung), giống blend cũ.
 //  - g_filterAuxDir / g_filterAuxSeq: khai báo ở trên AppendKfTransformFilters (độ mờ keyframe
 //    dùng cùng cơ chế file lệnh).
+/* LUT CHẠY FLOAT (đo 2026-10-03 trên "Yêu Con", nguồn DJI HEVC 10-bit). lut3d nhận định dạng theo
+ * bộ lọc ĐỨNG SAU nó, mà sau chuỗi màu luôn là `format=rgb24`/`format=rgba` -> nguồn 10-bit bị hạ
+ * về RGB 8-bit TRƯỚC khi qua LUT (LUT có độ dốc lớn khuếch đại bậc lượng tử hoá thành vệt dải màu).
+ * So một bản dựng float: LUT tĩnh 39,4 dB -> 49,3 dB khi chạy float. Chèn `format` float ngay trước
+ * lut3d (và trước nhánh trộn hai LUT): một LUT không tốn thêm CPU (60 khung 1080×1920: 5,9 CPU-giây
+ * cả hai cách), hai LUT + blend +20% phần LUT, thời gian thực không đổi. Danh sách hai định dạng:
+ * nguồn có alpha (ảnh PNG lớp phủ) đi gbrapf32le, không thì gbrpf32le — ép một định dạng không alpha
+ * là mất alpha. Env tắt (A/B): CRABBYCUT_EXPORT_LUTF32=0. */
+bool LutFloatEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_LUTF32");
+  return !(env && std::string(env) == "0");
+}
+
+const char* const kLutFloatFormat = "format=gbrpf32le|gbrapf32le";
+
+// Chèn kLutFloatFormat trước mỗi `lut3d=` đứng đầu một filter của chuỗi (đầu chuỗi hoặc sau dấu phẩy).
+std::string WithFloatLut(const std::string& chain) {
+  if (!LutFloatEnabled()) return chain;
+  std::string out;
+  size_t from = 0;
+  for (size_t at = chain.find("lut3d="); at != std::string::npos; at = chain.find("lut3d=", at + 6)) {
+    if (at != 0 && chain[at - 1] != ',') continue;
+    out.append(chain, from, at - from);
+    out += kLutFloatFormat;
+    out += ",";
+    from = at;
+  }
+  out.append(chain, from, std::string::npos);
+  return out;
+}
+
 std::string ColorAdjustLutBlend(double start, const std::string& aPath, const std::string& bPath,
                                 const std::string& mixExpr, const std::string& tag) {
   if (aPath.empty() || bPath.empty() || mixExpr.empty()) return "";
@@ -2521,6 +2552,7 @@ std::string ColorAdjustLutBlend(double start, const std::string& aPath, const st
   }
   std::ostringstream out;
   out << "sendcmd=f='" << FilterPath(cmdPath.string()) << "',";
+  if (LutFloatEnabled()) out << kLutFloatFormat << ",";   // hai nhánh lut3d + blend chạy float
   out << "split[" << tag << "la][" << tag << "lb];\n";
   out << "[" << tag << "la]lut3d=file='" << FilterPath(aPath) << "':interp=trilinear[" << tag << "la2];\n";
   out << "[" << tag << "lb]lut3d=file='" << FilterPath(bPath) << "':interp=trilinear[" << tag << "lb2];\n";
@@ -2544,8 +2576,8 @@ std::string ColorAdjustChain(double start, const std::string& staticFilters,
   // biểu thức thời gian ngay trong `vignette=angle='...':eval=frame` — tức là trong chính chuỗi
   // này, không đi qua field riêng như eq. Token chỉ xuất hiện ở đúng những biểu thức đó nên
   // thay ở đây là an toàn, và mọi filter nhận biểu thức về sau tự dùng được, không cần field mới.
-  const std::string staticSubbed = SubstituteLocalTime(staticFilters, start);
-  const std::string postSubbed = SubstituteLocalTime(postFilters, start);
+  const std::string staticSubbed = WithFloatLut(SubstituteLocalTime(staticFilters, start));
+  const std::string postSubbed = WithFloatLut(SubstituteLocalTime(postFilters, start));
   std::string out;
   const auto add = [&out](const std::string& piece) {
     if (piece.empty()) return;

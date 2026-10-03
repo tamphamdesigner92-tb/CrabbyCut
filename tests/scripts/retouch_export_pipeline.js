@@ -395,7 +395,7 @@ async function testTrackSourceGuard() {
  * hai bên khớp tuyệt đối). Chuỗi LUT + tương phản khuếch đại bậc nhảy đó tới ngưỡng mắt
  * thấy được, hiện thành một hình chữ nhật quanh mặt.
  *
- * Test dựng đúng tình huống đó: miếng vá sáng hơn nền ĐÚNG 2/255, cùng đi qua một chuỗi
+ * Test dựng đúng tình huống đó: miếng vá sáng hơn nền 4/255 (xem chỗ dựng fixture), cùng đi qua một chuỗi
  * màu có LUT, rồi ĐO BẬC NHẢY LỚN NHẤT giữa hai pixel kề nhau tại mép.
  * ------------------------------------------------------------------------- */
 async function testPatchEdgeIsFeathered() {
@@ -420,9 +420,12 @@ async function testPatchEdgeIsFeathered() {
         '-shortest', '-pix_fmt', 'yuv420p', '-c:v', 'libx264', '-crf', '0',
         path.join(tmp, 'temp_input.mp4')]);
     const patchPng = path.join(tmp, 'patch.png');
-    // +2/255 trên mỗi kênh — đúng độ lệch đã đo giữa hai bộ giải mã.
+    /* +4/255 trên mỗi kênh (độ lệch đo được giữa hai bộ giải mã là 2/255). Từ 2026-10-03 LUT chạy
+     * float (WithFloatLut của sidecar): airy_white nén vùng sáng này nên 2/255 còn dưới một mức sau
+     * LUT + eq — mép cứng đo 0/255, phép kiểm mất độ nhạy (trước đó lỗi hạ 8-bit TRƯỚC LUT mới làm
+     * nó lộ ra 1/255). +4/255: mép cứng 4/255, mép mềm 1/255 ở cả LUT float lẫn 8-bit cũ. */
     sh('ffmpeg', ['-nostdin', '-y', '-v', 'error', '-f', 'lavfi',
-        '-i', 'color=c=0x8c9caa:s=' + PW + 'x' + PH + ':d=1:r=30', '-frames:v', '1', patchPng]);
+        '-i', 'color=c=0x8e9eac:s=' + PW + 'x' + PH + ':d=1:r=30', '-frames:v', '1', patchPng]);
     const frame = 'data:image/png;base64,' + fs.readFileSync(patchPng).toString('base64');
     /* ĐÚNG ĐƯỜNG CỦA PRODUCTION: frontend chỉ đặt CHỖ TRỐNG `__LUT3D__` rồi gửi NỘI
      * DUNG cube; backend ghi ra file và tự ghép `lut3d=file='…'` (có escape `:` của ổ
