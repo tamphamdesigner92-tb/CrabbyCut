@@ -1188,6 +1188,16 @@ struct GpuProbeResult {
 };
 
 const char* const kGpuProbeCacheName = "gpu_probe_cache.txt";
+
+/* Chỗ cất kết quả dò. Mặc định `<temp dự án>/gpu_probe_cache.txt` — nhưng mở dự án là temp bị dọn
+ * sạch (/api/reset-project), nên lượt xuất ĐẦU sau mỗi lần mở dự án dò lại (~1,2 s trên Yêu Con, cả khi
+ * mọi batch trúng cache render). Backend bản thường đặt CRABBYCUT_EXPORT_GPU_PROBE_FILE ra ngoài temp;
+ * khoá vẫn đúng sau khi mở lại vì temp_input.mp4 là liên kết cứng từ cache nối (giữ mtime). */
+fs::path GpuProbeCacheFile(const fs::path& tempDir) {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_GPU_PROBE_FILE");
+  if (env && *env) return fs::path(env);   // getenv = bảng mã hệ thống, như CRABBYCUT_RENDER_CACHE_DIR
+  return tempDir / kGpuProbeCacheName;
+}
 constexpr long long kGpuProbeCacheMaxAgeSeconds = 3LL * 24 * 3600;
 /* Kết quả ÂM TÍNH (GPU/bộ mã hoá không dùng được) chỉ nhớ 10 phút: lỗi lúc dò có thể là tạm thời
  * (NVENC hết phiên vì ứng dụng khác đang mã hoá, driver đang khởi động lại) — nhớ 3 ngày là 3 ngày
@@ -6389,7 +6399,7 @@ int RunExportJobs(std::vector<BatchJob>& jobs, EncoderPlan& plan, size_t concurr
     Emit("progress", "Đồ thị GPU lỗi ở " + std::to_string(gpuFailed.size()) + " lượt — chạy lại bằng CPU...");
     // Kết quả dò GPU đã lưu có thể đã cũ (driver/GPU đổi) -> lượt sau dò lại (xem GpuProbeResult).
     std::error_code cacheEc;
-    fs::remove(jobs[gpuFailed.front()].tempDir / kGpuProbeCacheName, cacheEc);
+    fs::remove(GpuProbeCacheFile(jobs[gpuFailed.front()].tempDir), cacheEc);
     std::vector<BatchJob*> retry;
     for (size_t i : gpuFailed) {
       UseCpuGraph(jobs[i]);
@@ -6796,7 +6806,7 @@ int CommandExportVideo(int argc, char** argv) {
    * ghi cache. Env CRABBYCUT_EXPORT_GPU_PROBE_CACHE=0: luôn dò. */
   g_gpuLutKnown = -1;
   g_gpuLutBakeDir = tempDir / "gpu_color_luts";   // LUT bake của chuỗi màu tĩnh (BakeColorLut)
-  const fs::path gpuCacheFile = tempDir / kGpuProbeCacheName;
+  const fs::path gpuCacheFile = GpuProbeCacheFile(tempDir);
   const char* cacheEnv = std::getenv("CRABBYCUT_EXPORT_GPU_PROBE_CACHE");
   const bool gpuCacheOn = !(cacheEnv && std::string(cacheEnv) == "0");
   auto gpuProbe = std::async(std::launch::async, [crabFilters, nvencName, &source, overlayVideoPaths, gpuCacheFile, gpuCacheOn]() {

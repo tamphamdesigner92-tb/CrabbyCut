@@ -5017,12 +5017,19 @@ function listColorLuts() {
 // .cube do frontend bake cho MỘT block khi export -> ghi ra file để sidecar gọi lut3d.
 // Tên file = sha1 nội dung: 2 block cùng thông số dùng chung 1 file, và ghi lại lần
 // export sau cũng không sinh rác mới.
+// Mã băm của nội dung đã qua validateCubeText: cùng một lớp Điều chỉnh đi kèm MỌI clip nó phủ (Yêu Con:
+// 2 cube 1 MB × 10 clip), kiểm lại cú pháp 36k dòng cho từng bản sao là phí.
+const validatedColorLutHashes = new Set();
+
 function materializeColorLutCube(text) {
-  const check = validateCubeText(text);
-  if (!check.ok) throw new Error(_t('LUT dựng cho block không hợp lệ: {error}', { error: check.error }));
+  const hash = crypto.createHash('sha1').update(String(text || '')).digest('hex').slice(0, 16);
+  if (!validatedColorLutHashes.has(hash)) {
+    const check = validateCubeText(text);
+    if (!check.ok) throw new Error(_t('LUT dựng cho block không hợp lệ: {error}', { error: check.error }));
+    validatedColorLutHashes.add(hash);
+  }
   fs.mkdirSync(COLOR_LUT_BAKE_DIR, { recursive: true });
   fs.mkdirSync(COLOR_MASK_DIR, { recursive: true });
-  const hash = crypto.createHash('sha1').update(text).digest('hex').slice(0, 16);
   const filePath = path.join(COLOR_LUT_BAKE_DIR, `bake_${hash}.cube`);
   if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, text);
   return filePath;
@@ -7593,6 +7600,12 @@ function createApp() {
       const renderCacheEnv = RENDER_CACHE_ALLOWED && readAppSettings().export.renderCache
         ? { CRABBYCUT_RENDER_CACHE_DIR: RENDER_CACHE_DIR, CRABBYCUT_RENDER_CACHE_MAX_BYTES: String(RENDER_CACHE_MAX_BYTES) }
         : {};
+      /* Kết quả dò GPU (GpuProbeResult ở sidecar) cất NGOÀI temp_uploads: mở dự án là temp bị dọn, nên
+       * để mặc định thì lượt xuất đầu sau mỗi lần mở dự án dò lại ~1,2 s. Test (CRAB_TEMP_DIR) giữ mặc
+       * định trong temp để mỗi lượt test dò thật. */
+      if (!process.env.CRAB_TEMP_DIR) {
+        renderCacheEnv.CRABBYCUT_EXPORT_GPU_PROBE_FILE = path.join(USER_DATA_ROOT, 'gpu_probe_cache.txt');
+      }
       const sidecarEvents = await timeStage('sidecar_ms', () => runSidecar([
         'export-video',
         sourceVideoPath,

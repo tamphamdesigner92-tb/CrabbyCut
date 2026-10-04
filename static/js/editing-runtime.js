@@ -10724,14 +10724,26 @@
 
     // Bản CHỜ ĐƯỢC của ensureLutLoaded — export phải chắc chắn LUT đã nằm trong bộ nhớ
     // trước khi bake cube, nếu không video xuất ra sẽ thiếu đúng phần LUT (âm thầm).
+    /* MỘT lượt nạp cho mỗi LUT đang tải dở. Bước xuất dựng chuỗi màu của mọi clip SONG SONG
+     * (Promise.all trong performVideoExport): cả 10 clip cùng thấy "chưa có LUT", cùng tải tệp và
+     * cùng registerUserLut — mà mỗi lần đăng ký xoá sạch cubeCache, nên clip nào cũng bake lại cube
+     * từ đầu (~96 ms, Yêu Con: ~0,9 s của bước lane chính). Lượt gọi sau chờ chung lượt đầu. */
+    const lutLoadsInFlight = new Map();
     async function ensureLutLoadedAsync(lutId) {
         if (!lutId || !window.ColorAdjust || ColorAdjust.hasUserLut(lutId)) return;
-        if (!adjustLuts.length) await refreshLutCatalog();
-        const entry = adjustLuts.find((l) => l.id === lutId);
-        if (!entry || !entry.url) throw new Error(_t('Không tìm thấy LUT "{id}"', { id: lutId }));
-        const response = await fetch(entry.url);
-        if (!response.ok) throw new Error(_t('Không tải được LUT "{id}" ({status})', { id: lutId, status: response.status }));
-        ColorAdjust.registerUserLut(lutId, ColorAdjust.parseCube(await response.text()));
+        let job = lutLoadsInFlight.get(lutId);
+        if (!job) {
+            job = (async () => {
+                if (!adjustLuts.length) await refreshLutCatalog();
+                const entry = adjustLuts.find((l) => l.id === lutId);
+                if (!entry || !entry.url) throw new Error(_t('Không tìm thấy LUT "{id}"', { id: lutId }));
+                const response = await fetch(entry.url);
+                if (!response.ok) throw new Error(_t('Không tải được LUT "{id}" ({status})', { id: lutId, status: response.status }));
+                ColorAdjust.registerUserLut(lutId, ColorAdjust.parseCube(await response.text()));
+            })().finally(() => lutLoadsInFlight.delete(lutId));
+            lutLoadsInFlight.set(lutId, job);
+        }
+        return job;
     }
 
     // Gói thông số Điều chỉnh màu của MỘT block thành dữ liệu export.
