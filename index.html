@@ -3263,6 +3263,35 @@
         body.home-active .breadcrumb-container,
         body.home-active #projectTitleBar,
         body.home-active #btnExportVideo { display: none !important; }
+
+        /* ===== MÀN CHỜ "ĐANG MỞ DỰ ÁN" =====
+           performProjectLoad() nối lại video nguồn (vài giây tới cả phút) TRƯỚC khi biết dự
+           án ở bước nào. Không che thì trong lúc đó .main-layout lộ ra đúng bước mặc định
+           của HTML — step0 (giai đoạn Upload của luồng bóc băng) — rồi mới nhảy sang Editing,
+           trông như app mở nhầm màn hình. Mở dự án KHÁC khi đang dựng thì lộ trình dựng của
+           dự án cũ bị dọn dở dang. Lớp này che đúng vùng của #homeScreen (thanh trạng thái
+           ở dưới vẫn thấy -> tiến độ nối video vẫn hiện), nằm TRÊN Home và DƯỚI mọi modal:
+           hộp thoại bật ra giữa lúc nạp vẫn bấm được. */
+        #projectLoadingScreen {
+            position: fixed; top: var(--header-h); left: 0; right: 0; bottom: var(--statusbar-h);
+            z-index: calc(var(--z-home) + 1);
+            background: var(--bg-color);
+            display: none;
+            flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+            color: var(--text-muted);
+        }
+        body.project-loading #projectLoadingScreen { display: flex; }
+        body.project-loading .breadcrumb-container,
+        body.project-loading #projectTitleBar,
+        body.project-loading #btnExportVideo { visibility: hidden; }
+        #projectLoadingScreen .project-loading-spinner {
+            width: 28px; height: 28px; border-radius: 50%;
+            border: 3px solid var(--surface-4); border-top-color: var(--primary);
+            animation: project-loading-spin 0.8s linear infinite;
+        }
+        @keyframes project-loading-spin { to { transform: rotate(360deg); } }
+        #projectLoadingScreen .project-loading-title { font-size: var(--fs-lg); font-weight: 600; color: var(--text-1); }
+        #projectLoadingScreen .project-loading-name { font-size: var(--fs-sm); max-width: 60vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .home-rail {
             width: 300px; flex-shrink: 0; padding: 26px 20px;
             border-right: 1px solid var(--border-color); background: var(--panel-bg);
@@ -3802,6 +3831,12 @@
         </div>
         <button id="btnExportVideo" class="btn btn-primary" disabled><svg class="btn-ico"><use href="#ic-export"/></svg>Xuất video</button>
     </div>
+</div>
+<!-- Màn chờ lúc mở dự án (xem CSS #projectLoadingScreen). -->
+<div id="projectLoadingScreen" role="status" aria-live="polite" aria-hidden="true">
+    <div class="project-loading-spinner" aria-hidden="true"></div>
+    <div class="project-loading-title">Đang mở dự án…</div>
+    <div id="projectLoadingName" class="project-loading-name"></div>
 </div>
 <!-- MÀN HÌNH HOME: lớp phủ NGOÀI hệ step (xem CSS #homeScreen để biết vì sao). -->
 <div id="homeScreen" aria-hidden="true">
@@ -12402,7 +12437,35 @@
         }
     }
 
+    /* Màn chờ che trình dựng suốt lượt nạp — xem CSS #projectLoadingScreen. CHE chứ không
+     * display:none .main-layout: timeline/preview đo clientWidth trong lúc nạp, ẩn đi là
+     * chúng dựng với bề rộng 0. */
+    function showProjectLoadingScreen(filePath) {
+        const nameEl = document.getElementById('projectLoadingName');
+        if (nameEl) nameEl.textContent = String(filePath || '').split(/[\\/]/).pop().replace(/\.crab$/i, '');
+        document.getElementById('projectLoadingScreen')?.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('project-loading');
+    }
+
+    function hideProjectLoadingScreen() {
+        // Chờ 2 khung: showStep() và các lượt vẽ timeline hẹn bằng rAF/setTimeout(0) — gỡ
+        // màn chờ ngay thì còn kịp thấy một khung Editing vẽ dở.
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            document.body.classList.remove('project-loading');
+            document.getElementById('projectLoadingScreen')?.setAttribute('aria-hidden', 'true');
+        }));
+    }
+
     async function performProjectLoad(payload, relink, filePath) {
+        showProjectLoadingScreen(filePath);
+        try {
+            await performProjectLoadInner(payload, relink, filePath);
+        } finally {
+            hideProjectLoadingScreen();
+        }
+    }
+
+    async function performProjectLoadInner(payload, relink, filePath) {
         hideHome();   // bao cả 3 đường mở: Home, menu "Mở dự án…", double-click .crab từ OS
         await fetch(`${API_BASE}/reset-project`, { method: 'POST' });
         // Landmark khuôn mặt được nhớ trong bộ nhớ theo [start, end] của block. Mở dự án
