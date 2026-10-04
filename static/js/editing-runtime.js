@@ -20017,7 +20017,8 @@
         return canvas;
     }
 
-    async function bakeMainTransitionSequence(spanA, spanB, transDef, fps, seqW, seqH, srcUrl, collect) {
+    // `status.complete` = false khi có lần tua khung trả null (quá hạn) — chuỗi đó không được cất cache.
+    async function bakeMainTransitionSequence(spanA, spanB, transDef, fps, seqW, seqH, srcUrl, collect, status = null) {
         const T = window.Transitions;
         if (!T) return null;
         const d = Math.max(0.05, Number(transDef.duration) || 0);
@@ -20040,6 +20041,7 @@
         }
         const seamA = await captureSeamFrameAsync(srcUrl, Number(spanA.clip.end), noCache);   // khung CUỐI A
         const seamB = await captureSeamFrameAsync(srcUrl, Number(spanB.clip.start), noCache); // khung ĐẦU B
+        if (status && (!seamA || !seamB)) status.complete = false;
         const info = (cap) => (cap ? { drawable: cap, texW: cap.width || 2, texH: cap.height || 2 } : null);
         // Khung lane chính ĐỤC (nền đen bake vào) -> JPEG, nhỏ hơn PNG ~23 lần (xem khối
         // "ĐÓNG GÓI CHUỖI KHUNG CHUYỂN CẢNH KHI EXPORT").
@@ -20057,12 +20059,14 @@
                 srcTA = mainClipSourceTimeAt(spanA, seqT - spanA.start);
                 srcTB = Number(spanB.clip.start) || 0;
                 infoA = info(await captureSeamFrameAsync(srcUrl, srcTA, noCache)); // A SỐNG
+                if (status && !infoA) status.complete = false;
                 infoB = info(seamB);                                     // B tĩnh (đầu)
                 localA = Math.max(0, seqT - spanA.start); localB = 0;
             } else {
                 srcTA = Number(spanA.clip.end) || 0;
                 srcTB = mainClipSourceTimeAt(spanB, seqT - spanB.start);
                 infoB = info(await captureSeamFrameAsync(srcUrl, srcTB, noCache)); // B SỐNG
+                if (status && !infoB) status.complete = false;
                 infoA = info(seamA);                                     // A tĩnh (cuối)
                 localA = spanA.duration; localB = Math.max(0, seqT - spanB.start);
             }
@@ -20113,7 +20117,37 @@
             // thái, chỉ thêm một kênh trình bày, không đổi phép đếm.
             window.updateAppTask?.(done, todo);
             try {
-                const seq = await bakeMainTransitionSequence(a, b, transDef, exportFps, seqW, seqH, srcUrl, collect);
+                /* BỘ NHỚ ĐỆM KHUNG VẼ TRƯỚC (xem mainTransitionPrebakeKey): chuyển cảnh lane chính là bước
+                 * vẽ trước đắt nhất — mỗi khung tua <video> nguồn full-res (Yêu Con + 9 chuyển cảnh 0,5 s:
+                 * 18 s mỗi lượt xuất). Trúng -> chỉ gửi khoá. */
+                const frameCount = Math.max(2, Math.round(Math.max(0.05, d) * exportFps) + 1);
+                let cacheKey = await mainTransitionPrebakeKey(a, b, transDef, exportFps, seqW, seqH);
+                let seq = null;
+                if (cacheKey) {
+                    const found = await prebakeLookup([{ key: cacheKey, source_path: '' }]);
+                    const entry = found && found[0];
+                    const meta = entry && entry.hit ? entry.meta : null;
+                    if (meta && meta.frame_count === frameCount) {
+                        prebakeStats.hits += 1;
+                        seq = {
+                            start: 0, duration: Math.max(0.05, d), width: seqW, height: seqH,
+                            frame_count: frameCount, cache_key: cacheKey, source_path: '',
+                        };
+                    } else if (!entry || !entry.cacheable) {
+                        cacheKey = null;
+                    }
+                }
+                if (!seq) {
+                    const status = { complete: true };
+                    seq = await bakeMainTransitionSequence(a, b, transDef, exportFps, seqW, seqH, srcUrl, collect, status);
+                    if (cacheKey && status.complete && seq && Array.isArray(seq.frame_files)
+                        && seq.frame_files.length === frameCount) {
+                        seq.cache_key = cacheKey;
+                        seq.source_path = '';
+                        seq.cache_meta = { width: seqW, height: seqH, duration: seq.duration };
+                        prebakeStats.stores += 1;
+                    }
+                }
                 if (!bakedSeqHasFrames(seq)) continue;
                 items.push({
                     id: `maintrans_${a.index}`,
@@ -20590,6 +20624,75 @@
 
     // Số lượt trúng/trượt của lượt vẽ trước đang chạy (đi vào số đo `prebake_cache_*`).
     const prebakeStats = { hits: 0, stores: 0 };
+
+    /* Chữ ký NỘI DUNG một LUT người dùng (băm dữ liệu cube đã nạp + miền). Khung bake SẴN màu (chuyển
+     * cảnh) phụ thuộc nội dung .cube, mà id LUT không đổi khi người dùng nhập lại tệp cùng tên. Null =
+     * không nạp được LUT (không cache). */
+    const lutSignatureCache = new WeakMap();
+    async function prebakeLutSignature(id) {
+        if (!id || !window.ColorAdjust) return null;
+        try { await ensureLutLoadedAsync(id); } catch (_) { return null; }
+        const cube = ColorAdjust.getUserLut(id);
+        if (!cube || !cube.data) return null;
+        let sig = lutSignatureCache.get(cube);
+        if (!sig) {
+            const data = cube.data instanceof Float32Array ? cube.data : Float32Array.from(cube.data);
+            const head = new TextEncoder().encode(`${cube.size}|${JSON.stringify(cube.domainMin || null)}|${JSON.stringify(cube.domainMax || null)}|`);
+            const bytes = new Uint8Array(head.length + data.byteLength);
+            bytes.set(head, 0);
+            bytes.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength), head.length);
+            const digest = await crypto.subtle.digest('SHA-256', bytes);
+            sig = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+            lutSignatureCache.set(cube, sig);
+        }
+        return sig;
+    }
+
+    /* Khoá cho khung chuyển cảnh LANE CHÍNH tại điểm cắt A|B. Khung bake SẴN chuỗi màu (không có
+     * `color_source: 'raw'`), nên khoá gồm cả lớp Điều chỉnh phủ đoạn chuyển cảnh và NỘI DUNG mọi LUT
+     * dính tới. Retouch -> mã landmark của block đó; xoá logo -> không cache (miếng vá AI có trạng thái
+     * riêng). Null = không cache. */
+    async function mainTransitionPrebakeKey(spanA, spanB, transDef, fps, seqW, seqH) {
+        const clips = [spanA.clip, spanB.clip];
+        if (clips.some((c) => !c || logoActive(c))) return null;
+        const faces = [];
+        for (const clip of clips) {
+            if (clip.retouch && window.Retouch && !Retouch.isIdentity(clip.retouch)) {
+                const store = await awaitRetouchFaces(clip);
+                if (!store || !store.facesId) return null;
+                faces.push(store.facesId);
+            } else {
+                faces.push(null);
+            }
+        }
+        const d = Math.max(0.05, Number(transDef.duration) || 0);
+        const from = spanA.end - d / 2;
+        const to = spanA.end + d / 2;
+        const layers = editingItems.filter((it) => adjustLayerIsActive(it)
+            && it.timeline_start < to && it.timeline_start + it.duration > from);
+        const lutIds = new Set();
+        [spanA.clip.adjustments, spanB.clip.adjustments, ...layers.map((l) => l.adjustments)].forEach((a) => {
+            const id = a && a.lut && a.lut.id;
+            if (id) lutIds.add(String(id));
+        });
+        const luts = {};
+        for (const id of Array.from(lutIds).sort()) {
+            const sig = await prebakeLutSignature(id);
+            if (!sig) return null;
+            luts[id] = sig;
+        }
+        const span = (s) => ({ start: s.start, end: s.end, duration: s.duration });
+        return prebakeKey('main_trans', {
+            fps, seqW, seqH, transDef,
+            spanA: span(spanA), spanB: span(spanB), clipA: spanA.clip, clipB: spanB.clip,
+            layers, luts, faces,
+            sequence: payloadSequence(),
+            concat: (typeof mainConcatFrameSize === 'function') ? mainConcatFrameSize() : null,
+            drawA: mainLaneFrameDrawSize(spanA.clip), drawB: mainLaneFrameDrawSize(spanB.clip),
+            baseA: mainLaneBaseSize(spanA.clip).height, baseB: mainLaneBaseSize(spanB.clip).height,
+            jpeg: TRANSITION_JPEG_QUALITY,
+        });
+    }
 
     /* Khoá cho miếng vá Retouch của một block lane chính (đường VÁ VÙNG MẶT; bake cả khung
      * không dùng cache vì nó mang cả chuỗi màu/LUT/lớp Điều chỉnh). Null = không cache. */
