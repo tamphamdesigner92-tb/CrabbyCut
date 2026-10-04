@@ -29,6 +29,11 @@ const REQUIREMENTS = path.join(PROJECT_ROOT, 'requirements-tts.txt');
 const SERVER_SCRIPT = path.join(PROJECT_ROOT, 'tts', 'server.py');
 const MARKER = '.crab-tts-ready.json';
 const STALL_MS = 5 * 60 * 1000;
+/* Sau dòng "Installing collected packages" pip IM LẶNG tới khi xong cả lượt: chép torch +
+ * transformers… (hàng chục nghìn tệp, Defender quét từng tệp) vào thư mục tạm rồi chuyển sang
+ * --target. Máy tác giả mất ~5 phút; máy người dùng bị watchdog 5 phút giết giữa chừng ->
+ * tts-site trống. Pha này chỉ còn chặn treo thật bằng ngưỡng dài. */
+const INSTALL_STALL_MS = 60 * 60 * 1000;
 
 function venvDir() { return path.join(PROJECT_ROOT, '.venv-tts'); }
 function venvPython() {
@@ -86,14 +91,17 @@ function run(command, args, { env, onLine } = {}) {
     const child = spawn(command, args, { cwd: PROJECT_ROOT, env: env || process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     const tail = [];
     let stall = null;
+    let stallMs = STALL_MS;
+    let stalled = false;
     const arm = () => {
       clearTimeout(stall);
       stall = setTimeout(() => {
+        stalled = true;
         try {
           if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/f', '/t'], { windowsHide: true });
           else child.kill('SIGKILL');
         } catch (_) { /* no-op */ }
-      }, STALL_MS);
+      }, stallMs);
     };
     arm();
     const bufs = { out: '', err: '' };
@@ -103,6 +111,7 @@ function run(command, args, { env, onLine } = {}) {
       bufs[key] = lines.pop() || '';
       for (const line of lines) {
         if (!line.trim()) continue;
+        if (/^\s*Installing collected packages/i.test(line)) stallMs = INSTALL_STALL_MS;
         arm();
         if (!/^\s*Progress\s+\d+\s+of\s+\d+/i.test(line)) {
           tail.push(line);
@@ -117,6 +126,7 @@ function run(command, args, { env, onLine } = {}) {
     child.on('exit', (code) => {
       clearTimeout(stall);
       if (code === 0) resolve();
+      else if (stalled) reject(new Error(`${path.basename(command)} ${args.slice(0, 3).join(' ')} bị dừng vì không có tiến triển trong ${Math.round(stallMs / 60000)} phút\n${tail.slice(-10).join('\n')}`));
       else reject(new Error(`${path.basename(command)} ${args.slice(0, 3).join(' ')} thoát với mã ${code}\n${tail.slice(-10).join('\n')}`));
     });
   });
