@@ -166,7 +166,6 @@
      * setAppProgress('busy')          -> vô định (chạy tới lui)
      * Chỉ đụng DOM; mọi tiến độ vẫn do code gọi tự tính như cũ. */
     let bar = null;
-    let barFill = null;
 
     function ensureBar() {
         if (bar && bar.isConnected) return bar;
@@ -182,35 +181,54 @@
             bar.innerHTML = '<div class="app-progress-fill"></div>';
             (header || document.body).appendChild(bar);
         }
-        barFill = bar.querySelector('.app-progress-fill');
         return bar;
+    }
+
+    /* Vẽ một trạng thái lên một thanh. Thanh chính ở header + mọi bản sao .app-progress-mirror
+     * (popup Xuất video) — popup che dải header nên bản sao phải chạy đúng nhịp với nó. */
+    function paintBar(el, state, ratio) {
+        const fill = el.querySelector('.app-progress-fill');
+        if (state === 'off') {
+            el.classList.remove('is-on', 'is-indeterminate');
+            el.setAttribute('aria-hidden', 'true');
+            el.removeAttribute('aria-valuenow');
+            return;
+        }
+        el.classList.add('is-on');
+        el.setAttribute('aria-hidden', 'false');
+        if (state === 'busy') {
+            el.classList.add('is-indeterminate');
+            el.removeAttribute('aria-valuenow');
+            if (fill) fill.style.width = '';
+            return;
+        }
+        el.classList.remove('is-indeterminate');
+        el.setAttribute('aria-valuenow', String(Math.round(ratio * 100)));
+        el.setAttribute('aria-valuemin', '0');
+        el.setAttribute('aria-valuemax', '100');
+        if (fill) fill.style.width = `${(ratio * 100).toFixed(2)}%`;
     }
 
     function setAppProgress(value, total) {
         if (!ensureBar()) return;
+        let state = 'off';
+        let ratio = 0;
         if (value === null || value === undefined || value === false) {
-            bar.classList.remove('is-on', 'is-indeterminate');
-            bar.setAttribute('aria-hidden', 'true');
-            bar.removeAttribute('aria-valuenow');
-            return;
+            state = 'off';
+        } else if (value === 'busy' || value === true) {
+            state = 'busy';
+        } else {
+            ratio = Number(value);
+            if (Number.isFinite(total) && Number(total) > 0) ratio = Number(value) / Number(total);
+            if (Number.isFinite(ratio)) {
+                state = 'ratio';
+                ratio = Math.max(0, Math.min(1, ratio));
+            } else {
+                state = 'busy';
+            }
         }
-        bar.classList.add('is-on');
-        bar.setAttribute('aria-hidden', 'false');
-        if (value === 'busy' || value === true) {
-            bar.classList.add('is-indeterminate');
-            bar.removeAttribute('aria-valuenow');
-            barFill.style.width = '';
-            return;
-        }
-        let ratio = Number(value);
-        if (Number.isFinite(total) && Number(total) > 0) ratio = Number(value) / Number(total);
-        if (!Number.isFinite(ratio)) { setAppProgress('busy'); return; }
-        ratio = Math.max(0, Math.min(1, ratio));
-        bar.classList.remove('is-indeterminate');
-        bar.setAttribute('aria-valuenow', String(Math.round(ratio * 100)));
-        bar.setAttribute('aria-valuemin', '0');
-        bar.setAttribute('aria-valuemax', '100');
-        barFill.style.width = `${(ratio * 100).toFixed(2)}%`;
+        paintBar(bar, state, ratio);
+        document.querySelectorAll('.app-progress-mirror').forEach((el) => paintBar(el, state, ratio));
     }
 
     window.showToast = showToast;

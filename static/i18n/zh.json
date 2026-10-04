@@ -177,6 +177,8 @@
   "Đường dẫn lưu video không hợp lệ.": "视频保存位置无效。",
   "Đã huỷ xuất video.": "已取消导出。",
   "Đã xuất video: {name}": "视频已导出：{name}",
+  "Đang xuất video...": "正在导出视频...",
+  "Đã xuất xong: {name}": "导出完成：{name}",
   "Đã lưu video vào {path}": "视频已保存到 {path}",
   "Bạn đang dùng {version}.": "您当前使用的是 {version}。",
   "Bạn đang dùng bản mới nhất ({version}).": "您使用的已是最新版本（{version}）。",

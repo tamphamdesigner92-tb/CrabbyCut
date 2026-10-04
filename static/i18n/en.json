@@ -309,6 +309,8 @@
   "Đường dẫn lưu video không hợp lệ.": "Invalid save location for the video.",
   "Đã huỷ xuất video.": "Export cancelled.",
   "Đã xuất video: {name}": "Video exported: {name}",
+  "Đang xuất video...": "Exporting video...",
+  "Đã xuất xong: {name}": "Export finished: {name}",
   "Đã lưu video vào {path}": "Video saved to {path}",
   "Bạn đang dùng {version}.": "You're using {version}.",
   "Bạn đang dùng bản mới nhất ({version}).": "You're using the latest version ({version}).",

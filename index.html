@@ -3514,6 +3514,34 @@
         @media (prefers-reduced-motion: reduce) {
             .app-progress.is-indeterminate .app-progress-fill { width: 100%; opacity: 0.55; }
         }
+        /* Bản sao trong popup Xuất video: cùng lớp .app-progress (cùng hoạt ảnh vô định), chỉ
+           đổi sang dòng chảy bình thường và dày hơn. Xong/lỗi thì setAppProgress(null) đã tắt
+           thanh — data-state giữ lại dải đầy màu kết quả cho tới lượt xuất sau. */
+        .export-progress { margin-top: var(--sp-4); }
+        .export-progress[hidden] { display: none; }
+        .export-progress .app-progress-mirror {
+            position: relative; left: auto; right: auto; bottom: auto;
+            height: 4px; border-radius: 2px;
+            background: var(--border-subtle, rgba(255, 255, 255, 0.08));
+        }
+        .export-progress[data-state="running"] .app-progress-mirror,
+        .export-progress[data-state="done"] .app-progress-mirror,
+        .export-progress[data-state="error"] .app-progress-mirror { opacity: 1; }
+        .export-progress[data-state="done"] .app-progress-fill,
+        .export-progress[data-state="error"] .app-progress-fill {
+            width: 100% !important; animation: none; transform: none; opacity: 1;
+        }
+        .export-progress[data-state="done"] .app-progress-fill { background: var(--success); box-shadow: none; }
+        .export-progress[data-state="error"] .app-progress-fill { background: var(--danger); box-shadow: none; }
+        .export-progress-meta {
+            display: flex; justify-content: space-between; gap: var(--sp-4);
+            margin-top: var(--sp-3);
+            font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.4;
+        }
+        .export-progress-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .export-progress-time { flex: none; font-variant-numeric: tabular-nums; }
+        .export-progress[data-state="done"] .export-progress-text { color: var(--success); }
+        .export-progress[data-state="error"] .export-progress-text { color: var(--danger); }
 
         /* ----- D2a. Animation VÀO cho modal + dropdown -----
            Mọi modal/dropdown của app bật/tắt bằng display:none <-> block/flex. Với khuôn đó,
@@ -3980,6 +4008,16 @@
         </div>
     </div>
     <button id="btnExportFromStep4" class="btn btn-primary btn-block"><svg class="btn-ico"><use href="#ic-export"/></svg>Xuất video ngay</button>
+    <!-- Bản sao thanh tiến độ của header (người dùng báo 2026-10-04: popup che mất dải 2px dưới
+         header nên không biết app còn render hay không). setAppProgress (ui-feedback.js) vẽ lên
+         mọi .app-progress-mirror; performVideoExport bật/tắt khối này qua data-state. -->
+    <div id="exportProgress" class="export-progress" data-state="idle" hidden aria-live="polite">
+        <div class="app-progress app-progress-mirror" role="progressbar" aria-hidden="true"><div class="app-progress-fill"></div></div>
+        <div class="export-progress-meta">
+            <span id="exportProgressText" class="export-progress-text"></span>
+            <span id="exportProgressTime" class="export-progress-time"></span>
+        </div>
+    </div>
 </div>
 
 <div id="captureModalBackdrop" aria-hidden="true"></div>
@@ -6780,8 +6818,10 @@
         if (msg.includes('nối các file video')) return 'Đang nối video...';
         if (msg.includes('bóc băng')) return 'Đang bóc băng...';
         if (msg.includes('lọc kịch bản')) return 'Đang lọc kịch bản...';
-        if (msg.includes('timeline')) return 'Đang dựng timeline...';
+        // Xuất video TRƯỚC "timeline": câu của backend lúc xuất là "Đang chuẩn bị cắt video theo
+        // timeline đã lọc..." — để sau thì thanh trạng thái báo nhầm "Đang dựng timeline".
         if (msg.includes('chuẩn bị cắt video') || msg.includes('xuất video')) return 'Đang xuất video...';
+        if (msg.includes('timeline')) return 'Đang dựng timeline...';
         if (msg.includes('đã hoàn tất') || msg.includes('sẵn sàng')) return 'Sẵn sàng';
         if (msg.includes('lỗi')) return 'Có lỗi xảy ra';
         return raw;
@@ -6807,6 +6847,15 @@
         const shortText = compactStatusMessage(rawMessage);
         statusTextEl.innerText = `${isBusy ? '… ' : ''}${shortText}`;
         statusTextEl.title = String(rawMessage || shortText);
+        // Popup Xuất video che thanh trạng thái: lúc đang xuất thì chép cùng câu vào popup.
+        const exportProgressEl = document.getElementById('exportProgress');
+        if (isBusy && exportProgressEl?.dataset.state === 'running') {
+            const textEl = document.getElementById('exportProgressText');
+            if (textEl) {
+                textEl.textContent = shortText;
+                textEl.title = String(rawMessage || shortText);
+            }
+        }
     }
 
     function normalizeForScriptHover(text) {
@@ -15964,6 +16013,48 @@
         return (picked?.path && picked?.ticket) ? picked : null;
     }
 
+    /* Khối tiến độ dưới nút "Xuất video ngay" (#exportProgress). Thanh do setAppProgress vẽ;
+     * ở đây chỉ lo trạng thái, câu chữ và đồng hồ — backend không báo % khi mã hoá nên đồng
+     * hồ chạy là dấu hiệu "app vẫn đang làm" rõ nhất. */
+    let exportProgressClock = null;
+    function formatExportElapsed(ms) {
+        const total = Math.max(0, Math.floor(ms / 1000));
+        const h = Math.floor(total / 3600);
+        const m = Math.floor((total % 3600) / 60);
+        const s = String(total % 60).padStart(2, '0');
+        return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+    }
+    function setExportProgressUi(state, message = '') {
+        const box = document.getElementById('exportProgress');
+        if (!box) return;
+        const textEl = document.getElementById('exportProgressText');
+        const timeEl = document.getElementById('exportProgressTime');
+        if (state === 'idle') {
+            clearInterval(exportProgressClock);
+            exportProgressClock = null;
+            box.dataset.state = 'idle';
+            box.hidden = true;
+            return;
+        }
+        box.hidden = false;
+        box.dataset.state = state;
+        if (textEl) {
+            textEl.textContent = message;
+            textEl.title = message;
+        }
+        if (state === 'running') {
+            const startedAt = Date.now();
+            const tick = () => { if (timeEl) timeEl.textContent = formatExportElapsed(Date.now() - startedAt); };
+            tick();
+            clearInterval(exportProgressClock);
+            exportProgressClock = setInterval(tick, 1000);
+        } else {
+            clearInterval(exportProgressClock);   // giữ nguyên số giây cuối = thời gian xuất
+            exportProgressClock = null;
+        }
+    }
+    window.resetExportProgressUi = () => { if (!videoExportInFlight) setExportProgressUi('idle'); };
+
     async function performVideoExport(options = {}) {
         if (!latestTimeline || latestTimeline.length === 0) return;
         if (videoExportInFlight) {
@@ -15986,6 +16077,8 @@
         const exportStepBtn = document.getElementById('btnExportFromStep4');
         if (exportTopBtn) exportTopBtn.disabled = true;
         if (exportStepBtn) exportStepBtn.disabled = true;
+        setExportProgressUi('running', _t('Đang xuất video...'));
+        let exportResult = { ok: false, message: '' };
         startStatusPolling();
         /* ĐO TỪNG KHÂU (Bước 0.1, docs/KE_HOACH_TOI_UU_EXPORT_WIN.md). Mốc gửi lên server
          * (`client_started_at_ms`) chỉ bắt đầu từ lúc TẢI LÊN, nên con số trong báo cáo dự án
@@ -16183,6 +16276,7 @@
             console.info('[export-timing]', exportTiming);
             showToast(_t('Đã xuất video: {name}', { name: written?.name || exportTarget.path }), { type: 'success' });
             setStatusText(_t('Đã lưu video vào {path}', { path: exportTiming.output_path }), false);
+            exportResult = { ok: true, message: _t('Đã xuất xong: {name}', { name: written?.name || exportTarget.path }) };
             return;
         }
         const downloadClock = performance.now();
@@ -16196,6 +16290,7 @@
         a.href = URL.createObjectURL(exportBlob);
         a.download = `${exportFileName}.${exportCodec === 'prores' ? 'mov' : 'mp4'}`;
         a.click();
+        exportResult = { ok: true, message: _t('Đã xuất xong: {name}', { name: a.download }) };
         // Bake khung chuyển cảnh (nặng, nhiều phút) NẰM TRONG try này: trước đây nó ở ngoài
         // nên khi bake nổ lỗi — ví dụ JSON.stringify vượt trần chuỗi của V8 vì payload quá
         // lớn — không ai bắt, UI im lặng và người dùng chỉ thấy "render lỗi" không rõ vì sao.
@@ -16203,11 +16298,13 @@
             console.error('Export error:', error);
             window.__crabLastExportTiming = { ...exportTiming, error: String(error?.message || error) };
             showToast(error && error.message ? error.message : _t('Xuất video thất bại.'), { type: 'error' });
+            exportResult = { ok: false, message: error && error.message ? error.message : _t('Xuất video thất bại.') };
         } finally {
             videoExportInFlight = false;
             stopStatusPolling();
             if (exportTopBtn) exportTopBtn.disabled = false;
             if (exportStepBtn) exportStepBtn.disabled = false;
+            setExportProgressUi(exportResult.ok ? 'done' : 'error', exportResult.message || _t('Xuất video thất bại.'));
         }
     }
 
@@ -16230,6 +16327,7 @@
         if (document.getElementById('btnExportVideo').disabled) return;
         syncExportFileNameFromProject();
         syncExportBitrateUi();   // sequence có thể đã đổi khổ từ lần mở trước
+        window.resetExportProgressUi?.();   // kết quả lượt trước không treo lại ở lần mở mới
         if (window.EditingRuntime?.openExportModal) {
             window.EditingRuntime.openExportModal();
         }
