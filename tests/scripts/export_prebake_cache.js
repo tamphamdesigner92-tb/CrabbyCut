@@ -16,6 +16,7 @@
  *      trúng (đang chuẩn bị xuất), dọn được sau lượt xuất;
  *   8. mô-đun: dọn thư mục tạm bỏ dở, mục quá hạn, vượt trần (cũ nhất trước).
  *   9. nội dung .cube gửi một lần (`@cube:cN` + editing_json.cube_texts): giải đúng, thiếu thì lỗi rõ.
+ *  10. nhiều tệp nguồn (chuyển cảnh lớp phủ giữa hai ảnh/video): mảng đường dẫn, thứ tự, một tệp đổi.
  *
  * Chạy: npm run test:export-prebake-cache
  * ================================================================== */
@@ -249,6 +250,45 @@ async function testCubeRefs(baseUrl) {
   console.log('  [ok] @cube: tham chiếu giải đúng (ra màu LUT), thiếu nội dung -> lỗi rõ');
 }
 
+/* 10. NHIỀU TỆP NGUỒN (chuyển cảnh lớp phủ giữa hai ảnh/video: source_path là MẢNG đường dẫn, xem
+ * overlayTransitionPrebakeKey). Cất + trúng với đúng mảng; đổi thứ tự, đổi nội dung MỘT tệp -> trượt;
+ * phần tử rỗng / mảng rỗng -> không cache được (không được hiểu thành nguồn lane chính). */
+async function testMultiSource(baseUrl) {
+  const saved = await fetch(`${baseUrl}/api/settings`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ export: { renderCache: true } }),
+  });
+  assert.strictEqual(saved.status, 200, 'không bật lại được cache');
+  makeSource('red');
+  const imgA = path.join(process.env.CRAB_TEMP_DIR, 'ov_a.png');
+  const imgB = path.join(process.env.CRAB_TEMP_DIR, 'ov_b.png');
+  fs.writeFileSync(imgA, solidFrame('green', 'png'));
+  fs.writeFileSync(imgB, solidFrame('blue', 'png'));
+  const green = solidFrame('green', 'png');
+  const files = Array.from({ length: FRAMES }, (_, i) => ({ name: `trans_ov__${String(i).padStart(4, '0')}.png`, buf: green, type: 'image/png' }));
+  const K3 = randomKey();
+  const pair = [imgA, imgB];
+  let res = await lookup(baseUrl, [{ key: K3, source_path: pair }]);
+  assert.deepStrictEqual([res.results[0].hit, res.results[0].cacheable], [false, true], 'mảng nguồn hợp lệ phải cache được');
+  const first = await exportWith(baseUrl, [seqItem('trans_ov', {
+    frame_files: files.map((f) => f.name), cache_key: K3, source_path: pair, cache_meta: { width: 96, height: 64, duration: FRAMES / FPS },
+  })], files);
+  assert.strictEqual(first.status, 200, `lượt có khung (mảng nguồn) lỗi: ${first.text}`);
+  res = await lookup(baseUrl, [{ key: K3, source_path: pair }, { key: K3, source_path: [imgB, imgA] }]);
+  assert.strictEqual(res.results[0].hit, true, 'cùng mảng nguồn phải trúng');
+  assert.strictEqual(res.results[1].hit, false, 'đổi thứ tự nguồn là khoá khác');
+  const second = await exportWith(baseUrl, [seqItem('trans_ov', { cache_key: K3, source_path: pair })]);
+  assert.strictEqual(second.status, 200, `lượt chỉ gửi khoá (mảng nguồn) lỗi: ${second.text}`);
+  assert.deepStrictEqual(frameMd5(second.out), frameMd5(first.out), 'bản xuất từ cache phải trùng bản có khung');
+  fs.writeFileSync(imgB, solidFrame('white', 'png'));
+  res = await lookup(baseUrl, [{ key: K3, source_path: pair }, { key: K3, source_path: [imgA, ''] },
+    { key: K3, source_path: [] }, { key: K3, source_path: [imgA, path.join(tempDir, 'ngoai_thu_muc.png')] }]);
+  assert.deepStrictEqual([res.results[0].hit, res.results[0].cacheable], [false, true], 'một tệp nguồn đổi thì phải trượt');
+  assert.strictEqual(res.results[1].cacheable, false, 'phần tử rỗng -> không cache được');
+  assert.strictEqual(res.results[2].cacheable, false, 'mảng rỗng -> không cache được');
+  assert.strictEqual(res.results[3].cacheable, false, 'tệp ngoài thư mục cho phép -> không cache được');
+  console.log('  [ok] nhiều tệp nguồn: cất, trúng, thứ tự, một tệp đổi, phần tử hỏng');
+}
+
 function testModulePrune() {
   const dir = path.join(tempDir, 'prune');
   fs.mkdirSync(dir, { recursive: true });
@@ -289,6 +329,7 @@ async function main() {
   try {
     await testEndpoints(baseUrl);
     await testCubeRefs(baseUrl);
+    await testMultiSource(baseUrl);
   } finally {
     server.close?.();
   }

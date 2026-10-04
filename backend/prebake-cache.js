@@ -30,6 +30,7 @@ const KEY_RE = /^[0-9a-f]{64}$/;
 const NAME_RE = /^[0-9a-f]{40}$/;
 const EXT_RE = /^\.(jpg|png)$/;
 const SAMPLE_BYTES = 64 * 1024;
+const MAX_SOURCES = 8;
 // Lượt hỏi trúng giữ mục khỏi bị dọn tay trong lúc renderer còn đang chuẩn bị lượt xuất.
 const HOLD_MS = 10 * 60 * 1000;
 
@@ -48,9 +49,26 @@ function createPrebakeCache({ dir, allowed, enabled, resolveSource, salt, ttlMs,
   }
 
   /* Danh tính tệp nguồn. `undefined`/`null` = chuỗi khung không đọc tệp nào (chữ, hình) -> '-'.
-   * Nguồn không hợp lệ / không đọc được -> null (không dùng cache). */
+   * Mảng = chuỗi đọc NHIỀU tệp (chuyển cảnh lớp phủ giữa hai ảnh/video) -> gộp danh tính từng tệp
+   * theo đúng thứ tự. Nguồn không hợp lệ / không đọc được -> null (không dùng cache). */
   function sourceStamp(sourcePath) {
     if (sourcePath === undefined || sourcePath === null) return '-';
+    if (Array.isArray(sourcePath)) {
+      if (!sourcePath.length || sourcePath.length > MAX_SOURCES) return null;
+      const stamps = [];
+      for (const p of sourcePath) {
+        // Phần tử rỗng sẽ bị resolveSource hiểu là nguồn lane chính — với mảng thì đó là dữ liệu hỏng.
+        if (typeof p !== 'string' || !p.trim()) return null;
+        const stamp = fileStamp(p);
+        if (!stamp) return null;
+        stamps.push(stamp);
+      }
+      return crypto.createHash('sha256').update(`multi|${stamps.join('|')}`).digest('hex');
+    }
+    return fileStamp(sourcePath);
+  }
+
+  function fileStamp(sourcePath) {
     const resolved = resolveSource(sourcePath);
     if (!resolved) return null;
     let st;

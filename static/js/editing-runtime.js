@@ -19910,13 +19910,16 @@
     // Bake chuỗi khung full-frame cho vùng chuyển cảnh OVERLAY (mượn tại điểm cắt + compose).
     // Overlay là lớp TRONG SUỐT -> buộc phải PNG (JPEG không có alpha, sẽ thành nền đen đè
     // lên cả khung).
-    async function bakeTransitionSequence(A, B, transDef, fps, seqW, seqH, collect) {
+    // `status.complete` = false khi một trong hai lớp không dựng được (thiếu khung mép) — chuỗi đó
+    // không được cất cache.
+    async function bakeTransitionSequence(A, B, transDef, fps, seqW, seqH, collect, status = null) {
         const T = window.Transitions;
         if (!T) return null;
         const d = Math.max(0.05, Number(transDef.duration) || 0);
         const frameCount = Math.max(2, Math.round(d * fps) + 1);
         const infoA = await prepareExportLayer(A, 'A');
         const infoB = await prepareExportLayer(B, 'B');
+        if (status && (!infoA || !infoB)) status.complete = false;
         if (!infoA && !infoB) return null;
         const sink = bakedFrameSink(collect, `trans_${A.id}`, 'image/png');
         for (let i = 0; i < frameCount; i++) {
@@ -19934,6 +19937,35 @@
         return sink.seq(d, seqW, seqH, frameCount);
     }
 
+    /* Chuỗi khung chuyển cảnh (lane chính lẫn lớp phủ) qua BỘ NHỚ ĐỆM KHUNG VẼ TRƯỚC. `cache` =
+     * { key, sourcePath? } hoặc null. Trúng -> chuỗi chỉ mang khoá, không dựng; trượt -> `bake(status)`
+     * rồi gắn khoá để backend cất, chỉ khi chuỗi đủ khung VÀ không có lần bốc khung nào hụt. */
+    async function cachedTransitionSeq(cache, frameCount, d, seqW, seqH, bake) {
+        let key = cache ? cache.key : null;
+        const src = cache && cache.sourcePath !== undefined ? { source_path: cache.sourcePath } : {};
+        if (key) {
+            const found = await prebakeLookup([{ key, ...src }]);
+            const entry = found && found[0];
+            const meta = entry && entry.hit ? entry.meta : null;
+            if (meta && meta.frame_count === frameCount) {
+                prebakeStats.hits += 1;
+                return {
+                    start: 0, duration: Math.max(0.05, d), width: seqW, height: seqH,
+                    frame_count: frameCount, cache_key: key, ...src,
+                };
+            }
+            if (!entry || !entry.cacheable) key = null;
+        }
+        const status = { complete: true };
+        const seq = await bake(status);
+        if (key && status.complete && seq && Array.isArray(seq.frame_files)
+            && seq.frame_files.length === frameCount) {
+            Object.assign(seq, { cache_key: key, ...src, cache_meta: { width: seqW, height: seqH, duration: seq.duration } });
+            prebakeStats.stores += 1;
+        }
+        return seq;
+    }
+
     // Chèn các item chuyển cảnh overlay đã bake vào danh sách export + trim 2 item gốc.
     async function appendOverlayTransitionItems(items, exportFps, collect) {
         if (!transitionsAvailable()) return;
@@ -19946,7 +19978,11 @@
             const A = b.leftRef, B = b.rightRef;
             const d = transDef.duration, half = d / 2, J = b.junctionTime;
             try {
-                const seq = await bakeTransitionSequence(A, B, transDef, exportFps, seqW, seqH, collect);
+                // Cùng công thức số khung với bakeTransitionSequence (so với meta của mục cache).
+                const frameCount = Math.max(2, Math.round(Math.max(0.05, d) * exportFps) + 1);
+                const cache = await overlayTransitionPrebakeKey(A, B, transDef, exportFps, seqW, seqH);
+                const seq = await cachedTransitionSeq(cache, frameCount, d, seqW, seqH,
+                    (status) => bakeTransitionSequence(A, B, transDef, exportFps, seqW, seqH, collect, status));
                 if (!bakedSeqHasFrames(seq)) continue;
                 // SNAP mép transition vào lưới frame xuất (khớp snapT của backend) + cho item gốc CHỒNG
                 // 1 frame vào 2 mép transition -> không còn khe hở 1 frame (lỗi mất hình). Frame đầu
@@ -20121,33 +20157,10 @@
                  * vẽ trước đắt nhất — mỗi khung tua <video> nguồn full-res (Yêu Con + 9 chuyển cảnh 0,5 s:
                  * 18 s mỗi lượt xuất). Trúng -> chỉ gửi khoá. */
                 const frameCount = Math.max(2, Math.round(Math.max(0.05, d) * exportFps) + 1);
-                let cacheKey = await mainTransitionPrebakeKey(a, b, transDef, exportFps, seqW, seqH);
-                let seq = null;
-                if (cacheKey) {
-                    const found = await prebakeLookup([{ key: cacheKey, source_path: '' }]);
-                    const entry = found && found[0];
-                    const meta = entry && entry.hit ? entry.meta : null;
-                    if (meta && meta.frame_count === frameCount) {
-                        prebakeStats.hits += 1;
-                        seq = {
-                            start: 0, duration: Math.max(0.05, d), width: seqW, height: seqH,
-                            frame_count: frameCount, cache_key: cacheKey, source_path: '',
-                        };
-                    } else if (!entry || !entry.cacheable) {
-                        cacheKey = null;
-                    }
-                }
-                if (!seq) {
-                    const status = { complete: true };
-                    seq = await bakeMainTransitionSequence(a, b, transDef, exportFps, seqW, seqH, srcUrl, collect, status);
-                    if (cacheKey && status.complete && seq && Array.isArray(seq.frame_files)
-                        && seq.frame_files.length === frameCount) {
-                        seq.cache_key = cacheKey;
-                        seq.source_path = '';
-                        seq.cache_meta = { width: seqW, height: seqH, duration: seq.duration };
-                        prebakeStats.stores += 1;
-                    }
-                }
+                const key = await mainTransitionPrebakeKey(a, b, transDef, exportFps, seqW, seqH);
+                // source_path '' = nguồn lane chính (temp_input.mp4), xem resolveRetouchSource.
+                const seq = await cachedTransitionSeq(key ? { key, sourcePath: '' } : null, frameCount, d, seqW, seqH,
+                    (status) => bakeMainTransitionSequence(a, b, transDef, exportFps, seqW, seqH, srcUrl, collect, status));
                 if (!bakedSeqHasFrames(seq)) continue;
                 items.push({
                     id: `maintrans_${a.index}`,
@@ -20625,6 +20638,15 @@
     // Số lượt trúng/trượt của lượt vẽ trước đang chạy (đi vào số đo `prebake_cache_*`).
     const prebakeStats = { hits: 0, stores: 0 };
 
+    // Phông chữ ảnh hưởng điểm ảnh: mặt chữ KHAI BÁO (@font-face) của các họ có trong item.
+    // Không lấy trạng thái nạp — nó đổi giữa lượt đầu và lượt sau của cùng một phiên.
+    function prebakeFontSignature(json) {
+        return Array.from(document.fonts || [])
+            .filter((f) => json.includes(String(f.family || '').replace(/^["']|["']$/g, '')))
+            .map((f) => [f.family, f.weight, f.style, f.stretch, f.unicodeRange].join('|'))
+            .sort();
+    }
+
     /* Chữ ký NỘI DUNG một LUT người dùng (băm dữ liệu cube đã nạp + miền). Khung bake SẴN màu (chuyển
      * cảnh) phụ thuộc nội dung .cube, mà id LUT không đổi khi người dùng nhập lại tệp cùng tên. Null =
      * không nạp được LUT (không cache). */
@@ -20646,6 +20668,65 @@
             lutSignatureCache.set(cube, sig);
         }
         return sig;
+    }
+
+    /* Chữ ký nội dung của MỌI LUT người dùng nằm trong `objects` (adjustments của block/lớp, kể cả
+     * keyframe màu) -> { id: chữ ký }, hoặc null khi có LUT không nạp được (không cache). */
+    async function prebakeLutSignatures(objects) {
+        const ids = new Set();
+        const walk = (v, depth) => {
+            if (!v || typeof v !== 'object' || depth > 10) return;
+            for (const [k, x] of Object.entries(v)) {
+                if (k === 'lut' && x && typeof x === 'object' && x.id) ids.add(String(x.id));
+                else walk(x, depth + 1);
+            }
+        };
+        objects.forEach((o) => walk(o, 0));
+        const luts = {};
+        for (const id of Array.from(ids).sort()) {
+            const sig = await prebakeLutSignature(id);
+            if (!sig) return null;
+            luts[id] = sig;
+        }
+        return luts;
+    }
+
+    /* Khoá cho khung chuyển cảnh LỚP PHỦ giữa hai item A|B (chữ / hình / ảnh / video) -> { key,
+     * sourcePath } hoặc null (không cache). prepareExportLayer bake SẴN chỉnh màu của item và lớp
+     * Điều chỉnh tại mép vào khung, nên khoá gồm lớp Điều chỉnh quanh điểm cắt và nội dung mọi LUT
+     * dính tới. Danh tính tệp ảnh/video do BACKEND cộng thêm (`sourcePath` = mảng đường dẫn, một mục
+     * cho mỗi media); `asset.url` vào khoá vì khung mép video được bốc từ đó (có thể là bản proxy). */
+    async function overlayTransitionPrebakeKey(A, B, transDef, fps, seqW, seqH) {
+        const sources = [];
+        const sides = [];
+        for (const item of [A, B]) {
+            if (!item) return null;
+            const side = { item };
+            if (item.type === 'media') {
+                const asset = findAsset(item.asset_id);
+                if (!asset || !asset.path || !asset.url) return null;
+                sources.push(String(asset.path));
+                side.asset = {
+                    path: asset.path, url: asset.url, width: asset.width, height: asset.height,
+                    base: itemBaseSize(item, asset), fit: mediaAssetFitScale(asset),
+                };
+            } else if (item.type === 'text') {
+                side.fonts = prebakeFontSignature(JSON.stringify(item));
+                if (itemIsTextTemplate(item)) side.template = textTemplateResolved(item);
+            }
+            sides.push(side);
+        }
+        // Lớp Điều chỉnh chỉ áp cho media, tại mép A (cuối A) và mép B (đầu B) — lấy rộng quanh điểm cắt.
+        const J = itemEnd(A);
+        const d = Math.max(0.05, Number(transDef.duration) || 0);
+        const layers = sources.length ? editingItems.filter((it) => adjustLayerIsActive(it)
+            && it.timeline_start < J + d && it.timeline_start + it.duration > J - d) : [];
+        const luts = await prebakeLutSignatures([A, B, ...layers]);
+        if (!luts) return null;
+        const key = await prebakeKey('ov_trans', {
+            fps, seqW, seqH, transDef, sides, layers, luts, sequence: payloadSequence(),
+        });
+        return key ? { key, sourcePath: sources.length ? sources : undefined } : null;
     }
 
     /* Khoá cho khung chuyển cảnh LANE CHÍNH tại điểm cắt A|B. Khung bake SẴN chuỗi màu (không có
@@ -20670,17 +20751,8 @@
         const to = spanA.end + d / 2;
         const layers = editingItems.filter((it) => adjustLayerIsActive(it)
             && it.timeline_start < to && it.timeline_start + it.duration > from);
-        const lutIds = new Set();
-        [spanA.clip.adjustments, spanB.clip.adjustments, ...layers.map((l) => l.adjustments)].forEach((a) => {
-            const id = a && a.lut && a.lut.id;
-            if (id) lutIds.add(String(id));
-        });
-        const luts = {};
-        for (const id of Array.from(lutIds).sort()) {
-            const sig = await prebakeLutSignature(id);
-            if (!sig) return null;
-            luts[id] = sig;
-        }
+        const luts = await prebakeLutSignatures([spanA.clip, spanB.clip, ...layers]);
+        if (!luts) return null;
         const span = (s) => ({ start: s.start, end: s.end, duration: s.duration });
         return prebakeKey('main_trans', {
             fps, seqW, seqH, transDef,
@@ -21250,12 +21322,7 @@
             }
             return seq;
         };
-        // Phông chữ ảnh hưởng điểm ảnh: mặt chữ KHAI BÁO (@font-face) của các họ có trong item.
-        // Không lấy trạng thái nạp — nó đổi giữa lượt đầu và lượt sau của cùng một phiên.
-        const fontSignature = (json) => Array.from(document.fonts || [])
-            .filter((f) => json.includes(String(f.family || '').replace(/^["']|["']$/g, '')))
-            .map((f) => [f.family, f.weight, f.style, f.stretch, f.unicodeRange].join('|'))
-            .sort();
+        const fontSignature = prebakeFontSignature;
         const seqDims = () => {
             const s = payloadSequence();
             return { width: Number(s.width) || 0, height: Number(s.height) || 0 };

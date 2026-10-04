@@ -7244,7 +7244,8 @@ function createApp() {
   /* KHUNG VẼ TRƯỚC ĐÃ CÓ CHƯA (xem backend/prebake-cache.js). Renderer hỏi trước khi dựng một
    * chuỗi khung: trúng thì gửi khoá thay cho khung (seq.cache_key, không frame_files/frames);
    * trượt mà `enabled` thì dựng rồi gửi khung KÈM khoá để backend cất.
-   *   body = { entries: [{ key, source_path? }] }  (source_path vắng = chuỗi không đọc tệp nào)
+   *   body = { entries: [{ key, source_path? }] }  (source_path vắng = chuỗi không đọc tệp nào;
+   *   mảng đường dẫn = chuỗi đọc nhiều tệp, như chuyển cảnh lớp phủ giữa hai ảnh/video)
    *   -> { enabled, results: [{ hit, cacheable, meta? }] } cùng thứ tự. */
   app.post('/api/prebake/lookup', (req, res) => {
     try {
