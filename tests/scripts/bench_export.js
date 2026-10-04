@@ -70,6 +70,9 @@ function parseArgs(argv) {
     else if (arg === '--gold') opts.gold = true;
     else if (arg === '--lavfi') opts.lavfi = true;
     else if (arg === '--resolution') opts.resolution = next();
+    // Đoạn JS chạy trong renderer SAU khi mở dự án, TRƯỚC lượt xuất (lượt ghi) — mô phỏng "sửa một
+    // chỗ rồi xuất lại" để kiểm khoá của bộ nhớ đệm khung vẽ trước. Giá trị trả về được in ra.
+    else if (arg === '--eval-before') opts.evalBefore = path.resolve(next());
     else if (arg === '--help' || arg === '-h') opts.help = true;
     else throw new Error(`tham số lạ: ${arg}`);
   }
@@ -394,6 +397,11 @@ async function recordInElectron() {
         return { clips: kept.length, duration: acc, items_before: before, items: state.editingItems.length };
       })()`);
       console.log(`  cắt còn ${cutInfo.duration.toFixed(1)} s: ${cutInfo.clips} clip, ${cutInfo.items}/${cutInfo.items_before} item`);
+    }
+
+    if (opts.evalBefore) {
+      const evalResult = await cdp.evaluate(fs.readFileSync(opts.evalBefore, 'utf8'));
+      console.log(`  --eval-before ${path.basename(opts.evalBefore)}: ${JSON.stringify(evalResult)}`);
     }
 
     const settings = await cdp.evaluate(`({

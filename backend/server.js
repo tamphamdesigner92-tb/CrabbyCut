@@ -160,6 +160,15 @@ const RENDER_CACHE_DIR = process.env.CRAB_RENDER_CACHE_DIR
   : path.join(USER_DATA_ROOT, 'render_cache');
 const RENDER_CACHE_ALLOWED = Boolean(process.env.CRAB_RENDER_CACHE_DIR) || !process.env.CRAB_TEMP_DIR;
 const RENDER_CACHE_MAX_BYTES = 20 * 1024 * 1024 * 1024;
+/* KHUNG VẼ TRƯỚC (miếng vá Retouch, chuỗi khung chữ/ảnh động) cho lượt xuất lại — xem
+ * backend/prebake-cache.js. Đi chung công tắc + nút dọn với cache render; cùng quy tắc test:
+ * CRAB_TEMP_DIR mà không đặt CRAB_PREBAKE_CACHE_DIR thì TẮT (test phải dựng khung thật). */
+const PREBAKE_CACHE_DIR = process.env.CRAB_PREBAKE_CACHE_DIR
+  ? path.resolve(process.env.CRAB_PREBAKE_CACHE_DIR)
+  : path.join(USER_DATA_ROOT, 'prebake_cache');
+const PREBAKE_CACHE_ALLOWED = Boolean(process.env.CRAB_PREBAKE_CACHE_DIR) || !process.env.CRAB_TEMP_DIR;
+const PREBAKE_CACHE_MAX_BYTES = 10 * 1024 * 1024 * 1024;
+const PREBAKE_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const LIBRARY_CATEGORIES = { video: 'Video', elements: 'Elements', sfxs: 'SFXs', music: 'Music' };
 // Cài đặt ứng dụng (bảng Cài đặt trong Menu). Đặt ở gốc dự án — KHÔNG phải dữ liệu runtime
 // như temp_uploads/peaks_cache — để cấu hình đi theo thư mục dự án và sao lưu được.
@@ -381,6 +390,19 @@ const ttsService = require('./tts-service.js');
 const modelDownloads = require('./model-downloads.js');
 const { createLogoAi } = require('./logo-ai.js');
 const { createRetouchFramesHandler } = require('./retouch-frames.js');
+const { createPrebakeCache } = require('./prebake-cache.js');
+// Hàm khai báo (readAppSettings, resolveRetouchSource, logStatus) được hoist nên gọi lười ở đây được.
+const prebakeCache = createPrebakeCache({
+  dir: PREBAKE_CACHE_DIR,
+  allowed: PREBAKE_CACHE_ALLOWED,
+  enabled: () => Boolean(readAppSettings().export.renderCache),
+  resolveSource: (raw) => resolveRetouchSource(raw),
+  // Khung nguồn của miếng vá do ffmpeg giải mã + co (retouch-frames.js): đổi bản ffmpeg là đổi khung.
+  salt: () => commandText('ffmpeg', ['-hide_banner', '-version']).split(/\r?\n/)[0] || 'ffmpeg?',
+  ttlMs: PREBAKE_CACHE_TTL_MS,
+  maxBytes: PREBAKE_CACHE_MAX_BYTES,
+  log: (line) => logStatus(line),
+});
 /* PYTHON SIDECAR: cùng lý do — phép chọn interpreter và env UTF-8 nằm ở MỘT chỗ
  * (scripts/python_command.js), dùng chung với npm script lẫn test. Trước đây mỗi
  * chỗ tự chép một bản và mỗi bản thiếu một mảnh khác nhau. */
@@ -516,6 +538,18 @@ function dirUsage(dir) {
   walk(dir);
   // KHÔNG dùng formatBytes(): hàm đó chỉ hiển thị GB trở lên (dành cho dung lượng video
   // nguồn), nên cache 17 MB sẽ hiện "0.0 GB". Ở đây cần thang đủ từ KB.
+  return { bytes, files, human: humanBytes(bytes) };
+}
+
+// Dung lượng một mục ở Cài đặt › Bộ nhớ đệm: thư mục chính + `extraDirs` (dọn chung một nút).
+function targetUsage(target) {
+  let bytes = 0;
+  let files = 0;
+  [target.dir, ...(target.extraDirs || [])].forEach((dir) => {
+    const u = dirUsage(dir);
+    bytes += u.bytes;
+    files += u.files;
+  });
   return { bytes, files, human: humanBytes(bytes) };
 }
 
@@ -5545,6 +5579,36 @@ function materializeAnimationFrameFiles(seqRender, uploadedByName, itemId, index
   return { pattern: path.join(dir, `frame_%04d${ext}`), frameCount: sources.length };
 }
 
+/* Chuỗi khung mang `cache_key` (bộ nhớ đệm khung vẽ trước, backend/prebake-cache.js):
+ *   - KHÔNG kèm khung (renderer hỏi /api/prebake/lookup thấy trúng) -> trỏ thẳng vào mục cache.
+ *     Mục biến mất giữa lượt hỏi và lượt xuất là lỗi THẬT — không còn khung nào để lùi về, mà im
+ *     lặng rơi về overlay tĩnh là bản xuất mất Retouch/chữ động không báo gì. Dọn tay đã bị chặn
+ *     trong lúc renderer còn giữ mục (prebakeCache.held()), nên đường này gần như không xảy ra.
+ *   - KÈM khung -> ghi như cũ rồi CẤT vào cache và dùng bản trong cache: đường dẫn + mtime của
+ *     khung đứng yên giữa các lượt nên cache render (file_ids.tsv) không phải băm lại khung.
+ * Trả undefined khi chuỗi không dùng cache (đi đường cũ). */
+function materializePrebakeSeq(seq, uploadedByName, itemId, index) {
+  if (!seq || !seq.cache_key) return undefined;
+  const sourcePath = Object.prototype.hasOwnProperty.call(seq, 'source_path') ? seq.source_path : undefined;
+  const name = prebakeCache.entryName(seq.cache_key, sourcePath);
+  const hasFrames = (Array.isArray(seq.frame_files) && seq.frame_files.length > 0)
+    || (Array.isArray(seq.frames) && seq.frames.length > 0);
+  if (!hasFrames) {
+    const entry = name ? prebakeCache.readEntry(name) : null;
+    if (!entry) throw new Error(`Bộ nhớ đệm khung vẽ trước thiếu mục của ${itemId} — hãy bấm Xuất lại.`);
+    return { pattern: entry.pattern, frameCount: entry.frame_count };
+  }
+  const materialized = materializeAnimationFrameFiles(seq, uploadedByName, itemId, index)
+    || materializeAnimationFrames(seq, itemId, index);
+  if (!materialized || !name) return materialized;
+  const files = [];
+  for (let k = 0; k < materialized.frameCount; k += 1) {
+    files.push(materialized.pattern.replace('%04d', String(k).padStart(4, '0')));
+  }
+  const stored = prebakeCache.storeFiles(name, files, seq.cache_meta);
+  return stored ? { pattern: stored.pattern, frameCount: stored.frame_count } : materialized;
+}
+
 // Xoá các khung upload còn sót (chuỗi bị bỏ vì lỗi materialize) để temp không phình mãi.
 function cleanupTransitionFrameUploads() {
   try {
@@ -5738,8 +5802,10 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
       if (absEnd - absStart >= 0.05) {
         // Hai nguồn khung: phần file multipart (vùng chuyển cảnh — nặng) hoặc base64 nội
         // tuyến (hoạt ảnh text/shape/ảnh — nhẹ, giữ nguyên đường cũ).
-        const materialized = materializeAnimationFrameFiles(seq, transitionFrameFiles, item.id, index)
-          || materializeAnimationFrames(seq, item.id, index);
+        const prebaked = materializePrebakeSeq(seq, transitionFrameFiles, item.id, index);
+        const materialized = prebaked !== undefined ? prebaked
+          : (materializeAnimationFrameFiles(seq, transitionFrameFiles, item.id, index)
+            || materializeAnimationFrames(seq, item.id, index));
         if (materialized) {
           animOverlay = {
             asset_type: 'image_seq', // chuỗi ảnh chung (text/shape/ảnh)
@@ -6641,7 +6707,8 @@ function createApp() {
     // (liên kết cứng trong temp_uploads) — xoá mục cache chỉ gỡ một liên kết.
     sdr: { dir: SDR_CACHE_DIR, label: () => _t('Bản SDR của video HDR'), clearable: true },
     // Dọn được: lượt xuất sau render lại đủ (chỉ chậm hơn). Không dọn lúc đang xuất — bước ghép đang đọc nó.
-    render: { dir: RENDER_CACHE_DIR, label: () => _t('Bản render để xuất lại'), clearable: true },
+    // Gồm cả khung vẽ trước (prebake_cache): cùng một ý "phần đã dựng để xuất lại", chung công tắc.
+    render: { dir: RENDER_CACHE_DIR, extraDirs: [PREBAKE_CACHE_DIR], label: () => _t('Bản render để xuất lại'), clearable: true },
     // Dọn được: Retouch bám lại khuôn mặt ở lượt preview/xuất sau (chỉ chậm hơn).
     retouch: { dir: RETOUCH_CACHE_DIR, label: () => _t('Bám khuôn mặt (Retouch)'), clearable: true },
     /* Model lồng tiếng (F5 ~1,4 GB, VieNeu ~0,9 GB): dọn được — lượt lồng tiếng sau tự tải lại
@@ -6655,7 +6722,7 @@ function createApp() {
       res.json({
         status: 'success',
         items: Object.entries(CACHE_TARGETS).map(([id, t]) => {
-          const usage = dirUsage(t.dir);
+          const usage = targetUsage(t);
           return { id, label: t.label(), clearable: t.clearable, ...usage };
         }),
       });
@@ -6671,15 +6738,18 @@ function createApp() {
       const target = CACHE_TARGETS[id];
       if (!target) return httpError(res, 400, _t('Bộ nhớ đệm không hợp lệ.'));
       if (!target.clearable) return httpError(res, 400, _t('Không dọn được "{label}" — đây là dữ liệu của dự án đang mở.', { label: target.label() }));
-      if (id === 'render' && exportInFlight) return httpError(res, 409, _t('Đang xuất video — đợi xong rồi hãy dọn mục này.'));
+      // prebakeCache.held(): renderer vừa hỏi trúng khung vẽ trước và đang chuẩn bị lượt xuất.
+      if (id === 'render' && (exportInFlight || prebakeCache.held())) return httpError(res, 409, _t('Đang xuất video — đợi xong rồi hãy dọn mục này.'));
       let removed = 0;
-      let names = [];
-      try { names = fs.readdirSync(target.dir); } catch (_) { names = []; }
-      names.forEach((name) => {
-        try { fs.rmSync(path.join(target.dir, name), { recursive: true, force: true }); removed += 1; } catch (_) { /* bỏ qua */ }
+      [target.dir, ...(target.extraDirs || [])].forEach((dir) => {
+        let names = [];
+        try { names = fs.readdirSync(dir); } catch (_) { names = []; }
+        names.forEach((name) => {
+          try { fs.rmSync(path.join(dir, name), { recursive: true, force: true }); removed += 1; } catch (_) { /* bỏ qua */ }
+        });
       });
       fs.mkdirSync(target.dir, { recursive: true });
-      res.json({ status: 'success', id, removed, ...dirUsage(target.dir) });
+      res.json({ status: 'success', id, removed, ...targetUsage(target) });
     } catch (error) {
       recordProjectError('cache_clear', error, { endpoint: '/api/cache/clear' });
       httpError(res, 500, error);
@@ -7105,7 +7175,9 @@ function createApp() {
       if (fs.existsSync(cachePath)) {
         // Trúng cache -> trả thẳng, KHÔNG chạm vào sidecar. Chạm mtime = lần dùng cuối (pruneRetouchCache).
         try { const now = new Date(); fs.utimesSync(cachePath, now, now); } catch (_) { /* chỉ mất thứ tự hạn dùng */ }
-        return res.json({ status: 'success', cached: true, ...JSON.parse(fs.readFileSync(cachePath, 'utf8')) });
+        // `faces_id` = định danh của bộ landmark (nguồn + cỡ/mtime + khoảng + tuỳ chọn) — renderer
+        // đưa vào khoá cache khung vẽ trước (prebake-cache.js) thay cho băm cả mảng landmark.
+        return res.json({ status: 'success', cached: true, faces_id: path.basename(cachePath, '.json'), ...JSON.parse(fs.readFileSync(cachePath, 'utf8')) });
       }
       setStatus(_t('Đang bám khuôn mặt cho Retouch...'));
       const result = await runAutoReframeAnalysis({
@@ -7123,10 +7195,27 @@ function createApp() {
       }
       setStatus(_t('Đã bám xong khuôn mặt cho Retouch.'));
       projectMetrics.activity = true;
-      res.json({ status: 'success', cached: false, ...result });
+      res.json({ status: 'success', cached: false, faces_id: path.basename(cachePath, '.json'), ...result });
     } catch (error) {
       recordProjectError('retouch_track', error, { endpoint: '/api/retouch/track' });
       setStatus(_t('Lỗi khi bám khuôn mặt cho Retouch!'));
+      httpError(res, 500, error);
+    }
+  });
+
+  /* KHUNG VẼ TRƯỚC ĐÃ CÓ CHƯA (xem backend/prebake-cache.js). Renderer hỏi trước khi dựng một
+   * chuỗi khung: trúng thì gửi khoá thay cho khung (seq.cache_key, không frame_files/frames);
+   * trượt mà `enabled` thì dựng rồi gửi khung KÈM khoá để backend cất.
+   *   body = { entries: [{ key, source_path? }] }  (source_path vắng = chuỗi không đọc tệp nào)
+   *   -> { enabled, results: [{ hit, cacheable, meta? }] } cùng thứ tự. */
+  app.post('/api/prebake/lookup', (req, res) => {
+    try {
+      const entries = Array.isArray(req.body?.entries) ? req.body.entries.slice(0, 500) : [];
+      const results = entries.map((e) => prebakeCache.lookup(e?.key,
+        (e && Object.prototype.hasOwnProperty.call(e, 'source_path')) ? e.source_path : undefined));
+      res.json({ status: 'success', enabled: prebakeCache.active(), results });
+    } catch (error) {
+      recordProjectError('prebake_lookup', error, { endpoint: '/api/prebake/lookup' });
       httpError(res, 500, error);
     }
   });
@@ -7397,6 +7486,7 @@ function createApp() {
       if (exportLockReleased) return;
       exportLockReleased = true;
       exportInFlight = false;
+      prebakeCache.release();   // khung vẽ trước renderer hỏi trúng đã được dùng xong
     };
     res.on('close', releaseExportLock);
     let exportSettingsForError = null;
@@ -7595,6 +7685,7 @@ function start() {
   cleanGeneratedTextAssets(); // dọn PNG sequence hoạt ảnh còn sót từ phiên trước
   prunePeaksCache();          // dọn cache sóng âm quá hạn + file .tmp/.raw của job bị kill
   pruneRetouchCache();        // dọn landmark Retouch quá 30 ngày không dùng
+  prebakeCache.prune();       // dọn khung vẽ trước quá hạn / vượt trần (prebake-cache.js)
   pruneConcatCache();         // dọn bản đã nối quá hạn (mỗi mục là một file vài trăm MB)
   pruneSdrCache();            // dọn bản hạ SDR quá hạn / vượt trần dung lượng
   pruneAssetProxyCache();     // dọn proxy LQ quá hạn + file .part.mp4 của job bị kill

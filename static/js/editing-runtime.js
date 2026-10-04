@@ -8273,6 +8273,9 @@
                 // Tin theo cờ của sidecar, và tự suy thêm từ chính yêu cầu — payload cũ
                 // trong cache đĩa không có cờ này.
                 still: c.still === true || req.still === true,
+                // Định danh bộ landmark ở backend (nguồn + khoảng + tuỳ chọn) — vào khoá cache
+                // khung vẽ trước thay cho băm cả mảng landmark. Backend cũ không trả -> không cache.
+                facesId: typeof data.faces_id === 'string' ? data.faces_id : '',
             };
             retouchFaceCache.set(key, store);
             if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
@@ -19734,7 +19737,9 @@
     function bakedSeqHasFrames(seq) {
         if (!seq) return false;
         return (Array.isArray(seq.frames) && seq.frames.length > 0)
-            || (Array.isArray(seq.frame_files) && seq.frame_files.length > 0);
+            || (Array.isArray(seq.frame_files) && seq.frame_files.length > 0)
+            // Trúng bộ nhớ đệm khung vẽ trước: khung nằm sẵn ở backend, chỉ gửi khoá.
+            || (typeof seq.cache_key === 'string' && seq.cache_key.length > 0 && seq.frame_count >= 2);
     }
 
     function canvasToBlobAsync(canvas, type, quality) {
@@ -20403,6 +20408,8 @@
     /* Khung nguồn cho bước dựng Retouch: backend trước, phần thiếu (backend tắt, nguồn HDR, lỗi,
      * đứt giữa chừng) tua thẻ <video> như cũ. `source.path` = đường dẫn gửi backend ('' = lane chính
      * temp_input.mp4; null = không có tệp để gửi -> tua luôn), `source.url` = URL cho đường tua. */
+    // Trả SỐ KHUNG đến từ backend (phần còn lại là khung tua <video>) — cache khung vẽ trước chỉ
+    // cất chuỗi mà mọi khung đều từ backend.
     async function eachSourceFrameBest(source, times, onFrame) {
         let delivered = 0;
         if (source.path !== null && source.path !== undefined) {
@@ -20412,9 +20419,155 @@
                 console.warn('[retouch] không lấy được khung từ backend, tua <video>:', error?.message || error);
             }
         }
-        if (delivered >= times.length) return;
+        if (delivered >= times.length) return delivered;
         await eachSourceFrame(source.url, times.slice(delivered),
             (frame, k, texW, texH) => onFrame(frame, k + delivered, texW, texH));
+        return delivered;
+    }
+
+    /* =====================================================================
+     * BỘ NHỚ ĐỆM KHUNG VẼ TRƯỚC (backend/prebake-cache.js, mục 25 của
+     * docs/KE_HOACH_TOI_UU_EXPORT_WIN.md) — lượt xuất lại không dựng lại chuỗi khung mà lượt
+     * trước đã dựng với y hệt đầu vào. Yêu Con: dựng miếng vá Retouch 16,5 s mỗi lượt xuất.
+     *
+     * KHOÁ phải gồm MỌI thứ ảnh hưởng tới điểm ảnh, nên cố ý THỪA hơn thiếu: thừa thì chỉ dựng
+     * lại (chậm như cũ), thiếu thì xuất ra khung CŨ mà không ai biết.
+     *   - VÂN TAY MÃ NGUỒN: băm index.html + mọi script cùng nguồn của trang. Sửa bất kỳ dòng mã
+     *     nào cũng ra khoá mới — không phải nhớ tăng số phiên bản mỗi lần sửa retouch.js. Tính
+     *     ngay sau khi trang nạp (xem cuối khối) để khớp với mã ĐANG CHẠY nhất có thể.
+     *   - trình duyệt (userAgent = bản Chromium: bộ mã hoá JPEG/PNG, phép co của canvas) + chuỗi
+     *     GPU của WebGL (shader Retouch).
+     *   - dữ liệu của khối (toàn bộ JSON clip/item, trừ trường giao diện), sequence, fps…
+     * Danh tính TỆP nguồn + bản ffmpeg do backend cộng thêm (renderer không đọc được tệp).
+     * ================================================================== */
+    const PREBAKE_UI_KEYS = new Set(['is_selected']);
+
+    function prebakeStableStringify(value) {
+        const seen = new Set();
+        const walk = (v) => {
+            if (v === null || typeof v !== 'object') {
+                if (typeof v === 'number') return Number.isFinite(v) ? JSON.stringify(v) : 'null';
+                if (typeof v === 'function' || v === undefined) return undefined;
+                return JSON.stringify(v);
+            }
+            if (seen.has(v)) throw new Error('prebake key: vòng tham chiếu');
+            seen.add(v);
+            let out;
+            if (Array.isArray(v)) {
+                out = `[${v.map((x) => { const s = walk(x); return s === undefined ? 'null' : s; }).join(',')}]`;
+            } else {
+                const parts = [];
+                Object.keys(v).sort().forEach((k) => {
+                    if (PREBAKE_UI_KEYS.has(k)) return;
+                    const s = walk(v[k]);
+                    if (s !== undefined) parts.push(`${JSON.stringify(k)}:${s}`);
+                });
+                out = `{${parts.join(',')}}`;
+            }
+            seen.delete(v);
+            return out;
+        };
+        return walk(value);
+    }
+
+    async function prebakeSha256Hex(text) {
+        const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+        return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    function prebakeGpuId() {
+        try {
+            const gl = document.createElement('canvas').getContext('webgl');
+            if (!gl) return 'nogl';
+            const info = gl.getExtension('WEBGL_debug_renderer_info');
+            const id = info
+                ? `${gl.getParameter(info.UNMASKED_VENDOR_WEBGL)}|${gl.getParameter(info.UNMASKED_RENDERER_WEBGL)}`
+                : `${gl.getParameter(gl.VENDOR)}|${gl.getParameter(gl.RENDERER)}`;
+            gl.getExtension('WEBGL_lose_context')?.loseContext();
+            return id;
+        } catch (_) {
+            return 'nogl';
+        }
+    }
+
+    let prebakeFingerprintPromise = null;
+    function prebakeFingerprint() {
+        if (!prebakeFingerprintPromise) {
+            prebakeFingerprintPromise = (async () => {
+                if (!(window.crypto && crypto.subtle && typeof fetch === 'function')) return null;
+                const origin = location.origin;
+                const urls = [location.href.split('#')[0]];
+                for (const s of Array.from(document.scripts)) {
+                    if (!s.src) continue;
+                    try { if (new URL(s.src, location.href).origin === origin) urls.push(s.src); } catch (_) { /* bỏ qua */ }
+                }
+                const parts = [];
+                for (const url of urls) {
+                    const resp = await fetch(url, { cache: 'no-store' });
+                    if (!resp.ok) return null;
+                    parts.push(url.slice(origin.length), await resp.text());
+                }
+                parts.push(navigator.userAgent, prebakeGpuId());
+                return prebakeSha256Hex(parts.join('\u0000'));
+            })().catch(() => null);
+        }
+        return prebakeFingerprintPromise;
+    }
+    // Băm NGAY sau khi trang nạp: để tới lúc xuất mới băm thì tệp trên đĩa có thể đã khác mã đang
+    // chạy (chạy từ mã nguồn, sửa tệp mà chưa tải lại trang) — khung dựng bằng mã cũ sẽ mang khoá
+    // của mã mới. Bản cài đặt không đổi tệp nên chuyện này chỉ có ở máy dev.
+    if (document.readyState === 'complete') setTimeout(prebakeFingerprint, 0);
+    else window.addEventListener('load', () => setTimeout(prebakeFingerprint, 0), { once: true });
+
+    // Khoá cho một chuỗi khung, hoặc null (không dùng cache). `parts` = các đầu vào riêng của chuỗi.
+    async function prebakeKey(kind, parts) {
+        try {
+            const fp = await prebakeFingerprint();
+            if (!fp) return null;
+            return await prebakeSha256Hex(prebakeStableStringify({ kind, fp, parts }));
+        } catch (error) {
+            console.warn('[prebake] không tính được khoá:', error?.message || error);
+            return null;
+        }
+    }
+
+    /* Hỏi backend một lượt cho nhiều khoá: [{ key, source_path? }] -> mảng kết quả cùng thứ tự
+     * ({ hit, cacheable, meta? }), hoặc null nếu cache tắt / backend không trả lời (dựng như cũ). */
+    async function prebakeLookup(entries) {
+        if (!entries.length) return [];
+        try {
+            const resp = await fetch(`${API_BASE}/prebake/lookup`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ entries }),
+            });
+            if (!resp.ok) return null;
+            const data = await resp.json();
+            if (!data.enabled || !Array.isArray(data.results) || data.results.length !== entries.length) return null;
+            return data.results;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    // Số lượt trúng/trượt của lượt vẽ trước đang chạy (đi vào số đo `prebake_cache_*`).
+    const prebakeStats = { hits: 0, stores: 0 };
+
+    /* Khoá cho miếng vá Retouch của một block lane chính (đường VÁ VÙNG MẶT; bake cả khung
+     * không dùng cache vì nó mang cả chuỗi màu/LUT/lớp Điều chỉnh). Null = không cache. */
+    function retouchMainPrebakeKey(span, exportFps, seqW, seqH, store) {
+        if (!store || !store.facesId) return Promise.resolve(null);
+        return prebakeKey('rt_main', {
+            fps: exportFps, seqW, seqH,
+            span: { start: span.start, end: span.end, duration: span.duration },
+            clip: span.clip,
+            sequence: payloadSequence(),
+            concat: (typeof mainConcatFrameSize === 'function') ? mainConcatFrameSize() : null,
+            drawSize: mainLaneFrameDrawSize(span.clip),
+            baseH: mainLaneBaseSize(span.clip).height,
+            faces: store.facesId,
+            jpeg: RETOUCH_JPEG_QUALITY,
+        });
     }
 
     /* Bake retouch cho MỘT block lane chính -> { seq, rect } hoặc null.
@@ -20449,6 +20602,29 @@
             times.push(sourceTimeAt(Number(clip.start), k / exportFps, rate, clipSourceSpan));
         }
         let fullFrame = retouchExportNeedsFullFrame(span);
+
+        // ---- BỘ NHỚ ĐỆM: lượt trước đã dựng khối này với y hệt đầu vào -> dùng lại ----
+        // Chỉ đường VÁ VÙNG MẶT, không xoá logo (miếng vá AI có trạng thái riêng), không giữ nút
+        // so sánh. Hộp vá / mép mềm cất kèm khung nên lượt trúng bỏ qua được cả lượt 1.
+        let cacheKey = null;
+        if (!fullFrame && !logoActive(clip) && !retouchCompareOff) {
+            cacheKey = await retouchMainPrebakeKey(span, exportFps, seqW, seqH, store);
+            const found = cacheKey ? await prebakeLookup([{ key: cacheKey, source_path: '' }]) : null;
+            const entry = found && found[0];
+            const meta = entry && entry.hit ? entry.meta : null;
+            if (meta && meta.rect && meta.frame_count === frameCount && meta.width > 0 && meta.height > 0) {
+                prebakeStats.hits += 1;
+                if (progress) progress(frameCount, frameCount);
+                return {
+                    seq: {
+                        start: 0, duration: span.duration, width: meta.width, height: meta.height,
+                        frame_count: meta.frame_count, cache_key: cacheKey, source_path: '',
+                    },
+                    rect: meta.rect, fullFrame: false, feather: Number(meta.feather) || 0,
+                };
+            }
+            if (!entry || !entry.cacheable) cacheKey = null;   // cache tắt / nguồn không định danh được
+        }
 
         // ---- LƯỢT 1 (không giải mã gì): hộp bao HỢP qua mọi khung ----
         // Phải là hợp của CẢ clip vì miếng vá đứng yên còn mặt thì di chuyển. Lượt này
@@ -20499,7 +20675,7 @@
         // ---- LƯỢT 2: giải mã + retouch + cắt ----
         const sink = bakedFrameSink(collect, `retouch_${span.index}`, 'image/jpeg', RETOUCH_JPEG_QUALITY, { pipeline: true });
         let wrote = 0;
-        await eachSourceFrameBest({ path: '', url: srcUrl, crop: sourceCrop }, times, async (frame, k, texW, texH, view) => {
+        const fromBackend = await eachSourceFrameBest({ path: '', url: srcUrl, crop: sourceCrop }, times, async (frame, k, texW, texH, view) => {
             const localT = k / exportFps;
             const srcT = times[k];
             // ĐÚNG hàm mà preview gọi -> không thể lệch với preview. Miếng vá phủ lên
@@ -20532,7 +20708,19 @@
         const sw = fullFrame ? seqW : rect.w;
         const sh = fullFrame ? seqH : rect.h;
         await sink.flush();
-        return { seq: sink.seq(span.duration, sw, sh, wrote), rect, fullFrame, feather: featherPx };
+        const seq = sink.seq(span.duration, sw, sh, wrote);
+        /* Gửi khung KÈM khoá để backend cất — chỉ khi chuỗi đủ khung và MỌI khung đến từ backend:
+         * khung tua <video> lệch nhẹ (~47 dB) so với đường ffmpeg, cất nó là lượt sau mang theo
+         * một khung khác với khung mà đúng đầu vào ấy cho ra. Lượt 1 có thể đã chuyển sang bake
+         * cả khung (mặt quá to) -> không cất. */
+        if (cacheKey && !fullFrame && rect && wrote === frameCount && fromBackend >= frameCount
+            && Array.isArray(seq.frame_files)) {
+            seq.cache_key = cacheKey;
+            seq.source_path = '';
+            seq.cache_meta = { rect, feather: featherPx, width: sw, height: sh, duration: span.duration };
+            prebakeStats.stores += 1;
+        }
+        return { seq, rect, fullFrame, feather: featherPx };
     }
 
     /* Chèn item chuỗi khung retouch vào danh sách export.
@@ -20871,6 +21059,8 @@
         const timingMs = {};
         const timingCount = {};
         retouchFaceWaitMs = 0;
+        prebakeStats.hits = 0;
+        prebakeStats.stores = 0;
         const timed = async (key, work) => {
             if (!timingSink) return work();
             const started = performance.now();
@@ -20892,12 +21082,72 @@
         // Pre-render MỘT chuỗi frame PNG LIÊN TỤC (In→Hold→Out) ở fps xuất -> backend
         // ghép 1 overlay duy nhất, không còn khe ranh giới gây nháy. Lỗi render không
         // được làm hỏng export -> bỏ qua, backend rơi về overlay tĩnh.
-        const attachAnim = async (copy, renderer, ...args) => {
+        /* BỘ NHỚ ĐỆM KHUNG VẼ TRƯỚC cho chuỗi khung chữ/hình/ảnh động (xem prebakeKey). `cache` =
+           { kind, parts, sourcePath? } hoặc null (không dùng cache). Trúng -> chuỗi chỉ mang khoá,
+           không dựng, không gửi khung; trượt -> dựng như cũ rồi gửi khung KÈM khoá để backend cất. */
+        const cachedSeq = async (cache, render) => {
+            let key = cache ? await prebakeKey(cache.kind, cache.parts) : null;
+            const withSource = (seq) => (cache && cache.sourcePath !== undefined
+                ? { ...seq, source_path: cache.sourcePath } : seq);
+            if (key) {
+                const found = await prebakeLookup([withSource({ key })]);
+                const entry = found && found[0];
+                const meta = entry && entry.hit && entry.meta && entry.meta.seq;
+                if (meta && Number(meta.frame_count) === Number(entry.meta.frame_count)) {
+                    prebakeStats.hits += 1;
+                    return withSource({ ...meta, cache_key: key });
+                }
+                if (!entry || !entry.cacheable) key = null;
+            }
+            const seq = await render();
+            if (seq && key && Array.isArray(seq.frames) && seq.frames.length >= 2) {
+                const { frames: _frames, ...meta } = seq;
+                // frame_count của mục = số khung backend ghi ra (null "lặp khung trước" cũng thành tệp).
+                meta.frame_count = seq.frames.length;
+                Object.assign(seq, withSource({ cache_key: key, cache_meta: { seq: meta } }));
+                prebakeStats.stores += 1;
+            }
+            return seq;
+        };
+        // Phông chữ ảnh hưởng điểm ảnh: mặt chữ KHAI BÁO (@font-face) của các họ có trong item.
+        // Không lấy trạng thái nạp — nó đổi giữa lượt đầu và lượt sau của cùng một phiên.
+        const fontSignature = (json) => Array.from(document.fonts || [])
+            .filter((f) => json.includes(String(f.family || '').replace(/^["']|["']$/g, '')))
+            .map((f) => [f.family, f.weight, f.style, f.stretch, f.unicodeRange].join('|'))
+            .sort();
+        const seqDims = () => {
+            const s = payloadSequence();
+            return { width: Number(s.width) || 0, height: Number(s.height) || 0 };
+        };
+        // Phần khoá chung của chuỗi khung một item: JSON item (trừ PNG tĩnh vừa dựng — nó suy từ
+        // chính các trường khác), fps, cỡ sequence, phông.
+        const itemSeqParts = (copy, extra) => {
+            const { rendered_text_png: _a, rendered_text_width: _b, rendered_text_height: _c,
+                rendered_shape_png: _d, rendered_shape_width: _e, rendered_shape_height: _f,
+                animation_render: _g, ...rest } = copy;
+            const json = JSON.stringify(rest);
+            return { item: rest, fps: exportFps, sequence: seqDims(), fonts: fontSignature(json), ...(extra || {}) };
+        };
+        /* Ảnh động chỉ cache ở ca KHÔNG mang màu: chuỗi khung ảnh bake sẵn chuỗi màu, LUT (nội dung
+           .cube chỉ có số hiệu theo phiên), lớp Điều chỉnh phủ lên, Retouch, xoá logo — đưa đủ những
+           thứ đó vào khoá là dễ sót. Ca đó dựng như cũ. Danh tính tệp ảnh do backend thêm. */
+        const imageAnimCache = (copy, asset, rtStill) => {
+            if (!asset || !asset.path || rtStill || logoActive(copy)) return null;
+            if (!ColorAdjust.isIdentity(ColorAdjust.normalize(copy.adjustments))) return null;
+            if (ColorAdjust.hasAdjustKeyframes(copy.keyframes)) return null;
+            const start = Number(copy.timeline_start) || 0;
+            const end = start + (Number(copy.duration) || 0);
+            if (editingItems.some((it) => adjustLayerIsActive(it) && adjustLayerAppliesTo(it, copy)
+                && it.timeline_start < end && it.timeline_start + it.duration > start)) return null;
+            return { kind: 'img_anim', parts: itemSeqParts(copy), sourcePath: asset.path };
+        };
+        const attachAnim = async (copy, renderer, cache, ...args) => {
             if (!(window.TextAnimations && TextAnimations.hasAnimation(copy))) return;
             try {
                 const resolved = TextAnimations.resolveWindows(copy);
                 if (!resolved) return;
-                const seq = await timed('anim_seq', () => renderer(copy, resolved, exportFps, ...args));
+                const seq = await timed('anim_seq', () => cachedSeq(cache,
+                    () => renderer(copy, resolved, exportFps, ...args)));
                 if (seq) copy.animation_render = { fps: exportFps, seq };
             } catch (error) {
                 console.warn('Animation pre-render error:', error);
@@ -20929,13 +21179,17 @@
                    vẫn gửi kèm để backend có chỗ rơi về nếu bake thất bại. */
                 if (itemIsTextTemplate(copy)) {
                     try {
-                        const seq = await timed('anim_seq', () => renderTextTemplateSequence(copy, exportFps, bakeDensity));
+                        // Mẫu đã giải (gồm cả mẫu người dùng tự lưu ở Cài đặt + ảnh của lớp) vào khoá.
+                        const cache = { kind: 'text_tpl', parts: itemSeqParts(copy, { density: bakeDensity, template: textTemplateResolved(copy) }) };
+                        const seq = await timed('anim_seq', () => cachedSeq(cache,
+                            () => renderTextTemplateSequence(copy, exportFps, bakeDensity)));
                         if (seq) copy.animation_render = { fps: exportFps, seq };
                     } catch (error) {
                         console.warn('Text template pre-render error:', error);
                     }
                 } else {
-                    await attachAnim(copy, renderTextAnimationSequence);
+                    await attachAnim(copy, renderTextAnimationSequence,
+                        { kind: 'text_anim', parts: itemSeqParts(copy, { density: bakeDensity }) });
                 }
             } else if (copy?.type === 'shape') {
                 const rendered = await timed('shape_png', () => renderShapeItemToPng(copy));
@@ -20944,7 +21198,7 @@
                     copy.rendered_shape_width = rendered.width;
                     copy.rendered_shape_height = rendered.height;
                 }
-                await attachAnim(copy, renderShapeAnimationSequence);
+                await attachAnim(copy, renderShapeAnimationSequence, { kind: 'shape_anim', parts: itemSeqParts(copy) });
             } else if (copy?.type === 'media' && !itemIsVideoMedia(copy)) {
                 // Ảnh (media image): chỉ sinh chuỗi hoạt ảnh; đoạn hold trong chuỗi đã
                 // phủ toàn khoảng nên không cần PNG tĩnh riêng (backend rơi về ảnh gốc
@@ -20953,7 +21207,7 @@
                 // RETOUCH cho ảnh tĩnh: bake MỘT LẦN (ảnh không đổi theo thời gian) rồi
                 // dùng cho cả hai đường bên dưới.
                 const rtStill = await timed('retouch', () => sourceFxStillCanvas(copy, imgAsset));
-                await attachAnim(copy, renderImageAnimationSequence, imgAsset, rtStill);
+                await attachAnim(copy, renderImageAnimationSequence, imageAnimCache(copy, imgAsset, rtStill), imgAsset, rtStill);
                 // Không có hoạt ảnh -> attachAnim không sinh gì, mà retouch thì không diễn
                 // đạt được bằng filter FFmpeg. Đẩy ảnh đã retouch qua đường chuỗi khung.
                 if (!copy.animation_render && rtStill) {
@@ -21048,6 +21302,9 @@
                 timingSink[`${key}_calls`] = timingCount[key];
             }
             timingSink.item_count = items.length;
+            // Bộ nhớ đệm khung vẽ trước: số chuỗi dùng lại / số chuỗi gửi kèm khoá để cất.
+            timingSink.prebake_cache_hits = prebakeStats.hits;
+            timingSink.prebake_cache_stores = prebakeStats.stores;
         }
         return {
             version: 5,
