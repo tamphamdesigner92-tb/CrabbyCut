@@ -10794,6 +10794,32 @@
         return renderMaskPngDataUrl(ColorAdjust.normalizeMask(mask), w, h);
     }
 
+    /* NỘI DUNG .cube GỬI MỘT LẦN cho cả lượt xuất (mục 25 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md).
+     * Spec màu mang `@cube:cN` thay cho chữ .cube (~1 MB cho cube 33³); nội dung thật đi MỘT lần
+     * trong `editing_json.cube_texts` (exportPayload rút ra ở cuối). Trước đây cùng một lớp Điều chỉnh
+     * được chép vào `color_adjust_layer` của MỌI clip nó phủ — Yêu Con: 2 cube × 10 clip, timeline_json
+     * 20 MB phải stringify, tải lên, parse, băm. Backend giải tham chiếu ở materializeColorLutCube.
+     * Spec chỉ dựng trong luồng xuất (bước lane chính của performVideoExport rồi exportPayload), nên
+     * gom từ lần rút trước tới lần rút này là đúng phần của lượt xuất đang chạy. */
+    const exportCubeIdByText = new Map();
+    const exportCubeTextById = new Map();
+    function exportCubeRef(text) {
+        if (!text) return text;
+        let id = exportCubeIdByText.get(text);
+        if (!id) {
+            id = `c${exportCubeTextById.size + 1}`;
+            exportCubeIdByText.set(text, id);
+            exportCubeTextById.set(id, text);
+        }
+        return `@cube:${id}`;
+    }
+    function drainExportCubeTexts() {
+        const out = Object.fromEntries(exportCubeTextById);
+        exportCubeIdByText.clear();
+        exportCubeTextById.clear();
+        return out;
+    }
+
     // options: {frameHeight, frameWidth, label, fps, duration}
     //   frameHeight/Width = kích thước STREAM mà filter chạy trên đó (kích thước NGUỒN,
     //     vì chuỗi màu chèn TRƯỚC bước scale) — KHÔNG phải kích thước sequence.
@@ -10874,12 +10900,12 @@
             enable: options.enable || '',
         });
         const cube = (needsLut && !blendCubes)
-            ? ColorAdjust.cubeToText(ColorAdjust.bakeCubeCached(adj), 'CrabbyCut block')
+            ? exportCubeRef(ColorAdjust.cubeToText(ColorAdjust.bakeCubeCached(adj), 'CrabbyCut block'))
             : '';
         if (!filters.length && !cube && !blendCubes && !eqExpr) return null;
         const out = { filters, cube };
         if (blendCubes) {
-            out.lut_mix = { a: blendCubes.a, b: blendCubes.b, expr: lutMixExpr };
+            out.lut_mix = { a: exportCubeRef(blendCubes.a), b: exportCubeRef(blendCubes.b), expr: lutMixExpr };
         }
         if (eqExpr) out.eq_expr = eqExpr;
         if (cbKeyframed || toneKeyframed || blurKeyframed) {
@@ -21323,6 +21349,8 @@
             tracks,
             items,
             assets: editingAssets,
+            // Nội dung .cube mà spec màu (của lane chính lẫn của item) trỏ tới bằng `@cube:cN`.
+            cube_texts: drainExportCubeTexts(),
         };
     }
 

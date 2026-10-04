@@ -15,6 +15,7 @@
  *   7. Cài đặt › Bộ nhớ đệm: mục "render" tính cả khung vẽ trước, không dọn được khi renderer vừa hỏi
  *      trúng (đang chuẩn bị xuất), dọn được sau lượt xuất;
  *   8. mô-đun: dọn thư mục tạm bỏ dở, mục quá hạn, vượt trần (cũ nhất trước).
+ *   9. nội dung .cube gửi một lần (`@cube:cN` + editing_json.cube_texts): giải đúng, thiếu thì lỗi rõ.
  *
  * Chạy: npm run test:export-prebake-cache
  * ================================================================== */
@@ -82,9 +83,9 @@ function seqItem(id, seq) {
   };
 }
 
-async function exportWith(baseUrl, items, files = []) {
+async function exportWith(baseUrl, items, files = [], extra = {}) {
   const form = new FormData();
-  form.append('timeline_json', JSON.stringify([{ start: 0, end: 3, text: 'src', script_index: 0 }]));
+  form.append('timeline_json', JSON.stringify(extra.timeline || [{ start: 0, end: 3, text: 'src', script_index: 0 }]));
   const settings = {
     resolution: 'sequence',
     sequence: { width: 320, height: 180, preset: 'custom', source_width: 160, source_height: 90, source_fps: String(FPS) },
@@ -99,6 +100,7 @@ async function exportWith(baseUrl, items, files = []) {
     tracks: [{ id: 'track_main', type: 'main', order: 0, visible: true, volume: 100 }],
     items,
     assets: [],
+    ...(extra.cubeTexts ? { cube_texts: extra.cubeTexts } : {}),
   }));
   files.forEach((f) => form.append('transition_frames', new Blob([f.buf], { type: f.type }), f.name));
   const response = await fetch(`${baseUrl}/api/export-video`, { method: 'POST', body: form });
@@ -220,6 +222,33 @@ async function testEndpoints(baseUrl) {
   console.log('  [ok] endpoint: cất, trúng, trùng từng khung, base64, nguồn đổi, giữ khi dọn, công tắc');
 }
 
+function sampleRgb(file, seconds) {
+  const r = spawnSync('ffmpeg', ['-v', 'error', '-ss', String(seconds), '-i', file, '-frames:v', '1',
+    '-vf', 'scale=1:1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { cwd: projectRoot, encoding: 'buffer' });
+  assert.strictEqual(r.status, 0, r.stderr?.toString('utf8'));
+  return [...r.stdout.slice(0, 3)];
+}
+
+/* 9. NỘI DUNG .cube GỬI MỘT LẦN: spec màu của clip mang `@cube:cN`, nội dung nằm ở editing_json.cube_texts
+ * (exportCubeRef ở editing-runtime.js). Tham chiếu phải được giải ĐÚNG (bản xuất ra màu của LUT), và thiếu
+ * nội dung thì lượt xuất LỖI — không được lặng lẽ bỏ LUT như với một .cube hỏng. */
+async function testCubeRefs(baseUrl) {
+  makeSource('red');
+  const lines = ['TITLE "test"', 'LUT_3D_SIZE 2', ''];
+  for (let i = 0; i < 8; i += 1) lines.push('0.000000 0.000000 1.000000');   // mọi màu -> xanh lam
+  const cube = `${lines.join('\n')}\n`;
+  const timeline = (ref) => [{ start: 0, end: 3, text: 'src', script_index: 0, color_adjust: { filters: ['__LUT3D__'], cube: ref } }];
+  const ok = await exportWith(baseUrl, [], [], { timeline: timeline('@cube:c1'), cubeTexts: { c1: cube } });
+  assert.strictEqual(ok.status, 200, `xuất với @cube lỗi: ${ok.text}`);
+  const rgb = sampleRgb(ok.out, 1.5);
+  // Nguồn 160×90 không phủ kín sequence 320×180 -> trung bình cả khung chỉ ~nửa; bản không có LUT thì đỏ ~127.
+  assert.ok(rgb[2] > 100 && rgb[0] < 30 && rgb[1] < 30, `LUT tham chiếu không được áp (màu ${rgb})`);
+  const missing = await exportWith(baseUrl, [], [], { timeline: timeline('@cube:c2'), cubeTexts: { c1: cube } });
+  assert.notStrictEqual(missing.status, 200, 'thiếu nội dung cube thì lượt xuất phải lỗi');
+  assert.ok(/cube_texts/.test(missing.text || ''), `lỗi phải nói rõ thiếu cube_texts: ${missing.text}`);
+  console.log('  [ok] @cube: tham chiếu giải đúng (ra màu LUT), thiếu nội dung -> lỗi rõ');
+}
+
 function testModulePrune() {
   const dir = path.join(tempDir, 'prune');
   fs.mkdirSync(dir, { recursive: true });
@@ -259,6 +288,7 @@ async function main() {
   await new Promise((resolve) => setTimeout(resolve, 400));
   try {
     await testEndpoints(baseUrl);
+    await testCubeRefs(baseUrl);
   } finally {
     server.close?.();
   }

@@ -5021,7 +5021,36 @@ function listColorLuts() {
 // 2 cube 1 MB × 10 clip), kiểm lại cú pháp 36k dòng cho từng bản sao là phí.
 const validatedColorLutHashes = new Set();
 
-function materializeColorLutCube(text) {
+/* `@cube:cN` -> nội dung .cube của LƯỢT XUẤT đang chạy (`editing_json.cube_texts`, xem exportCubeRef ở
+ * editing-runtime.js): renderer gửi mỗi cube MỘT lần thay cho chép vào spec của từng clip. Đặt ở đầu route
+ * xuất (lượt xuất chạy một lần một — exportInFlight), xoá ở finally. */
+let exportCubeTexts = null;
+const CUBE_REF_RE = /^@cube:(c\d{1,6})$/;
+
+function setExportCubeTexts(raw) {
+  exportCubeTexts = new Map();
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [id, text] of Object.entries(raw)) {
+      if (/^c\d{1,6}$/.test(id) && typeof text === 'string') exportCubeTexts.set(id, text);
+    }
+  }
+}
+
+function resolveExportCubeRef(text) {
+  const match = CUBE_REF_RE.exec(String(text || ''));
+  if (!match) return text;
+  const resolved = exportCubeTexts ? exportCubeTexts.get(match[1]) : undefined;
+  // Thiếu nội dung là lỗi của payload, không phải LUT hỏng: báo rõ thay vì để validateCubeText nói "LUT_3D_SIZE".
+  if (typeof resolved !== 'string') {
+    const error = new Error(`Payload xuất thiếu nội dung LUT ${match[1]} (cube_texts).`);
+    error.code = 'CUBE_REF_MISSING';   // normalizeColorAdjustFields KHÔNG được nuốt lỗi này (sai màu im lặng)
+    throw error;
+  }
+  return resolved;
+}
+
+function materializeColorLutCube(rawText) {
+  const text = resolveExportCubeRef(rawText);
   const hash = crypto.createHash('sha1').update(String(text || '')).digest('hex').slice(0, 16);
   if (!validatedColorLutHashes.has(hash)) {
     const check = validateCubeText(text);
@@ -5143,6 +5172,7 @@ function normalizeColorAdjustFields(raw) {
       } catch (error) {
         // Mất một trong hai cube -> quay về đường TĨNH (raw.cube) nếu có, chứ không dựng
         // graph nửa vời.
+        if (error.code === 'CUBE_REF_MISSING') throw error;
         logStatus(`[color-adjust] bỏ keyframe cường độ LUT của block: ${error.message}`);
         lutMix = null;
       }
@@ -5155,6 +5185,7 @@ function normalizeColorAdjustFields(raw) {
       lutFilter = `lut3d=file='${ColorAdjust.filterPath(lutPath)}':interp=trilinear`;
     } catch (error) {
       // Thà mất riêng phần LUT còn hơn làm hỏng cả filtergraph -> vẫn giữ eq/curves.
+      if (error.code === 'CUBE_REF_MISSING') throw error;
       logStatus(`[color-adjust] bỏ qua LUT của block: ${error.message}`);
     }
   }
@@ -7522,6 +7553,11 @@ function createApp() {
         return httpError(res, 400, _t('Không tìm thấy video nguồn. Hãy chạy bước bóc băng trước.'));
       }
       const timeline = JSON.parse(req.body.timeline_json || '[]');
+      /* editing_json parse MỘT lần ở đây (trước: hai lần, ở sdrOverridesForEditingAssets và
+       * normalizeEditingPayload) — và phải TRƯỚC khi chuẩn hoá timeline: spec màu của clip trỏ tới nội
+       * dung .cube trong `cube_texts` của nó (xem setExportCubeTexts). */
+      const editingRaw = parseOptionalJsonObject(req.body.editing_json || {});
+      setExportCubeTexts(editingRaw.cube_texts);
       const exportSettings = normalizeExportSettings(req.body);
       // Cài đặt › Xuất video › "Render bằng" (mục 1.21): sidecar dựng đồ thị GPU khi máy dùng được.
       exportSettings.render_device = readAppSettings().export.renderDevice;
@@ -7567,9 +7603,9 @@ function createApp() {
       // Khâu này có thể mã hoá lại TOÀN BỘ một video HDR làm lớp phủ ngay trong lượt xuất
       // (chưa có trong cache) — đo riêng để không bị đổ oan cho ffmpeg của sidecar.
       const sdrAssetOverrides = await timeStage('sdr_overrides_ms',
-        () => sdrOverridesForEditingAssets(req.body.editing_json || {}));
+        () => sdrOverridesForEditingAssets(editingRaw));
       const editingPayload = await timeStage('normalize_ms', () => normalizeEditingPayload(
-        req.body.editing_json || {},
+        editingRaw,
         timelineDurationFromIntervals(exportIntervals),
         parseFpsValue(exportSettings.render_fps),
         transitionFrameFiles,
@@ -7688,6 +7724,7 @@ function createApp() {
     } finally {
       // Khung đã materialize thì đã được RENAME đi; đây là dọn phần còn sót (chuỗi bị bỏ).
       cleanupTransitionFrameUploads();
+      exportCubeTexts = null;   // nội dung .cube chỉ thuộc lượt xuất này (setExportCubeTexts)
     }
   });
 
