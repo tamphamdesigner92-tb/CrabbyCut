@@ -60,6 +60,17 @@ const SCENARIOS = [
     stills: [[4, 4]], firstCut: SEQ_START_FRAME },
   { name: 'D', audioRate: 48000, spacing: 17, clips: [(SEQ_START_FRAME + SEQ_FRAMES) / FPS, 12.9, 12.5],
     stills: [[4, 4], [20, 3]], firstCut: SEQ_START_FRAME + SEQ_FRAMES },
+  /* Mốc cắt XUYÊN QUA chuỗi khung "trơn" (SequenceCutFrame, mục 25): biên clip ở khung 460 = khung 8 của chuỗi.
+   * Batch sau nạp chuỗi bằng `-start_number 8` — bản song song phải trùng bản một lượt từng khung, chuỗi vẫn
+   * hiện đúng khung k ở khung nền 452+k. Trước đây mọi chuỗi khung chặn mốc cắt (dự án có chuyển cảnh ở mọi
+   * biên clip thành một batch). */
+  { name: 'E', audioRate: 48000, spacing: 17, clips: [(SEQ_START_FRAME + 8) / FPS, 12.9, 12.5],
+    stills: [[4, 4], [20, 3]], firstCut: SEQ_START_FRAME + 8 },
+  /* Cùng bố cục nhưng chuỗi có keyframe (độ mờ theo LOCALT): xén đầu là lệch pha keyframe -> KHÔNG được cắt
+   * xuyên qua, mốc cắt đầu phải nằm chỗ khác. */
+  { name: 'F', audioRate: 48000, spacing: 15, clips: [(SEQ_START_FRAME + 8) / FPS, 12.9, 12.5, 12.0],
+    // Ảnh ở batch cuối (44–47 s): batch không lớp phủ nào thì khỏi vòng RGBA của ProRes, khác bản một lượt.
+    stills: [[4, 4], [20, 3], [44, 3]], notCut: SEQ_START_FRAME + 8, seqExtra: { kf_opacity_expr: '100' } },   // phần trăm, hằng 100% -> hình như cũ
 ];
 
 function run(cmd, args, opts = {}) {
@@ -110,7 +121,7 @@ function writeTimeline(file, assets, scenario) {
     { ...base, index: overlays.length, id: 'item_seq_anim', type: 'media', asset_type: 'image_seq',
       asset_path: path.join(assets.seqDir, 'frame_%04d.png'), seq_fps: FPS, frame_count: SEQ_FRAMES,
       timeline_start: SEQ_START_FRAME / FPS, duration: SEQ_FRAMES / FPS, position_x: 0, position_y: 0,
-      track_id: 'track_text_2', track_order: 1 },
+      track_id: 'track_text_2', track_order: 1, ...(scenario.seqExtra || {}) },
     { ...base, index: overlays.length + 1, id: 'item_video', type: 'media', asset_type: 'media_video',
       asset_path: assets.clip, timeline_start: VIDEO_START_FRAME / FPS, duration: 4, position_x: 100, position_y: 50,
       track_id: 'track_media_1', track_order: 2 },
@@ -204,6 +215,11 @@ function checkScenario(scenario, assets) {
     assert.ok(Math.abs(firstBatch - scenario.firstCut / FPS) < 0.002,
       `${tag}: phải cắt sát chuỗi khung ở khung ${scenario.firstCut} (${(scenario.firstCut / FPS).toFixed(3)} s), batch đầu dài ${firstBatch} s`);
   }
+  if (scenario.notCut) {
+    const firstBatch = videoRuns(tParallel)[0].sequence_duration;
+    assert.ok(Math.abs(firstBatch - scenario.notCut / FPS) > 0.002,
+      `${tag}: KHÔNG được cắt xuyên chuỗi khung có keyframe ở khung ${scenario.notCut} (batch đầu dài ${firstBatch} s)`);
+  }
   assert.strictEqual(tParallel.workers, 3, `${tag}, PARALLEL=3: 3 lượt hình cùng lúc`);
 
   const a = frameHashes(single);
@@ -253,7 +269,9 @@ function main() {
   fs.rmSync(TEST_DIR, { recursive: true, force: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
   const assets = makeSharedAssets();
-  for (const scenario of SCENARIOS) checkScenario(scenario, assets);
+  // ONLY=E,F: chỉ chạy các kịch bản đó (gỡ lỗi).
+  const only = process.env.ONLY ? new Set(process.env.ONLY.split(',')) : null;
+  for (const scenario of SCENARIOS) if (!only || only.has(scenario.name)) checkScenario(scenario, assets);
   if (!process.env.KEEP_TEST_DIR) fs.rmSync(TEST_DIR, { recursive: true, force: true });
   console.log('export parallel ok');
 }

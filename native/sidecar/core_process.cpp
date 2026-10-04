@@ -912,6 +912,7 @@ struct ExportOverlay {
   // Chuỗi frame PNG (asset_type "text_image_seq"): fps + số frame của sequence
   double seqFps = 30.0;
   int frameCount = 0;
+  int seqStartFrame = 0;   // khung đầu của chuỗi khi batch bắt đầu giữa chuỗi (-start_number)
   int assetInputIndex = -1;
   // Hoạt ảnh VIDEO overlay (biểu thức FFmpeg theo thời gian; token LOCALT = t - start):
   // dịch chuyển qua overlay x/y, thu phóng qua scale, xoay qua rotate, opacity qua fade.
@@ -2297,7 +2298,7 @@ bool ReadExportPayload(
       overlay.color = ExtractJsonStringField(overlayObjects[i], "color", "#ffffff");
       overlay.align = ExtractJsonStringField(overlayObjects[i], "align", "center");
       overlay.seqFps = ClampDouble(ExtractDoubleFieldOr(overlayObjects[i], "seq_fps", 30.0), 1.0, 120.0);
-      overlay.frameCount = ClampInt(ExtractIntField(overlayObjects[i], "frame_count", 0), 0, 1000);
+      overlay.frameCount = ClampInt(ExtractIntField(overlayObjects[i], "frame_count", 0), 0, 3600);   // = trần backend
       overlay.animXExpr = ExtractJsonStringField(overlayObjects[i], "anim_x_expr", "");
       overlay.animYExpr = ExtractJsonStringField(overlayObjects[i], "anim_y_expr", "");
       overlay.animSxExpr = ExtractJsonStringField(overlayObjects[i], "anim_sx_expr", "");
@@ -4028,9 +4029,18 @@ bool IntervalIsTimeVarying(const ExportInterval& item) {
 /* Lớp phủ có thuộc tính biến thiên theo thời gian -> không được cắt qua nó.
  * Chuỗi khung hoạt ảnh (`image_sequence`) cũng tính là biến thiên: nội dung nó ĐỔI theo
  * khung, xén đầu là lệch pha cả chuỗi. */
+bool OverlayHasTimeVaryingProps(const ExportOverlay& overlay);
+
 bool OverlayIsTimeVarying(const ExportOverlay& overlay) {
   if (OverlayIsImageSequence(overlay)) return true;
   if (!OverlayIsImageLike(overlay)) return true;      // video/audio: có trục thời gian riêng
+  return OverlayHasTimeVaryingProps(overlay);
+}
+
+/* Thuộc tính biến thiên theo thời gian NGOÀI nội dung (hoạt ảnh In/Out, keyframe, chuỗi màu có
+ * LOCALT/sendcmd, lớp Điều chỉnh) — mọi thứ phụ thuộc giờ CỤC BỘ tính từ đầu lớp phủ, nên xén đầu
+ * lớp phủ là lệch pha chúng. */
+bool OverlayHasTimeVaryingProps(const ExportOverlay& overlay) {
   if (overlay.animInDur > 0.001 || overlay.animOutDur > 0.001) return true;
   // Chuỗi màu CỦA CHÍNH lớp phủ cũng có thể mang LOCALT / sendcmd (xem ColorChainTimeVarying).
   if (ColorChainTimeVarying(overlay.adjustFilters) || ColorChainTimeVarying(overlay.adjustFiltersPost)) return true;
@@ -4108,6 +4118,35 @@ bool OverlayStraddles(const ExportOverlay& overlay, double at, double fps) {
   return first < at - 0.75 / fps && last > at - 0.25 / fps;
 }
 
+/* CẮT XUYÊN QUA CHUỖI KHUNG "TRƠN" (khung chuyển cảnh, chữ/hình động không keyframe — mục 25 của
+ * docs/KE_HOACH_TOI_UU_EXPORT_WIN.md). Chuỗi khung chỉ biến thiên ở SỐ THỨ TỰ khung: batch sau nạp
+ * chuỗi bằng `-start_number k` (OverlaysForBatch) là thấy đúng khung mà bản một lượt thấy ở mốc cắt.
+ * Điều kiện: không thuộc tính biến thiên nào khác (OverlayHasTimeVaryingProps), mốc cắt rơi ĐÚNG biên
+ * khung của chuỗi (k nguyên — backend đặt đầu chuỗi trên lưới khung xuất, chuỗi vẽ trước dựng ở fps
+ * xuất), và k < số khung thật (khung nhân bản ở đuôi không phải tệp, xem SequenceTailFrames).
+ * Trước đây mọi chuỗi khung chặn mốc cắt: dự án có chuyển cảnh ở mọi biên clip (Magic Fill) thành
+ * MỘT batch — mất chạy song song lẫn cache render. Env tắt: CRABBYCUT_EXPORT_SEQCUT=0. */
+bool SequenceCutEnabled() {
+  static const bool enabled = [] {
+    const char* env = std::getenv("CRABBYCUT_EXPORT_SEQCUT");
+    if (!env) return true;
+    const std::string value = env;
+    return !(value == "0" || value == "false" || value == "off");
+  }();
+  return enabled;
+}
+
+// Số khung của chuỗi tính từ đầu chuỗi tới mốc `at` nếu cắt được ở đó, -1 nếu không.
+long long SequenceCutFrame(const ExportOverlay& overlay, double at) {
+  if (!SequenceCutEnabled() || !OverlayIsImageSequence(overlay) || !(overlay.seqFps > 1.0)
+      || overlay.frameCount <= 1 || OverlayHasTimeVaryingProps(overlay)) return -1;
+  const double exact = (at - overlay.timelineStart) * overlay.seqFps;
+  const long long k = std::llround(exact);
+  if (std::fabs(exact - static_cast<double>(k)) > 1e-3) return -1;
+  if (k < 1 || k >= overlay.frameCount) return -1;
+  return k;
+}
+
 /* MỐC CẮT MONG MUỐN KẾ TIẾP — theo LƯỚI CỐ ĐỊNH k × target trên trục sequence (mục 1.13), không
  * theo "đầu batch + target". Theo đầu batch thì một mốc bị đẩy lùi (lớp phủ động vắt qua, cắt ở biên
  * clip) kéo lệch MỌI mốc sau nó -> mọi batch phía sau đổi nội dung, cache render lỡ hết. Theo lưới thì
@@ -4165,7 +4204,7 @@ std::vector<OverlayBatch> PlanOverlayBatches(
   }
   auto safeToCutAt = [&](double at) {
     for (const auto* overlay : blocking) {
-      if (OverlayStraddles(*overlay, at, fps)) return false;
+      if (OverlayStraddles(*overlay, at, fps) && SequenceCutFrame(*overlay, at) < 0) return false;
     }
     return true;
   };
@@ -4246,6 +4285,18 @@ std::vector<ExportOverlay> OverlaysForBatch(
     const double clippedStart = std::max(0.0, start);
     const double clippedEnd = std::min(batch.sequenceDuration, end);
     if (clippedEnd - clippedStart < 1e-6) continue;
+    /* Chuỗi khung bắt đầu TRƯỚC batch = mốc cắt xuyên qua nó (SequenceCutFrame): nạp từ khung k để khung
+     * ở đầu batch đúng là khung bản một lượt thấy ở mốc đó; số khung còn lại cho phép tính khung đuôi. */
+    if (OverlayIsImageSequence(overlay) && start < -1e-9) {
+      const long long k = SequenceCutFrame(source, from);
+      if (k < 0) {
+        // PlanOverlayBatches không đặt mốc cắt qua chuỗi không cắt được — tới đây là lỗi lập kế hoạch.
+        Emit("progress", "Cảnh báo: chuỗi khung " + overlay.id + " bị cắt ở mốc không hợp lệ.");
+      } else {
+        overlay.seqStartFrame = source.seqStartFrame + static_cast<int>(k);
+        overlay.frameCount = source.frameCount - static_cast<int>(k);
+      }
+    }
     overlay.timelineStart = clippedStart;
     overlay.duration = clippedEnd - clippedStart;
     /* Xén ở CUỐI batch thì cho dài dư qua mép (nội dung tĩnh nên vô hại; batch hết thì thôi).
@@ -5361,7 +5412,7 @@ void AppendOverlayInputArgs(
     if (OverlayIsImageSequence(overlay)) {
       cmd.insert(cmd.end(), {
         "-framerate", FfmpegDouble(overlay.seqFps),
-        "-start_number", "0",
+        "-start_number", std::to_string(overlay.seqStartFrame),
         "-i", assetPath
       });
     } else if (OverlayStillOnce(overlay)) {
