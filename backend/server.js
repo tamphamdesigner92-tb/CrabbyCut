@@ -1801,6 +1801,17 @@ function registerSourceAccess(rawPath) {
   else sourceAccessFiles.add(resolved);
 }
 
+/* `resolved` (ĐÃ realpath) có nằm trong `dir` không — `dir` cũng phải qua realpath trước khi so.
+ * macOS: os.tmpdir() là /var/folders/… — một SYMLINK tới /private/var/folders/…; realpath của tệp
+ * ra /private/var/… còn thư mục gốc chỉ path.resolve thì vẫn /var/… -> mọi tệp trong thư mục tạm bị
+ * coi là "ngoài" (test:export-prebake-cache đỏ chỉ trên Mac; Windows không có symlink kiểu này). Thư
+ * mục gốc không tồn tại thì so theo path.resolve như cũ. */
+function pathIsInsideDir(resolved, dir) {
+  let base = path.resolve(dir);
+  try { base = fs.realpathSync(base); } catch (_) { /* chưa có thư mục: so như cũ */ }
+  return (resolved + path.sep).startsWith(base + path.sep);
+}
+
 function isSourceAccessAllowed(rawPath) {
   if (!rawPath) return false;
   let resolved = path.resolve(String(rawPath));
@@ -2858,9 +2869,14 @@ function concatCacheLookup(key) {
  * được vẫn lệch ~1ms sau một vòng làm tròn — mà peaks_cache/proxy_cache khoá theo mtime và
  * `video_version` CHÍNH LÀ mtime, nên lệch 1ms là trượt sạch cache và preview phải tải lại.
  * Chuẩn hoá về mốc chẵn rồi áp CÙNG MỘT phép cho cả bản gốc lẫn bản trong cache thì mọi lượt
- * chép sau đều ra đúng một giá trị. */
+ * chép sau đều ra đúng một giá trị.
+ * Đặt ở GIỮA mili giây đó (+0,5 ms), không đặt đúng mép: giây số thực `…666.088` không biểu diễn
+ * chính xác được, libuv cắt cụt phần nano giây, và trên APFS (macOS, độ phân giải ns) nó thành
+ * `…666.0879998` -> Math.trunc(mtimeMs) ra …087, lệch 1 ms so với bản gốc (test:concat-cache đỏ
+ * chỉ trên Mac; NTFS làm tròn theo bước 100 ns nên không lộ). Giữa khoảng thì cắt cụt kiểu nào
+ * cũng rơi đúng mili giây. */
 function applyMtimeMs(filePath, mtimeMs) {
-  const seconds = Math.floor(mtimeMs) / 1000;
+  const seconds = (Math.floor(mtimeMs) + 0.5) / 1000;
   try { fs.utimesSync(filePath, seconds, seconds); } catch (_) { /* không đặt được thì chỉ mất cache */ }
   return fs.statSync(filePath).mtimeMs;
 }
@@ -4299,10 +4315,7 @@ function resolveSubtitleSourcePath(raw) {
   if (!text) return null;
   let resolved;
   try { resolved = fs.realpathSync(path.resolve(text)); } catch (_) { return null; }
-  const inside = (dir) => {
-    const base = path.resolve(dir) + path.sep;
-    return (resolved + path.sep).startsWith(base);
-  };
+  const inside = (dir) => pathIsInsideDir(resolved, dir);
   if (inside(TEMP_DIR) || inside(LIBRARY_DIR)) return resolved;
   if (isSourceAccessAllowed(resolved)) return resolved;
   return null;
@@ -4686,10 +4699,7 @@ function resolveRetouchSource(raw) {
   } catch (_) {
     return null;
   }
-  const inside = (dir) => {
-    const base = path.resolve(dir) + path.sep;
-    return (resolved + path.sep).startsWith(base);
-  };
+  const inside = (dir) => pathIsInsideDir(resolved, dir);
   // Ngoài 2 thư mục của ứng dụng, chấp nhận nguồn NGƯỜI DÙNG ĐÃ ĐĂNG KÝ qua panel (thư
   // mục thêm vào "Tệp phương tiện"). Vẫn là danh sách trắng, không phải mở toang.
   if (!inside(TEMP_DIR) && !inside(LIBRARY_DIR) && !isSourceAccessAllowed(resolved)) return null;
