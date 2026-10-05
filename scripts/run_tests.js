@@ -5,7 +5,8 @@
 /* =====================================================================
  * CHẠY TOÀN BỘ TEST — CÙNG MỘT LỆNH TRÊN WINDOWS, macOS VÀ CI
  *   npm run test:all                     (mọi test của `npm test` + `test:export-all`)
- *   npm run test:all -- --skip-python    (bỏ 3 test Python cần torch/whisper — CI dùng)
+ *   npm run test:all -- --skip-python    (bỏ các test cần môi trường Python AI torch/whisper — CI dùng;
+ *                                         xem PYTHON_ENV_TESTS, env CRABBYCUT_TEST_SKIP_PYTHON=1)
  *   npm run test:all -- --only=test:seam,test:export
  *
  * VÌ SAO KHÔNG CHỈ `npm test`: chuỗi `a && b && c` DỪNG ở test đỏ đầu tiên, nên một máy
@@ -35,6 +36,12 @@ const ROOT = path.resolve(__dirname, '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 const RuntimePaths = require('./runtime_paths.js');
 const { pinFor } = require('./ffmpeg_pin.js');
+
+/* Test chạy bằng `node` nhưng cần môi trường Python AI (core_logic.py import torch + whisper ở
+ * đầu tệp; mlx-whisper trên Mac). --skip-python bỏ chúng như 3 test scripts/run_python.js. Test chỉ
+ * có MỘT phần cần Python (test:backend gọi /api/filter) thì không nằm ở đây: nó đọc
+ * CRABBYCUT_TEST_SKIP_PYTHON=1 và bỏ đúng phần đó. */
+const PYTHON_ENV_TESTS = new Set(['test:asr-engine']);
 
 function parseArgs(argv) {
   const opts = { skipPython: false, only: null, timeoutS: 900, build: false };
@@ -116,18 +123,20 @@ function main() {
   for (const name of testList(opts)) {
     const args = commandOf(name);
     if (!args) { results.push({ name, status: 'BỎ', note: 'không phải lệnh node' }); continue; }
-    if (opts.skipPython && args[0].replace(/\\/g, '/').endsWith('scripts/run_python.js')) {
+    if (opts.skipPython && (PYTHON_ENV_TESTS.has(name) || args[0].replace(/\\/g, '/').endsWith('scripts/run_python.js'))) {
       results.push({ name, status: 'BỎ', note: '--skip-python' });
       continue;
     }
     const t0 = Date.now();
     const r = spawnSync(process.execPath, args, {
       cwd: ROOT, encoding: 'utf8', timeout: opts.timeoutS * 1000, maxBuffer: 512 * 1024 * 1024,
-      env: { ...process.env, FORCE_COLOR: '0' },
+      env: { ...process.env, FORCE_COLOR: '0', ...(opts.skipPython ? { CRABBYCUT_TEST_SKIP_PYTHON: '1' } : {}) },
     });
     const seconds = (Date.now() - t0) / 1000;
     fs.writeFileSync(path.join(logDir, `${name.replace(/[:]/g, '_')}.log`),
-      `${r.stdout || ''}\n${r.stderr || ''}${r.error ? `\n${r.error}` : ''}`);
+      `${r.stdout || ''}\n${r.stderr || ''}${r.error ? `\n${r.error}` : ''}`
+      // Mã thoát luôn ghi lại: test chết không in gì (crash, exit sớm) thì log trống trơn.
+      + `\n[run_tests] exit=${r.status} signal=${r.signal || '-'} ${seconds.toFixed(1)}s\n`);
     let status = r.error?.code === 'ETIMEDOUT' ? 'QUÁ GIỜ' : (r.status === 0 ? 'XANH' : 'ĐỎ');
     let note = '';
     if (gaps[name]) {
