@@ -128,14 +128,23 @@ function main() {
       continue;
     }
     const t0 = Date.now();
-    const r = spawnSync(process.execPath, args, {
-      cwd: ROOT, encoding: 'utf8', timeout: opts.timeoutS * 1000, maxBuffer: 512 * 1024 * 1024,
-      env: { ...process.env, FORCE_COLOR: '0', ...(opts.skipPython ? { CRABBYCUT_TEST_SKIP_PYTHON: '1' } : {}) },
-    });
+    /* stdout/stderr của test ghi THẲNG vào tệp log, không qua ống: trên Windows Node ghi ống BẤT
+     * ĐỒNG BỘ, tiến trình chết native (vd. 0xC0000409) là mất sạch phần đang chờ ghi -> log trống,
+     * không biết chết ở đâu (test:project-package trên CI 2026-10-05). Ghi tệp là đồng bộ. */
+    const logFile = path.join(logDir, `${name.replace(/[:]/g, '_')}.log`);
+    const fd = fs.openSync(logFile, 'w');
+    let r;
+    try {
+      r = spawnSync(process.execPath, args, {
+        cwd: ROOT, stdio: ['ignore', fd, fd], timeout: opts.timeoutS * 1000,
+        env: { ...process.env, FORCE_COLOR: '0', ...(opts.skipPython ? { CRABBYCUT_TEST_SKIP_PYTHON: '1' } : {}) },
+      });
+    } finally {
+      fs.closeSync(fd);
+    }
     const seconds = (Date.now() - t0) / 1000;
-    fs.writeFileSync(path.join(logDir, `${name.replace(/[:]/g, '_')}.log`),
-      `${r.stdout || ''}\n${r.stderr || ''}${r.error ? `\n${r.error}` : ''}`
-      // Mã thoát luôn ghi lại: test chết không in gì (crash, exit sớm) thì log trống trơn.
+    // Mã thoát luôn ghi lại: test chết không in gì (crash, exit sớm) thì log trống trơn.
+    fs.appendFileSync(logFile, `${r.error ? `\n${r.error}` : ''}`
       + `\n[run_tests] exit=${r.status} signal=${r.signal || '-'} ${seconds.toFixed(1)}s\n`);
     let status = r.error?.code === 'ETIMEDOUT' ? 'QUÁ GIỜ' : (r.status === 0 ? 'XANH' : 'ĐỎ');
     let note = '';
