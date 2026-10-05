@@ -897,6 +897,21 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
 
 # BƯỚC M — macOS (chạy song song từ Bước 1; đã chốt 2026-09-27)
 
+> **Cập nhật 2026-10-05 — Mac nay chạy CHÍNH `main` này** (repo công khai, không còn nhánh riêng; quy
+> trình: `docs/DONG_BO_WIN_MAC.md`). Đo trên MacBook Pro M1 Pro 16 GB, ffmpeg Homebrew 8.1:
+> - `main` lúc đó KHÔNG biên dịch được trên clang và 24/102 test đỏ trên Mac; đã sửa (xem bảng bẫy trong
+>   `DONG_BO_WIN_MAC.md`) — còn 3 test đỏ chỉ vì ffmpeg Homebrew khác bản ghim (`tests/known-platform-gaps.json`).
+> - M.2: xong theo nghĩa mạnh nhất — chung một mã, không port.
+> - M.5: `h264_videotoolbox -realtime 1` là TRẦN ~66 khung/s (1838 khung 1080x1920: 28,0 s; `-realtime 0`
+>   9,45 s; hevc 18,3 -> 6,75 s), chất lượng còn nhỉnh hơn -> xuất nay `-realtime 0`. M1 Pro chỉ một bộ mã
+>   hoá: hai phiên song song đạt TỔNG ~194 khung/s, vẫn đáng chạy song song (1.8) vì lượt này lấp chỗ encoder
+>   chờ giải mã của lượt kia -> 1.8 có nhánh POSIX (`RunBatchJobs`), số lượt theo RAM như Windows.
+> - Fixture "Bin Tom" (20 clip, 19 lớp phủ, 1838 khung): `main` nguyên trạng trên Mac 30,0 s; + song song
+>   POSIX + `-realtime 0` -> **10,2 s** (sàn của encoder ~9,5 s).
+> - M.4: VideoToolbox giải mã HEVC 10-bit nhanh hơn CPU (4,95 s so với 8,4 s, CPU 48 -> 5,5 giây-CPU) nhưng
+>   H.264 đã chuẩn hoá thì CHẬM hơn (21,3 so với 6,0 s) — chưa gắn vào `main`.
+> - M.1 (bản ffmpeg ghim cho Mac): CHƯA — chờ người dùng quyết. Homebrew đã lên 9.0.2.
+
 **Hiện trạng nhánh macOS** (`CrabbyCut_Private`, dòng `CrabbyCut_v2.0.x`, cùng khung sidecar):
 - ffmpeg lấy từ hệ thống (Homebrew), gọi bằng tên trần (`backend/hdr-tonemap.js:10-11`), không ghim phiên bản. Homebrew lên FFmpeg 9 là `-filter_complex_script` hỏng (`core_process.cpp:3001`, `server.js:3890`, `subtitle-jobs.js:259`).
   - Việc đầu tiên trên Mac của người dùng: chạy `ffmpeg -version` để biết đã hỏng chưa.
