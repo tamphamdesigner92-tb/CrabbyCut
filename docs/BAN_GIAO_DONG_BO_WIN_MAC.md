@@ -74,20 +74,21 @@ Mac dev đã cài; ffmpeg Homebrew còn trên máy nhưng CrabbyCut không gọi
 
 ---
 
-## 5. Còn mở — cần quyết định
+## 5. Đã quyết: hai ngưỡng test chuyển sang so tương đối (2026-10-05)
 
-**Hai ngưỡng test chỉnh trên x86, Mac (ARM) không đạt** — ghi ở `tests/known-platform-gaps.json`,
-phân tích ở [DONG_BO_WIN_MAC.md](DONG_BO_WIN_MAC.md) mục 6:
+Hai ngưỡng chỉnh trên x86 mà Apple Silicon không đạt (làm tròn SIMD x86 ≠ ARM/C, đo dưới Rosetta —
+[DONG_BO_WIN_MAC.md](DONG_BO_WIN_MAC.md) mục 6). Người dùng duyệt đổi sang so tương đối:
+- `test:export-fast-path` (ProRes): so bản chuẩn, mới không kém cũ ở mặt phẳng nào (Mac: luma
+  44,6 → 66,4 dB so bản chuẩn).
+- `test:retouch-export`: mép mềm giảm bậc nhảy ≥ 3 lần so với mép cứng (Mac 8 → 2, Windows 4 → 1).
 
-| Test | Mac | Windows | Ngưỡng |
-|---|---|---|---|
-| `test:export-fast-path` (ProRes, luma mới/cũ) | 44,59 dB | ≥ 45 | ≥ 45 dB |
-| `test:retouch-export` (mép miếng vá) | cứng 8 → mềm 2/255 | 4 → 1/255 | mềm ≤ 1/255 |
+`tests/known-platform-gaps.json` trống. Trên Mac: 104/104 (trừ test Python khi `--skip-python`).
 
-Không phải do ffmpeg hay encoder: đã đo với bản ghim, ép `prores_ks`, tắt SIMD, và chạy bản x86_64
-cùng nguồn dưới Rosetta — bản C và ARM cho 44,59 dB, chỉ SIMD x86 cho 45,52 dB. **Đề xuất:** đổi sang
-so tương đối (ProRes so bản chuẩn; miếng vá so tỉ lệ mép mềm/mép cứng — cả hai máy đều giảm 4 lần),
-rồi xoá hai mục khỏi danh sách lỗ hổng. Chưa sửa vì đây là ngưỡng người dùng đặt.
+**CI lần đầu (cũng 2026-10-05)** lộ ra các test dựa vào thứ chỉ máy dev có — đã sửa: ngôn ngữ của
+updater, tài nguyên `library/` không nằm trong git, môi trường Python AI (`--skip-python` →
+`CRABBYCUT_TEST_SKIP_PYTHON=1`), đuôi `.exe`, chờ cứng 700 ms, `fs.cpSync` thư mục tên có dấu làm Node
+chết native trên Windows. **Còn theo dõi:** `test:media-scale-fit` ca keyframe đỏ MỘT lần trên runner
+Windows (khung 8 khác nhau), hai lượt khác xanh, Mac 8/8 lần xanh — chưa rõ nguồn không tất định.
 
 **Chưa làm (ngoài phạm vi đợt này):**
 - Bộ cài macOS: `scripts/setup_runtime.js` mới chỉ hỗ trợ Windows (Python nhúng, tải ffmpeg). Bản
@@ -103,5 +104,5 @@ rồi xoá hai mục khỏi danh sách lỗ hổng. Chưa sửa vì đây là ng
 |---|---|---|---|
 | 2026-10-04 | Mac M1 Pro | Homebrew 8.1 | `main` không biên dịch được; 24 đỏ |
 | 2026-10-05 | Mac M1 Pro | Homebrew 8.1 | 101/104 xanh, 3 lỗ hổng |
-| 2026-10-05 | Mac M1 Pro | ghim `n8.1.1-crabbycut.2` | **102/104 xanh**, 0 đỏ, 2 lỗ hổng (§5) |
+| 2026-10-05 | Mac M1 Pro | ghim `n8.1.1-crabbycut.2` | 102/104 xanh, 2 lỗ hổng; sau khi đổi ngưỡng (§5): **104/104** |
 | | Windows | ghim `n8.1.1-crabbycut.2` | *chưa chạy* |

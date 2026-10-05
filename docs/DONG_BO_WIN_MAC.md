@@ -66,7 +66,7 @@ Mỗi bẫy dưới đây làm test ĐỎ trên Mac trong khi XANH trên Windows
 | `RunQuiet` POSIX bỏ qua giới hạn thời gian | một lệnh dò treo là treo cả lượt xuất | `waitpid` + hạn giờ |
 | `h264_videotoolbox -realtime 1` | xuất bị chặn ở ~66 khung/s (trần thật ~194) | `-realtime 0` khi xuất |
 | ffmpeg Homebrew (8.1, rồi 9.x) ≠ bản ghim 8.1.1 của Windows | thiếu `zscale`, làm tròn khác — 3 test đỏ | bản ghim cho Mac (mục 5) |
-| SIMD x86 làm tròn khác ARM/C | 2 ngưỡng chỉnh trên Windows không đạt trên Mac | còn mở — mục 6 |
+| SIMD x86 làm tròn khác ARM/C | 2 ngưỡng chỉnh trên Windows không đạt trên Mac | ngưỡng so tương đối — mục 6 |
 
 ## 5. ffmpeg: một bản ghim cho mỗi nền tảng, cùng mã nguồn
 
@@ -92,7 +92,7 @@ cứng: CUDA/NVENC trên Windows, VideoToolbox trên Mac; Mac không có `libpla
   của `FFMPEG_PINS`.
 
 Đo trên Mac sau khi chuyển sang bản ghim (2026-10-05): 102/104 test xanh. `test:export-hdr-asset-usage`
-xanh lại (có `zscale`). Hai test còn lại KHÔNG đỏ vì ffmpeg — xem mục 6.
+xanh lại (có `zscale`). Hai test còn lại KHÔNG đỏ vì ffmpeg — xem mục 6 (đã sửa ngưỡng: 104/104).
 
 ## 6. Cùng mã, cùng ffmpeg, vẫn khác: làm tròn SIMD theo kiến trúc CPU
 
@@ -109,9 +109,16 @@ của `test:export-fast-path` (ProRes, luma mới/cũ), cùng nguồn FFmpeg n8.
 Ngưỡng 45 dB được chỉnh trên máy Windows, tức là chỉ qua được nhờ cách làm tròn của SIMD x86; bản C
 chính xác cũng chỉ 44,59. Tương tự với mép mềm miếng vá của `test:retouch-export`: Mac đo 8 → 2/255
 (ép `prores_ks`, tắt SIMD, chạy bản x86 không AVX2 đều như vậy), Windows đo 4 → 1/255, mà ngưỡng
-là ≤ 1. Hai test này nằm trong `tests/known-platform-gaps.json` cùng số đo. Muốn gỡ thì sửa NGƯỠNG
-cho khỏi phụ thuộc kiến trúc: ProRes so với bản chuẩn thay vì ngưỡng tuyệt đối sát 45 dB; mép miếng
-vá so tỉ lệ mép mềm / mép cứng (cả hai máy đều giảm 4 lần) thay vì ≤ 1/255.
+là ≤ 1.
+
+**Đã sửa (người dùng duyệt 2026-10-05): cả hai ngưỡng chuyển sang so tương đối.**
+- `test:export-fast-path` (ProRes): so với bản chuẩn 4:4:4 10-bit, bản mới không kém bản cũ ở mặt
+  phẳng nào (cùng tiêu chí phần H.264 của test). Mac: luma cũ → mới so bản chuẩn 44,6 → 66,4 dB — con
+  số "mới/cũ 44,59" trước đây đo độ sai của bản CŨ, không phải của bản mới.
+- `test:retouch-export`: mép mềm phải giảm bậc nhảy ít nhất 3 lần so với mép cứng (cả hai máy đều
+  giảm 4 lần), mép cứng ≥ 3/255 để tỉ lệ còn nghĩa.
+
+`tests/known-platform-gaps.json` nay trống ở cả hai nền tảng.
 
 Bài học cho test mới: một ngưỡng chỉnh cho vừa khít số đo trên MỘT máy sẽ hỏng ở kiến trúc kia. Hoặc
 chừa biên cho sai khác làm tròn (1–2 mức 8-bit, ~1 dB PSNR), hoặc so tương đối (tỉ lệ, so bản chuẩn).
