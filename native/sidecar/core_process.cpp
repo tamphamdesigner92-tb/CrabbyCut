@@ -42,7 +42,13 @@
 #pragma comment(lib, "shell32.lib")
 #endif
 #else
+#include <cerrno>
+#include <csignal>
+#include <fcntl.h>
+#include <spawn.h>
 #include <sys/wait.h>
+#include <unistd.h>
+extern char** environ;
 #endif
 
 namespace fs = std::filesystem;
@@ -210,6 +216,98 @@ HANDLE SpawnIn(const std::vector<std::string>& args, const fs::path& workingDir,
 }
 #endif
 
+#ifndef _WIN32
+/* ===== TIẾN TRÌNH CON TRÊN macOS/Linux — cùng hợp đồng với nhánh CreateProcessW ở trên =====
+ *
+ * TRƯỚC 2026-10-05 nhánh POSIX chạy mọi lệnh bằng std::system() ở cwd của sidecar và BỎ QUA
+ * `workingDir`, trong khi ShortInputPath đổi đường dẫn lớp phủ thành TƯƠNG ĐỐI theo thư mục tạm.
+ * Kết quả trên Mac: mọi bản xuất có lớp phủ/tiếng nằm trong thư mục tạm chết với "Error opening
+ * input file …: No such file" (test:export-many-overlays, test:audio-denoise… đỏ trên Mac, xanh
+ * trên Windows). Nay: posix_spawn `/bin/sh -c "cd '<dir>' && exec <lệnh>"` — cùng shell mà
+ * std::system dùng (QuoteArg bọc nháy đơn), `exec` để tiến trình con CHÍNH LÀ ffmpeg (tín hiệu
+ * tới thẳng nó). posix_spawn an toàn khi gọi song song, std::system thì không (nó tự đổi cách xử
+ * lý SIGCHLD/SIGINT) — nên lượt xuất song song (RunBatchJobs) dùng chung đường này.
+ * `quiet` = bỏ hết đầu ra (RunQuiet). Trả -1 nếu không khởi chạy được. */
+pid_t SpawnIn(const std::vector<std::string>& args, const fs::path& workingDir, bool quiet = false) {
+  std::string line = "exec " + CommandLine(args);
+  if (!workingDir.empty()) line = "cd " + QuoteArg(workingDir.string()) + " && " + line;
+  posix_spawn_file_actions_t actions;
+  posix_spawn_file_actions_init(&actions);
+  if (quiet) {
+    posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0);
+  }
+  char shell[] = "/bin/sh";
+  char dashC[] = "-c";
+  char* argv[] = {shell, dashC, line.data(), nullptr};
+  pid_t pid = -1;
+  const int rc = posix_spawn(&pid, "/bin/sh", &actions, nullptr, argv, environ);
+  posix_spawn_file_actions_destroy(&actions);
+  return rc == 0 ? pid : -1;
+}
+
+int ExitCodeFromStatus(int status) {
+  if (WIFEXITED(status)) return WEXITSTATUS(status);
+  if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+  return 1;
+}
+
+int WaitChild(pid_t pid) {
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0) {
+    if (errno != EINTR) return 1;
+  }
+  return ExitCodeFromStatus(status);
+}
+
+/* Backend dừng sidecar bằng SIGTERM (tắt app). Trong lúc sidecar chờ ffmpeg con, SIGTERM/SIGINT
+ * được chuyển tiếp tới các con rồi sidecar mới chết theo tín hiệu gốc — không để 2–3 ffmpeg mồ côi
+ * tiếp tục ghi đĩa sau khi app đã tắt. Chỉ dùng hàm an toàn trong signal handler. */
+constexpr int kMaxTrackedChildren = 64;
+pid_t g_runningChildren[kMaxTrackedChildren];
+volatile sig_atomic_t g_runningChildCount = 0;
+
+void ForwardSignalToChildren(int sig) {
+  for (int i = 0; i < g_runningChildCount; i++) {
+    if (g_runningChildren[i] > 0) kill(g_runningChildren[i], SIGTERM);
+  }
+  std::signal(sig, SIG_DFL);
+  std::raise(sig);
+}
+
+void TrackChildren(const std::vector<pid_t>& pids) {
+  int n = 0;
+  for (const pid_t pid : pids) {
+    if (n >= kMaxTrackedChildren) break;
+    g_runningChildren[n++] = pid;
+  }
+  g_runningChildCount = n;
+}
+
+// Đặt trình chuyển tiếp tín hiệu suốt đời một đối tượng (lồng nhau được: chỉ tầng ngoài cùng cài).
+class ChildSignalGuard {
+ public:
+  ChildSignalGuard() {
+    if (depth_++ == 0) {
+      prevTerm_ = std::signal(SIGTERM, ForwardSignalToChildren);
+      prevInt_ = std::signal(SIGINT, ForwardSignalToChildren);
+    }
+  }
+  ~ChildSignalGuard() {
+    if (--depth_ == 0) {
+      g_runningChildCount = 0;
+      std::signal(SIGTERM, prevTerm_);
+      std::signal(SIGINT, prevInt_);
+    }
+  }
+ private:
+  static inline int depth_ = 0;
+  static inline void (*prevTerm_)(int) = SIG_DFL;
+  static inline void (*prevInt_)(int) = SIG_DFL;
+};
+#endif
+
 int RunIn(const std::vector<std::string>& args, const fs::path& workingDir) {
   const std::string line = CommandLine(args);
 #ifdef _WIN32
@@ -222,6 +320,18 @@ int RunIn(const std::vector<std::string>& args, const fs::path& workingDir) {
     return static_cast<int>(exitCode);
   }
   if (immediateCode != 0) return immediateCode;
+#else
+  if (const pid_t pid = SpawnIn(args, workingDir); pid > 0) {
+    ChildSignalGuard guard;
+    TrackChildren({pid});
+    return WaitChild(pid);
+  }
+  // posix_spawn hỏng (không nên xảy ra): lùi về std::system như trước — vẫn cd đúng thư mục.
+  if (!workingDir.empty()) {
+    const int status = std::system(("cd " + QuoteArg(workingDir.string()) + " && " + line).c_str());
+    if (status == -1) return 1;
+    return ExitCodeFromStatus(status);
+  }
 #endif
   const int status = std::system(ShellCommandLine(line).c_str());
 #ifdef _WIN32
@@ -280,11 +390,23 @@ int RunQuiet(const std::vector<std::string>& args, unsigned timeoutMs = 20000) {
   CloseHandle(pi.hProcess);
   return static_cast<int>(exitCode);
 #else
-  (void)timeoutMs;
-  const int status = std::system((CommandLine(args) + " >/dev/null 2>&1").c_str());
-  if (status == -1) return -1;
-  if (WIFEXITED(status)) return WEXITSTATUS(status);
-  return 1;
+  /* Cùng hợp đồng với nhánh Windows: quá `timeoutMs` (driver/thiết bị treo) thì giết và coi như
+   * hỏng. Trước đây nhánh này bỏ qua timeoutMs — một lệnh dò treo là treo luôn cả lượt xuất. */
+  const pid_t pid = SpawnIn(args, fs::path(), true);
+  if (pid <= 0) return -1;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+  int status = 0;
+  for (;;) {
+    const pid_t done = waitpid(pid, &status, WNOHANG);
+    if (done == pid) return ExitCodeFromStatus(status);
+    if (done < 0 && errno != EINTR) return -1;
+    if (std::chrono::steady_clock::now() >= deadline) {
+      kill(pid, SIGKILL);
+      WaitChild(pid);
+      return -1;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
 #endif
 }
 
@@ -1219,7 +1341,11 @@ std::string FileStamp(const std::string& path) {
   const std::uintmax_t size = fs::file_size(path, ec);
   if (ec) return path + "|?";
   const auto mtime = fs::last_write_time(path, ec);
-  return path + "|" + std::to_string(size) + "|" + (ec ? std::string("?") : std::to_string(mtime.time_since_epoch().count()));
+  /* Ép về long long: libc++ (macOS) dùng __int128 làm kiểu đếm của file_clock nên
+   * std::to_string(count()) MƠ HỒ và cả sidecar không biên dịch được trên Mac; MSVC vốn là
+   * long long nên phép ép không đổi khoá cache bên Windows. Nano giây từ 1970 vẫn vừa 64 bit. */
+  return path + "|" + std::to_string(size) + "|"
+    + (ec ? std::string("?") : std::to_string(static_cast<long long>(mtime.time_since_epoch().count())));
 }
 
 std::string GpuProbeKey(const std::string& nvenc, const std::string& source, const std::vector<std::string>& overlayVideos) {
@@ -4462,15 +4588,29 @@ bool AlphaChromaEnabled() {
   return !(value == "0" || value == "false" || value == "off");
 }
 
+/* MỘT LUỒNG CHO MỖI BỘ `scale` TRÊN NHÁNH LỚP PHỦ (sửa 2026-10-05, lộ ra trên macOS).
+ *
+ * swscale của FFmpeg 8 cho MỖI filter `scale` một bể luồng riêng, cỡ bằng số luồng của đồ thị. ĐO
+ * trên M1 Pro (10 luồng): 60 bộ `scale` nối tiếp -> 616 luồng; thêm `:threads=1` -> 26 luồng. Nhánh
+ * lớp phủ YUV có 3–4 bộ `scale` cho mỗi lớp phủ, cộng 11 luồng giải mã cho mỗi ảnh PNG, nên 131
+ * phụ đề (test:export-many-overlays) chạm ĐÚNG trần 4096 luồng mỗi tiến trình của macOS
+ * (kern.num_taskthreads): pthread_create trả EAGAIN -> swscale báo "Failed initializing scaling graph
+ * (Resource temporarily unavailable)", VideoToolbox không mở được encoder hoặc TREO hẳn (đã thấy treo
+ * 600 s). Windows không có trần nhỏ như vậy nên lỗi không lộ, chỉ phí ~6.500 luồng. Ảnh lớp phủ nhỏ,
+ * chia lát không đem lại gì; slice threading của swscale cho kết quả như nhau ở mọi số luồng.
+ * Bộ `scale` trên KHUNG CHÍNH (cỡ sequence) giữ đa luồng. */
+const char* const kOverlayScaleThreads = ":threads=1";
+
 std::string AlphaWeightedYuva420(const std::string& tag) {
   const std::string p = tag + "yp";
   const std::string q = tag + "yq";
   const std::string p8 = tag + "y8";
   const std::string c8 = tag + "yc";
   return ",split[" + p + "][" + q + "];\n"
-    "[" + p + "]scale=out_color_matrix=bt709:out_range=tv,format=yuva444p[" + p8 + "];\n"
-    "[" + q + "]scale=out_color_matrix=bt709:out_range=tv,format=yuva444p16le,premultiply=inplace=1"
-    ",scale=w=iw/2:h=ih/2:flags=area,unpremultiply=inplace=1,scale=sws_dither=none,format=yuva444p[" + c8 + "];\n"
+    "[" + p + "]scale=out_color_matrix=bt709:out_range=tv" + kOverlayScaleThreads + ",format=yuva444p[" + p8 + "];\n"
+    "[" + q + "]scale=out_color_matrix=bt709:out_range=tv" + kOverlayScaleThreads + ",format=yuva444p16le,premultiply=inplace=1"
+    ",scale=w=iw/2:h=ih/2:flags=area" + kOverlayScaleThreads + ",unpremultiply=inplace=1,scale=sws_dither=none"
+    + kOverlayScaleThreads + ",format=yuva444p[" + c8 + "];\n"
     "[" + p8 + "][" + c8 + "]mergeplanes=map0s=0:map0p=0:map1s=1:map1p=1:map2s=1:map2p=2:map3s=0:map3p=3"
     ":format=yuva420p";
 }
@@ -4660,9 +4800,11 @@ void WriteVisualOverlayFilter(
   AppendVideoMaskFilter(script, overlay.videoMaskPath, "vmo" + id + "_");
   if (!overlayDynTransform) {
     script << ",scale=max(2\\,ceil(iw*" << FfmpegDouble(scaleValue) << "/2)*2)"
-           << ":max(2\\,ceil(ih*" << FfmpegDouble(scaleValue) << "/2)*2)";
+           << ":max(2\\,ceil(ih*" << FfmpegDouble(scaleValue) << "/2)*2)" << kOverlayScaleThreads;
   }
-  script << color.post << ",format=rgba";
+  // `scale` tường minh trước format=rgba: ảnh không phải RGBA (JPEG) thì chính nó đổi định dạng,
+  // thay cho bộ scale TỰ CHÈN mang bể luồng đầy đủ (xem kOverlayScaleThreads). RGBA sẵn thì đứng yên.
+  script << color.post << ",scale=threads=1,format=rgba";
   AppendFeatherAlpha(script, overlay.featherPx);
   if (overlay.flipX) {
     script << ",hflip";
@@ -4717,7 +4859,7 @@ void WriteVisualOverlayFilter(
      * khung chữ): áp cho cả chuỗi khung thì xuất 29–31 s -> 33–35 s (+13%) mà so bản chuẩn gần
      * như không đổi (52,50 -> 52,53 dB). Video lớp phủ đục hoàn toàn nên cũng đổi thẳng. */
     if (stillOnce && AlphaChromaEnabled()) script << AlphaWeightedYuva420("ov" + id);
-    else script << ",scale=out_color_matrix=bt709:out_range=tv,format=yuva420p";
+    else script << ",scale=out_color_matrix=bt709:out_range=tv" << kOverlayScaleThreads << ",format=yuva420p";
     // Đồ thị GPU: tải lên TRƯỚC loop/tpad — khung lặp lại chỉ là tham chiếu tới khung GPU đã tải.
     if (gpu == OverlayGpu::CpuYuv) script << ",hwupload";
   }
@@ -5017,7 +5159,17 @@ void AppendHardwareEncoderArgs(std::vector<std::string>& cmd, const ExportSettin
 
   const std::string bitrate = BitrateForHardware(settings);
   if (plan.mode == "videotoolbox") {
-    cmd.insert(cmd.end(), {"-c:v", plan.videoEncoder, "-b:v", bitrate, "-realtime", "1", "-prio_speed", "1"});
+    /* KHÔNG `-realtime 1` KHI XUẤT (đổi 2026-10-05). Trên Apple Silicon cờ đó là cái TRẦN tốc độ chứ
+     * không phải gợi ý: ĐO trên M1 Pro, 1838 khung 1080x1920 ở 13 Mbps —
+     *     h264_videotoolbox  realtime=1  28,0 s (~66 khung/s)   realtime=0  9,45 s (~194 khung/s)
+     *     hevc_videotoolbox  realtime=1  18,3 s                 realtime=0  6,75 s
+     * chất lượng còn nhỉnh hơn khi tắt (VMAF so nguồn 97,53 so với 97,06). ~194 khung/s là trần của
+     * chính bộ mã hoá phần cứng (hai phiên song song cũng chỉ đạt tổng chừng đó). Proxy preview
+     * (AppendPreviewEncoderArgs) là việc nền khi nhập, cố ý giữ realtime.
+     * CRABBYCUT_VT_REALTIME=1 trả lại cờ cũ (A/B). */
+    const char* vtRealtime = std::getenv("CRABBYCUT_VT_REALTIME");
+    const bool realtime = vtRealtime && std::string(vtRealtime) == "1";
+    cmd.insert(cmd.end(), {"-c:v", plan.videoEncoder, "-b:v", bitrate, "-realtime", realtime ? "1" : "0", "-prio_speed", "1"});
   } else if (plan.mode == "nvenc") {
     /* `-preset fast` = p1 + tune hq (md5 trùng khi thử trên cùng khung). Mức chất lượng: VBR đích 0
      * + `-cq` + trần `-maxrate` — cảnh khó chạm trần thì như bitrate cố định cũ, cảnh dễ thì nhỏ
@@ -5409,18 +5561,24 @@ void AppendOverlayInputArgs(
   for (const auto& overlay : overlays) {
     if (!OverlayNeedsInput(overlay)) continue;
     const std::string assetPath = ShortInputPath(overlay.assetPath, baseDir);
+    /* `-threads` cho bộ giải mã ẢNH (mục 1.0 của kế hoạch): mặc định mỗi bộ giải mã PNG mở số-lõi+1
+     * luồng khung — 131 phụ đề là ~1.450 luồng chỉ để giải mã những tấm ảnh nhỏ (xem
+     * kOverlayScaleThreads về trần 4096 luồng của macOS). Ảnh tĩnh: 1 luồng; chuỗi khung chữ động
+     * giải mã nhiều khung nên giữ 2. */
     if (OverlayIsImageSequence(overlay)) {
       cmd.insert(cmd.end(), {
+        "-threads", "2",
         "-framerate", FfmpegDouble(overlay.seqFps),
         "-start_number", std::to_string(overlay.seqStartFrame),
         "-i", assetPath
       });
     } else if (OverlayStillOnce(overlay)) {
       // Một khung duy nhất; `loop` trong filter lặp lại khung đã xử lý (xem OverlayStillOnce).
-      cmd.insert(cmd.end(), {"-i", assetPath});
+      cmd.insert(cmd.end(), {"-threads", "1", "-i", assetPath});
     } else if (OverlayIsImageLike(overlay)) {
       // Dư 1 s: lớp phủ tĩnh xén ở cuối batch dài quá mép batch (xem OverlaysForBatch).
       cmd.insert(cmd.end(), {
+        "-threads", "1",
         "-loop", "1",
         "-t", FixedSeconds(std::max(0.05, sequenceDuration + kBatchOverlayTailSeconds)),
         "-i", assetPath
@@ -6300,8 +6458,17 @@ size_t ExportParallelWorkers(const ExportSettings& settings) {
     workers = std::min(workers, std::max<size_t>(1, static_cast<size_t>(totalGb * 0.5 / perWorkerGb)));
   }
 #else
-  (void)settings;
-  workers = 1;   // chưa có đường spawn không chờ cho macOS/Linux (xem RunBatchJobs)
+  /* Cùng công thức RAM với Windows. ĐO trên M1 Pro (10 luồng, 16 GB), fixture bintom: hai lượt hình
+   * cùng lúc lấp đúng chỗ encoder VideoToolbox ngồi chờ bộ giải mã ở các khe giữa clip — trần của
+   * encoder là ~194 khung/s 1080x1920 và hai phiên song song cũng chỉ đạt tổng chừng đó. */
+  const long pages = sysconf(_SC_PHYS_PAGES);
+  const long pageSize = sysconf(_SC_PAGE_SIZE);
+  if (pages > 0 && pageSize > 0) {
+    const double totalGb = static_cast<double>(pages) * static_cast<double>(pageSize) / (1024.0 * 1024.0 * 1024.0);
+    const double pixels = static_cast<double>(std::max(1, settings.width)) * std::max(1, settings.height);
+    const double perWorkerGb = pixels > 1920.0 * 1080.0 * 1.5 ? 3.0 : 1.5;
+    workers = std::min(workers, std::max<size_t>(1, static_cast<size_t>(totalGb * 0.5 / perWorkerGb)));
+  }
 #endif
   return workers;
 }
@@ -6405,17 +6572,61 @@ std::vector<int> RunBatchJobs(std::vector<BatchJob*>& jobs, const EncoderPlan& p
     }
   }
 #else
-  (void)concurrency;
-  for (size_t i = 0; i < jobs.size(); i++) {
-    BatchJob& job = *jobs[i];
-    prefetchBefore(job);
-    if (RenderCacheLookup(job, plan, job.timing.label + labelSuffix)) { codes[i] = 0; continue; }
-    Emit("progress", "Đang render " + job.progressText + "...");
-    const std::vector<std::string> cmd = JobCommandForRun(job, plan, job.timing.label + labelSuffix);
-    const auto started = ExportClock::now();
-    codes[i] = RunIn(cmd, job.tempDir);
-    job.timing.runMs += MsSince(started);
-    if (!g_exportBenchDir.empty()) SetChildEnv("FFREPORT", "");
+  /* macOS/Linux: cùng vòng lặp với nhánh Windows ở trên, chỉ đổi CreateProcessW +
+   * WaitForMultipleObjects thành posix_spawn (SpawnIn) + waitpid(-1). Giữ hai nhánh tách riêng thay
+   * vì gộp qua một lớp trừu tượng để nhánh Windows (đã đo, đã phát hành) không đổi một dòng nào. */
+  struct Active { size_t index; pid_t pid; ExportClock::time_point started; };
+  std::vector<Active> active;
+  ChildSignalGuard signalGuard;
+  const auto track = [&]() {
+    std::vector<pid_t> pids;
+    for (const auto& a : active) pids.push_back(a.pid);
+    TrackChildren(pids);
+  };
+  size_t next = 0;
+  while (next < jobs.size() || !active.empty()) {
+    while (next < jobs.size() && active.size() < concurrency) {
+      BatchJob& job = *jobs[next];
+      const std::string runLabel = job.timing.label + labelSuffix;
+      prefetchBefore(job);
+      if (RenderCacheLookup(job, plan, runLabel)) { codes[next++] = 0; continue; }
+      const std::vector<std::string> cmd = JobCommandForRun(job, plan, runLabel);
+      Emit("progress", "Đang render " + job.progressText
+                       + (concurrency > 1 ? " — " + std::to_string(active.size() + 1) + " lượt chạy cùng lúc" : "") + "...");
+      const auto started = ExportClock::now();
+      const pid_t pid = SpawnIn(cmd, job.tempDir);
+      if (pid > 0) {
+        active.push_back({next, pid, started});
+        track();
+      } else {
+        codes[next] = RunIn(cmd, job.tempDir);   // không sinh được tiến trình: chạy chờ như cũ
+        job.timing.runMs += MsSince(started);
+      }
+      if (!g_exportBenchDir.empty()) SetChildEnv("FFREPORT", "");
+      next++;
+    }
+    if (active.empty()) continue;
+    int status = 0;
+    const pid_t done = waitpid(-1, &status, 0);
+    if (done < 0) {
+      if (errno == EINTR) continue;
+      // Không chờ được (không nên xảy ra): chờ lần lượt cho chắc.
+      for (const auto& a : active) {
+        codes[a.index] = WaitChild(a.pid);
+        jobs[a.index]->timing.runMs += MsSince(a.started);
+      }
+      active.clear();
+      track();
+      continue;
+    }
+    for (size_t i = 0; i < active.size(); i++) {
+      if (active[i].pid != done) continue;
+      codes[active[i].index] = ExitCodeFromStatus(status);
+      jobs[active[i].index]->timing.runMs += MsSince(active[i].started);
+      active.erase(active.begin() + static_cast<std::ptrdiff_t>(i));
+      break;
+    }
+    track();
   }
 #endif
   return codes;
@@ -6651,15 +6862,15 @@ std::vector<std::string> BuildPreviewProxyCommand(
    * THẬT, mà môi trường đo tự động (pane ẩn) không dựng được tầng đó — 4 biến thể proxy
    * đều giải mã như nhau ở đó. Đây là bản sửa theo đúng thông lệ, chưa phải theo số đo.
    *
-   * ⚠️ NHÁNH VIDEOTOOLBOX (macOS) CỐ Ý GIỮ NGUYÊN `-2`: không có máy macOS để kiểm chứng
-   * `scale_vt` có nhận cú pháp `-16` hay không. Sai ở đó thì proxy hỏng hẳn trên Mac, đắt
-   * hơn nhiều so với cái được. Ai có máy Mac hãy đổi nốt và ghi lại kết quả đo. */
+   * NHÁNH VIDEOTOOLBOX (macOS) cũng `-16` (đổi 2026-10-05, đã kiểm trên M1 Pro, ffmpeg 8.1):
+   * `scale_vt` nhận cú pháp này — nguồn 1728x3072 ra proxy 400x720, đúng bằng nhánh CPU (`-2` cho
+   * 406x720 và làm test:proxy-alignment đỏ trên Mac). Hai nền tảng vì thế ra CÙNG cỡ proxy. */
   cmd.insert(cmd.end(), {
     "-i", input,
     "-map", "0:v:0",
     "-map", "0:a?",
     "-vf", useVideoToolboxScale
-      ? "format=nv12,hwupload,scale_vt=w=if(gt(ih\\,720)\\,-2\\,iw):h=if(gt(ih\\,720)\\,720\\,ih)"
+      ? "format=nv12,hwupload,scale_vt=w=if(gt(ih\\,720)\\,-16\\,iw):h=if(gt(ih\\,720)\\,720\\,ih)"
       : "scale=w=if(gt(ih\\,720)\\,-16\\,iw):h=if(gt(ih\\,720)\\,720\\,ih),setsar=1,format=yuv420p",
     "-sn", "-dn"
   });
