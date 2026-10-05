@@ -38,7 +38,7 @@ huggingface-hub; platform_system == "Windows"
 nvidia-cublas-cu12; platform_system == "Windows"
 opencv-contrib-python<4.12; python_version < "3.13"
 mediapipe==0.10.21; python_version < "3.13"
-# Xoá logo bằng AI (asr/logo_inpaint_sidecar.py) chạy model MI-GAN bằng onnxruntime. Trên
+# Xoá vật thể bằng AI (asr/logo_inpaint_sidecar.py) chạy model LaMa bằng onnxruntime. Trên
 # Windows faster-whisper đã kéo gói này về; khai báo riêng để macOS (không có faster-whisper)
 # và bước cài theo nhóm `logo_ai` (scripts/python_requirements.js) cũng có nó.
 onnxruntime
