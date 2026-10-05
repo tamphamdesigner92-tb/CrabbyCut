@@ -18,6 +18,11 @@
  * riêng và không làm lệnh thoát lỗi — nhưng nếu một test trong danh sách lại XANH thì lệnh báo
  * để xoá nó khỏi danh sách (lỗ hổng đã được vá thì không được nằm đó che lỗi mới).
  *
+ * FFMPEG: test chạy CÙNG ffmpeg với backend — thư mục bin của bản ghim (npm run ffmpeg:install)
+ * được nối vào đầu PATH đúng như backend/server.js làm. Dòng đầu của bảng ghi bản đang dùng; không
+ * phải bản ghim của nền tảng này (scripts/ffmpeg_pin.js) thì có cảnh báo — kết quả khi đó không so
+ * được với máy kia.
+ *
  * Mã thoát: 0 = mọi test xanh (trừ lỗ hổng đã biết), 1 = có test đỏ.
  * ===================================================================== */
 'use strict';
@@ -28,6 +33,8 @@ const { spawnSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+const RuntimePaths = require('./runtime_paths.js');
+const { pinFor } = require('./ffmpeg_pin.js');
 
 function parseArgs(argv) {
   const opts = { skipPython: false, only: null, timeoutS: 900, build: false };
@@ -80,8 +87,23 @@ function loadKnownGaps() {
   }
 }
 
+/* Nối bin của bản ghim vào đầu PATH (cùng quy tắc với backend/server.js) rồi báo ffmpeg nào sẽ chạy. */
+function useRuntimeFfmpeg() {
+  const dir = RuntimePaths.ffmpegDir();
+  if (fs.existsSync(dir)) process.env.PATH = [dir, process.env.PATH].join(path.delimiter);
+  const probe = spawnSync('ffmpeg', ['-hide_banner', '-version'], { encoding: 'utf8' });
+  const version = probe.status === 0 ? String(probe.stdout).split(/\r?\n/)[0].trim() : null;
+  const pin = pinFor();
+  console.log(`ffmpeg: ${version || 'KHÔNG CHẠY ĐƯỢC'}`);
+  if (pin && !version?.startsWith(pin.versionPrefix)) {
+    console.log(`  CẢNH BÁO: không phải bản ghim ${pin.id} — kết quả không so được với máy kia. `
+      + 'Chạy: npm run ffmpeg:install');
+  }
+}
+
 function main() {
   const opts = parseArgs(process.argv.slice(2));
+  useRuntimeFfmpeg();
   const logDir = path.join(ROOT, 'test_temp', 'test-logs');
   fs.mkdirSync(logDir, { recursive: true });
   if (opts.build) {

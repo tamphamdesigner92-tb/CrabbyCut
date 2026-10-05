@@ -45,8 +45,10 @@ jobs:
       - name: Cài phụ thuộc npm
         run: npm ci
 
-      - name: Cài ffmpeg (Windows = bản ghim; macOS = Homebrew ffmpeg@8)
-        run: node scripts/ci_install_ffmpeg.js
+      # Cùng bản ghim với máy dev và bộ cài (scripts/ffmpeg_pin.js): CI chạy ffmpeg khác bản người
+      # dùng thì "CI xanh" không chứng minh được gì.
+      - name: Cài ffmpeg bản ghim
+        run: node scripts/install_ffmpeg.js --ci
 
       - name: Build addon + sidecar
         run: npm run build:native

@@ -1,9 +1,8 @@
 {
   "_doc": "Test ĐỎ vì MÔI TRƯỜNG của một nền tảng, không phải vì mã. scripts/run_tests.js báo riêng các mục này và không làm lệnh thoát lỗi; mục nào đã XANH thì lệnh báo để xoá. Mỗi mục phải ghi lý do + việc cần làm để gỡ. Xem docs/DONG_BO_WIN_MAC.md mục 5.",
   "darwin": {
-    "test:export-hdr-asset-usage": "ffmpeg Homebrew không có zscale/libplacebo nên không dựng được bản SDR của video HDR làm lớp phủ. Gỡ khi bản Mac dùng ffmpeg ghim n8.1.1-crabbycut (có zimg).",
-    "test:retouch-export": "Mép mềm miếng vá đo 2/255 với ffmpeg Homebrew 8.1 (bản 8.1.1 ghim trên Windows đo 0/255) — khác làm tròn giữa hai bản ffmpeg, kể cả khi ép encoder CPU. Gỡ khi bản Mac dùng ffmpeg ghim.",
-    "test:export-fast-path": "ProRes: luma mới/cũ 44,59 dB (< 45) với ffmpeg Homebrew 8.1, đồ thị đã phát lại lossless — khác làm tròn giữa hai bản ffmpeg. Gỡ khi bản Mac dùng ffmpeg ghim."
+    "test:retouch-export": "Mép mềm miếng vá đo 2/255 (mép cứng 8/255) trên Apple Silicon, ngưỡng ≤ 1/255 chỉnh trên x86 (Windows đo 4 -> 1). KHÔNG phải do ffmpeg hay encoder: cùng ffmpeg ghim n8.1.1-crabbycut.2, ép prores_ks, tắt SIMD (-cpuflags 0) đều 8 -> 2; bản x86_64 cùng nguồn chạy dưới Rosetta (SSE4.2, không AVX2) cũng 8 -> 2. Phần khác của Windows là mã SIMD x86 (AVX2) làm tròn khác bản C/ARM. Gỡ khi ngưỡng không còn phụ thuộc kiến trúc CPU (vd. so tỉ lệ mép mềm/mép cứng) — docs/DONG_BO_WIN_MAC.md mục 5.",
+    "test:export-fast-path": "ProRes: luma mới/cũ 44,59 dB (< 45) trên Apple Silicon. Đo trên CÙNG đồ thị, cùng nguồn FFmpeg: arm64 44,59 dB (có/không SIMD), x86_64 tắt SIMD 44,59 dB, x86_64 bật SIMD 45,52 dB — ngưỡng 45 chỉ đạt được nhờ cách làm tròn của SIMD x86 (Windows), bản C chính xác cũng chỉ 44,59. Gỡ khi ngưỡng không còn phụ thuộc kiến trúc CPU — docs/DONG_BO_WIN_MAC.md mục 5."
   },
   "win32": {}
 }

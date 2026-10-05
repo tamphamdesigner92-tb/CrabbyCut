@@ -24,6 +24,7 @@ git switch main
 git pull --rebase origin main        # lấy việc máy kia vừa đẩy lên
 git switch -c <tên-việc>             # nhánh ngắn cho một việc
 # … sửa …
+npm run ffmpeg:install               # ffmpeg bản ghim của nền tảng này (không làm gì nếu đã đúng bản)
 npm run build:native                 # build lại sidecar + addon từ nguồn của CHÍNH máy này
 npm run test:all                     # toàn bộ test, mỗi test chạy riêng, bảng tổng ở cuối
 git push -u origin <tên-việc>        # mở pull request vào main
@@ -41,7 +42,7 @@ git push -u origin <tên-việc>        # mở pull request vào main
 | | Windows | macOS | Ghi chú |
 |---|---|---|---|
 | Node | 22 | 22 | CI dùng 22 |
-| ffmpeg | **bản ghim** `n8.1.1-crabbycut.2` (`scripts/ffmpeg_pin.js`) | **Homebrew** (chưa ghim) | Lỗ hổng lớn nhất — mục 5 |
+| ffmpeg | **bản ghim** `n8.1.1-crabbycut.2` win64 | **bản ghim** `n8.1.1-crabbycut.2` macOS arm64 | Cùng nguồn FFmpeg — mục 5 |
 | Kết thúc dòng | LF | LF | `.gitattributes` (`* text=auto eol=lf`) |
 | Python | runtime nhúng | `.venv` | 3 test Python chỉ chạy trên máy dev |
 
@@ -64,16 +65,53 @@ Mỗi bẫy dưới đây làm test ĐỎ trên Mac trong khi XANH trên Windows
 | Chạy song song (mục 1.8) chỉ có nhánh Windows | Mac luôn chạy nối tiếp | nhánh POSIX trong `RunBatchJobs` |
 | `RunQuiet` POSIX bỏ qua giới hạn thời gian | một lệnh dò treo là treo cả lượt xuất | `waitpid` + hạn giờ |
 | `h264_videotoolbox -realtime 1` | xuất bị chặn ở ~66 khung/s (trần thật ~194) | `-realtime 0` khi xuất |
+| ffmpeg Homebrew (8.1, rồi 9.x) ≠ bản ghim 8.1.1 của Windows | thiếu `zscale`, làm tròn khác — 3 test đỏ | bản ghim cho Mac (mục 5) |
+| SIMD x86 làm tròn khác ARM/C | 2 ngưỡng chỉnh trên Windows không đạt trên Mac | còn mở — mục 6 |
 
-## 5. Lỗ hổng còn lại: ffmpeg trên Mac chưa ghim
+## 5. ffmpeg: một bản ghim cho mỗi nền tảng, cùng mã nguồn
 
-Windows chạy bản ffmpeg CrabbyCut tự dựng (n8.1.1 + bộ lọc CUDA), Mac chạy ffmpeg Homebrew — khác
-phiên bản, khác bộ thư viện. Hệ quả đo được trên Mac (Homebrew 8.1): thiếu `zscale`/`libplacebo`
-nên lớp phủ HDR không hạ được về SDR; vài phép làm tròn khác bản 8.1.1 một đơn vị. Và Homebrew đã
-lên 9.0.2: một lần `brew upgrade` là Mac chạy ffmpeg 9 trong khi Windows vẫn 8.1.1.
+Đến 2026-10-05 Windows chạy bản CrabbyCut tự dựng (n8.1.1 + bộ lọc CUDA), Mac chạy ffmpeg Homebrew —
+khác phiên bản, khác bộ thư viện. Đo được trên Mac (Homebrew 8.1): thiếu `zscale` nên lớp phủ HDR
+không hạ được về SDR, vài phép làm tròn khác 8.1.1 một đơn vị (mép mềm 2/255, ProRes 44,59 dB) —
+3 test chỉ đỏ trên Mac. Và một lần `brew upgrade` là Mac sang ffmpeg 9 trong khi Windows vẫn 8.1.1.
 
-Các test đỏ chỉ vì lỗ hổng này được ghi ở `tests/known-platform-gaps.json` (có lý do) để CI vẫn có
-ích trong lúc chờ. Muốn hai máy chạy CÙNG một ffmpeg: dựng bản macOS arm64 từ đúng nguồn
-`ffmpeg-for-CrabbyCut` (n8.1.1 + các bản vá không phụ thuộc CUDA), phát hành ở cùng Release, thêm
-mục darwin vào `scripts/ffmpeg_pin.js`, rồi cho bản Mac tải nó như Windows. Xong thì xoá các mục
-tương ứng trong `known-platform-gaps.json` — `npm run test:all` sẽ nhắc nếu quên.
+Nay mỗi nền tảng có một bản ghim trong `scripts/ffmpeg_pin.js` (`pinFor()`), dựng từ CÙNG nguồn ở
+repo `ffmpeg-for-CrabbyCut`: FFmpeg n8.1.1 cùng commit + cùng bản vá, cùng chuỗi `ffmpeg -version`,
+thư viện ngoài cùng phiên bản. `build.sh` dựng bản Windows (MSYS2), `build-macos.sh` dựng bản Mac
+(Apple Silicon, macOS 11+, chỉ phụ thuộc thư viện hệ thống). Khác nhau chỉ ở phần tăng tốc phần
+cứng: CUDA/NVENC trên Windows, VideoToolbox trên Mac; Mac không có `libplacebo` nên tonemap HDR đi
+`zscale` — đúng đường của máy Windows không có driver Vulkan.
+
+- `npm run ffmpeg:install` (scripts/install_ffmpeg.js) tải bản ghim của máy, kiểm SHA-256 và chuỗi
+  phiên bản, cài vào thư mục runtime (`~/Library/Application Support/CrabbyCut/runtime/ffmpeg/bin`,
+  `%LOCALAPPDATA%\CrabbyCut\runtime\ffmpeg\bin`). backend/server.js và scripts/run_tests.js nối thư
+  mục đó vào đầu PATH, nên app chạy từ mã nguồn lẫn test đều dùng bản ghim; ffmpeg Homebrew vẫn nằm
+  trên máy nhưng không được gọi nữa. CI cài bằng cùng lệnh (`--ci`).
+- `npm run test:all` in bản ffmpeg đang dùng ở dòng đầu và cảnh báo nếu không phải bản ghim.
+- Đổi bản ghim: dựng cả hai bản từ cùng tag, chạy `npm run test:all` trên cả hai máy, sửa cả hai mục
+  của `FFMPEG_PINS`.
+
+Đo trên Mac sau khi chuyển sang bản ghim (2026-10-05): 102/104 test xanh. `test:export-hdr-asset-usage`
+xanh lại (có `zscale`). Hai test còn lại KHÔNG đỏ vì ffmpeg — xem mục 6.
+
+## 6. Cùng mã, cùng ffmpeg, vẫn khác: làm tròn SIMD theo kiến trúc CPU
+
+Windows chạy x86_64, Mac chạy arm64. FFmpeg (swscale và một số bộ lọc) có mã SIMD riêng cho từng
+kiến trúc, và mã SIMD x86 KHÔNG làm tròn giống bản C; mã ARM thì trùng bản C. Đo trên cùng đồ thị lọc
+của `test:export-fast-path` (ProRes, luma mới/cũ), cùng nguồn FFmpeg n8.1.1-crabbycut.2:
+
+| Bản dựng | luma mới/cũ |
+|---|---|
+| arm64 (Mac), có hoặc không SIMD | 44,59 dB |
+| x86_64, tắt SIMD (`-cpuflags 0`) | 44,59 dB |
+| x86_64, bật SIMD (SSE4.2, chạy dưới Rosetta) | 45,52 dB |
+
+Ngưỡng 45 dB được chỉnh trên máy Windows, tức là chỉ qua được nhờ cách làm tròn của SIMD x86; bản C
+chính xác cũng chỉ 44,59. Tương tự với mép mềm miếng vá của `test:retouch-export`: Mac đo 8 → 2/255
+(ép `prores_ks`, tắt SIMD, chạy bản x86 không AVX2 đều như vậy), Windows đo 4 → 1/255, mà ngưỡng
+là ≤ 1. Hai test này nằm trong `tests/known-platform-gaps.json` cùng số đo. Muốn gỡ thì sửa NGƯỠNG
+cho khỏi phụ thuộc kiến trúc: ProRes so với bản chuẩn thay vì ngưỡng tuyệt đối sát 45 dB; mép miếng
+vá so tỉ lệ mép mềm / mép cứng (cả hai máy đều giảm 4 lần) thay vì ≤ 1/255.
+
+Bài học cho test mới: một ngưỡng chỉnh cho vừa khít số đo trên MỘT máy sẽ hỏng ở kiến trúc kia. Hoặc
+chừa biên cho sai khác làm tròn (1–2 mức 8-bit, ~1 dB PSNR), hoặc so tương đối (tỉ lệ, so bản chuẩn).
