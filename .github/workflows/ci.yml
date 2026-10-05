@@ -1,0 +1,63 @@
+# CI — CÙNG MỘT MÃ NGUỒN PHẢI XANH TRÊN CẢ macOS LẪN WINDOWS
+#
+# Mỗi lần đẩy lên main và mỗi pull request: build sidecar + addon và chạy toàn bộ test
+# (scripts/run_tests.js) trên Apple Silicon và trên Windows. Một thay đổi viết trên máy Windows mà
+# làm hỏng Mac (hay ngược lại) đỏ ngay ở đây, trước khi máy kia kéo về.
+#
+# Không chạy ở CI:
+#   - 3 test Python (test:matching, test:script-reorder-align, test:dubbing-core): cần torch +
+#     whisper (vài GB). Chạy trên máy dev bằng `npm run test:all`.
+#   - phần GPU: runner không có NVIDIA; VideoToolbox trên runner macOS là máy ảo — sidecar tự lùi
+#     về bộ mã hoá CPU, đúng đường của máy người dùng không có phần cứng đó.
+# Lỗ hổng môi trường đã biết của từng nền tảng: tests/known-platform-gaps.json.
+name: CI (macOS + Windows)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      # Không test nào chạy Electron — khỏi tải ~100 MB binary của nó.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Cài phụ thuộc npm
+        run: npm ci
+
+      - name: Cài ffmpeg (Windows = bản ghim; macOS = Homebrew ffmpeg@8)
+        run: node scripts/ci_install_ffmpeg.js
+
+      - name: Build addon + sidecar
+        run: npm run build:native
+
+      - name: Chạy toàn bộ test
+        run: node scripts/run_tests.js --skip-python
+
+      - name: Lưu log test khi đỏ
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ matrix.os }}
+          path: test_temp/test-logs/
+          retention-days: 7
