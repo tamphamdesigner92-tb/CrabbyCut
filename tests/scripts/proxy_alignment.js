@@ -58,13 +58,14 @@ function extractFunction(src, name) {
     assert.ok(cpuLine.includes('-16'),
         'nhánh CPU phải căn bề rộng theo bội số 16 (`-16`), không phải chỉ số chẵn (`-2`)');
 
-    /* Nhánh VideoToolbox giữ `-2` là CÓ CHỦ Ý: không có máy macOS để kiểm `scale_vt` có
-       nhận cú pháp `-16` không. Sai ở đó thì proxy hỏng hẳn trên Mac — đắt hơn cái được.
-       Khẳng định này tồn tại để ai đó "dọn cho đồng bộ" phải đọc lý do trước. */
+    /* Nhánh VideoToolbox cũng `-16` — ĐÃ KIỂM CHỨNG trên máy Mac thật (2026-10-05, M1 Pro,
+       ffmpeg 8.1): `scale_vt` nhận cú pháp này, nguồn 1728x3072 ra proxy 400x720, đúng bằng nhánh
+       CPU (`-2` cho 406x720). Hai nền tảng phải ra CÙNG cỡ proxy; phần chạy thật bên dưới đo lại
+       trên chính máy đang chạy test. */
     const vtLine = fn.split('\n').find((l) => l.includes('scale_vt=w='));
     assert.ok(vtLine, 'không tìm thấy bộ lọc scale_vt của nhánh macOS');
-    assert.ok(vtLine.includes('-2'),
-        'nhánh macOS phải GIỮ `-2` cho tới khi có người kiểm chứng `-16` trên scale_vt thật');
+    assert.ok(vtLine.includes('-16') && !vtLine.includes('\\\\,-2\\\\,'),
+        'nhánh macOS (scale_vt) phải căn bề rộng theo bội số 16 (`-16`) như nhánh CPU');
     assert.ok(/CHƯA KIỂM CHỨNG ĐƯỢC|chưa phải theo số đo/.test(cpp),
         'phải giữ ghi chú rằng đây là bản sửa theo thông lệ, chưa có số đo xác nhận');
 }
@@ -139,7 +140,10 @@ if (!sample) {
     const iFrames = execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
         '-show_frames', '-show_entries', 'frame=pict_type', '-of', 'csv=p=0', out],
         { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
-        .split('\n').filter((l) => l.trim() === 'I').length;
+        /* Lấy TRƯỜNG ĐẦU: ffprobe 8.x in luôn side data của khung trên cùng dòng CSV
+           ("I,H.26[45] User Data Unregistered SEI message"). VideoToolbox gắn SEI đó vào MỌI khung
+           nên so cả dòng với 'I' đếm ra 0 trên Mac (NVENC không gắn nên Windows không lộ). */
+        .split('\n').filter((l) => l.split(',')[0].trim() === 'I').length;
     assert.strictEqual(iFrames, frames,
         `proxy PHẢI là all-intra (${frames} khung, ${iFrames} khung I). Đổi sang GOP thường `
         + 'đã thử và làm TỆ HƠN — đo được khung giải mã 63 -> 77-87 fps.');
