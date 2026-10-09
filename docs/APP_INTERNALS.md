@@ -5363,6 +5363,7 @@ NỀN KHUNG PREVIEW — đen hay xanh nhấp nháy (isSequenceTransparencyWarnin
   - Hardware info hiển thị GPU (MLX/Metal) khi chạy trên darwin arm64.
   - Timeline (ruler + segment) render bằng PixiJS; sóng âm render bằng canvas 2D riêng (audio-waveform.js), cả hai giới hạn devicePixelRatio tối đa 2 để giảm tải.
   - Export ưu tiên VideoToolbox cho h264/hevc/prores khi FFmpeg hỗ trợ.
+  - Export giải mã nguồn chính bằng VideoToolbox (`-hwaccel videotoolbox`, khung chép về RAM) khi nguồn là HEVC hoặc > 8-bit; H.264 8-bit giữ giải mã CPU vì VideoToolbox chậm hơn với nó (SourceHwDecodeArgs, mục M.4). Tắt: CRABBYCUT_EXPORT_HWDEC=0. Test: test:export-hw-decode.
   - Preview proxy ưu tiên h264_videotoolbox và scale_vt nếu FFmpeg hỗ trợ, nhưng chỉ chạy sau ASR để tránh tranh MLX/MPS/unified memory.
   - Playback preview dùng HTML video decoder của Chromium/Electron với proxy all-keyframe để seek mượt hơn.
 - Windows:
