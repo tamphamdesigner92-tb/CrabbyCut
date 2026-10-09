@@ -144,6 +144,8 @@ function main() {
         // ---- 9) paintViewport: ánh xạ pixel <-> thời gian + cull theo viewport ----
         // Canvas/ctx giả chỉ ghi lại các hình chữ nhật được vẽ (toạ độ NỘI DUNG, vì
         // translate bị bỏ qua) -> kiểm được toán ánh xạ mà không cần browser.
+        // Thanh sóng và vạch trục đều là fillRect; phân biệt bằng MÀU (vạch trục mặc định).
+        const BASELINE_COLOR = 'rgba(255,255,255,0.16)';
         const mockCanvas = () => {
             const rects = [];
             const blits = [];
@@ -151,8 +153,8 @@ function main() {
                 fillStyle: '', globalAlpha: 1,
                 setTransform() {}, clearRect() {}, translate() {}, save() {}, restore() {},
                 beginPath() {}, fill() {},
-                rect(x, y, w, h) { rects.push({ x, y, w, h }); },
-                fillRect(x, y, w, h) { rects.push({ x, y, w, h, baseline: true }); },
+                rect(x, y, w, h) { rects.push({ x, y, w, h, path: true }); },
+                fillRect(x, y, w, h) { rects.push({ x, y, w, h, baseline: this.fillStyle === BASELINE_COLOR }); },
                 drawImage(src, sx) { blits.push({ src, sx }); },
             };
             return { canvas: { width: 0, height: 0, style: {}, getContext: () => ctx }, rects, blits };
@@ -199,6 +201,35 @@ function main() {
         for (const rect of clipped.rects) {
             assert.ok(rect.x >= 519 && rect.x <= 701, `vẽ ra ngoài viewport: x=${rect.x}`);
         }
+
+        /* ---- 9b) Thanh sóng: fillRect THẲNG HÀNG điểm ảnh thiết bị, không gom path ----
+         * Path vài nghìn contour là đường raster GPU chậm nhất của Skia (trace Match Script:
+         * lệnh raster 63 ms mỗi nấc zoom). Mỗi thanh một fillRect mép nguyên điểm ảnh thì rẻ —
+         * nhưng chỉ ĐÚNG HÌNH khi các thanh kề nhau không chồng mép (màu có alpha: chồng mép
+         * = vạch sọc). Kiểm ở dpr 1,5 + scrollLeft lẻ, chỗ dễ lệch lưới nhất. */
+        {
+            const dpr = 1.5;
+            const scrollLeft = 123.37;
+            const mock = mockCanvas();
+            AudioWaveform.paintViewport({
+                canvas: mock.canvas, scrollLeft, scrollTop: 0, viewWidth: 700, viewHeight: 100, dpr,
+            }, [{ key: 'tone', url: 'ingest:tone', rect: { x: BLOCK_LEFT, y: 10, w: BLOCK_WIDTH, h: 40 }, srcStart: 0, srcEnd: CLIP_DURATION }]);
+            assert.strictEqual(mock.rects.filter((r) => r.path).length, 0, 'thanh sóng không được gom vào path nữa');
+            const bars = mock.rects.filter((r) => !r.baseline);
+            assert.ok(bars.length > 0, 'không có thanh sóng nào');
+            const dev = (x) => (x - scrollLeft) * dpr;
+            for (const r of bars) {
+                assert.ok(Math.abs(dev(r.x) - Math.round(dev(r.x))) < 1e-6, `mép trái lệch lưới điểm ảnh: ${dev(r.x)}`);
+                assert.ok(Math.abs(dev(r.x + r.w) - Math.round(dev(r.x + r.w))) < 1e-6, `mép phải lệch lưới: ${dev(r.x + r.w)}`);
+                assert.ok(r.w * dpr >= 1 - 1e-6, `thanh hẹp hơn 1 điểm ảnh: ${r.w * dpr}`);
+            }
+            // Trong cùng một lượt (peak hoặc RMS), thanh sau bắt đầu ĐÚNG ở/sau mép phải thanh trước.
+            for (let i = 1; i < bars.length; i += 1) {
+                if (bars[i].x < bars[i - 1].x) continue;   // x lùi lại = sang lượt RMS
+                assert.ok(bars[i].x >= bars[i - 1].x + bars[i - 1].w - 1e-6,
+                    `hai thanh kề nhau chồng mép: ${bars[i - 1].x}+${bars[i - 1].w} > ${bars[i].x}`);
+            }
+        }
         /* ---- 10) paintViewportBuffered: cuộn KHÔNG được tô lại dải sóng ----
          * Đây là bản sửa nút thắt preview (rớt 52-81% khung khi phát). Cái phải chốt là
          * HÀNH VI đệm, không phải hình vẽ: hình do paintViewport lo và đã kiểm ở trên.
@@ -241,6 +272,40 @@ function main() {
         // Dữ liệu peak đổi -> chữ ký khác -> phải dựng lại (nếu không sóng đứng hình cũ).
         AudioWaveform.ingest('tone', toBuffer(tonePk));
         assert.strictEqual(paintBuffered(200).rebuilt, true, 'peak đổi mà đệm không dựng lại');
+
+        /* Hình học đổi LIÊN TỤC (kéo zoom) -> chỉ dựng dải HẸP quanh khung nhìn; dừng tay
+         * thì lượt dựng sau lại rộng. Đồng hồ giả để không phụ thuộc tốc độ máy chạy test. */
+        {
+            const realNow = Date.now;
+            let clock = 1_000_000;
+            Date.now = () => clock;
+            try {
+                const zoomMock = mockCanvas();
+                const paintAt = (blockWidth, scrollLeft) => AudioWaveform.paintViewportBuffered({
+                    canvas: zoomMock.canvas, bufferKey: 'test-zoom', scrollLeft, scrollTop: 0,
+                    viewWidth: 400, viewHeight: 100, dpr: 1, contentWidth: 6000,
+                    createCanvas: () => mockCanvas().canvas,
+                }, [{ ...bufTarget[0], rect: { x: BLOCK_LEFT, y: 10, w: blockWidth, h: 40 } }]);
+                const wide1 = paintAt(5000, 1000);
+                assert.strictEqual(wide1.narrow, false, 'lượt dựng đầu phải là dải rộng');
+                clock += 16;   // nấc zoom kế tiếp, cùng khung sau
+                const z1 = paintAt(5200, 1000);
+                assert.strictEqual(z1.rebuilt, true, 'zoom đổi mà không dựng lại');
+                assert.strictEqual(z1.narrow, true, 'đang zoom liên tục mà vẫn dựng cả dải 6000 px');
+                clock += 16;
+                assert.strictEqual(paintAt(5400, 1000).narrow, true, 'cụm zoom phải giữ dải hẹp');
+                clock += 16;
+                assert.strictEqual(paintAt(5400, 1050).rebuilt, false, 'cuộn trong dải hẹp không được dựng lại');
+                clock += 500;  // dừng tay, rồi cuộn ra ngoài dải hẹp
+                const settled = paintAt(5400, 2500);
+                assert.strictEqual(settled.rebuilt, true);
+                assert.strictEqual(settled.narrow, false, 'hết cụm zoom thì phải dựng lại dải rộng');
+                clock += 16;   // cùng chữ ký, cuộn tiếp trong dải rộng -> chỉ blit
+                assert.strictEqual(paintAt(5400, 3000).rebuilt, false, 'dải rộng sau zoom không phủ đủ');
+            } finally {
+                Date.now = realNow;
+            }
+        }
 
         // Khung nhìn rộng hơn cả nội dung+trần -> không đệm được, phải vẽ thẳng như cũ.
         const wideMock = mockCanvas();
