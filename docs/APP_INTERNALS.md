@@ -8893,6 +8893,24 @@ Test: `audio_waveform_columns.js` thêm (9b) thanh thẳng lưới + không ch�
 scrollLeft lẻ; và cụm zoom dựng dải hẹp / dừng tay dựng lại rộng (đồng hồ giả). Đột biến bỏ
 ghim lưới hoặc bỏ dải hẹp đều làm test đổ.
 
+**Không đụng render (đo 2026-10-09).** Bản sửa chỉ chạm hiển thị timeline: `drawColumns` /
+`paintViewport*` không có mặt trong đường xuất, và không tệp nào trong `backend/`, `native/`
+đổi. Đo bằng `bench_export.js`, ffmpeg ghim `n8.1.1-crabbycut.2`, RTX + NVENC, xen kẽ A/B:
+
+| Ca | So sánh | Thời gian (trung vị 3 lượt) | Tệp xuất |
+| --- | --- | --- | --- |
+| Yêu Con (phát lại) | trước 1.1.16 (`0b5bf5e`) vs 1.1.16 | 16,0 / 16,0 s | trùng md5 cả 6 lượt |
+| Yêu Con (phát lại) | `main` vs `sync/main-mac-win` | 15,8 / 16,0 s | trùng md5 |
+| Bin Tom tập 3 (phát lại) | `main` vs `sync/main-mac-win` | 9,3 / 9,1 s | trùng md5 |
+| forever inside, cắt 300 s (phát lại) | `main` vs `sync/main-mac-win` | 49,9 / 49,7 s | trùng md5 |
+| Yêu Con trong Electron (mở .crab + vẽ trước + xuất, 2 lượt) | `main` vs `sync/main-mac-win` | 47,8–50,9 / 47,2–48,5 s; vẽ trước 30,6–33,5 / 29,8–30,8 s | trùng md5 |
+
+`sync/main-mac-win` thêm `threads=1` cho các bộ lọc `scale` (để Win và Mac ra cùng số) — không
+đổi một byte đầu ra nào ở ba dự án trên và không chậm đi. Trên Mac: CI `macos-14` (arm64)
+101/101 test xanh với bản sửa này, gồm `test:audio-waveform`; `test:tts-model-store` từ nay chạy
+cả khi `--skip-python` (chỉ cần thư viện chuẩn). Retina (dpr 2) có gấp đôi số cột sóng âm mỗi
+lượt dựng — chính là chỗ dải hẹp lúc zoom giúp nhiều nhất.
+
 ## Auto Subtitle đa ngôn ngữ — menu ngôn ngữ, font CJK, đồng bộ phụ đề (2026-09-14)
 
 Ba việc thêm vào Auto Subtitle, theo yêu cầu người dùng. Đọc mục trên trước.
