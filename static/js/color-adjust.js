@@ -1755,7 +1755,26 @@
         return `clip((${e})/100,0,1)`;
     }
 
+    /* Nhớ vài chuỗi gần nhất theo ĐỐI TƯỢNG cube (+ tiêu đề). Đổi cube 33³ ra chữ tốn ~21 ms, mà lượt
+     * xuất gọi lại cho MỌI block cùng một lớp Điều chỉnh (Yêu Con: 2 cube × 10 clip ≈ 0,4 s) — cube
+     * thành phần nằm trong cubeCache nên là cùng một đối tượng. Chỉ giữ CUBE_TEXT_MAX chuỗi (~1 MB mỗi
+     * chuỗi). Cube trong cache không bao giờ bị sửa tại chỗ (mỗi lần bake là một đối tượng mới). */
+    const CUBE_TEXT_MAX = 6;
+    const cubeTextRecent = [];
     function cubeToText(cube, title = 'CrabbyCut') {
+        const at = cubeTextRecent.findIndex((e) => e.cube === cube && e.title === title);
+        if (at >= 0) {
+            const [hit] = cubeTextRecent.splice(at, 1);
+            cubeTextRecent.unshift(hit);
+            return hit.text;
+        }
+        const text = cubeToTextUncached(cube, title);
+        cubeTextRecent.unshift({ cube, title, text });
+        if (cubeTextRecent.length > CUBE_TEXT_MAX) cubeTextRecent.pop();
+        return text;
+    }
+
+    function cubeToTextUncached(cube, title) {
         const lines = [`TITLE "${String(title).replace(/"/g, '')}"`, `LUT_3D_SIZE ${cube.size}`, ''];
         const n = cube.size;
         for (let bi = 0; bi < n; bi++) {

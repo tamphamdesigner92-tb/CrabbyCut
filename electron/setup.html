@@ -206,7 +206,9 @@
       $('m-gpu').textContent = m.nvidia.available
         ? m.nvidia.gpus.map((g) => g.name + (g.vram_mb ? ' (' + Math.round(g.vram_mb / 1024) + ' GB)' : '')).join(', ')
         : _t('Không có GPU NVIDIA — sẽ dùng CPU để bóc băng');
-      $('m-ffmpeg').textContent = m.ffmpeg ? _t('Đã có trên máy — dùng lại') : _t('Chưa có — sẽ tải về');
+      // Bộ cài LUÔN dùng bản ffmpeg ghim của ứng dụng (scripts/ffmpeg_pin.js); ffmpeg của
+      // máy chỉ là đường lùi khi mất mạng, nên không còn hiện "dùng lại bản trên máy".
+      $('m-ffmpeg').textContent = _t('Dùng bản riêng đã kiểm chứng của ứng dụng');
       $('m-disk').textContent = _t('{size} trống trên {path}', { size: humanBytes(m.disk.free_bytes), path: m.disk.path });
       return;
     }

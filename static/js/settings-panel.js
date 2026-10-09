@@ -23,7 +23,7 @@
         { id: 'preview', label: _t('Xem trước'), ready: true },
         { id: PANE_ASE, label: _t('Auto Sound Effects'), ready: true },
         { id: 'cache', label: _t('Bộ nhớ đệm'), ready: true },
-        { id: 'export', label: _t('Xuất video'), ready: false },
+        { id: 'export', label: _t('Xuất video'), ready: true },
         { id: 'about', label: _t('Về CrabbyCut'), ready: true },
     ];
 
@@ -513,6 +513,30 @@
         </section>`;
     }
 
+    /* Thiết bị render (mục 1.21 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md, người dùng chốt 2026-10-02:
+     * mặc định GPU). Sidecar tự lùi về CPU khi máy không dùng được GPU, và từng đoạn có hiệu ứng
+     * chưa có bản GPU vẫn dựng bằng CPU trong cùng lượt xuất — nên ô này là "ưu tiên", không phải
+     * lệnh cứng. */
+    function exportPaneHtml() {
+        const e = draft.export;
+        return `<p class="set-intro">${_t('Áp dụng cho các lần xuất video sau.')}</p>
+        <section class="set-sec"><h4>${_t('Thiết bị render')}</h4>
+            <div class="set-row2">
+                <label>${_t('Render bằng')}
+                    ${selectHtml('data-set-act="renderDevice"', [
+                        { value: 'gpu', label: _t('GPU (mặc định)') },
+                        { value: 'cpu', label: _t('CPU') },
+                    ], e.renderDevice)}
+                </label>
+            </div>
+            <p class="set-note">${_t('GPU dùng card NVIDIA để giải mã, dựng hình và mã hoá — máy rảnh tay hơn hẳn trong lúc xuất. Máy không dùng được GPU thì tự render bằng CPU. Đoạn có hiệu ứng chưa có bản GPU (chỉnh màu, keyframe, xoay, mặt nạ…) vẫn render bằng CPU trong cùng lượt xuất.')}</p>
+        </section>
+        <section class="set-sec"><h4>${_t('Xuất lại')}</h4>
+            ${checkboxRowHtml(_t('Dùng lại phần đã render khi xuất lại'), 'renderCache', e.renderCache,
+                _t('Xuất lại cùng cài đặt thì chỉ render những đoạn đã sửa; đoạn không đổi lấy lại từ lượt xuất trước, giống hệt từng khung. Dự án ngắn chỉ có lợi trên máy nhiều nhân. Bộ nhớ đệm tối đa 20 GB, dọn ở mục Bộ nhớ đệm.'))}
+        </section>`;
+    }
+
     function cachePaneHtml() {
         if (!cacheUsage) return `<p class="set-intro">${_t('Đang đọc dung lượng…')}</p>`;
         const rows = cacheUsage.map((it) => `<div class="set-file">
@@ -581,6 +605,7 @@
             autosave: autosavePaneHtml,
             preview: previewPaneHtml,
             cache: cachePaneHtml,
+            export: exportPaneHtml,
             about: aboutPaneHtml,
             [PANE_ASE]: asePaneHtml,
         };
@@ -798,6 +823,8 @@
         'pvQuality': (el) => { draft.preview.defaultQuality = el.value; return false; },
         'pvTransition': (el) => { draft.preview.transitionQuality = el.value; return false; },
         'frameStep': (el) => { draft.preview.frameStep = Number(el.value); return false; },
+        'renderDevice': (el) => { draft.export.renderDevice = el.value; return false; },
+        'renderCache': (el) => { draft.export.renderCache = el.checked; return false; },
         'sc-search': (el) => { keyFilter = el.value; return false; },
     };
 

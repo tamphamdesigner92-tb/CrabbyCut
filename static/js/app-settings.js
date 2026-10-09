@@ -182,6 +182,14 @@
     // transitionQuality 'auto' = 2 mức (CSS px khi phát, ×dpr khi dừng); 'sharp' = luôn ×dpr,
     // nét hơn khi phát nhưng hiệu ứng Xoắn sẽ giật (xem transitionRenderScale).
     const DEFAULT_PREVIEW = { defaultQuality: 'proxy', frameStep: 1, transitionQuality: 'auto' };
+    /* Xuất video (mục 1.21 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md, người dùng chốt 2026-10-02):
+     * render bằng GPU (bộ lọc CUDA của bản ffmpeg riêng + NVDEC/NVENC) hay CPU. Mặc định GPU kể
+     * cả khi với một nguồn cụ thể GPU không nhanh hơn; máy không dùng được GPU thì sidecar tự
+     * render bằng CPU (GpuRenderAvailable). Backend gửi xuống sidecar ở `render_device`.
+     * `renderCache` (mục 1.13): dùng lại batch hình đã render ở lượt xuất trước khi nội dung không
+     * đổi — ra đúng từng khung như render lại, nên bật sẵn. Backend bỏ thư mục cache khi tắt. */
+    const RENDER_DEVICES = ['gpu', 'cpu'];
+    const DEFAULT_EXPORT = { renderDevice: 'gpu', renderCache: true };
 
     const DEFAULTS = {
         version: SCHEMA_VERSION,
@@ -192,6 +200,7 @@
         autoSave: DEFAULT_AUTO_SAVE,
         general: DEFAULT_GENERAL,
         preview: DEFAULT_PREVIEW,
+        export: DEFAULT_EXPORT,
         // Thư viện rỗng lúc đầu: hiệu ứng dựng sẵn nằm trong engine, đây chỉ chứa phần
         // người dùng tự lưu.
         textEffects: [],
@@ -509,6 +518,14 @@
         };
     }
 
+    function normalizeExport(raw) {
+        const s = raw && typeof raw === 'object' ? raw : {};
+        return {
+            renderDevice: RENDER_DEVICES.includes(s.renderDevice) ? s.renderDevice : DEFAULT_EXPORT.renderDevice,
+            renderCache: typeof s.renderCache === 'boolean' ? s.renderCache : DEFAULT_EXPORT.renderCache,
+        };
+    }
+
     /**
      * Chuẩn hoá TOÀN BỘ object cài đặt. Đầu vào rỗng/hỏng/thiếu khoá đều ra một object
      * hợp lệ. Idempotent: normalize(normalize(x)) sâu-bằng normalize(x).
@@ -568,6 +585,7 @@
             autoSave: normalizeAutoSave(src.autoSave),
             general: normalizeGeneral(src.general),
             preview: normalizePreview(src.preview),
+            export: normalizeExport(src.export),
             textEffects: normalizeTextEffects(src.textEffects),
         };
     }
@@ -640,6 +658,7 @@
         FIT_VALUES,
         PREVIEW_QUALITY,
         TRANSITION_QUALITY,
+        RENDER_DEVICES,
         LANGUAGES,
         DEFAULTS,
         defaults,

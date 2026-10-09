@@ -76,9 +76,23 @@ const LUT_DIR = path.join(LIBRARY_DIR, 'luts');
 // .cube do frontend BAKE (HSL 8 dải ∘ LUT người dùng) cho từng block khi export.
 // Nằm trong temp_uploads vì là dữ liệu của một lần xuất, không phải tài sản dự án.
 const COLOR_LUT_BAKE_DIR = path.join(TEMP_DIR, 'color_luts');
-// Cache landmark khuôn mặt cho Retouch (xem retouchCachePath). Đặt trong TEMP_DIR nên
-// được dọn cùng dữ liệu tạm của dự án.
-const RETOUCH_CACHE_DIR = path.join(TEMP_DIR, 'retouch_faces');
+/* Cache landmark khuôn mặt cho Retouch (xem retouchCachePath). Trước 2026-10-03 nằm trong TEMP_DIR: mở lại dự
+ * án là mất, lượt xuất/preview đầu tiên sau đó bám lại khuôn mặt — "Yêu Con" (6 block Retouch) 11,2 s mỗi lần.
+ * Nay đặt ngoài temp_uploads như peaks_cache/proxy_cache: khoá gồm đường dẫn + size + mtime của nguồn, mà
+ * temp_input.mp4 khôi phục từ cache nối bằng liên kết cứng nên giữ nguyên mtime. Dọn mục quá 30 ngày lúc khởi
+ * động (pruneRetouchCache), dọn tay ở Cài đặt › Bộ nhớ đệm. CRAB_RETOUCH_CACHE_DIR chỉ cho TEST; test đặt
+ * CRAB_TEMP_DIR mà không đặt biến này thì cache ở lại trong TEMP_DIR như cũ (mỗi lượt test bám lại thật). */
+const RETOUCH_CACHE_DIR = process.env.CRAB_RETOUCH_CACHE_DIR
+  ? path.resolve(process.env.CRAB_RETOUCH_CACHE_DIR)
+  : (process.env.CRAB_TEMP_DIR ? path.join(TEMP_DIR, 'retouch_faces') : path.join(USER_DATA_ROOT, 'retouch_cache'));
+const RETOUCH_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/* XOÁ LOGO BẰNG AI: miếng vá theo từng khung (xem backend/logo-ai.js). Đặt NGOÀI temp_uploads
+ * như proxy_cache: một lượt AI tốn vài phút, asset thư viện dùng lại qua nhiều dự án không được
+ * bắt chạy lại. Khoá gồm mtime+size của nguồn nên nguồn đổi là tự ra khoá mới; khoá lâu không
+ * dùng được dọn theo hạn (logoAi.pruneCache). */
+const LOGO_AI_CACHE_DIR = process.env.CRAB_LOGO_AI_CACHE_DIR
+  ? path.resolve(process.env.CRAB_LOGO_AI_CACHE_DIR)
+  : path.join(USER_DATA_ROOT, 'logo_ai_cache');
 // Mặt nạ (ảnh xám PNG) do frontend bake cho panel Điều chỉnh, dùng ở khâu export.
 const COLOR_MASK_DIR = path.join(TEMP_DIR, 'color_masks');
 // Chỗ trống của lut3d trong chuỗi filter màu (PHẢI khớp ColorAdjust.LUT3D_SLOT). Frontend
@@ -122,6 +136,39 @@ const CONCAT_CACHE_DIR = process.env.CRAB_CONCAT_CACHE_DIR
  * điểm nối, cả khi xuất lẫn khi xem trước. Dùng lại là bản sửa không có tác dụng. */
 const CONCAT_CACHE_VERSION = 5;
 const CONCAT_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/* BẢN HẠ SDR CỦA VIDEO HDR (mục 1.15 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md, người dùng chốt
+ * 2026-09-29) — xem ensureSdrAsset. Cùng lý do đặt ngoài temp_uploads như các cache trên: bản
+ * trong temp_uploads mất ở mỗi lần mở dự án, và hạ SDR lại một file 270 s là 72,5 s (Bin Tom).
+ * CRAB_SDR_CACHE_DIR chỉ dùng cho TEST (như CRAB_CONCAT_CACHE_DIR). Mỗi mục cỡ bằng video gốc
+ * nên có TRẦN dung lượng ngoài hạn dùng: vượt trần thì bỏ mục lâu không dùng nhất trước. */
+const SDR_CACHE_DIR = process.env.CRAB_SDR_CACHE_DIR
+  ? path.resolve(process.env.CRAB_SDR_CACHE_DIR)
+  : path.join(USER_DATA_ROOT, 'sdr_cache');
+const SDR_CACHE_VERSION = 1;   // tăng khi ĐỔI chuỗi tonemap/mã hoá bản SDR -> khoá cũ hết hiệu lực
+const SDR_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const SDR_CACHE_MAX_BYTES = 20 * 1024 * 1024 * 1024;
+/* BỘ NHỚ ĐỆM RENDER CHO LƯỢT XUẤT LẠI (mục 1.13 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md) — kiểu
+ * "Use Previews" của Premiere: batch hình của lượt xuất trước được dùng lại khi khoá trùng (sidecar
+ * tính khoá theo nội dung, xem RenderCacheKey trong core_process.cpp), nên chỉ đoạn đã đổi phải render
+ * lại. Cùng ổ với temp_uploads (cùng USER_DATA_ROOT) để sidecar cất batch bằng đổi tên. Sidecar tự dọn
+ * theo trần + hạn 30 ngày; Cài đặt › Bộ nhớ đệm dọn tay.
+ * CRAB_RENDER_CACHE_DIR chỉ dùng cho TEST. Test đặt CRAB_TEMP_DIR mà không đặt biến này thì cache TẮT:
+ * lượt xuất của test phải render thật (đo thời gian, kiểm đường lùi GPU/CPU), không lấy batch của lần
+ * chạy trước. */
+const RENDER_CACHE_DIR = process.env.CRAB_RENDER_CACHE_DIR
+  ? path.resolve(process.env.CRAB_RENDER_CACHE_DIR)
+  : path.join(USER_DATA_ROOT, 'render_cache');
+const RENDER_CACHE_ALLOWED = Boolean(process.env.CRAB_RENDER_CACHE_DIR) || !process.env.CRAB_TEMP_DIR;
+const RENDER_CACHE_MAX_BYTES = 20 * 1024 * 1024 * 1024;
+/* KHUNG VẼ TRƯỚC (miếng vá Retouch, chuỗi khung chữ/ảnh động) cho lượt xuất lại — xem
+ * backend/prebake-cache.js. Đi chung công tắc + nút dọn với cache render; cùng quy tắc test:
+ * CRAB_TEMP_DIR mà không đặt CRAB_PREBAKE_CACHE_DIR thì TẮT (test phải dựng khung thật). */
+const PREBAKE_CACHE_DIR = process.env.CRAB_PREBAKE_CACHE_DIR
+  ? path.resolve(process.env.CRAB_PREBAKE_CACHE_DIR)
+  : path.join(USER_DATA_ROOT, 'prebake_cache');
+const PREBAKE_CACHE_ALLOWED = Boolean(process.env.CRAB_PREBAKE_CACHE_DIR) || !process.env.CRAB_TEMP_DIR;
+const PREBAKE_CACHE_MAX_BYTES = 10 * 1024 * 1024 * 1024;
+const PREBAKE_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const LIBRARY_CATEGORIES = { video: 'Video', elements: 'Elements', sfxs: 'SFXs', music: 'Music' };
 // Cài đặt ứng dụng (bảng Cài đặt trong Menu). Đặt ở gốc dự án — KHÔNG phải dữ liệu runtime
 // như temp_uploads/peaks_cache — để cấu hình đi theo thư mục dự án và sao lưu được.
@@ -341,6 +388,21 @@ const subtitleJobs = require('./subtitle-jobs.js');
 /* LỒNG TIẾNG (tab Âm thanh) + SỔ TẢI MODEL AI cho thanh trạng thái — xem đầu hai tệp. */
 const ttsService = require('./tts-service.js');
 const modelDownloads = require('./model-downloads.js');
+const { createLogoAi } = require('./logo-ai.js');
+const { createRetouchFramesHandler } = require('./retouch-frames.js');
+const { createPrebakeCache } = require('./prebake-cache.js');
+// Hàm khai báo (readAppSettings, resolveRetouchSource, logStatus) được hoist nên gọi lười ở đây được.
+const prebakeCache = createPrebakeCache({
+  dir: PREBAKE_CACHE_DIR,
+  allowed: PREBAKE_CACHE_ALLOWED,
+  enabled: () => Boolean(readAppSettings().export.renderCache),
+  resolveSource: (raw) => resolveRetouchSource(raw),
+  // Khung nguồn của miếng vá do ffmpeg giải mã + co (retouch-frames.js): đổi bản ffmpeg là đổi khung.
+  salt: () => commandText('ffmpeg', ['-hide_banner', '-version']).split(/\r?\n/)[0] || 'ffmpeg?',
+  ttlMs: PREBAKE_CACHE_TTL_MS,
+  maxBytes: PREBAKE_CACHE_MAX_BYTES,
+  log: (line) => logStatus(line),
+});
 /* PYTHON SIDECAR: cùng lý do — phép chọn interpreter và env UTF-8 nằm ở MỘT chỗ
  * (scripts/python_command.js), dùng chung với npm script lẫn test. Trước đây mỗi
  * chỗ tự chép một bản và mỗi bản thiếu một mảnh khác nhau. */
@@ -476,6 +538,18 @@ function dirUsage(dir) {
   walk(dir);
   // KHÔNG dùng formatBytes(): hàm đó chỉ hiển thị GB trở lên (dành cho dung lượng video
   // nguồn), nên cache 17 MB sẽ hiện "0.0 GB". Ở đây cần thang đủ từ KB.
+  return { bytes, files, human: humanBytes(bytes) };
+}
+
+// Dung lượng một mục ở Cài đặt › Bộ nhớ đệm: thư mục chính + `extraDirs` (dọn chung một nút).
+function targetUsage(target) {
+  let bytes = 0;
+  let files = 0;
+  [target.dir, ...(target.extraDirs || [])].forEach((dir) => {
+    const u = dirUsage(dir);
+    bytes += u.bytes;
+    files += u.files;
+  });
   return { bytes, files, human: humanBytes(bytes) };
 }
 
@@ -845,6 +919,64 @@ function mediaVideoInfo(filePath) {
   } catch (_) {
     return { width: null, height: null, fps: null, fps_value: null };
   }
+}
+
+/* Đặc tính của `temp_input.mp4` cho báo cáo export (Bước 0.1, KE_HOACH_TOI_UU_EXPORT_WIN.md):
+ * thời gian export phụ thuộc trước hết vào việc giải mã CÁI GÌ — H.264 8-bit đã chuẩn hoá
+ * (~600 khung/s ở 1080p) khác xa AV1 4K được `-c copy` (~238 khung/s, ăn ~12 lõi). Không có
+ * mấy dòng này thì hai báo cáo "chậm" không so được với nhau. */
+function exportSourceSummary(filePath) {
+  const text = commandText('ffprobe', [
+    '-v', 'error',
+    '-select_streams', 'v:0',
+    '-show_entries', 'stream=codec_name,profile,pix_fmt,width,height,avg_frame_rate,nb_frames,color_transfer:stream_tags=rotate:stream_side_data=rotation',
+    '-of', 'json',
+    filePath,
+  ], 5000);
+  try {
+    const stream = (JSON.parse(text || '{}').streams || [])[0] || {};
+    let rotation = parseFfprobeRotation(stream?.tags?.rotate);
+    if (rotation === null) {
+      for (const sideData of (stream?.side_data_list || [])) {
+        rotation = parseFfprobeRotation(sideData?.rotation);
+        if (rotation !== null) break;
+      }
+    }
+    return {
+      codec: [stream.codec_name, stream.profile].filter(Boolean).join(' ') || null,
+      pix_fmt: stream.pix_fmt || null,
+      size: stream.width && stream.height ? `${stream.width}x${stream.height}` : null,
+      fps: parseFfprobeRate(stream.avg_frame_rate)?.text || null,
+      frames: Number(stream.nb_frames) || null,
+      rotation: rotation || 0,
+      color_transfer: stream.color_transfer || null,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+/* GHI LẠI NGUYÊN PAYLOAD CỦA MỘT LƯỢT XUẤT (Bước 0.2, chỉ dành cho dev): bật bằng
+ * `CRABBYCUT_EXPORT_CAPTURE_DIR=<thư mục>`. tests/scripts/bench_export.js vẽ trước MỘT lần
+ * trong Electron thật, rồi phát lại đúng FormData này nhiều lượt để đo phần server/ffmpeg —
+ * không phải bake lại hàng nghìn PNG chữ cho mỗi lượt. Khung chuyển cảnh phải CHÉP ngay ở
+ * đầu handler: normalizeEditingPayload sẽ rename chúng đi chỗ khác. */
+function captureExportRequest(req, dir) {
+  const framesDir = path.join(dir, 'frames');
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(framesDir, { recursive: true });
+  const fields = {};
+  for (const [key, value] of Object.entries(req.body || {})) {
+    if (typeof value === 'string') fields[key] = value;
+  }
+  const files = [];
+  for (const file of Array.isArray(req.files) ? req.files : []) {
+    const localName = `${files.length}_${path.basename(String(file.originalname || 'frame'))}`;
+    fs.copyFileSync(file.path, path.join(framesDir, localName));
+    files.push({ field: file.fieldname, originalname: file.originalname, mimetype: file.mimetype, file: localName });
+  }
+  fs.writeFileSync(path.join(dir, 'form.json'),
+    JSON.stringify({ captured_at: new Date().toISOString(), fields, files }), 'utf8');
 }
 
 function mediaHasAudio(filePath) {
@@ -1389,11 +1521,66 @@ async function writeProjectReport(reason) {
   lines.push(reportLine(2, 'fps', render?.fps));
   lines.push(reportLine(2, 'codec', render?.codec));
   lines.push(reportLine(2, 'quality', render?.quality));
+  lines.push(reportLine(2, 'bitrate', render?.rate_mode
+    ? (render.rate_mode === 'custom' ? `custom ${render.rate_mbps} Mbps` : render.rate_mode) : null));
   lines.push(reportLine(2, 'encoder', render?.encoder));
   lines.push(reportLine(2, 'audio_bitrate', render?.audio_bitrate));
   lines.push(reportLine(2, 'interval_count', render?.interval_count));
+  lines.push(reportLine(2, 'overlay_count', render?.overlay_count));
+  const renderSeq = render?.sequence;
+  lines.push(reportLine(2, 'sequence', renderSeq?.width && renderSeq?.height
+    ? `${renderSeq.width}x${renderSeq.height} @ ${render?.render_fps || renderSeq.fps || '?'} fps` : null));
+  // Cỡ bản xuất khi khác cỡ sequence (ô "Độ phân giải", mục 1.12); phần hình nhỏ hơn = có viền đen.
+  lines.push(reportLine(2, 'output_size', render?.output_width && render?.output_height
+    ? `${render.output_width}x${render.output_height} (${render.output_preset}; hình ${render.output_content_width}x${render.output_content_height})`
+    : null));
+  lines.push(reportLine(2, 'timeline_duration_sec', render?.timeline_duration_sec));
+  lines.push(reportLine(2, 'output_duration_sec', render?.output_duration_sec));
+  // Nguồn mà ffmpeg phải GIẢI MÃ (temp_input.mp4), không phải file người dùng thêm vào.
+  const renderSource = render?.source;
+  lines.push(reportLine(2, 'source_codec', renderSource?.codec));
+  lines.push(reportLine(2, 'source_format', renderSource
+    ? `${renderSource.size || '?'} ${renderSource.pix_fmt || '?'} ${renderSource.fps || '?'} fps rotate=${renderSource.rotation}${renderSource.color_transfer ? ` trc=${renderSource.color_transfer}` : ''}`
+    : null));
   lines.push(reportLine(2, 'duration_ms', render?.duration_ms));
   lines.push(reportLine(2, 'duration_human', formatDuration(render?.duration_ms)));
+  /* TÁCH THEO KHÂU (Bước 0.1, KE_HOACH_TOI_UU_EXPORT_WIN.md). `duration_ms` ở trên tính từ lúc
+   * trình duyệt BẮT ĐẦU tải lên, nên KHÔNG gồm bước vẽ trước (chữ, chuyển cảnh, retouch) —
+   * phần đó nằm ở `client_prebake_ms`. Bước tải về xảy ra sau khi báo cáo được ghi nên không
+   * có ở đây; bench:export đo nó phía trình duyệt. */
+  const clientTiming = render?.client_timing;
+  lines.push(reportLine(2, 'client_prebake_ms', clientTiming?.prebake_ms));
+  lines.push(reportLine(2, 'client_prebake_detail', clientTiming?.prebake));
+  const serverTiming = render?.server_timing;
+  lines.push(reportLine(2, 'upload_ms', serverTiming?.upload_ms));
+  lines.push(reportLine(2, 'sdr_overrides_ms', serverTiming?.sdr_overrides_ms));
+  lines.push(reportLine(2, 'normalize_ms', serverTiming?.normalize_ms));
+  lines.push(reportLine(2, 'prepare_ms', serverTiming?.prepare_ms));
+  lines.push(reportLine(2, 'sidecar_ms', serverTiming?.sidecar_ms));
+  lines.push(reportLine(2, 'verify_ms', serverTiming?.verify_ms));
+  const sidecarTiming = render?.sidecar_timing;
+  // Cỡ khung mà đồ thị dựng: khác `sequence` khi xuất nhỏ hơn sequence (mục 1.12 pha 2).
+  lines.push(reportLine(2, 'graph_size', sidecarTiming?.graph_size || null));
+  // Thiết bị render thật của lượt xuất (mục 1.21): "gpu" khi ít nhất một batch đi đồ thị GPU.
+  lines.push(reportLine(2, 'render_device', sidecarTiming?.render
+    ? `${sidecarTiming.render}${render?.render_device ? ` (cài đặt: ${render.render_device})` : ''}` : null));
+  lines.push(reportLine(2, 'sidecar_probe_ms', sidecarTiming?.probe_ms));
+  lines.push(reportLine(2, 'sidecar_plan_ms', sidecarTiming?.plan_ms));
+  lines.push(reportLine(2, 'sidecar_concat_ms', sidecarTiming?.concat_ms));
+  // Cache render (mục 1.13): batch dùng lại ghi ` cache` ở dòng của nó; đây là số batch mới cất vào.
+  lines.push(reportLine(2, 'render_cache_stored', sidecarTiming ? (sidecarTiming.cache_stored ?? null) : null));
+  const sidecarRuns = Array.isArray(sidecarTiming?.runs) ? sidecarTiming.runs : [];
+  lines.push(reportLine(2, 'ffmpeg_run_count', sidecarTiming ? sidecarRuns.length : null));
+  for (const run of sidecarRuns) {
+    /* `source_to` = lượt này giải mã nguồn tới đâu: từ `seek` (seek theo batch, mục 1.1) hoặc
+     * từ giây 0 nếu không seek — khi đó batch càng về sau càng đắt dù cùng độ dài. */
+    lines.push(reportLine(3, run.label,
+      `${run.mode} run_ms=${run.run_ms} intervals=${run.intervals} overlays=${run.overlays} `
+      + `seq_sec=${run.sequence_duration} source=${run.source_from}..${run.source_to}`
+      + `${run.seek_to ? ` seek=${run.seek_to}` : ''}`
+      + `${run.cache_hit ? ' cache' : ''}${run.gpu ? ' gpu' : ''}${run.gpu_fallback ? ' gpu_fallback' : ''}`
+      + `${run.cpu_retry ? ' cpu_retry' : ''}${run.exit ? ` exit=${run.exit}` : ''}`));
+  }
   lines.push(reportLine(2, 'output_path', render?.output_path));
   lines.push(reportEndTag(1, 'EXPORT'));
   lines.push('');
@@ -2345,7 +2532,7 @@ async function ensureSdrAsset(filePath, { label = '' } = {}) {
   if (!sourceIsHdr(resolved)) return { path: resolved, tonemapped: false };
   let stat;
   try { stat = fs.statSync(resolved); } catch (_) { return { path: resolved, tonemapped: false }; }
-  const key = sha1Text(`${resolved}|${stat.size}|${stat.mtimeMs}`).slice(0, 24);
+  const key = sha1Text(`v${SDR_CACHE_VERSION}|${resolved}|${stat.size}|${stat.mtimeMs}`).slice(0, 24);
   const dir = path.join(EDITING_ASSET_DIR, 'sdr', key);
   fs.mkdirSync(dir, { recursive: true });
   const base = path.basename(resolved, path.extname(resolved));
@@ -2353,12 +2540,21 @@ async function ensureSdrAsset(filePath, { label = '' } = {}) {
   if (fs.existsSync(output) && fs.statSync(output).size > 0) {
     return { path: output, tonemapped: true, reused: true };
   }
+  // Mở lại dự án: bản SDR đã có trong cache lâu dài -> liên kết vào editing_assets, không mã hoá lại.
+  if (sdrCacheRestore(key, base, output)) {
+    return { path: output, tonemapped: true, reused: true, cached: true };
+  }
   /* MỘT lượt dựng cho mỗi file, dù có bao nhiêu bên hỏi cùng lúc. Bấm Xuất trong khi preview
    * đang dựng cùng asset đó là hai tiến trình ffmpeg ghi vào ĐÚNG một đường dẫn — file ra hỏng
    * mà không bên nào báo lỗi. Bên đến sau chờ chung kết quả của bên đầu. */
   const inflight = sdrAssetInflight.get(output);
   if (inflight) return inflight;
-  const job = buildSdrAsset(resolved, output, label);
+  // Bản hỏng (0 byte) có thể là liên kết cứng tới cache: gỡ liên kết trước, đừng để ffmpeg ghi đè tại chỗ.
+  fs.rmSync(output, { force: true });
+  const job = buildSdrAsset(resolved, output, label).then((result) => {
+    if (result.tonemapped && !result.reused) sdrCacheStore(key, base, output);
+    return result;
+  });
   sdrAssetInflight.set(output, job);
   try {
     return await job;
@@ -2368,6 +2564,93 @@ async function ensureSdrAsset(filePath, { label = '' } = {}) {
 }
 
 const sdrAssetInflight = new Map();
+
+/* ---- CACHE LÂU DÀI CỦA BẢN SDR (SDR_CACHE_DIR, mục 1.15) ----
+ * Bản dùng thật vẫn phải nằm DƯỚI editing_assets/ (xem khối chú thích của ensureSdrAsset); cache
+ * chỉ là chỗ nó sống sót qua /api/reset-project. Hai bên là LIÊN KẾT CỨNG của cùng một file khi
+ * chung ổ (không tốn thêm đĩa, không chép), khác ổ thì chép. Vì là cùng một file nên KHÔNG BÊN
+ * NÀO ĐƯỢC GHI ĐÈ TẠI CHỖ — ensureSdrAsset chỉ dựng vào đường dẫn chưa có file.
+ * Lần dùng gần nhất ghi vào tệp `last_used` trong thư mục khoá, KHÔNG chạm mtime của video: sóng
+ * âm/proxy khoá theo (path|size|mtime), đổi mtime là trượt sạch cache của chúng. */
+function sdrCacheEntry(key, base) {
+  return path.join(SDR_CACHE_DIR, key, `${base}.mp4`);
+}
+
+function linkOrCopyFile(src, dst) {
+  try {
+    fs.linkSync(src, dst);
+    return 'link';
+  } catch (_) {
+    fs.copyFileSync(src, dst);
+    return 'copy';
+  }
+}
+
+function markSdrCacheUsed(key) {
+  try { fs.writeFileSync(path.join(SDR_CACHE_DIR, key, 'last_used'), String(Date.now()), 'utf8'); } catch (_) { /* chỉ mất thứ tự LRU */ }
+}
+
+function sdrCacheRestore(key, base, output) {
+  const entry = sdrCacheEntry(key, base);
+  try {
+    if (!fs.existsSync(entry) || fs.statSync(entry).size <= 0) return false;
+    fs.rmSync(output, { force: true });
+    linkOrCopyFile(entry, output);
+    markSdrCacheUsed(key);
+    return true;
+  } catch (error) {
+    console.log(`[sdr-cache] không lấy được bản trong cache: ${error?.message || error}`);
+    return false;
+  }
+}
+
+function sdrCacheStore(key, base, output) {
+  try {
+    const entry = sdrCacheEntry(key, base);
+    fs.mkdirSync(path.dirname(entry), { recursive: true });
+    fs.rmSync(entry, { force: true });
+    linkOrCopyFile(output, entry);
+    markSdrCacheUsed(key);
+    pruneSdrCache();
+  } catch (error) {
+    console.log(`[sdr-cache] không ghi được cache: ${error?.message || error}`);
+  }
+}
+
+/* Dọn: mục quá hạn dùng, mục rỗng, rồi nếu tổng vượt trần thì bỏ mục lâu không dùng nhất trước.
+ * Mỗi mục một try riêng: trên Windows, file đang được ffmpeg/preview đọc thì xoá ném EBUSY —
+ * bỏ qua mục đó, lượt dọn sau sẽ lấy. */
+function pruneSdrCache({ maxBytes = SDR_CACHE_MAX_BYTES, ttlMs = SDR_CACHE_TTL_MS } = {}) {
+  let keys = [];
+  try { keys = fs.readdirSync(SDR_CACHE_DIR); } catch (_) { return; }
+  const now = Date.now();
+  const entries = [];
+  for (const key of keys) {
+    const dir = path.join(SDR_CACHE_DIR, key);
+    try {
+      const st = fs.statSync(dir);
+      if (!st.isDirectory()) { fs.rmSync(dir, { force: true }); continue; }
+      let used = st.mtimeMs;
+      try { used = fs.statSync(path.join(dir, 'last_used')).mtimeMs; } catch (_) { /* thiếu -> theo thư mục */ }
+      let bytes = 0;
+      let videos = 0;
+      for (const name of fs.readdirSync(dir)) {
+        if (!name.endsWith('.mp4')) continue;
+        videos += 1;
+        bytes += fs.statSync(path.join(dir, name)).size;
+      }
+      if (!videos || now - used > ttlMs) { fs.rmSync(dir, { recursive: true, force: true }); continue; }
+      entries.push({ dir, used, bytes });
+    } catch (_) { /* bỏ qua mục này */ }
+  }
+  entries.sort((a, b) => b.used - a.used);
+  let total = 0;
+  for (const entry of entries) {
+    total += entry.bytes;
+    if (total <= maxBytes) continue;
+    try { fs.rmSync(entry.dir, { recursive: true, force: true }); } catch (_) { /* bỏ qua */ }
+  }
+}
 
 async function buildSdrAsset(resolved, output, label) {
   const name = label || path.basename(resolved);
@@ -2409,12 +2692,23 @@ async function buildSdrAsset(resolved, output, label) {
  * Vì sao vẫn cần dù preview đã đổi sang bản SDR: dự án mở lại từ .crab mang theo `path` đã lưu
  * (trỏ file HDR gốc), và người dùng có thể bấm Xuất mà chưa hề chạm vào block overlay nào —
  * lúc đó không có gì kích hoạt đường preview. File giao khách thì không được phép sai màu, nên
- * chốt lại ở đây. Asset đã có bản SDR từ trước thì bước này chỉ là một lần tra đĩa. */
+ * chốt lại ở đây. Asset đã có bản SDR từ trước thì bước này chỉ là một lần tra đĩa.
+ *
+ * CHỈ ASSET CÓ ITEM TRỎ TỚI (mục 1.15, KE_HOACH_TOI_UU_EXPORT_WIN.md). `assets` là cả THƯ VIỆN
+ * của dự án, gồm cả video nguồn lane chính mà dự án tự đăng ký làm asset "liên kết". Đo
+ * 2026-09-28 trên "Bin Tom - Tap 3": thư viện 13 asset, item chỉ dùng 3, vậy mà lượt xuất đầu
+ * mã hoá lại trọn `IMG_0827.MOV` (HEVC 10-bit HLG, 270 s) mất 72,5 s trong tổng 129 s — cho một
+ * file không lớp phủ nào đọc. Bản SDR của asset được dùng thì nay sống qua các lần mở dự án nhờ
+ * SDR_CACHE_DIR (xem sdrCacheRestore). */
 async function sdrOverridesForEditingAssets(rawEditing) {
   const overrides = new Map();
   const raw = parseOptionalJsonObject(rawEditing);
   const assets = Array.isArray(raw.assets) ? raw.assets : [];
+  const usedAssetIds = new Set((Array.isArray(raw.items) ? raw.items : [])
+    .map((item) => String(item?.asset_id || ''))
+    .filter(Boolean));
   for (const asset of assets) {
+    if (!usedAssetIds.has(String(asset?.id || ''))) continue;
     const assetPath = String(asset?.path || '');
     if (!assetPath) continue;
     if (editingAssetKindForPath(assetPath) !== 'media_video') continue;
@@ -3083,6 +3377,19 @@ function prewarmAudioPeaksForAssets(assets) {
     if (asset.type === 'media_image') continue;
     queueAudioPeaks(asset.path);
   }
+}
+
+// Dọn landmark Retouch quá hạn lúc khởi động (cache dẫn xuất, mất là bám lại được). mtime = lần dùng cuối.
+function pruneRetouchCache() {
+  try {
+    if (!fs.existsSync(RETOUCH_CACHE_DIR)) return;
+    const now = Date.now();
+    for (const name of fs.readdirSync(RETOUCH_CACHE_DIR)) {
+      if (!/^face_[0-9a-f]+\.json$/.test(name)) continue;
+      const item = path.join(RETOUCH_CACHE_DIR, name);
+      if ((now - fs.statSync(item).mtimeMs) > RETOUCH_CACHE_TTL_MS) fs.rmSync(item, { force: true });
+    }
+  } catch (_) { /* cache dọn được thì tốt, không thì bỏ qua */ }
 }
 
 // Dọn peak cũ lúc khởi động (cache dẫn xuất, mất là sinh lại được).
@@ -3881,7 +4188,8 @@ function normalizeMagicFillIntervals(raw) {
 
 async function extractMagicFillAudio(sourceVideoPath, intervals, outputPath) {
   // atrim từng khoảng rồi concat. Filter dài (timeline nhiều clip) nên ghi ra
-  // file và dùng -filter_complex_script để không vượt giới hạn độ dài đối số.
+  // file và dùng -/filter_complex <file> để không vượt giới hạn độ dài đối số
+  // (-filter_complex_script đã bị xoá khỏi FFmpeg master/9.0).
   const parts = intervals.map((iv, idx) => (
     `[0:a]atrim=start=${iv.start.toFixed(3)}:end=${iv.end.toFixed(3)},asetpts=PTS-STARTPTS[a${idx}]`
   ));
@@ -3894,7 +4202,7 @@ async function extractMagicFillAudio(sourceVideoPath, intervals, outputPath) {
     '-hide_banner',
     '-v', 'error',
     '-i', sourceVideoPath,
-    '-filter_complex_script', filterPath,
+    '-/filter_complex', filterPath,
     '-map', '[out]',
     '-ac', '1',
     '-ar', '16000',
@@ -4389,6 +4697,32 @@ function resolveRetouchSource(raw) {
   return resolved;
 }
 
+/* Model MI-GAN nằm cạnh runtime (%LOCALAPPDATA%\CrabbyCut\models) ở CẢ HAI đường chạy: tải một
+ * lần cho mọi dự án, và chạy từ mã nguồn cũng không làm bẩn thư mục repo bằng 28 MB nhị phân. */
+function logoAiModelDir() {
+  if (process.env.CRAB_LOGO_AI_MODEL_DIR) return path.resolve(process.env.CRAB_LOGO_AI_MODEL_DIR);
+  try {
+    const RuntimePaths = require(path.join(PROJECT_ROOT, 'scripts', 'runtime_paths.js'));
+    return path.join(RuntimePaths.appDataRoot(), 'models', 'logo_ai');
+  } catch (_) {
+    return path.join(USER_DATA_ROOT, 'models', 'logo_ai');
+  }
+}
+
+const logoAi = createLogoAi({
+  cacheDir: LOGO_AI_CACHE_DIR,
+  modelDir: logoAiModelDir(),
+  scriptPath: path.join(PROJECT_ROOT, 'asr', 'logo_inpaint_sidecar.py'),
+  runSidecar: (...args) => runPythonSidecar(...args),
+  resolveSource: resolveRetouchSource,
+  tempJsonPath,
+  setStatus: (message) => setStatus(message),
+  logStatus: (message) => logStatus(message),
+  t: (text, params) => _t(text, params),
+});
+// Dọn khoá quá hạn một lần sau khi khởi động — không chặn lúc mở app, không giữ tiến trình sống.
+setTimeout(() => { logoAi.pruneCache().catch(() => {}); }, 60000).unref();
+
 function retouchCachePath(videoPath, clips, options) {
   let stamp = '';
   try {
@@ -4432,7 +4766,7 @@ async function runAutoReframeAnalysis({ videoPath, clips, mode, options }) {
 }
 
 const EXPORT_RESOLUTIONS = {
-  source: { width: null, height: null, label: 'Giữ kích thước nguồn' },
+  source: { width: null, height: null, label: 'Theo Sequence' },
   p720: { width: 1280, height: 720, label: 'HD 720p' },
   p1080: { width: 1920, height: 1080, label: 'Full HD 1080p' },
   p1440: { width: 2560, height: 1440, label: 'QHD 1440p' },
@@ -4453,8 +4787,55 @@ const EXPORT_RESOLUTIONS = {
  * người dùng đang thấy "59.94 fps" trên thanh điều khiển. Không một dòng lỗi nào.
  * Hai danh sách lệch nhau là lỗi im lặng -> giữ chúng bằng nhau. */
 const EXPORT_FPS_VALUES = new Set(['source', '23.976', '24', '25', '29.97', '30', '50', '59.94', '60']);
+
+/* CỠ BẢN XUẤT THEO Ô "ĐỘ PHÂN GIẢI" (mục 1.12). Trước đây ô này vô tác dụng: sequence luôn đè.
+ * Phần hình cỡ `output_content_*` = khung sequence co đều theo `output_scale`, đệm đen cho đủ
+ * `output_*`. Phóng to: sidecar dựng đồ thị ở cỡ sequence rồi co ở đuôi (pha 1, OutputColorFilters);
+ * co nhỏ: dựng thẳng ở cỡ phần hình (pha 2, ApplyOutputScaleToPayload — bật mặc định 2026-10-02).
+ *   'fit'   — như Premiere (Scale To Fit): đúng cỡ preset, hình co vừa, khổ lệch thì có viền đen;
+ *   'short' — như CapCut: giữ khổ sequence, preset chỉ quy định cạnh ngắn, không viền.
+ * Trả null = xuất đúng cỡ sequence ('source', 'custom', hoặc preset trùng cỡ sequence).
+ * Người dùng chốt 2026-09-30: làm như Premiere ('fit'); 'short' giữ lại phòng khi thêm lựa chọn. */
+const EXPORT_SCALE_MODE = 'fit';
+
+function exportOutputFrame(sequenceWidth, sequenceHeight, preset, mode = EXPORT_SCALE_MODE) {
+  const target = EXPORT_RESOLUTIONS[String(preset || '').trim().toLowerCase()];
+  const sw = Number(sequenceWidth);
+  const sh = Number(sequenceHeight);
+  if (!target || !target.width || !target.height || !(sw > 0) || !(sh > 0)) return null;
+  const even = (v) => Math.max(16, 2 * Math.round(v / 2));
+  let frame;
+  if (mode === 'short') {
+    const s = Math.min(target.width, target.height) / Math.min(sw, sh);
+    const w = Math.min(7680, even(sw * s));
+    const h = Math.min(7680, even(sh * s));
+    frame = { output_width: w, output_height: h, output_content_width: w, output_content_height: h, output_scale: s };
+  } else {
+    const s = Math.min(target.width / sw, target.height / sh);
+    frame = {
+      output_width: target.width,
+      output_height: target.height,
+      output_content_width: Math.min(target.width, even(sw * s)),
+      output_content_height: Math.min(target.height, even(sh * s)),
+      output_scale: s,
+    };
+  }
+  if (frame.output_width === sw && frame.output_height === sh
+      && frame.output_content_width === sw && frame.output_content_height === sh) return null;
+  return frame;
+}
 const EXPORT_CODEC_VALUES = new Set(['h264', 'hevc', 'prores']);
 const EXPORT_QUALITY_VALUES = new Set(['small', 'balanced', 'high']);
+/* Ô "Bitrate" kiểu CapCut (mục 1.20 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md, người dùng chốt
+ * 2026-10-01) thay ô "Chất lượng": ba mức là CHẤT LƯỢNG CỐ ĐỊNH có trần, "custom" là bitrate trung
+ * bình người dùng nhập (Mbps). Cùng dải với kRateMbpsMin/Max của sidecar. */
+const EXPORT_RATE_MODES = new Set(['lower', 'recommended', 'higher', 'custom']);
+const EXPORT_RATE_MBPS_MIN = 0.5;
+const EXPORT_RATE_MBPS_MAX = 400;
+// Payload/khách cũ chỉ gửi `quality`: Cao -> Khuyến nghị, Cân bằng / Tệp nhỏ -> Thấp hơn.
+const RATE_MODE_FROM_QUALITY = { high: 'recommended', balanced: 'lower', small: 'lower' };
+// Chiều ngược lại cho `quality` (preset CPU, báo cáo): Thấp hơn là Cân bằng cũ.
+const QUALITY_FROM_RATE_MODE = { lower: 'balanced', recommended: 'high', higher: 'high', custom: 'high' };
 const EXPORT_AUDIO_VALUES = new Set(['128k', '192k', '320k']);
 
 function evenDimension(value, fallback) {
@@ -4497,7 +4878,15 @@ function normalizeExportSettings(body = {}) {
     ? String(raw.fps || body.export_fps || 'source')
     : 'source';
   const codec = EXPORT_CODEC_VALUES.has(String(raw.codec || 'h264')) ? String(raw.codec || 'h264') : 'h264';
-  const quality = EXPORT_QUALITY_VALUES.has(String(raw.quality || 'high')) ? String(raw.quality || 'high') : 'high';
+  let quality = EXPORT_QUALITY_VALUES.has(String(raw.quality || 'high')) ? String(raw.quality || 'high') : 'high';
+  let rateMode = EXPORT_RATE_MODES.has(String(raw.rate_mode || '')) ? String(raw.rate_mode) : RATE_MODE_FROM_QUALITY[quality];
+  const rateMbpsRaw = Number(raw.rate_mbps);
+  const rateMbps = Number.isFinite(rateMbpsRaw) && rateMbpsRaw >= EXPORT_RATE_MBPS_MIN && rateMbpsRaw <= EXPORT_RATE_MBPS_MAX
+    ? Math.round(rateMbpsRaw * 100) / 100
+    : null;
+  // "Tùy chỉnh" mà số không hợp lệ -> Khuyến nghị (sidecar cũng tự lùi như vậy).
+  if (rateMode === 'custom' && rateMbps === null) rateMode = 'recommended';
+  if (EXPORT_RATE_MODES.has(String(raw.rate_mode || ''))) quality = QUALITY_FROM_RATE_MODE[rateMode];
   const audioBitrate = EXPORT_AUDIO_VALUES.has(String(raw.audio_bitrate || '192k')) ? String(raw.audio_bitrate || '192k') : '192k';
 
   return {
@@ -4507,6 +4896,8 @@ function normalizeExportSettings(body = {}) {
     fps,
     codec,
     quality,
+    rate_mode: rateMode,
+    ...(rateMode === 'custom' ? { rate_mbps: rateMbps } : {}),
     audio_bitrate: audioBitrate,
   };
 }
@@ -4626,12 +5017,48 @@ function listColorLuts() {
 // .cube do frontend bake cho MỘT block khi export -> ghi ra file để sidecar gọi lut3d.
 // Tên file = sha1 nội dung: 2 block cùng thông số dùng chung 1 file, và ghi lại lần
 // export sau cũng không sinh rác mới.
-function materializeColorLutCube(text) {
-  const check = validateCubeText(text);
-  if (!check.ok) throw new Error(_t('LUT dựng cho block không hợp lệ: {error}', { error: check.error }));
+// Mã băm của nội dung đã qua validateCubeText: cùng một lớp Điều chỉnh đi kèm MỌI clip nó phủ (Yêu Con:
+// 2 cube 1 MB × 10 clip), kiểm lại cú pháp 36k dòng cho từng bản sao là phí.
+const validatedColorLutHashes = new Set();
+
+/* `@cube:cN` -> nội dung .cube của LƯỢT XUẤT đang chạy (`editing_json.cube_texts`, xem exportCubeRef ở
+ * editing-runtime.js): renderer gửi mỗi cube MỘT lần thay cho chép vào spec của từng clip. Đặt ở đầu route
+ * xuất (lượt xuất chạy một lần một — exportInFlight), xoá ở finally. */
+let exportCubeTexts = null;
+const CUBE_REF_RE = /^@cube:(c\d{1,6})$/;
+
+function setExportCubeTexts(raw) {
+  exportCubeTexts = new Map();
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [id, text] of Object.entries(raw)) {
+      if (/^c\d{1,6}$/.test(id) && typeof text === 'string') exportCubeTexts.set(id, text);
+    }
+  }
+}
+
+function resolveExportCubeRef(text) {
+  const match = CUBE_REF_RE.exec(String(text || ''));
+  if (!match) return text;
+  const resolved = exportCubeTexts ? exportCubeTexts.get(match[1]) : undefined;
+  // Thiếu nội dung là lỗi của payload, không phải LUT hỏng: báo rõ thay vì để validateCubeText nói "LUT_3D_SIZE".
+  if (typeof resolved !== 'string') {
+    const error = new Error(`Payload xuất thiếu nội dung LUT ${match[1]} (cube_texts).`);
+    error.code = 'CUBE_REF_MISSING';   // normalizeColorAdjustFields KHÔNG được nuốt lỗi này (sai màu im lặng)
+    throw error;
+  }
+  return resolved;
+}
+
+function materializeColorLutCube(rawText) {
+  const text = resolveExportCubeRef(rawText);
+  const hash = crypto.createHash('sha1').update(String(text || '')).digest('hex').slice(0, 16);
+  if (!validatedColorLutHashes.has(hash)) {
+    const check = validateCubeText(text);
+    if (!check.ok) throw new Error(_t('LUT dựng cho block không hợp lệ: {error}', { error: check.error }));
+    validatedColorLutHashes.add(hash);
+  }
   fs.mkdirSync(COLOR_LUT_BAKE_DIR, { recursive: true });
   fs.mkdirSync(COLOR_MASK_DIR, { recursive: true });
-  const hash = crypto.createHash('sha1').update(text).digest('hex').slice(0, 16);
   const filePath = path.join(COLOR_LUT_BAKE_DIR, `bake_${hash}.cube`);
   if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, text);
   return filePath;
@@ -4745,6 +5172,7 @@ function normalizeColorAdjustFields(raw) {
       } catch (error) {
         // Mất một trong hai cube -> quay về đường TĨNH (raw.cube) nếu có, chứ không dựng
         // graph nửa vời.
+        if (error.code === 'CUBE_REF_MISSING') throw error;
         logStatus(`[color-adjust] bỏ keyframe cường độ LUT của block: ${error.message}`);
         lutMix = null;
       }
@@ -4757,6 +5185,7 @@ function normalizeColorAdjustFields(raw) {
       lutFilter = `lut3d=file='${ColorAdjust.filterPath(lutPath)}':interp=trilinear`;
     } catch (error) {
       // Thà mất riêng phần LUT còn hơn làm hỏng cả filtergraph -> vẫn giữ eq/curves.
+      if (error.code === 'CUBE_REF_MISSING') throw error;
       logStatus(`[color-adjust] bỏ qua LUT của block: ${error.message}`);
     }
   }
@@ -4875,6 +5304,41 @@ function normalizeVideoMaskFields(raw) {
   } catch (error) {
     throw new Error(_t('Không ghi được mặt nạ cắt hình của block: {error}', { error: error.message }));
   }
+}
+
+/* XOÁ LOGO của block -> hai field phẳng cho sidecar: `logo_mode` và `logo_rects`
+ * ("x:y:w:h:p|..." — pixel NGUYÊN của stream mà chuỗi filter chạy trên đó, p = bán kính mờ
+ * hoặc cạnh ô khảm). Frontend đã quy đổi bằng LogoRemoval.exportRects; ở đây chỉ DỰNG LẠI
+ * chuỗi từ số đã kẹp, không nhận chuỗi nào của client — field này đổ thẳng vào filter script.
+ * Sidecar tự kẹp thêm theo kích thước thật của stream. */
+const LOGO_MODES = new Set(['delogo', 'blur', 'pixelate']);
+function normalizeLogoRemovalFields(raw) {
+  if (!raw || typeof raw !== 'object') return {};
+  /* CHẾ ĐỘ AI: dán miếng vá của lượt `{ key, run }` — dir/vị trí/mốc đọc từ index TRÊN ĐĨA
+   * (logoAi.exportFields), không nhận đường dẫn nào của client. Lượt không dùng được (đã bị
+   * dọn, chưa xong) -> delogo trên cùng các hình chữ nhật frontend gửi kèm: thà logo được
+   * nội suy còn hơn bản xuất lộ nguyên logo mà không báo gì. */
+  if (raw.mode === 'ai') {
+    const ai = logoAi.exportFields(raw);
+    if (ai) return ai;
+    logStatus('[logo-ai] không dùng được miếng vá AI khi xuất — rơi về delogo');
+  }
+  const mode = LOGO_MODES.has(raw.mode) ? raw.mode : 'delogo';
+  const toInt = (v, lo, hi) => {
+    const n = Math.round(Number(v));
+    return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : null;
+  };
+  const rects = (Array.isArray(raw.rects) ? raw.rects : []).slice(0, 4).map((r) => {
+    const x = toInt(r?.x, 0, 16384);
+    const y = toInt(r?.y, 0, 16384);
+    const w = toInt(r?.w, 0, 16384);
+    const h = toInt(r?.h, 0, 16384);
+    const p = toInt(r?.p, 0, 4096);
+    if ([x, y, w, h, p].some((v) => v === null) || w < 6 || h < 6) return null;
+    return `${x}:${y}:${w}:${h}:${p}`;
+  }).filter(Boolean);
+  if (!rects.length) return {};
+  return { logo_mode: mode, logo_rects: rects.join('|') };
 }
 
 // Biểu thức keyframe -> FFmpeg do frontend sinh (chỉ số/hàm toán). Whitelist ký tự để
@@ -5024,6 +5488,7 @@ function normalizeExportIntervals(timeline, sequenceSettings = null) {
       ...normalizeColorAdjustFields(item?.color_adjust),
       ...normalizeAdjustLayerFields(item?.color_adjust_layer),
       ...normalizeVideoMaskFields(item?.video_mask_png),
+      ...normalizeLogoRemovalFields(item?.logo_removal_px),
     };
   });
 }
@@ -5150,6 +5615,36 @@ function materializeAnimationFrameFiles(seqRender, uploadedByName, itemId, index
     fs.renameSync(src, path.join(dir, `frame_${String(k).padStart(4, '0')}${ext}`));
   });
   return { pattern: path.join(dir, `frame_%04d${ext}`), frameCount: sources.length };
+}
+
+/* Chuỗi khung mang `cache_key` (bộ nhớ đệm khung vẽ trước, backend/prebake-cache.js):
+ *   - KHÔNG kèm khung (renderer hỏi /api/prebake/lookup thấy trúng) -> trỏ thẳng vào mục cache.
+ *     Mục biến mất giữa lượt hỏi và lượt xuất là lỗi THẬT — không còn khung nào để lùi về, mà im
+ *     lặng rơi về overlay tĩnh là bản xuất mất Retouch/chữ động không báo gì. Dọn tay đã bị chặn
+ *     trong lúc renderer còn giữ mục (prebakeCache.held()), nên đường này gần như không xảy ra.
+ *   - KÈM khung -> ghi như cũ rồi CẤT vào cache và dùng bản trong cache: đường dẫn + mtime của
+ *     khung đứng yên giữa các lượt nên cache render (file_ids.tsv) không phải băm lại khung.
+ * Trả undefined khi chuỗi không dùng cache (đi đường cũ). */
+function materializePrebakeSeq(seq, uploadedByName, itemId, index) {
+  if (!seq || !seq.cache_key) return undefined;
+  const sourcePath = Object.prototype.hasOwnProperty.call(seq, 'source_path') ? seq.source_path : undefined;
+  const name = prebakeCache.entryName(seq.cache_key, sourcePath);
+  const hasFrames = (Array.isArray(seq.frame_files) && seq.frame_files.length > 0)
+    || (Array.isArray(seq.frames) && seq.frames.length > 0);
+  if (!hasFrames) {
+    const entry = name ? prebakeCache.readEntry(name) : null;
+    if (!entry) throw new Error(`Bộ nhớ đệm khung vẽ trước thiếu mục của ${itemId} — hãy bấm Xuất lại.`);
+    return { pattern: entry.pattern, frameCount: entry.frame_count };
+  }
+  const materialized = materializeAnimationFrameFiles(seq, uploadedByName, itemId, index)
+    || materializeAnimationFrames(seq, itemId, index);
+  if (!materialized || !name) return materialized;
+  const files = [];
+  for (let k = 0; k < materialized.frameCount; k += 1) {
+    files.push(materialized.pattern.replace('%04d', String(k).padStart(4, '0')));
+  }
+  const stored = prebakeCache.storeFiles(name, files, seq.cache_meta);
+  return stored ? { pattern: stored.pattern, frameCount: stored.frame_count } : materialized;
 }
 
 // Xoá các khung upload còn sót (chuỗi bị bỏ vì lỗi materialize) để temp không phình mãi.
@@ -5312,6 +5807,12 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
       position_x: transform.position_x,
       position_y: transform.position_y,
       scale: transform.scale,
+      /* HỆ SỐ VỪA KHUNG của block media (renderer tính, xem mediaAssetFitScale): "scale 100%" của
+       * media overlay = vừa khung như lane chính; sidecar co luồng cỡ gốc theo scale/100 × hệ số.
+       * Ảnh chữ/hình khối (bake sẵn ở cỡ hiển thị) và payload cũ không có -> 1 = như trước. */
+      fit_scale: (type === 'media' && !textImagePath && !shapeImagePath && Number(item.fit_scale) > 0)
+        ? Math.max(0.001, Math.min(64, Number(item.fit_scale)))
+        : 1,
       rotation: transform.rotation,
       opacity: transform.opacity,
       flip_x: transform.flip_x,
@@ -5339,8 +5840,10 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
       if (absEnd - absStart >= 0.05) {
         // Hai nguồn khung: phần file multipart (vùng chuyển cảnh — nặng) hoặc base64 nội
         // tuyến (hoạt ảnh text/shape/ảnh — nhẹ, giữ nguyên đường cũ).
-        const materialized = materializeAnimationFrameFiles(seq, transitionFrameFiles, item.id, index)
-          || materializeAnimationFrames(seq, item.id, index);
+        const prebaked = materializePrebakeSeq(seq, transitionFrameFiles, item.id, index);
+        const materialized = prebaked !== undefined ? prebaked
+          : (materializeAnimationFrameFiles(seq, transitionFrameFiles, item.id, index)
+            || materializeAnimationFrames(seq, item.id, index));
         if (materialized) {
           animOverlay = {
             asset_type: 'image_seq', // chuỗi ảnh chung (text/shape/ảnh)
@@ -5404,7 +5907,13 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
         id: `${baseOverlay.id}_anim`,
       });
     } else {
-      overlays.push({ ...baseOverlay, ...(animVideoFields || {}), ...kfFields, ...adjFields, ...maskFields, index: overlayIndex++ });
+      // XOÁ LOGO chỉ ở nhánh KHÔNG bake: chuỗi khung bake sẵn đã xoá logo trong từng
+      // khung PNG (frontend đi qua cùng LogoRemoval), xoá lần nữa là sai toạ độ.
+      overlays.push({
+        ...baseOverlay, ...(animVideoFields || {}), ...kfFields, ...adjFields, ...maskFields,
+        ...normalizeLogoRemovalFields(item.logo_removal_px),
+        index: overlayIndex++,
+      });
     }
   });
   const visualTypes = new Set(['media', 'text']);
@@ -6232,6 +6741,14 @@ function createApp() {
     proxy: { dir: PROXY_CACHE_DIR, label: () => _t('Proxy LQ xem trước'), clearable: true },
     asr: { dir: ASR_CACHE_DIR, label: () => _t('Kết quả bóc băng'), clearable: true },
     concat: { dir: CONCAT_CACHE_DIR, label: () => _t('Bản đã nối của dự án'), clearable: true },
+    // Dọn được: lượt xuất/xem trước sau tự hạ SDR lại. Bản đang dùng trong dự án mở vẫn còn
+    // (liên kết cứng trong temp_uploads) — xoá mục cache chỉ gỡ một liên kết.
+    sdr: { dir: SDR_CACHE_DIR, label: () => _t('Bản SDR của video HDR'), clearable: true },
+    // Dọn được: lượt xuất sau render lại đủ (chỉ chậm hơn). Không dọn lúc đang xuất — bước ghép đang đọc nó.
+    // Gồm cả khung vẽ trước (prebake_cache): cùng một ý "phần đã dựng để xuất lại", chung công tắc.
+    render: { dir: RENDER_CACHE_DIR, extraDirs: [PREBAKE_CACHE_DIR], label: () => _t('Bản render để xuất lại'), clearable: true },
+    // Dọn được: Retouch bám lại khuôn mặt ở lượt preview/xuất sau (chỉ chậm hơn).
+    retouch: { dir: RETOUCH_CACHE_DIR, label: () => _t('Bám khuôn mặt (Retouch)'), clearable: true },
     /* Model lồng tiếng (F5 ~1,4 GB, VieNeu ~0,9 GB): dọn được — lượt lồng tiếng sau tự tải lại
      * (có thanh tiến trình). Tệp đang được server TTS nạp dở thì Windows không cho xoá, bỏ qua. */
     tts_models: { dir: ttsService.modelDir(), label: () => _t('Mô hình lồng tiếng'), clearable: true },
@@ -6243,7 +6760,7 @@ function createApp() {
       res.json({
         status: 'success',
         items: Object.entries(CACHE_TARGETS).map(([id, t]) => {
-          const usage = dirUsage(t.dir);
+          const usage = targetUsage(t);
           return { id, label: t.label(), clearable: t.clearable, ...usage };
         }),
       });
@@ -6259,14 +6776,18 @@ function createApp() {
       const target = CACHE_TARGETS[id];
       if (!target) return httpError(res, 400, _t('Bộ nhớ đệm không hợp lệ.'));
       if (!target.clearable) return httpError(res, 400, _t('Không dọn được "{label}" — đây là dữ liệu của dự án đang mở.', { label: target.label() }));
+      // prebakeCache.held(): renderer vừa hỏi trúng khung vẽ trước và đang chuẩn bị lượt xuất.
+      if (id === 'render' && (exportInFlight || prebakeCache.held())) return httpError(res, 409, _t('Đang xuất video — đợi xong rồi hãy dọn mục này.'));
       let removed = 0;
-      let names = [];
-      try { names = fs.readdirSync(target.dir); } catch (_) { names = []; }
-      names.forEach((name) => {
-        try { fs.rmSync(path.join(target.dir, name), { recursive: true, force: true }); removed += 1; } catch (_) { /* bỏ qua */ }
+      [target.dir, ...(target.extraDirs || [])].forEach((dir) => {
+        let names = [];
+        try { names = fs.readdirSync(dir); } catch (_) { names = []; }
+        names.forEach((name) => {
+          try { fs.rmSync(path.join(dir, name), { recursive: true, force: true }); removed += 1; } catch (_) { /* bỏ qua */ }
+        });
       });
       fs.mkdirSync(target.dir, { recursive: true });
-      res.json({ status: 'success', id, removed, ...dirUsage(target.dir) });
+      res.json({ status: 'success', id, removed, ...targetUsage(target) });
     } catch (error) {
       recordProjectError('cache_clear', error, { endpoint: '/api/cache/clear' });
       httpError(res, 500, error);
@@ -6658,6 +7179,13 @@ function createApp() {
    * Đo trên footage của dự án: 6 giây @30fps (1728x3072) = 4,4 giây phân tích, nhận diện
    * được mặt ở 180/180 frame.
    */
+  // Khung nguồn (RGBA) cho bước dựng Retouch khi xuất — ffmpeg giải mã tuần tự thay cho tua
+  // thẻ <video> từng khung. Cùng cổng an toàn nguồn với /api/retouch/track. Xem retouch-frames.js.
+  app.post('/api/retouch/frames', createRetouchFramesHandler({
+    resolveSource: resolveRetouchSource,
+    logStatus: (message) => logStatus(message),
+  }));
+
   app.post('/api/retouch/track', async (req, res) => {
     try {
       // NGUỒN: mặc định là lane chính (temp_input.mp4), nhưng nhận được đường dẫn asset
@@ -6683,8 +7211,11 @@ function createApp() {
 
       const cachePath = retouchCachePath(sourceVideoPath, clips, options);
       if (fs.existsSync(cachePath)) {
-        // Trúng cache -> trả thẳng, KHÔNG chạm vào sidecar.
-        return res.json({ status: 'success', cached: true, ...JSON.parse(fs.readFileSync(cachePath, 'utf8')) });
+        // Trúng cache -> trả thẳng, KHÔNG chạm vào sidecar. Chạm mtime = lần dùng cuối (pruneRetouchCache).
+        try { const now = new Date(); fs.utimesSync(cachePath, now, now); } catch (_) { /* chỉ mất thứ tự hạn dùng */ }
+        // `faces_id` = định danh của bộ landmark (nguồn + cỡ/mtime + khoảng + tuỳ chọn) — renderer
+        // đưa vào khoá cache khung vẽ trước (prebake-cache.js) thay cho băm cả mảng landmark.
+        return res.json({ status: 'success', cached: true, faces_id: path.basename(cachePath, '.json'), ...JSON.parse(fs.readFileSync(cachePath, 'utf8')) });
       }
       setStatus(_t('Đang bám khuôn mặt cho Retouch...'));
       const result = await runAutoReframeAnalysis({
@@ -6702,12 +7233,65 @@ function createApp() {
       }
       setStatus(_t('Đã bám xong khuôn mặt cho Retouch.'));
       projectMetrics.activity = true;
-      res.json({ status: 'success', cached: false, ...result });
+      res.json({ status: 'success', cached: false, faces_id: path.basename(cachePath, '.json'), ...result });
     } catch (error) {
       recordProjectError('retouch_track', error, { endpoint: '/api/retouch/track' });
       setStatus(_t('Lỗi khi bám khuôn mặt cho Retouch!'));
       httpError(res, 500, error);
     }
+  });
+
+  /* KHUNG VẼ TRƯỚC ĐÃ CÓ CHƯA (xem backend/prebake-cache.js). Renderer hỏi trước khi dựng một
+   * chuỗi khung: trúng thì gửi khoá thay cho khung (seq.cache_key, không frame_files/frames);
+   * trượt mà `enabled` thì dựng rồi gửi khung KÈM khoá để backend cất.
+   *   body = { entries: [{ key, source_path? }] }  (source_path vắng = chuỗi không đọc tệp nào;
+   *   mảng đường dẫn = chuỗi đọc nhiều tệp, như chuyển cảnh lớp phủ giữa hai ảnh/video)
+   *   -> { enabled, results: [{ hit, cacheable, meta? }] } cùng thứ tự. */
+  app.post('/api/prebake/lookup', (req, res) => {
+    try {
+      const entries = Array.isArray(req.body?.entries) ? req.body.entries.slice(0, 500) : [];
+      const results = entries.map((e) => prebakeCache.lookup(e?.key,
+        (e && Object.prototype.hasOwnProperty.call(e, 'source_path')) ? e.source_path : undefined));
+      res.json({ status: 'success', enabled: prebakeCache.active(), results });
+    } catch (error) {
+      recordProjectError('prebake_lookup', error, { endpoint: '/api/prebake/lookup' });
+      httpError(res, 500, error);
+    }
+  });
+
+  /* XOÁ LOGO BẰNG AI (tab Retouch > Xoá logo, chế độ 'ai') — xem backend/logo-ai.js.
+   *   POST /api/logo-ai/status   body = yêu cầu của MỘT block -> done | queued | running | none
+   *   POST /api/logo-ai/process  như trên nhưng xếp job nếu chưa có
+   *   GET  /api/logo-ai/job/:id  tiến độ; POST .../cancel huỷ
+   *   GET  /api/logo-ai/patch/:key/:run/:file  miếng vá PNG cho preview
+   * Nguồn đi qua CÙNG cổng an toàn với Retouch (resolveRetouchSource). */
+  const logoAiRoute = (run) => (req, res) => {
+    try {
+      res.json({ status: 'success', ...logoAi.request(req.body, { run }) });
+    } catch (error) {
+      if (error?.status === 400) return httpError(res, 400, error);
+      recordProjectError('logo_ai', error, { endpoint: req.path });
+      httpError(res, 500, error);
+    }
+  };
+  app.post('/api/logo-ai/status', logoAiRoute(false));
+  app.post('/api/logo-ai/process', logoAiRoute(true));
+  app.get('/api/logo-ai/job/:id', (req, res) => {
+    const view = logoAi.jobStatus(req.params.id);
+    if (!view) return httpError(res, 404, _t('Không tìm thấy job xoá logo.'));
+    res.json({ status: 'success', ...view });
+  });
+  app.post('/api/logo-ai/job/:id/cancel', (req, res) => {
+    const view = logoAi.cancel(req.params.id);
+    if (!view) return httpError(res, 404, _t('Không tìm thấy job xoá logo.'));
+    res.json({ status: 'success', ...view });
+  });
+  app.get('/api/logo-ai/patch/:key/:run/:file', (req, res) => {
+    const file = logoAi.patchPath(req.params.key, req.params.run, req.params.file);
+    if (!file) return res.status(404).end();
+    // Một miếng vá không bao giờ đổi nội dung (lượt mới = thư mục run mới) -> cache lâu.
+    res.set('Cache-Control', 'private, max-age=86400, immutable');
+    res.sendFile(file);
   });
 
   app.post('/api/pose/track', async (req, res) => {
@@ -6876,6 +7460,51 @@ function createApp() {
     }
   });
 
+  /* GHI THẲNG RA CHỖ NGƯỜI DÙNG CHỌN (mục 1.16, người dùng chốt 2026-09-29: hỏi chỗ lưu TRƯỚC khi
+   * xuất, như Premiere). Trước đây: ghi TEMP_DIR/final_cut.mp4 -> trình duyệt tải cả file vào
+   * Blob (11,5 GB mất 64 s) -> hộp thoại lưu -> ghi thêm một bản; Blob không bao giờ được thu hồi
+   * nên mỗi lượt để lại một bản sao cỡ file xuất trong blob_storage tới khi tắt app.
+   *
+   * VÌ SAO CÓ CHỮ KÝ: HTTP API này không kiểm nguồn gọi, nên nhận đường dẫn tuỳ ý qua đó là cho
+   * mọi trang web đang mở trên máy ghi được file vào chỗ bất kỳ. Đường dẫn chỉ được nhận khi đi
+   * kèm HMAC do main process ký (hộp thoại lưu gốc, electron/main.js `export-pick-output`) bằng
+   * khoá ngẫu nhiên của phiên, truyền cho backend qua env lúc spawn. Backend chạy ngoài Electron
+   * (npm run backend:dev) thì không có khoá -> bỏ qua output_path, đi đường tải về cũ. */
+  const EXPORT_OUTPUT_SECRET = String(process.env.CRAB_EXPORT_OUTPUT_SECRET || '');
+
+  function exportOutputTicket(filePath) {
+    return crypto.createHmac('sha256', EXPORT_OUTPUT_SECRET).update(String(filePath)).digest('hex');
+  }
+
+  // null = không có đường dẫn (đi đường tải về). Có mà sai chữ ký/sai đuôi -> ném lỗi 400.
+  function trustedExportOutputPath(body, codec) {
+    const target = String(body?.output_path || '');
+    if (!target || !EXPORT_OUTPUT_SECRET) return null;
+    const ticket = Buffer.from(String(body?.output_ticket || ''), 'utf8');
+    const expected = Buffer.from(exportOutputTicket(target), 'utf8');
+    if (ticket.length !== expected.length || !crypto.timingSafeEqual(ticket, expected)) {
+      const error = new Error(_t('Đường dẫn lưu video không hợp lệ.'));
+      error.status = 400;
+      throw error;
+    }
+    const wantExt = codec === 'prores' ? '.mov' : '.mp4';
+    if (!path.isAbsolute(target) || path.extname(target).toLowerCase() !== wantExt
+      || !fs.existsSync(path.dirname(target))) {
+      const error = new Error(_t('Đường dẫn lưu video không hợp lệ.'));
+      error.status = 400;
+      throw error;
+    }
+    return target;
+  }
+
+  // Ghi vào tệp tạm CẠNH tệp đích rồi đổi tên khi xong: xuất hỏng giữa chừng thì không để lại
+  // một tệp dở mang đúng tên người dùng chọn, và tệp cũ (nếu ghi đè) còn nguyên tới lúc xong.
+  // Đổi tên trong cùng thư mục là tức thì, kể cả với tệp 11 GB.
+  function exportPartPath(target) {
+    const ext = path.extname(target);
+    return path.join(path.dirname(target), `${path.basename(target, ext)}.exporting${ext}`);
+  }
+
   app.post('/api/export-video', transitionFrameUpload.array('transition_frames', TRANSITION_FRAME_LIMIT), async (req, res) => {
     // KHOÁ MỘT LƯỢT XUẤT: mọi lượt xuất đều ghi vào CÙNG một đường dẫn
     // (TEMP_DIR/final_cut.mp4). Hai lượt chạy song song sẽ ghi đè nhau giữa lúc đang viết ->
@@ -6896,22 +7525,43 @@ function createApp() {
       if (exportLockReleased) return;
       exportLockReleased = true;
       exportInFlight = false;
+      prebakeCache.release();   // khung vẽ trước renderer hỏi trúng đã được dùng xong
     };
     res.on('close', releaseExportLock);
     let exportSettingsForError = null;
+    let userOutputPath = null;   // chỗ người dùng chọn (mục 1.16); null = đường tải về cũ
     // Khung vùng chuyển cảnh đã được multer ghi ra đĩa trước khi vào handler; tra theo TÊN
     // mà frontend đặt (chính là tên trong seq.frame_files).
     const transitionFrameFiles = new Map(
       (Array.isArray(req.files) ? req.files : []).map((file) => [String(file.originalname || ''), file.path]),
     );
+    /* MỐC THỜI GIAN TỪNG KHÂU (Bước 0.1). Handler chạy SAU khi multer đã nhận xong toàn bộ
+     * body (kể cả khung chuyển cảnh), nên `handlerStartedAt − client_started_at_ms` chính là
+     * thời gian tải lên — hai mốc cùng một đồng hồ vì frontend và backend chạy chung máy. */
+    const handlerStartedAt = Date.now();
+    const stageMs = {};
+    const timeStage = async (key, work) => {
+      const started = Date.now();
+      try { return await work(); } finally { stageMs[key] = Date.now() - started; }
+    };
     try {
+      if (process.env.CRABBYCUT_EXPORT_CAPTURE_DIR) {
+        await timeStage('capture_ms', () => captureExportRequest(req, process.env.CRABBYCUT_EXPORT_CAPTURE_DIR));
+      }
       setStatus(_t('Đang chuẩn bị cắt video theo timeline đã lọc...'));
       const sourceVideoPath = path.join(TEMP_DIR, 'temp_input.mp4');
       if (!fs.existsSync(sourceVideoPath)) {
         return httpError(res, 400, _t('Không tìm thấy video nguồn. Hãy chạy bước bóc băng trước.'));
       }
       const timeline = JSON.parse(req.body.timeline_json || '[]');
+      /* editing_json parse MỘT lần ở đây (trước: hai lần, ở sdrOverridesForEditingAssets và
+       * normalizeEditingPayload) — và phải TRƯỚC khi chuẩn hoá timeline: spec màu của clip trỏ tới nội
+       * dung .cube trong `cube_texts` của nó (xem setExportCubeTexts). */
+      const editingRaw = parseOptionalJsonObject(req.body.editing_json || {});
+      setExportCubeTexts(editingRaw.cube_texts);
       const exportSettings = normalizeExportSettings(req.body);
+      // Cài đặt › Xuất video › "Render bằng" (mục 1.21): sidecar dựng đồ thị GPU khi máy dùng được.
+      exportSettings.render_device = readAppSettings().export.renderDevice;
       const exportRaw = typeof req.body.export_settings === 'string' && req.body.export_settings.trim()
         ? JSON.parse(req.body.export_settings)
         : (req.body.export_settings || {});
@@ -6925,6 +7575,11 @@ function createApp() {
       exportSettings.width = sequenceSettings.width;
       exportSettings.height = sequenceSettings.height;
       exportSettings.resolution = 'sequence';
+      /* Ô "Độ phân giải" của hộp thoại xuất (renderer gửi ở `legacy_resolution`, bản cũ ở
+       * `export_preset`): cỡ phần hình + hệ số co — xem exportOutputFrame. */
+      exportSettings.output_preset = String(exportRaw.legacy_resolution || req.body.export_preset || 'source');
+      Object.assign(exportSettings, exportOutputFrame(sequenceSettings.width, sequenceSettings.height,
+        exportSettings.output_preset) || {});
       /* "Giữ theo nguồn" ở hộp thoại Xuất = THEO TIMEBASE CỦA SEQUENCE, không phải theo
        * nhịp khung của file nguồn. Đúng như Premiere: ô Frame Rate của Export Settings mặc
        * định lấy timebase sequence, và nhịp của từng clip nguồn không liên quan.
@@ -6944,32 +7599,51 @@ function createApp() {
         '30',
       );
       exportSettingsForError = exportSettings;
+      userOutputPath = trustedExportOutputPath(req.body, exportSettings.codec);
       // Chốt màu asset overlay TRƯỚC khi dựng payload: xem sdrOverridesForEditingAssets.
-      const sdrAssetOverrides = await sdrOverridesForEditingAssets(req.body.editing_json || {});
-      const editingPayload = normalizeEditingPayload(
-        req.body.editing_json || {},
+      // Khâu này có thể mã hoá lại TOÀN BỘ một video HDR làm lớp phủ ngay trong lượt xuất
+      // (chưa có trong cache) — đo riêng để không bị đổ oan cho ffmpeg của sidecar.
+      const sdrAssetOverrides = await timeStage('sdr_overrides_ms',
+        () => sdrOverridesForEditingAssets(editingRaw));
+      const editingPayload = await timeStage('normalize_ms', () => normalizeEditingPayload(
+        editingRaw,
         timelineDurationFromIntervals(exportIntervals),
         parseFpsValue(exportSettings.render_fps),
         transitionFrameFiles,
         sdrAssetOverrides,
-      );
+      ));
       const timelineFile = path.join(TEMP_DIR, 'export_timeline.json');
+      /* KHÔNG ghi `editingItems`: sidecar không đọc nó (lớp phủ đã chuẩn hoá nằm ở `overlays`), mà item thô
+       * còn nguyên ảnh chữ base64 + khung hoạt ảnh — "Bin Tom" 92 MB: backend stringify + ghi 92 MB, sidecar
+       * quét cả tệp mất ~1 s mỗi lượt xuất (đo 2026-10-03, khâu dò nguồn 1,4 s so với 0,6 s của dự án khác). */
       await fsp.writeFile(timelineFile, JSON.stringify(jsonSafe({
         version: editingPayload.overlays.length ? 4 : 3,
         sequence: sequenceSettings,
         intervals: exportIntervals,
         editingTracks: editingPayload.tracks,
-        editingItems: editingPayload.items,
         assets: editingPayload.assets,
         main_audio_volume: editingPayload.mainAudioVolume,
         overlays: editingPayload.overlays,
         settings: exportSettings,
       })), 'utf8');
       const outputName = exportOutputName(exportSettings);
-      const outputPath = path.join(TEMP_DIR, outputName);
-      const renderStartedAt = parseClientStartedAtMs(req.body.client_started_at_ms) || Date.now();
+      const outputPath = userOutputPath ? exportPartPath(userOutputPath) : path.join(TEMP_DIR, outputName);
+      if (userOutputPath) await fsp.rm(outputPath, { force: true });
+      const clientStartedAt = parseClientStartedAtMs(req.body.client_started_at_ms);
+      const renderStartedAt = clientStartedAt || Date.now();
       const serverRenderStartedAt = Date.now();
-      const sidecarEvents = await runSidecar([
+      stageMs.prepare_ms = serverRenderStartedAt - handlerStartedAt;
+      // Cài đặt › Xuất video › "Dùng lại phần đã render" (mục 1.13): không truyền thư mục = sidecar tắt cache.
+      const renderCacheEnv = RENDER_CACHE_ALLOWED && readAppSettings().export.renderCache
+        ? { CRABBYCUT_RENDER_CACHE_DIR: RENDER_CACHE_DIR, CRABBYCUT_RENDER_CACHE_MAX_BYTES: String(RENDER_CACHE_MAX_BYTES) }
+        : {};
+      /* Kết quả dò GPU (GpuProbeResult ở sidecar) cất NGOÀI temp_uploads: mở dự án là temp bị dọn, nên
+       * để mặc định thì lượt xuất đầu sau mỗi lần mở dự án dò lại ~1,2 s. Test (CRAB_TEMP_DIR) giữ mặc
+       * định trong temp để mỗi lượt test dò thật. */
+      if (!process.env.CRAB_TEMP_DIR) {
+        renderCacheEnv.CRABBYCUT_EXPORT_GPU_PROBE_FILE = path.join(USER_DATA_ROOT, 'gpu_probe_cache.txt');
+      }
+      const sidecarEvents = await timeStage('sidecar_ms', () => runSidecar([
         'export-video',
         sourceVideoPath,
         outputPath,
@@ -6977,7 +7651,7 @@ function createApp() {
         TEMP_DIR,
         exportSettings.resolution,
         exportSettings.fps,
-      ]);
+      ], { env: renderCacheEnv }));
       /* CHỐT CHẶN: FILE XUẤT RA PHẢI DÀI ĐÚNG BẰNG TIMELINE.
        *
        * ffmpeg có thể kết thúc với mã 0 mà vẫn NUỐT MẤT phần cuối phim: chỉ cần nguồn đổi
@@ -6990,7 +7664,7 @@ function createApp() {
        * Ngưỡng rộng tay (nửa giây hoặc 2%) vì lưới khung và phần đệm của bộ mã hoá luôn làm
        * lệch vài khung; chỉ báo lỗi khi THIẾU, dài hơn thì không có gì để mất. */
       const expectedDuration = timelineDurationFromIntervals(exportIntervals);
-      const actualDuration = mediaDurationSeconds(outputPath);
+      const actualDuration = await timeStage('verify_ms', () => mediaDurationSeconds(outputPath));
       const allowedShortfall = Math.max(0.5, expectedDuration * 0.02);
       if (Number.isFinite(actualDuration) && expectedDuration > 0
         && actualDuration < expectedDuration - allowedShortfall) {
@@ -7000,29 +7674,58 @@ function createApp() {
         );
       }
       const encoderEvent = sidecarEvents.find((evt) => String(evt?.message || '').startsWith('Export encoder:'));
+      // Sự kiện `timing` của sidecar (xem ExportTimingJson trong core_process.cpp). Sidecar
+      // cũ không phát nó -> null, báo cáo chỉ thiếu phần chi tiết.
+      const timingEvent = sidecarEvents.find((evt) => evt?.type === 'timing');
+      let sidecarTiming = null;
+      try { sidecarTiming = timingEvent ? JSON.parse(timingEvent.message) : null; } catch (_) { /* bỏ qua */ }
+      const clientTiming = parseOptionalJsonObject(req.body.client_timing_json);
+      const sourceSummary = exportSourceSummary(sourceVideoPath);
+      const serverTiming = {
+        upload_ms: clientStartedAt ? Math.max(0, handlerStartedAt - clientStartedAt) : null,
+        ...stageMs,
+        server_ms: Date.now() - handlerStartedAt,
+      };
       projectMetrics.export = {
         ...exportSettings,
         encoder: encoderEvent ? String(encoderEvent.message).replace(/^Export encoder:\s*/, '') : null,
         sequence: jsonSafe(sequenceSettings),
         interval_count: exportIntervals.length,
         overlay_count: editingPayload.overlays.length,
+        timeline_duration_sec: expectedDuration,
+        output_duration_sec: actualDuration,
+        source: sourceSummary,
+        client_timing: clientTiming && Object.keys(clientTiming).length ? clientTiming : null,
+        server_timing: serverTiming,
+        sidecar_timing: sidecarTiming,
         duration_ms: Math.max(0, Date.now() - renderStartedAt),
         server_duration_ms: Math.max(0, Date.now() - serverRenderStartedAt),
-        output_path: outputPath,
+        output_path: userOutputPath || outputPath,
         ended_at: new Date().toISOString(),
       };
+      // Tệp tạm cạnh đích -> đúng tên người dùng chọn (fs.rename ghi đè tệp cũ nếu có).
+      if (userOutputPath) await fsp.rename(outputPath, userOutputPath);
       projectMetrics.activity = true;
       const reportPath = await writeProjectReport('export_success');
       setStatus(_t('Đã hoàn tất cắt dựng video.'));
       res.setHeader('X-Project-Report-Path', reportPath);
-      res.download(outputPath, outputName);
+      // Cho frontend (và bench:export) ghép với phần đo phía trình duyệt: JSON toàn số + nhãn
+      // ASCII nên an toàn làm giá trị header.
+      res.setHeader('X-Export-Timing', JSON.stringify({ ...serverTiming, sidecar: sidecarTiming }));
+      if (userOutputPath) {
+        res.json({ status: 'success', path: userOutputPath, name: path.basename(userOutputPath) });
+      } else {
+        res.download(outputPath, outputName);
+      }
     } catch (error) {
       recordProjectError('export', error, { endpoint: '/api/export-video', exportSettings: exportSettingsForError });
       setStatus(_t('Lỗi khi xuất video hoàn chỉnh!'));
-      httpError(res, 500, error);
+      if (userOutputPath) await fsp.rm(exportPartPath(userOutputPath), { force: true }).catch(() => {});
+      httpError(res, Number(error?.status) || 500, error);
     } finally {
       // Khung đã materialize thì đã được RENAME đi; đây là dọn phần còn sót (chuỗi bị bỏ).
       cleanupTransitionFrameUploads();
+      exportCubeTexts = null;   // nội dung .cube chỉ thuộc lượt xuất này (setExportCubeTexts)
     }
   });
 
@@ -7032,7 +7735,10 @@ function createApp() {
 function start() {
   cleanGeneratedTextAssets(); // dọn PNG sequence hoạt ảnh còn sót từ phiên trước
   prunePeaksCache();          // dọn cache sóng âm quá hạn + file .tmp/.raw của job bị kill
+  pruneRetouchCache();        // dọn landmark Retouch quá 30 ngày không dùng
+  prebakeCache.prune();       // dọn khung vẽ trước quá hạn / vượt trần (prebake-cache.js)
   pruneConcatCache();         // dọn bản đã nối quá hạn (mỗi mục là một file vài trăm MB)
+  pruneSdrCache();            // dọn bản hạ SDR quá hạn / vượt trần dung lượng
   pruneAssetProxyCache();     // dọn proxy LQ quá hạn + file .part.mp4 của job bị kill
   const app = createApp();
   const server = http.createServer(app);
@@ -7096,7 +7802,8 @@ if (require.main === module) {
 // `normalizeEditingPayload` xuất ra để test được HỢP ĐỒNG payload mà không phải dựng cả
 // một lượt render (xem tests/scripts/retouch_export_pipeline.js).
 module.exports = {
-  createApp, start, normalizeColorAdjustFields, normalizeVideoMaskFields, normalizeEditingPayload,
+  createApp, start, normalizeColorAdjustFields, normalizeVideoMaskFields, normalizeLogoRemovalFields, normalizeEditingPayload,
+  logoAi,
   // Xuất ra để test kiểm được cổng an toàn của /api/retouch/track mà không phải chạy
   // MediaPipe: đường "cho phép" nếu kiểm qua HTTP là sẽ khởi động sidecar thật.
   resolveRetouchSource,
@@ -7110,4 +7817,11 @@ module.exports = {
   flattenSessionWords, sliceWordsByBlocks, sessionWordsCoverBlocks,
   // Thanh trạng thái "Đang tải model": test khoá phép đọc thanh tqdm theo byte.
   parseTqdmBytes,
+  // Test khoá "chỉ hạ SDR asset CÓ item dùng" (mục 1.15) mà không phải dựng cả lượt xuất.
+  sdrOverridesForEditingAssets,
+  ensureSdrAsset,
+  pruneSdrCache,
+  exportOutputFrame,
+  // Test khoá ô "Bitrate" (mục 1.20): mức, số Mbps, lùi về Khuyến nghị, suy từ `quality` cũ.
+  normalizeExportSettings,
 };

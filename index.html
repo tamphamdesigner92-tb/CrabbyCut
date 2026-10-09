@@ -41,6 +41,7 @@
     <!-- auto-grade.js đọc window.ColorAdjust lúc khởi tạo (UMD) -> phải nạp SAU color-adjust.js -->
     <script src="/static/js/auto-grade.js?v=autograde-p1"></script>
     <script src="/static/js/retouch.js?v=retouch-p1"></script>
+    <script src="/static/js/logo-removal.js?v=logo-p1"></script>
     <script src="/static/js/auto-subtitle.js?v=autosub-lumen-p2"></script>
     <!-- Văn bản → Local Subtitle: bộ đọc tệp phụ đề (hàm thuần) + panel. Panel dùng lại buildSrt/
          injectStyle của auto-subtitle.js nên nạp SAU nó. -->
@@ -739,13 +740,16 @@
         .sequence-preview-shell.is-zoomed { overflow: auto; }
         /* Khung không được co lại theo vùng cuộn — nó phải giữ đúng cỡ đã tính. */
         .sequence-preview-shell > .sequence-preview-frame { flex: 0 0 auto; }
+        /* KHÔNG viền, KHÔNG bo góc (như CapCut): viền nằm TRONG khung nên ăn mất
+           0.67px mỗi bên ở màn hình 150% -> vùng vẽ lệch tỉ lệ sequence, và góc bo cắt mất
+           4 góc hình. Cả hai làm lộ nền (xanh cảnh báo trong suốt) ở mép hình. */
         .sequence-preview-frame {
             position: relative;
             overflow: hidden;
             background: #000;
-            border: 1px solid var(--white-a08);
+            border: 0;
             box-shadow: var(--sh-3);
-            border-radius: var(--r-md);
+            border-radius: 0;
         }
         .sequence-preview-frame.transparency-warning-active {
             background: #0AD500;
@@ -2240,6 +2244,11 @@
         .transcribe-options-grid .form-group {
             margin-bottom: 0;
         }
+        /* Ô số Mbps của Bitrate "Tùy chỉnh" (hộp thoại Xuất) — nằm ngay dưới ô chọn. */
+        .export-bitrate-custom { display: flex; align-items: center; gap: var(--sp-3); margin-top: var(--sp-3); }
+        .export-bitrate-custom[hidden] { display: none; }
+        .export-bitrate-custom input { flex: 1 1 auto; min-width: 0; }
+        .export-bitrate-unit { font-size: var(--fs-xs); color: var(--text-muted); }
         input, select, textarea {
             width: 100%; padding: var(--sp-4) var(--sp-5);
             border: 1px solid var(--border-color);
@@ -3259,6 +3268,35 @@
         body.home-active .breadcrumb-container,
         body.home-active #projectTitleBar,
         body.home-active #btnExportVideo { display: none !important; }
+
+        /* ===== MÀN CHỜ "ĐANG MỞ DỰ ÁN" =====
+           performProjectLoad() nối lại video nguồn (vài giây tới cả phút) TRƯỚC khi biết dự
+           án ở bước nào. Không che thì trong lúc đó .main-layout lộ ra đúng bước mặc định
+           của HTML — step0 (giai đoạn Upload của luồng bóc băng) — rồi mới nhảy sang Editing,
+           trông như app mở nhầm màn hình. Mở dự án KHÁC khi đang dựng thì lộ trình dựng của
+           dự án cũ bị dọn dở dang. Lớp này che đúng vùng của #homeScreen (thanh trạng thái
+           ở dưới vẫn thấy -> tiến độ nối video vẫn hiện), nằm TRÊN Home và DƯỚI mọi modal:
+           hộp thoại bật ra giữa lúc nạp vẫn bấm được. */
+        #projectLoadingScreen {
+            position: fixed; top: var(--header-h); left: 0; right: 0; bottom: var(--statusbar-h);
+            z-index: calc(var(--z-home) + 1);
+            background: var(--bg-color);
+            display: none;
+            flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+            color: var(--text-muted);
+        }
+        body.project-loading #projectLoadingScreen { display: flex; }
+        body.project-loading .breadcrumb-container,
+        body.project-loading #projectTitleBar,
+        body.project-loading #btnExportVideo { visibility: hidden; }
+        #projectLoadingScreen .project-loading-spinner {
+            width: 28px; height: 28px; border-radius: 50%;
+            border: 3px solid var(--surface-4); border-top-color: var(--primary);
+            animation: project-loading-spin 0.8s linear infinite;
+        }
+        @keyframes project-loading-spin { to { transform: rotate(360deg); } }
+        #projectLoadingScreen .project-loading-title { font-size: var(--fs-lg); font-weight: 600; color: var(--text-1); }
+        #projectLoadingScreen .project-loading-name { font-size: var(--fs-sm); max-width: 60vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .home-rail {
             width: 300px; flex-shrink: 0; padding: 26px 20px;
             border-right: 1px solid var(--border-color); background: var(--panel-bg);
@@ -3481,6 +3519,34 @@
         @media (prefers-reduced-motion: reduce) {
             .app-progress.is-indeterminate .app-progress-fill { width: 100%; opacity: 0.55; }
         }
+        /* Bản sao trong popup Xuất video: cùng lớp .app-progress (cùng hoạt ảnh vô định), chỉ
+           đổi sang dòng chảy bình thường và dày hơn. Xong/lỗi thì setAppProgress(null) đã tắt
+           thanh — data-state giữ lại dải đầy màu kết quả cho tới lượt xuất sau. */
+        .export-progress { margin-top: var(--sp-4); }
+        .export-progress[hidden] { display: none; }
+        .export-progress .app-progress-mirror {
+            position: relative; left: auto; right: auto; bottom: auto;
+            height: 4px; border-radius: 2px;
+            background: var(--border-subtle, rgba(255, 255, 255, 0.08));
+        }
+        .export-progress[data-state="running"] .app-progress-mirror,
+        .export-progress[data-state="done"] .app-progress-mirror,
+        .export-progress[data-state="error"] .app-progress-mirror { opacity: 1; }
+        .export-progress[data-state="done"] .app-progress-fill,
+        .export-progress[data-state="error"] .app-progress-fill {
+            width: 100% !important; animation: none; transform: none; opacity: 1;
+        }
+        .export-progress[data-state="done"] .app-progress-fill { background: var(--success); box-shadow: none; }
+        .export-progress[data-state="error"] .app-progress-fill { background: var(--danger); box-shadow: none; }
+        .export-progress-meta {
+            display: flex; justify-content: space-between; gap: var(--sp-4);
+            margin-top: var(--sp-3);
+            font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.4;
+        }
+        .export-progress-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .export-progress-time { flex: none; font-variant-numeric: tabular-nums; }
+        .export-progress[data-state="done"] .export-progress-text { color: var(--success); }
+        .export-progress[data-state="error"] .export-progress-text { color: var(--danger); }
 
         /* ----- D2a. Animation VÀO cho modal + dropdown -----
            Mọi modal/dropdown của app bật/tắt bằng display:none <-> block/flex. Với khuôn đó,
@@ -3799,6 +3865,12 @@
         <button id="btnExportVideo" class="btn btn-primary" disabled><svg class="btn-ico"><use href="#ic-export"/></svg>Xuất video</button>
     </div>
 </div>
+<!-- Màn chờ lúc mở dự án (xem CSS #projectLoadingScreen). -->
+<div id="projectLoadingScreen" role="status" aria-live="polite" aria-hidden="true">
+    <div class="project-loading-spinner" aria-hidden="true"></div>
+    <div class="project-loading-title">Đang mở dự án…</div>
+    <div id="projectLoadingName" class="project-loading-name"></div>
+</div>
 <!-- MÀN HÌNH HOME: lớp phủ NGOÀI hệ step (xem CSS #homeScreen để biết vì sao). -->
 <div id="homeScreen" aria-hidden="true">
     <aside class="home-rail">
@@ -3865,10 +3937,12 @@
             <label for="exportFileName">Tên tệp xuất</label>
             <input id="exportFileName" type="text" value="studio_final_cut">
         </div>
-        <div class="form-group" style="display: none;">
+        <!-- Mục 1.12: ô này từng bị ẩn và vô tác dụng (backend luôn xuất đúng cỡ sequence). Nay
+             backend co ở đuôi đồ thị theo lựa chọn này — xem exportOutputFrame (backend/server.js). -->
+        <div class="form-group">
             <label for="exportResolution">Kích thước video</label>
             <select id="exportResolution">
-                <option value="source" selected>Giữ kích thước nguồn</option>
+                <option value="source" selected>Theo Sequence</option>
                 <option value="p720">HD 720p (1280x720)</option>
                 <option value="p1080">Full HD 1080p (1920x1080)</option>
                 <option value="p1440">QHD 1440p (2560x1440)</option>
@@ -3911,13 +3985,22 @@
             </div>
         </div>
         <div class="transcribe-options-grid">
+            <!-- Ô "Bitrate" kiểu CapCut (mục 1.20 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md, người dùng chốt
+                 2026-10-01) thay ô "Chất lượng" cũ. Ba mức đầu là CHẤT LƯỢNG CỐ ĐỊNH có trần: tệp tự
+                 nhỏ khi nguồn dễ nén, không bao giờ to hơn bitrate cố định cũ của cùng mức. "Tùy chỉnh"
+                 = bitrate trung bình (Mbps). ProRes không dùng bitrate -> ô bị khoá (syncExportBitrateUi). -->
             <div class="form-group">
-                <label for="exportQuality">Chất lượng</label>
-                <select id="exportQuality">
-                    <option value="high" selected>Cao</option>
-                    <option value="balanced">Cân bằng</option>
-                    <option value="small">Tệp nhỏ</option>
+                <label for="exportBitrate">Bitrate</label>
+                <select id="exportBitrate">
+                    <option value="lower">Thấp hơn</option>
+                    <option value="recommended" selected>Khuyến nghị</option>
+                    <option value="higher">Cao hơn</option>
+                    <option value="custom">Tùy chỉnh</option>
                 </select>
+                <div id="exportBitrateCustomRow" class="export-bitrate-custom" hidden>
+                    <input id="exportBitrateMbps" type="number" min="0.5" max="400" step="0.5" value="20" inputmode="decimal" aria-label="Bitrate (Mbps)">
+                    <span class="export-bitrate-unit">Mbps</span>
+                </div>
             </div>
             <div class="form-group">
                 <label for="exportAudioBitrate">Âm thanh</label>
@@ -3930,6 +4013,16 @@
         </div>
     </div>
     <button id="btnExportFromStep4" class="btn btn-primary btn-block"><svg class="btn-ico"><use href="#ic-export"/></svg>Xuất video ngay</button>
+    <!-- Bản sao thanh tiến độ của header (người dùng báo 2026-10-04: popup che mất dải 2px dưới
+         header nên không biết app còn render hay không). setAppProgress (ui-feedback.js) vẽ lên
+         mọi .app-progress-mirror; performVideoExport bật/tắt khối này qua data-state. -->
+    <div id="exportProgress" class="export-progress" data-state="idle" hidden aria-live="polite">
+        <div class="app-progress app-progress-mirror" role="progressbar" aria-hidden="true"><div class="app-progress-fill"></div></div>
+        <div class="export-progress-meta">
+            <span id="exportProgressText" class="export-progress-text"></span>
+            <span id="exportProgressTime" class="export-progress-time"></span>
+        </div>
+    </div>
 </div>
 
 <div id="captureModalBackdrop" aria-hidden="true"></div>
@@ -5695,7 +5788,7 @@
             text: { label: _t('Văn bản'), subs: { basic: _t('Cơ bản'), template: _t('Mẫu'), effect: _t('Hiệu ứng'), transform: _t('Biến đổi') } },
             anim: { label: _t('Hiệu ứng động'), subs: { in: _t('Vào'), out: _t('Ra'), combo: _t('Kết hợp') } },
             shape: { label: _t('Hình dạng'), subs: { basic: _t('Cơ bản'), transform: _t('Biến đổi') } },
-            retouch: { label: _t('Retouch'), subs: { basic: _t('Làm đẹp') } },
+            retouch: { label: _t('Retouch'), subs: { basic: _t('Làm đẹp'), logo: _t('Xoá logo') } },
             adjust: {
                 label: _t('Điều chỉnh'),
                 subs: {
@@ -6293,7 +6386,12 @@
                 this.root.appendChild(this.app.view);
                 this.background = new PIXI.Graphics();
                 this.app.stage.addChild(this.background);
-                this.texture = PIXI.Texture.from(this.videoEl);
+                /* autoPlay: false — mặc định của Pixi 7 (`VideoResource`) là TỰ GỌI video.play() ở
+                   mỗi sự kiện `canplay`: mở dự án xong là preview tự chạy (có từ 1.1.8, không ai
+                   bấm Phát), và đổi sang proxy lúc đang dừng cũng tự chạy tiếp. Dừng yên như
+                   Premiere (người dùng chốt 2026-09-29, mục 1.17 của KE_HOACH_TOI_UU_EXPORT_WIN.md);
+                   playhead được đặt ở đầu sequence cuối lượt mở dự án (parkPreviewAtSequenceStart). */
+                this.texture = PIXI.Texture.from(this.videoEl, { resourceOptions: { autoPlay: false } });
                 this.sprite = new PIXI.Sprite(this.texture);
                 this.sprite.anchor.set(0.5);
                 this.app.stage.addChild(this.sprite);
@@ -6349,6 +6447,17 @@
 
                 const payload = getSequencePayload();
 	                const previewScale = Math.min(frameW / payload.width, frameH / payload.height);
+	                /* Khung là số px NGUYÊN nên vẫn có thể lệch tỉ lệ sequence dưới 1px. Giãn
+	                 * sprite thêm đúng phần dư đó (≤ 0.3%, mắt không thấy) để hình vừa KHÍT khung —
+	                 * nếu không, mép hình rơi vào giữa pixel và nền (xanh cảnh báo trong suốt)
+	                 * lộ thành một vệt mảnh ở hai bên. Lệch từ 1.5px trở lên là khoảng trống
+	                 * THẬT (cảnh báo phải hiện) -> không giãn. */
+	                const edgeFit = (frame, seq) => {
+	                    const k = frame / Math.max(1e-6, seq * previewScale);
+	                    return (k > 1 && (frame - seq * previewScale) < 1.5) ? k : 1;
+	                };
+	                const edgeX = edgeFit(frameW, payload.width);
+	                const edgeY = edgeFit(frameH, payload.height);
 	                const activeIdx = getActivePreviewClipIndex();
 	                const activeClip = activeIdx >= 0 ? latestTimeline[activeIdx] : null;
 	                // KEYFRAME: transform hiệu dụng tại playhead (nội suy) trước khi áp anim delta.
@@ -6391,8 +6500,8 @@
 	                this.sprite.rotation = (transform.rotation + aRot) * Math.PI / 180;
 	                this.sprite.alpha = (transform.opacity / 100) * aOpacity;
 	                this.sprite.scale.set(
-	                    displayScale * clipScale * aSx * (transform.flip_x ? -1 : 1),
-	                    displayScale * clipScale * aSy * (transform.flip_y ? -1 : 1),
+	                    displayScale * clipScale * aSx * edgeX * (transform.flip_x ? -1 : 1),
+	                    displayScale * clipScale * aSy * edgeY * (transform.flip_y ? -1 : 1),
 	                );
 	                // ỐNG HÚT MÀU: lưu CHÍNH các con số vừa dùng để vẽ sprite, để phép
 	                // ánh xạ ngược (điểm bấm trên preview -> pixel NGUỒN) không bao giờ
@@ -6409,8 +6518,8 @@
 	                    cx: frameW / 2 + ((transform.position_x + aDx) * previewScale),
 	                    cy: frameH / 2 + ((transform.position_y + aDy) * previewScale),
 	                    rotation: (transform.rotation + aRot) * Math.PI / 180,
-	                    scaleX: displayScale * clipScale * aSx * (transform.flip_x ? -1 : 1),
-	                    scaleY: displayScale * clipScale * aSy * (transform.flip_y ? -1 : 1),
+	                    scaleX: displayScale * clipScale * aSx * edgeX * (transform.flip_x ? -1 : 1),
+	                    scaleY: displayScale * clipScale * aSy * edgeY * (transform.flip_y ? -1 : 1),
 	                    texW: cropRect.width,
 	                    texH: cropRect.height,
 	                    texX: cropRect.x,
@@ -6618,10 +6727,11 @@
 	                // thứ tự mà khâu bake khi xuất sẽ phải theo.
 	                // Kết quả là CANVAS -> buộc đi đường nhiều lượt (b), y như khi có
 	                // lớp Điều chỉnh; PIXI.Filter một lượt không nhận canvas trung gian.
+	                // XOÁ LOGO đi cùng retouch qua EditingRuntime.sourceFxDrawable (retouch rồi
+	                // xoá logo) — cùng lý do buộc sang đường canvas nhiều lượt.
 	                const rtClip = activeClip;
-	                const rtOn = !!(window.Retouch && rtClip?.retouch
-	                    && !Retouch.isIdentity(rtClip.retouch)
-	                    && window.EditingRuntime?.retouchedDrawable);
+	                const rtOn = !!(rtClip && window.EditingRuntime?.sourceFxDrawable
+	                    && window.EditingRuntime.clipHasSourceFx(rtClip));
 	                const useSpatialPath = !!window.ColorAdjust
 	                    && !!window.EditingRuntime?.colorAdjustedDrawable
 	                    && this.videoEl.videoWidth > 0
@@ -6632,9 +6742,10 @@
 	                    if (rtOn) {
 	                        // Mốc thời gian là giây NGUỒN của clip — đúng trục mà landmark
 	                        // được ghi (retouch_track lấy mẫu theo thời gian nguồn).
-	                        base = window.EditingRuntime.retouchedDrawable(
+	                        base = window.EditingRuntime.sourceFxDrawable(
 	                            this.videoEl, textureW, textureH, rtClip,
-	                            Number(this.videoEl.currentTime) || 0, textureW / Math.max(1, textureH))
+	                            Number(this.videoEl.currentTime) || 0, textureW / Math.max(1, textureH),
+	                            'mainpreview')
 	                            || this.videoEl;
 	                    }
 	                    let fx = window.EditingRuntime.colorAdjustedDrawable(
@@ -6712,8 +6823,10 @@
         if (msg.includes('nối các file video')) return 'Đang nối video...';
         if (msg.includes('bóc băng')) return 'Đang bóc băng...';
         if (msg.includes('lọc kịch bản')) return 'Đang lọc kịch bản...';
-        if (msg.includes('timeline')) return 'Đang dựng timeline...';
+        // Xuất video TRƯỚC "timeline": câu của backend lúc xuất là "Đang chuẩn bị cắt video theo
+        // timeline đã lọc..." — để sau thì thanh trạng thái báo nhầm "Đang dựng timeline".
         if (msg.includes('chuẩn bị cắt video') || msg.includes('xuất video')) return 'Đang xuất video...';
+        if (msg.includes('timeline')) return 'Đang dựng timeline...';
         if (msg.includes('đã hoàn tất') || msg.includes('sẵn sàng')) return 'Sẵn sàng';
         if (msg.includes('lỗi')) return 'Có lỗi xảy ra';
         return raw;
@@ -6739,6 +6852,15 @@
         const shortText = compactStatusMessage(rawMessage);
         statusTextEl.innerText = `${isBusy ? '… ' : ''}${shortText}`;
         statusTextEl.title = String(rawMessage || shortText);
+        // Popup Xuất video che thanh trạng thái: lúc đang xuất thì chép cùng câu vào popup.
+        const exportProgressEl = document.getElementById('exportProgress');
+        if (isBusy && exportProgressEl?.dataset.state === 'running') {
+            const textEl = document.getElementById('exportProgressText');
+            if (textEl) {
+                textEl.textContent = shortText;
+                textEl.title = String(rawMessage || shortText);
+            }
+        }
     }
 
     function normalizeForScriptHover(text) {
@@ -8851,8 +8973,19 @@
         const availableH = Math.max(1, shell.clientHeight || shell.getBoundingClientRect().height);
         // fit = mức "vừa khung"; previewZoom nhân thêm vào (1 = vừa khung).
         const fit = Math.min(availableW / payload.width, availableH / payload.height) * previewZoom;
-        frame.style.width = `${Math.max(1, Math.floor(payload.width * fit))}px`;
-        frame.style.height = `${Math.max(1, Math.floor(payload.height * fit))}px`;
+        /* Làm tròn MỘT cạnh rồi suy cạnh kia theo ĐÚNG tỉ lệ sequence. Làm tròn xuống riêng
+         * từng cạnh là tỉ lệ khung lệch tỉ lệ hình tới gần 1px -> hình không phủ kín khung
+         * và lộ một vệt nền ở hai mép. */
+        const maxW = Math.max(1, Math.floor(payload.width * fit));
+        const maxH = Math.max(1, Math.floor(payload.height * fit));
+        let frameW = maxW;
+        let frameH = Math.max(1, Math.round(maxW * payload.height / payload.width));
+        if (frameH > maxH) {
+            frameH = maxH;
+            frameW = Math.max(1, Math.min(maxW, Math.round(maxH * payload.width / payload.height)));
+        }
+        frame.style.width = `${frameW}px`;
+        frame.style.height = `${frameH}px`;
 	        updateSequencePreviewTransform();
 	        updateSafeZoneOverlay();
 	    }
@@ -9840,6 +9973,23 @@
             }
         });
         return Math.max(0, Math.min(getTimelineDuration(), bestTime));
+    }
+
+    /* Mở dự án xong: dừng preview ở ĐẦU sequence, như Premiere. Trước đây việc này do cú tự phát
+       của Pixi làm hộ (xem SequencePixiPreviewRenderer.init) — phát từ giây 0 của nguồn, rồi
+       vòng timeupdate nhảy tới clip đầu. Tắt tự phát mà không đặt lại thì preview đứng ở giây 0
+       của NGUỒN (ngoài clip đầu, vd 9,96 s ở "Bin Tom") và đồng hồ hiện 00:00:00:00 / 00:00:00:00
+       vì chưa có timeupdate nào. Seek (kể cả tới đúng chỗ đang đứng) luôn bắn timeupdate. */
+    function parkPreviewAtSequenceStart() {
+        if (!(videoDuration > 0)) return;
+        if (!video.paused) video.pause();
+        setVideoTimeFromTimelineTime(0);
+        /* Vẽ đồng hồ NGAY: timeupdate của lượt tua chỉ tới khi trình duyệt giải mã xong khung đích
+           (đo trong Electron, Bin Tom: 1,5 s sau khi mở vẫn còn 00:00:00:00 / 00:00:00:00). Cùng
+           công thức với handler timeupdate. */
+        const displayTotal = currentMode === 'FINAL' ? getTimelineDuration() : videoDuration;
+        const clock = document.getElementById('timeDisplay');
+        if (clock) clock.innerText = `${formatTimecode(getDisplayClockTime())} / ${formatTimecode(displayTotal)}`;
     }
 
     function setVideoTimeFromTimelineTime(timelineTime) {
@@ -12341,7 +12491,35 @@
         }
     }
 
+    /* Màn chờ che trình dựng suốt lượt nạp — xem CSS #projectLoadingScreen. CHE chứ không
+     * display:none .main-layout: timeline/preview đo clientWidth trong lúc nạp, ẩn đi là
+     * chúng dựng với bề rộng 0. */
+    function showProjectLoadingScreen(filePath) {
+        const nameEl = document.getElementById('projectLoadingName');
+        if (nameEl) nameEl.textContent = String(filePath || '').split(/[\\/]/).pop().replace(/\.crab$/i, '');
+        document.getElementById('projectLoadingScreen')?.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('project-loading');
+    }
+
+    function hideProjectLoadingScreen() {
+        // Chờ 2 khung: showStep() và các lượt vẽ timeline hẹn bằng rAF/setTimeout(0) — gỡ
+        // màn chờ ngay thì còn kịp thấy một khung Editing vẽ dở.
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            document.body.classList.remove('project-loading');
+            document.getElementById('projectLoadingScreen')?.setAttribute('aria-hidden', 'true');
+        }));
+    }
+
     async function performProjectLoad(payload, relink, filePath) {
+        showProjectLoadingScreen(filePath);
+        try {
+            await performProjectLoadInner(payload, relink, filePath);
+        } finally {
+            hideProjectLoadingScreen();
+        }
+    }
+
+    async function performProjectLoadInner(payload, relink, filePath) {
         hideHome();   // bao cả 3 đường mở: Home, menu "Mở dự án…", double-click .crab từ OS
         await fetch(`${API_BASE}/reset-project`, { method: 'POST' });
         // Landmark khuôn mặt được nhớ trong bộ nhớ theo [start, end] của block. Mở dự án
@@ -12565,6 +12743,7 @@
         updateProjectTitle();
         touchRecentProject(filePath);   // mở cũng là "gần đây", không chỉ lưu
         undoStack = []; redoStack = []; updateUndoRedoButtons();
+        parkPreviewAtSequenceStart();
         setStatusText(_t('Đã mở dự án'), false);
     }
 
@@ -15832,18 +16011,98 @@
     // Phải khoá NGAY TỪ ĐẦU hàm, trước mọi việc nặng.
     let videoExportInFlight = false;
 
-    async function performVideoExport() {
+    /* CHỖ LƯU VIDEO XUẤT — hỏi TRƯỚC khi render, như Premiere (mục 1.16, người dùng chốt
+     * 2026-09-29). ffmpeg ghi thẳng ra đó: hết vòng tải cả file qua trình duyệt (11,5 GB mất 64 s)
+     * rồi ghi thêm một bản, hết bản sao trong blob_storage. Trả { path, ticket } | false (người
+     * dùng huỷ) | null (không có hộp thoại gốc: chạy trong trình duyệt, backend ngoài, hoặc
+     * `pickOutput: false` của bench:export) -> đường tải về cũ. */
+    async function pickVideoExportTarget(options) {
+        if (options?.pickOutput === false || !window.desktopEnv?.pickExportOutput) return null;
+        const codec = document.getElementById('exportCodec')?.value || 'h264';
+        const suggestedName = sanitizeProjectName(document.getElementById('exportFileName')?.value || '') || 'studio_final_cut';
+        const picked = await window.desktopEnv.pickExportOutput({
+            suggestedName,
+            ext: codec === 'prores' ? 'mov' : 'mp4',
+            projectPath: currentProjectPath || '',
+        });
+        if (picked?.canceled) return false;
+        return (picked?.path && picked?.ticket) ? picked : null;
+    }
+
+    /* Khối tiến độ dưới nút "Xuất video ngay" (#exportProgress). Thanh do setAppProgress vẽ;
+     * ở đây chỉ lo trạng thái, câu chữ và đồng hồ — backend không báo % khi mã hoá nên đồng
+     * hồ chạy là dấu hiệu "app vẫn đang làm" rõ nhất. */
+    let exportProgressClock = null;
+    function formatExportElapsed(ms) {
+        const total = Math.max(0, Math.floor(ms / 1000));
+        const h = Math.floor(total / 3600);
+        const m = Math.floor((total % 3600) / 60);
+        const s = String(total % 60).padStart(2, '0');
+        return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+    }
+    function setExportProgressUi(state, message = '') {
+        const box = document.getElementById('exportProgress');
+        if (!box) return;
+        const textEl = document.getElementById('exportProgressText');
+        const timeEl = document.getElementById('exportProgressTime');
+        if (state === 'idle') {
+            clearInterval(exportProgressClock);
+            exportProgressClock = null;
+            box.dataset.state = 'idle';
+            box.hidden = true;
+            return;
+        }
+        box.hidden = false;
+        box.dataset.state = state;
+        if (textEl) {
+            textEl.textContent = message;
+            textEl.title = message;
+        }
+        if (state === 'running') {
+            const startedAt = Date.now();
+            const tick = () => { if (timeEl) timeEl.textContent = formatExportElapsed(Date.now() - startedAt); };
+            tick();
+            clearInterval(exportProgressClock);
+            exportProgressClock = setInterval(tick, 1000);
+        } else {
+            clearInterval(exportProgressClock);   // giữ nguyên số giây cuối = thời gian xuất
+            exportProgressClock = null;
+        }
+    }
+    window.resetExportProgressUi = () => { if (!videoExportInFlight) setExportProgressUi('idle'); };
+
+    async function performVideoExport(options = {}) {
         if (!latestTimeline || latestTimeline.length === 0) return;
         if (videoExportInFlight) {
             setStatusText(_t('Đang xuất video — vui lòng đợi lượt hiện tại xong.'), true);
             return;
         }
+        // Hộp thoại lưu gốc là modal nên không bấm Xuất lần hai được trong lúc nó mở.
+        const exportTarget = await pickVideoExportTarget(options);
+        if (exportTarget === false) {
+            setStatusText(_t('Đã huỷ xuất video.'), false);
+            return;
+        }
         videoExportInFlight = true;
+        /* Dừng preview trước khi xuất: vòng phát (Pixi + overlay + cuộn timeline, ~60 Hz) giành
+         * CPU/GPU với ffmpeg vốn đã bão hoà CPU. Đo 2026-09-28 (bản cắt 300 s 4K): cùng payload,
+         * lượt xuất khi preview đang phát chậm hơn ~21–30%. Nút Play tự đồng bộ theo sự kiện
+         * 'pause', giống nút Chụp khung hình. */
+        if (video && !video.paused) video.pause();
         const exportTopBtn = document.getElementById('btnExportVideo');
         const exportStepBtn = document.getElementById('btnExportFromStep4');
         if (exportTopBtn) exportTopBtn.disabled = true;
         if (exportStepBtn) exportStepBtn.disabled = true;
+        setExportProgressUi('running', _t('Đang xuất video...'));
+        let exportResult = { ok: false, message: '' };
         startStatusPolling();
+        /* ĐO TỪNG KHÂU (Bước 0.1, docs/KE_HOACH_TOI_UU_EXPORT_WIN.md). Mốc gửi lên server
+         * (`client_started_at_ms`) chỉ bắt đầu từ lúc TẢI LÊN, nên con số trong báo cáo dự án
+         * chưa bao giờ gồm bước vẽ trước (PNG chữ, chuỗi khung hoạt ảnh/chuyển cảnh/retouch).
+         * `prebake` đi kèm FormData để vào báo cáo; bản đầy đủ (cả tải về) nằm ở
+         * `window.__crabLastExportTiming` cho bench:export đọc. */
+        const exportClock = performance.now();
+        const exportTiming = { started_at_ms: Date.now(), prebake: {} };
         try {
         const formData = new FormData();
         latestTimeline = normalizeTimelineTransforms(latestTimeline);
@@ -15880,6 +16139,10 @@
                 acc += clipSequenceDuration(c);
             });
         }
+        // XOÁ LOGO BẰNG AI: block ở chế độ AI phải có miếng vá phủ đủ khoảng TRƯỚC khi dựng
+        // payload — logoRemovalExportPx (lane chính, ngay dưới) và exportPayload (overlay) chỉ
+        // đọc trạng thái đã có. Block chạy hỏng thì rơi về delogo, EditingRuntime báo ra.
+        await window.EditingRuntime?.ensureLogoAiForExport?.();
         const concatFrameForExport = mainConcatFrameSize();
         const timelineForExport = await Promise.all(latestTimeline.map(async (clip, index) => {
             /* VÙNG ẢNH THẬT gửi kèm từng block: backend đổi nó thành `fit_scale` cho sidecar
@@ -15923,6 +16186,10 @@
                 // stream mà chuỗi filter chạy trên đó (chuỗi màu cũng chèn TRƯỚC scale).
                 const maskPng = window.EditingRuntime.videoMaskExportPng(clip.video_mask, srcW, srcH);
                 if (maskPng) out = { ...out, video_mask_png: maskPng };
+                // XOÁ LOGO: hình chữ nhật pixel trên KHUNG NỐI — cùng stream `[0:v]` mà sidecar
+                // chèn delogo/boxblur vào (trước chuỗi màu, trước scale).
+                const logoPx = window.EditingRuntime.logoRemovalExportPx?.(clip, srcW, srcH);
+                if (logoPx) out = { ...out, logo_removal_px: logoPx };
             }
             if (window.TextAnimations && TextAnimations.hasAnimation && TextAnimations.hasAnimation(clip)) {
                 const dur = Math.max(0.05, clipSequenceDuration(clip));
@@ -15947,24 +16214,33 @@
             return out;
         }));
         formData.append("timeline_json", JSON.stringify(timelineForExport));
+        exportTiming.prebake.main_lane_ms = Math.round(performance.now() - exportClock);
         if (window.EditingRuntime?.exportPayload) {
             // Chuỗi khung của vùng chuyển cảnh đi RIÊNG thành các phần file nhị phân, KHÔNG
             // nhét vào editing_json: nhét vào thì JSON.stringify vượt trần chuỗi của V8
             // (~536MB) ngay khi có vài chuyển cảnh full-res -> "lỗi render" không rõ nguyên
             // nhân. Xem khối "ĐÓNG GÓI CHUỖI KHUNG CHUYỂN CẢNH KHI EXPORT" ở editing-runtime.js.
             const transitionFrames = [];
+            const payloadClock = performance.now();
             const editingJson = await window.EditingRuntime.exportPayload({
                 fps: effectiveFps,
                 collectFile: (name, blob) => transitionFrames.push([name, blob]),
+                timing: exportTiming.prebake,
             });
-            formData.append("editing_json", JSON.stringify(editingJson));
+            exportTiming.prebake.editing_payload_ms = Math.round(performance.now() - payloadClock);
+            const serializeClock = performance.now();
+            const editingJsonText = JSON.stringify(editingJson);
+            exportTiming.prebake.serialize_ms = Math.round(performance.now() - serializeClock);
+            exportTiming.prebake.editing_json_bytes = editingJsonText.length;
+            exportTiming.prebake.transition_frame_files = transitionFrames.length;
+            formData.append("editing_json", editingJsonText);
             for (const [name, blob] of transitionFrames) formData.append("transition_frames", blob, name);
         }
 
         const exportResolution = document.getElementById('exportResolution')?.value || 'source';
         const exportFps = document.getElementById('exportFps')?.value || 'source';
         const exportCodec = document.getElementById('exportCodec')?.value || 'h264';
-        const exportQuality = document.getElementById('exportQuality')?.value || 'high';
+        const exportRate = readExportBitrate();
         const exportAudioBitrate = document.getElementById('exportAudioBitrate')?.value || '192k';
         const exportSettings = {
             resolution: 'sequence',
@@ -15972,7 +16248,8 @@
             sequence: sequencePayload,
             fps: exportFps,
             codec: exportCodec,
-            quality: exportQuality,
+            rate_mode: exportRate.mode,
+            ...(exportRate.mode === 'custom' ? { rate_mbps: exportRate.mbps } : {}),
             audio_bitrate: exportAudioBitrate,
         };
         const exportFileNameRaw = document.getElementById('exportFileName')?.value || '';
@@ -15983,29 +16260,67 @@
         formData.append("sequence_settings", JSON.stringify(sequencePayload));
         formData.append("export_preset", exportResolution);
         formData.append("export_fps", exportFps);
+        exportTiming.prebake_ms = Math.round(performance.now() - exportClock);
+        formData.append("client_timing_json", JSON.stringify({
+            prebake_ms: exportTiming.prebake_ms,
+            prebake: exportTiming.prebake,
+        }));
         formData.append("client_started_at_ms", String(Date.now()));
+        if (exportTarget) {
+            formData.append('output_path', exportTarget.path);
+            formData.append('output_ticket', exportTarget.ticket);
+        }
 
+        const requestClock = performance.now();
         const response = await fetch(`${API_BASE}/export-video`, { method: "POST", body: formData });
+        // Tải lên + toàn bộ phía server (chờ tới khi có header phản hồi).
+        exportTiming.request_ms = Math.round(performance.now() - requestClock);
         if (!response.ok) {
             let detail = '';
             try { detail = (await response.json()).detail || ''; } catch (_) {}
             throw new Error(detail || _t("Xuất video thất bại."));
         }
+        try { exportTiming.server = JSON.parse(response.headers.get('X-Export-Timing') || 'null'); } catch (_) {}
+        exportTiming.report_path = response.headers.get('X-Project-Report-Path') || null;
+        // Đã ghi thẳng ra chỗ người dùng chọn: server trả JSON, không có gì để tải về.
+        if (exportTarget && (response.headers.get('content-type') || '').includes('application/json')) {
+            const written = await response.json();
+            exportTiming.download_ms = 0;
+            exportTiming.output_path = written?.path || exportTarget.path;
+            exportTiming.total_ms = Math.round(performance.now() - exportClock);
+            window.__crabLastExportTiming = exportTiming;
+            console.info('[export-timing]', exportTiming);
+            showToast(_t('Đã xuất video: {name}', { name: written?.name || exportTarget.path }), { type: 'success' });
+            setStatusText(_t('Đã lưu video vào {path}', { path: exportTiming.output_path }), false);
+            exportResult = { ok: true, message: _t('Đã xuất xong: {name}', { name: written?.name || exportTarget.path }) };
+            return;
+        }
+        const downloadClock = performance.now();
+        const exportBlob = await response.blob();
+        exportTiming.download_ms = Math.round(performance.now() - downloadClock);
+        exportTiming.output_bytes = exportBlob.size;
+        exportTiming.total_ms = Math.round(performance.now() - exportClock);
+        window.__crabLastExportTiming = exportTiming;
+        console.info('[export-timing]', exportTiming);
         const a = document.createElement("a");
-        a.href = URL.createObjectURL(await response.blob());
+        a.href = URL.createObjectURL(exportBlob);
         a.download = `${exportFileName}.${exportCodec === 'prores' ? 'mov' : 'mp4'}`;
         a.click();
+        exportResult = { ok: true, message: _t('Đã xuất xong: {name}', { name: a.download }) };
         // Bake khung chuyển cảnh (nặng, nhiều phút) NẰM TRONG try này: trước đây nó ở ngoài
         // nên khi bake nổ lỗi — ví dụ JSON.stringify vượt trần chuỗi của V8 vì payload quá
         // lớn — không ai bắt, UI im lặng và người dùng chỉ thấy "render lỗi" không rõ vì sao.
         } catch (error) {
             console.error('Export error:', error);
+            window.__crabLastExportTiming = { ...exportTiming, error: String(error?.message || error) };
             showToast(error && error.message ? error.message : _t('Xuất video thất bại.'), { type: 'error' });
+            exportResult = { ok: false, message: error && error.message ? error.message : _t('Xuất video thất bại.') };
         } finally {
             videoExportInFlight = false;
             stopStatusPolling();
             if (exportTopBtn) exportTopBtn.disabled = false;
             if (exportStepBtn) exportStepBtn.disabled = false;
+            setExportProgressUi(exportResult.ok ? 'done' : 'error', exportResult.message || _t('Xuất video thất bại.'));
         }
     }
 
@@ -16027,6 +16342,8 @@
     document.getElementById('btnExportVideo').addEventListener('click', () => {
         if (document.getElementById('btnExportVideo').disabled) return;
         syncExportFileNameFromProject();
+        syncExportBitrateUi();   // sequence có thể đã đổi khổ từ lần mở trước
+        window.resetExportProgressUi?.();   // kết quả lượt trước không treo lại ở lần mở mới
         if (window.EditingRuntime?.openExportModal) {
             window.EditingRuntime.openExportModal();
         }
@@ -16035,6 +16352,51 @@
     document.getElementById('btnExportFromStep4')?.addEventListener('click', () => {
         performVideoExport();
     });
+
+    /* Ô "Bitrate" (xem ghi chú ở markup). Cỡ khung THẬT SỰ được mã hoá = cỡ preset của "Kích thước
+     * video", hoặc cỡ sequence khi để "Theo Sequence" — cùng quy tắc với RateKbps của sidecar. */
+    const EXPORT_PRESET_FRAMES = {
+        p720: [1280, 720], p1080: [1920, 1080], p1440: [2560, 1440], p2160: [3840, 2160],
+        vertical_720: [720, 1280], vertical_1080: [1080, 1920], vertical_1440: [1440, 2560],
+        vertical_2160: [2160, 3840], square_1080: [1080, 1080],
+    };
+    // Số điền sẵn cho "Tùy chỉnh": trần của mức Khuyến nghị (13 Mbps cho H.264 1080p, 11 cho H.265).
+    function recommendedExportMbps() {
+        const preset = document.getElementById('exportResolution')?.value || 'source';
+        let seq = { width: 1920, height: 1080 };
+        try { seq = getSequencePayload(); } catch (_) { /* chưa có sequence: lấy 1080p */ }
+        const [w, h] = EXPORT_PRESET_FRAMES[preset] || [seq.width, seq.height];
+        const base = (document.getElementById('exportCodec')?.value === 'hevc') ? 11 : 13;
+        const mbps = base * (w * h) / (1920 * 1080);
+        return Math.min(80, Math.max(2.5, Math.round(mbps * 2) / 2));
+    }
+    let exportBitrateMbpsTouched = false;
+    function syncExportBitrateUi() {
+        const select = document.getElementById('exportBitrate');
+        const row = document.getElementById('exportBitrateCustomRow');
+        const input = document.getElementById('exportBitrateMbps');
+        if (!select || !row || !input) return;
+        const prores = document.getElementById('exportCodec')?.value === 'prores';
+        select.disabled = prores;
+        input.disabled = prores;
+        select.title = prores ? _t('ProRes không dùng bitrate (chất lượng cố định theo profile).') : '';
+        const custom = select.value === 'custom';
+        row.hidden = !custom;
+        if (custom && !exportBitrateMbpsTouched) input.value = String(recommendedExportMbps());
+    }
+    function readExportBitrate() {
+        const mode = document.getElementById('exportBitrate')?.value || 'recommended';
+        if (mode !== 'custom') return { mode };
+        const mbps = Number(String(document.getElementById('exportBitrateMbps')?.value || '').replace(',', '.'));
+        // Số không hợp lệ -> Khuyến nghị (backend và sidecar cũng lùi như vậy).
+        if (!Number.isFinite(mbps) || mbps < 0.5 || mbps > 400) return { mode: 'recommended' };
+        return { mode, mbps };
+    }
+    document.getElementById('exportBitrateMbps')?.addEventListener('input', () => { exportBitrateMbpsTouched = true; });
+    ['exportBitrate', 'exportCodec', 'exportResolution'].forEach((id) => {
+        document.getElementById(id)?.addEventListener('change', syncExportBitrateUi);
+    });
+    syncExportBitrateUi();
 </script>
 <script src="/static/js/editing-runtime.js?v=lumen-p5-lsub-asetpl2"></script>
 <script src="/static/js/perf-runtime.js"></script>

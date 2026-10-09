@@ -3,6 +3,8 @@
 
 #include <cstdlib>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <clocale>
 #include <cstdint>
 #include <cstdio>
@@ -11,12 +13,17 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <mutex>
+#include <numeric>
 #include <regex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -167,39 +174,54 @@ std::wstring WidenForProcess(const std::string& text) {
 }
 #endif
 
-int RunIn(const std::vector<std::string>& args, const fs::path& workingDir) {
-  const std::string line = CommandLine(args);
 #ifdef _WIN32
-  if (line.size() <= kWindowsCommandLineLimit) {
-    std::wstring wide = WidenForProcess(line);
-    if (!wide.empty()) {
-      // CreateProcessW ĐƯỢC PHÉP sửa tại chỗ bộ đệm dòng lệnh -> phải là bộ đệm ghi được.
-      std::vector<wchar_t> buffer(wide.begin(), wide.end());
-      buffer.push_back(L'\0');
-      const std::wstring wideDir = workingDir.empty() ? std::wstring() : WidenForProcess(workingDir.string());
-      STARTUPINFOW si;
-      ZeroMemory(&si, sizeof(si));
-      si.cb = sizeof(si);
-      PROCESS_INFORMATION pi;
-      ZeroMemory(&pi, sizeof(pi));
-      if (CreateProcessW(nullptr, buffer.data(), nullptr, nullptr, TRUE, 0, nullptr,
-                         wideDir.empty() ? nullptr : wideDir.c_str(), &si, &pi)) {
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        DWORD exitCode = 1;
-        GetExitCodeProcess(pi.hProcess, &exitCode);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-        return static_cast<int>(exitCode);
-      }
-    }
-  } else {
+/* Khởi chạy một tiến trình KHÔNG chờ (lượt xuất song song, mục 1.8) — trả handle tiến trình, hoặc
+ * nullptr: `immediateCode` = 7 khi dòng lệnh vượt trần của Windows (đã báo lỗi), 0 khi
+ * CreateProcessW hỏng (RunIn lùi về std::system như trước). */
+HANDLE SpawnIn(const std::vector<std::string>& args, const fs::path& workingDir, int& immediateCode) {
+  immediateCode = 0;
+  const std::string line = CommandLine(args);
+  if (line.size() > kWindowsCommandLineLimit) {
     /* Vượt cả trần của CreateProcess. Nói THẲNG ra nguyên nhân: rơi về std::system() ở đây
      * chỉ đổi một thông báo khó hiểu này lấy một thông báo khó hiểu khác. */
     Emit("error", "Dòng lệnh ffmpeg dài " + std::to_string(line.size())
                   + " ký tự, vượt trần " + std::to_string(kWindowsCommandLineLimit)
                   + " của Windows. Dự án có quá nhiều lớp phủ (phụ đề/ảnh) cho một lượt render.", 7);
-    return 7;
+    immediateCode = 7;
+    return nullptr;
   }
+  std::wstring wide = WidenForProcess(line);
+  if (wide.empty()) return nullptr;
+  // CreateProcessW ĐƯỢC PHÉP sửa tại chỗ bộ đệm dòng lệnh -> phải là bộ đệm ghi được.
+  std::vector<wchar_t> buffer(wide.begin(), wide.end());
+  buffer.push_back(L'\0');
+  const std::wstring wideDir = workingDir.empty() ? std::wstring() : WidenForProcess(workingDir.string());
+  STARTUPINFOW si;
+  ZeroMemory(&si, sizeof(si));
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi;
+  ZeroMemory(&pi, sizeof(pi));
+  if (!CreateProcessW(nullptr, buffer.data(), nullptr, nullptr, TRUE, 0, nullptr,
+                      wideDir.empty() ? nullptr : wideDir.c_str(), &si, &pi)) {
+    return nullptr;
+  }
+  CloseHandle(pi.hThread);
+  return pi.hProcess;
+}
+#endif
+
+int RunIn(const std::vector<std::string>& args, const fs::path& workingDir) {
+  const std::string line = CommandLine(args);
+#ifdef _WIN32
+  int immediateCode = 0;
+  if (HANDLE process = SpawnIn(args, workingDir, immediateCode)) {
+    WaitForSingleObject(process, INFINITE);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(process, &exitCode);
+    CloseHandle(process);
+    return static_cast<int>(exitCode);
+  }
+  if (immediateCode != 0) return immediateCode;
 #endif
   const int status = std::system(ShellCommandLine(line).c_str());
 #ifdef _WIN32
@@ -214,6 +236,56 @@ int RunIn(const std::vector<std::string>& args, const fs::path& workingDir) {
 
 int Run(const std::vector<std::string>& args) {
   return RunIn(args, fs::path());
+}
+
+/* Chạy một lệnh dò, BỎ HẾT đầu ra, trả mã thoát (dò GPU/NVDEC của mục 1.21: chỉ cần biết chạy
+ * được hay không — CommandOutput không trả mã thoát, mà ffmpeg sập thì không in gì). Quá
+ * `timeoutMs` (driver treo) thì giết tiến trình và coi như hỏng. */
+int RunQuiet(const std::vector<std::string>& args, unsigned timeoutMs = 20000) {
+#ifdef _WIN32
+  const std::wstring wide = WidenForProcess(CommandLine(args));
+  if (wide.empty()) return -1;
+  std::vector<wchar_t> buffer(wide.begin(), wide.end());
+  buffer.push_back(L'\0');
+  SECURITY_ATTRIBUTES sa;
+  ZeroMemory(&sa, sizeof(sa));
+  sa.nLength = sizeof(sa);
+  sa.bInheritHandle = TRUE;
+  HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                           OPEN_EXISTING, 0, nullptr);
+  STARTUPINFOW si;
+  ZeroMemory(&si, sizeof(si));
+  si.cb = sizeof(si);
+  if (nul != INVALID_HANDLE_VALUE) {
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = nul;
+    si.hStdOutput = nul;
+    si.hStdError = nul;
+  }
+  PROCESS_INFORMATION pi;
+  ZeroMemory(&pi, sizeof(pi));
+  const BOOL started = CreateProcessW(nullptr, buffer.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+                                      nullptr, nullptr, &si, &pi);
+  if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+  if (!started) return -1;
+  CloseHandle(pi.hThread);
+  if (WaitForSingleObject(pi.hProcess, timeoutMs) != WAIT_OBJECT_0) {
+    TerminateProcess(pi.hProcess, 1);
+    WaitForSingleObject(pi.hProcess, 2000);
+    CloseHandle(pi.hProcess);
+    return -1;
+  }
+  DWORD exitCode = 1;
+  GetExitCodeProcess(pi.hProcess, &exitCode);
+  CloseHandle(pi.hProcess);
+  return static_cast<int>(exitCode);
+#else
+  (void)timeoutMs;
+  const int status = std::system((CommandLine(args) + " >/dev/null 2>&1").c_str());
+  if (status == -1) return -1;
+  if (WIFEXITED(status)) return WEXITSTATUS(status);
+  return 1;
+#endif
 }
 
 std::string CommandOutput(const std::vector<std::string>& args) {
@@ -756,6 +828,16 @@ struct ExportInterval {
   // MẶT NẠ CẮT HÌNH của block (tab Video) — KHÁC adjustMaskPath (mặt nạ đó chỉ giới hạn
   // phạm vi chỉnh màu). Xem AppendVideoMaskFilter.
   std::string videoMaskPath;
+  // XOÁ LOGO (tab Retouch > Xoá logo): chế độ + các hình chữ nhật PIXEL trên stream nguồn,
+  // "x:y:w:h:p|..." do backend dựng lại từ số đã kẹp. Rỗng = không xoá. Xem AppendLogoRemovalFilters.
+  std::string logoMode;
+  std::string logoRects;
+  // XOÁ LOGO BẰNG AI: thư mục một lượt của backend/logo-ai.js (r{k}.ffconcat + miếng vá PNG),
+  // vị trí miếng vá "x:y|..." (pixel stream nguồn) và PTS nguồn của khung ĐẦU lượt đó.
+  // Có dir thì thay cho logoMode/logoRects. Xem AppendLogoAiFilters.
+  std::string logoAiDir;
+  std::string logoAiRects;
+  double logoAiT0 = 0.0;
   // KEYFRAME thông số màu: biểu thức theo thời gian cho `eq` (token LOCALT). Có giá trị
   // thì chuỗi adjustFilters KHÔNG chứa eq nữa — xem AppendColorAdjustEq.
   std::string adjEqContrastExpr;
@@ -802,6 +884,9 @@ struct ExportOverlay {
   double positionX = 0.0;
   double positionY = 0.0;
   double scale = 100.0;
+  // HỆ SỐ VỪA KHUNG của block media (renderer tính, backend chuyển): "scale 100%" của media overlay
+  // = vừa khung như lane chính (xem ExportInterval::fitScale). Ảnh chữ/hình khối, payload cũ: 1.
+  double fitScale = 1.0;
   double rotation = 0.0;
   double opacity = 100.0;
   bool flipX = false;
@@ -827,6 +912,7 @@ struct ExportOverlay {
   // Chuỗi frame PNG (asset_type "text_image_seq"): fps + số frame của sequence
   double seqFps = 30.0;
   int frameCount = 0;
+  int seqStartFrame = 0;   // khung đầu của chuỗi khi batch bắt đầu giữa chuỗi (-start_number)
   int assetInputIndex = -1;
   // Hoạt ảnh VIDEO overlay (biểu thức FFmpeg theo thời gian; token LOCALT = t - start):
   // dịch chuyển qua overlay x/y, thu phóng qua scale, xoay qua rotate, opacity qua fade.
@@ -854,6 +940,16 @@ struct ExportOverlay {
   // MẶT NẠ CẮT HÌNH của block (tab Video) — KHÁC adjustMaskPath (mặt nạ đó chỉ giới hạn
   // phạm vi chỉnh màu). Xem AppendVideoMaskFilter.
   std::string videoMaskPath;
+  // XOÁ LOGO (tab Retouch > Xoá logo): chế độ + các hình chữ nhật PIXEL trên stream nguồn,
+  // "x:y:w:h:p|..." do backend dựng lại từ số đã kẹp. Rỗng = không xoá. Xem AppendLogoRemovalFilters.
+  std::string logoMode;
+  std::string logoRects;
+  // XOÁ LOGO BẰNG AI: thư mục một lượt của backend/logo-ai.js (r{k}.ffconcat + miếng vá PNG),
+  // vị trí miếng vá "x:y|..." (pixel stream nguồn) và PTS nguồn của khung ĐẦU lượt đó.
+  // Có dir thì thay cho logoMode/logoRects. Xem AppendLogoAiFilters.
+  std::string logoAiDir;
+  std::string logoAiRects;
+  double logoAiT0 = 0.0;
   std::string adjEqContrastExpr;
   std::string adjEqBrightnessExpr;
   std::string adjEqSaturationExpr;
@@ -881,6 +977,8 @@ struct ExportOverlay {
   std::string adjustLutAPath;
   std::string adjustLutBPath;
   std::string adjustLutMixExpr;
+  // Video lớp phủ giải mã được bằng NVDEC ra thẳng khung CUDA (đồ thị GPU, mục 1.21 — NvdecDecodes).
+  bool gpuNvdec = false;
 };
 
 struct ExportSettings {
@@ -891,6 +989,14 @@ struct ExportSettings {
   std::string renderFps = "30";
   std::string codec = "h264";
   std::string quality = "high";
+  /* Ô "Bitrate" kiểu CapCut (mục 1.20, người dùng chốt 2026-10-01) — thay ô "Chất lượng".
+   *   lower / recommended / higher: CHẤT LƯỢNG CỐ ĐỊNH có TRẦN (NVENC `-cq`, CPU CRF). Trần = bitrate
+   *     cố định cũ của Cân bằng / Cao / 2×Cao, nên bản xuất không bao giờ to hơn bản cũ cùng mức;
+   *     nguồn dễ nén (phim AV1 2 Mbps) thì nhỏ hẳn đi.
+   *   custom: bitrate trung bình người dùng nhập (`rateMbps`), đỉnh ×1,5.
+   * Payload cũ không có `rate_mode` thì suy từ `quality` (RateModeFromQuality). */
+  std::string rateMode = "recommended";
+  double rateMbps = 0.0;
   std::string audioBitrate = "192k";
   double mainAudioVolume = 100.0;
   /* ============ TRỤC THỜI GIAN THẬT CỦA FILE NGUỒN ============
@@ -923,7 +1029,38 @@ struct ExportSettings {
   // Nguồn chính KHÔNG gắn nhãn ma trận màu -> chuỗi clip gắn bt709 trước khi đổi sang RGB.
   // Xem MediaColorUntagged.
   bool sourceColorUntagged = false;
+  // Được phép seek vào giữa nguồn chính theo từng batch (xem BatchSeekSeconds/SourceSeekSafe).
+  bool seekSafe = false;
+  // Đường nhanh YUV cho clip lane chính (mục 1.3, xem MainLaneFastPlan). Đo MỘT lần ở
+  // ProbeMainSourceForFastPath: cỡ khung nguồn, ma trận có phải BT.709 không, vị trí mẫu màu.
+  bool fastPathSource = false;
+  int sourceWidth = 0;
+  int sourceHeight = 0;
+  int sourceChromaH = 128;   // vị trí mẫu màu, đơn vị 1/256 điểm ảnh luma (như scale in_h_chr_pos)
+  int sourceChromaV = 128;
+  std::string sourcePixFmt;   // pix_fmt luồng hình nguồn (đồ thị GPU: định dạng tải lên, GpuUploadFormat)
+  /* CỠ BẢN XUẤT KHÁC CỠ SEQUENCE (mục 1.12, ô "Độ phân giải" của hộp thoại xuất). Đồ thị vẫn
+   * dựng ở cỡ sequence (`width`/`height`); đuôi đồ thị co phần hình về content* rồi đệm đen cho
+   * đủ output* (content = output thì không đệm). Backend tính các số này (exportOutputFrame);
+   * 0 = xuất đúng cỡ sequence. Xem OutputColorFilters. */
+  int outputWidth = 0;
+  int outputHeight = 0;
+  int contentWidth = 0;
+  int contentHeight = 0;
+  // Hệ số sequence -> phần hình mà backend dùng để tính content* (0 = payload cũ, không có).
+  double outputScale = 0.0;
+  // Đồ thị đã dựng ở cỡ phần hình (pha 2, xem ApplyOutputScaleToPayload): `width`/`height` lúc
+  // này là content*, đuôi đồ thị chỉ còn đệm đen.
+  bool builtAtOutputScale = false;
+  /* Thiết bị render (mục 1.21, Cài đặt › Xuất video — người dùng chốt 2026-10-02): "auto" (mặc
+   * định = GPU khi máy có GPU dùng được), "gpu", "cpu". Xem GpuRenderWanted. */
+  std::string renderDevice = "auto";
 };
+
+bool OutputResized(const ExportSettings& settings) {
+  return settings.outputWidth > 0 && settings.outputHeight > 0
+      && settings.contentWidth > 0 && settings.contentHeight > 0;
+}
 
 struct EncoderPlan {
   std::string mode = "cpu";
@@ -975,6 +1112,352 @@ bool HardwareExportEnabled() {
   return !(value == "0" || value == "false" || value == "off" || value == "cpu");
 }
 
+/* ===== ĐỒ THỊ GPU (mục 1.21 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md) =====
+ *
+ * Bản ffmpeg riêng của CrabbyCut có bộ lọc CUDA `crabgeo_cuda` (cắt + co + đổi màu + đặt vào
+ * khung) và `crabblend_cuda` (trộn lớp phủ). Máy có NVENC + bản ffmpeg đó thì batch nào mọi
+ * clip/lớp phủ đều có bản GPU (BatchGpuEligible) được dựng thành đồ thị GPU: khung ở trên GPU từ
+ * lúc giải mã (NVDEC) hoặc tải lên tới lúc NVENC mã hoá. Batch còn lại đi đồ thị CPU như cũ, trong
+ * cùng một lượt xuất (cùng NVENC nên ghép `-c copy` được). Đồ thị GPU lỗi -> chạy lại batch đó
+ * bằng đồ thị CPU (RunExportJobs).
+ * Người dùng chốt 2026-10-02: Cài đặt › Xuất video "Render bằng: GPU / CPU", mặc định GPU khi máy
+ * dùng được — payload mang `render_device` ("auto"/"gpu"/"cpu"). Env CRABBYCUT_EXPORT_GPU=0|1 ép
+ * tắt/bật (A/B, test). */
+bool GpuRenderWanted(const ExportSettings& settings) {
+  if (const char* env = std::getenv("CRABBYCUT_EXPORT_GPU")) {
+    const std::string value = env;
+    if (value == "0" || value == "false" || value == "off") return false;
+    if (value == "1" || value == "true" || value == "on") return true;
+  }
+  return settings.renderDevice != "cpu";
+}
+
+/* ffmpeg có hai bộ lọc CUDA của CrabbyCut VÀ chạy thật được trọn chuỗi tải lên -> crabgeo ->
+ * NVENC (máy có thể có bản ffmpeg riêng mà không có GPU NVIDIA, hoặc driver quá cũ). ~0,4 s, chạy
+ * song song với các phép dò khác ở đầu lượt xuất. Thử cả `sync=1` (GpuOutputFilters): bản build cũ
+ * chưa có tuỳ chọn đó thì coi như không dùng được. */
+bool GpuRenderAvailable(const std::string& nvencEncoder) {
+  if (!HasFfmpegFilter("crabgeo_cuda") || !HasFfmpegFilter("crabblend_cuda")) return false;
+  return RunQuiet({"ffmpeg", "-hide_banner", "-v", "error", "-nostdin",
+                   "-init_hw_device", "cuda=cu", "-filter_hw_device", "cu",
+                   "-f", "lavfi", "-i", "color=c=black:s=256x256:r=25:d=0.2",
+                   "-vf", "format=yuv420p,hwupload,crabgeo_cuda=w=128:h=128:ow=256:oh=256:x=64:y=64:passthrough=0:sync=1",
+                   "-c:v", nvencEncoder, "-f", "null", "-"}) == 0;
+}
+
+/* DÒ GỘP cho nguồn chính: giải mã hai khung bằng NVDEC -> crabgeo -> NVENC trong MỘT tiến trình.
+ * Mỗi lệnh dò tốn ~0,5 s khởi tạo CUDA/NVENC, chạy song song thì tranh nhau (Test.crab: khâu dò
+ * 0,4 -> 1,4 s với hai lệnh riêng). Đúng thì vừa "GPU dùng được" vừa "NVDEC giải mã được nguồn";
+ * sai thì nơi gọi dò riêng GpuRenderAvailable. Khung ra cố định 640×360 (co ≤ 12 lần với nguồn 8K,
+ * đủ lớn cho cỡ tối thiểu của NVENC với nguồn nhỏ).
+ * `-xerror` + `-t 2` ở input: NVDEC không giải mã được codec (AV1 trên GTX 10xx) thì bộ giải mã báo
+ * lỗi ở TỪNG gói mà ffmpeg vẫn đọc tiếp — trước đây lệnh dò đọc hết nguồn tới khi chạm thời gian chờ
+ * 20 s (phim 4K AV1 640 MB: khâu dò 20,8 s). Nay thoát ngay ở lỗi đầu (~0,3 s). */
+bool GpuRenderAvailableWithNvdec(const std::string& nvencEncoder, const std::string& source) {
+  if (!HasFfmpegFilter("crabgeo_cuda") || !HasFfmpegFilter("crabblend_cuda")) return false;
+  return RunQuiet({"ffmpeg", "-hide_banner", "-v", "error", "-nostdin", "-xerror",
+                   "-init_hw_device", "cuda=cu", "-filter_hw_device", "cu",
+                   "-hwaccel", "cuda", "-hwaccel_device", "cu", "-hwaccel_output_format", "cuda",
+                   "-t", "2", "-i", source, "-frames:v", "2", "-an", "-sn", "-dn",
+                   "-vf", "crabgeo_cuda=w=640:h=360:passthrough=0:sync=1",
+                   "-c:v", nvencEncoder, "-f", "null", "-"}) == 0;
+}
+
+/* crabgeo_cuda có LUT 3D (`lut`/`lut2`/`mix`, bản n8.1.1-crabbycut.2 trở đi): clip/lớp phủ chỉ có
+ * tầng màu là LUT (lớp Điều chỉnh, HSL + LUT đã bake) đi được đồ thị GPU — xem BlockGpuLut. */
+// -1 = chưa biết (dò bằng lệnh); 0/1 = lấy từ cache dò GPU của lượt trước (xem GpuProbeCache).
+static int g_gpuLutKnown = -1;
+
+bool GpuLutAvailable() {
+  if (g_gpuLutKnown >= 0) return g_gpuLutKnown == 1;
+  static const bool has = CommandOutput({"ffmpeg", "-hide_banner", "-h", "filter=crabgeo_cuda"}).find("lut2") != std::string::npos;
+  return has;
+}
+
+/* KẾT QUẢ DÒ GPU LƯU GIỮA CÁC LẦN XUẤT (mục 1.21). Mỗi lượt xuất là một tiến trình sidecar mới, mà
+ * phép dò (khởi tạo CUDA + NVENC, giải mã thử NVDEC nguồn chính và từng video lớp phủ, hỏi crabgeo
+ * có LUT) tốn ~0,8 s — Test.crab: khâu dò 0,4 -> 1,2 s khi bật GPU, trên lượt xuất ~11 s. Kết quả
+ * lưu ở `<temp dự án>/gpu_probe_cache.txt`, dùng lại khi KHOÁ trùng và chưa quá 3 ngày. Khoá: dấu
+ * vân tay bản ffmpeg (FNV-1a của danh sách filter + encoder), tên NVENC, đường dẫn + cỡ + mốc sửa
+ * của nguồn và từng video lớp phủ được dò. Driver/GPU đổi mà khoá không đổi: batch GPU lỗi thì
+ * RunExportJobs chạy lại bằng đồ thị CPU (như mọi lỗi GPU) và XOÁ cache — lượt sau dò lại. */
+struct GpuProbeResult {
+  int main = 0;                    // 0 = không dùng được GPU, 1 = GPU được nhưng NVDEC không giải mã được nguồn, 2 = cả hai
+  bool lut = false;                // crabgeo_cuda có LUT
+  std::vector<bool> overlayNvdec;  // theo thứ tự danh sách video lớp phủ được dò
+  bool cached = false;
+};
+
+const char* const kGpuProbeCacheName = "gpu_probe_cache.txt";
+
+/* Chỗ cất kết quả dò. Mặc định `<temp dự án>/gpu_probe_cache.txt` — nhưng mở dự án là temp bị dọn
+ * sạch (/api/reset-project), nên lượt xuất ĐẦU sau mỗi lần mở dự án dò lại (~1,2 s trên Yêu Con, cả khi
+ * mọi batch trúng cache render). Backend bản thường đặt CRABBYCUT_EXPORT_GPU_PROBE_FILE ra ngoài temp;
+ * khoá vẫn đúng sau khi mở lại vì temp_input.mp4 là liên kết cứng từ cache nối (giữ mtime). */
+fs::path GpuProbeCacheFile(const fs::path& tempDir) {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_GPU_PROBE_FILE");
+  if (env && *env) return fs::path(env);   // getenv = bảng mã hệ thống, như CRABBYCUT_RENDER_CACHE_DIR
+  return tempDir / kGpuProbeCacheName;
+}
+constexpr long long kGpuProbeCacheMaxAgeSeconds = 3LL * 24 * 3600;
+/* Kết quả ÂM TÍNH (GPU/bộ mã hoá không dùng được) chỉ nhớ 10 phút: lỗi lúc dò có thể là tạm thời
+ * (NVENC hết phiên vì ứng dụng khác đang mã hoá, driver đang khởi động lại) — nhớ 3 ngày là 3 ngày
+ * xuất bằng CPU dù máy có GPU, mà đường CPU không có lỗi nào để xoá cache. */
+constexpr long long kProbeNegativeMaxAgeSeconds = 600;
+
+std::uint64_t Fnv1a64(const std::string& text) {
+  std::uint64_t h = 1469598103934665603ULL;
+  for (unsigned char ch : text) {
+    h ^= ch;
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+std::string FileStamp(const std::string& path) {
+  std::error_code ec;
+  const std::uintmax_t size = fs::file_size(path, ec);
+  if (ec) return path + "|?";
+  const auto mtime = fs::last_write_time(path, ec);
+  return path + "|" + std::to_string(size) + "|" + (ec ? std::string("?") : std::to_string(mtime.time_since_epoch().count()));
+}
+
+std::string GpuProbeKey(const std::string& nvenc, const std::string& source, const std::vector<std::string>& overlayVideos) {
+  std::ostringstream key;
+  key << "v1|" << std::hex << Fnv1a64(FfmpegFilters() + "\n" + FfmpegEncoders()) << std::dec << "|" << nvenc
+      << "|" << FileStamp(source);
+  for (const std::string& path : overlayVideos) key << "|" << FileStamp(path);
+  std::string out = key.str();
+  std::replace(out.begin(), out.end(), '\n', ' ');
+  return out;
+}
+
+long long UnixNowSeconds() {
+  return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+bool ReadGpuProbeCache(const fs::path& file, const std::string& key, size_t overlayCount, GpuProbeResult& out) {
+  std::ifstream in(file);
+  if (!in) return false;
+  std::string line;
+  std::string cachedKey;
+  long long time = 0;
+  GpuProbeResult r;
+  bool haveMain = false;
+  while (std::getline(in, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    const size_t tab = line.find('\t');
+    if (tab == std::string::npos) continue;
+    const std::string name = line.substr(0, tab);
+    const std::string value = line.substr(tab + 1);
+    if (name == "key") cachedKey = value;
+    else if (name == "time") time = std::atoll(value.c_str());
+    else if (name == "main") { r.main = std::atoi(value.c_str()); haveMain = true; }
+    else if (name == "lut") r.lut = value == "1";
+    else if (name == "ov") r.overlayNvdec.push_back(value == "1");
+  }
+  const long long age = UnixNowSeconds() - time;
+  const long long maxAge = r.main == 0 ? kProbeNegativeMaxAgeSeconds : kGpuProbeCacheMaxAgeSeconds;
+  if (cachedKey != key || !haveMain || r.main < 0 || r.main > 2 || age < 0 || age > maxAge
+      || r.overlayNvdec.size() != overlayCount) return false;
+  r.cached = true;
+  out = r;
+  return true;
+}
+
+void WriteGpuProbeCache(const fs::path& file, const std::string& key, const GpuProbeResult& r) {
+  std::ofstream outFile(file, std::ios::trunc);
+  if (!outFile) return;
+  outFile << "key\t" << key << "\n" << "time\t" << UnixNowSeconds() << "\n"
+          << "main\t" << r.main << "\n" << "lut\t" << (r.lut ? 1 : 0) << "\n";
+  for (bool nvdec : r.overlayNvdec) outFile << "ov\t" << (nvdec ? 1 : 0) << "\n";
+}
+
+/* Tệp giải mã được bằng NVDEC ra thẳng khung CUDA. NVDEC không giải mã được (AV1 trên GTX 10xx,
+ * H.264 10-bit, 4:2:2…) thì `-hwaccel cuda` lặng lẽ lùi về giải mã CPU, khung ra ở RAM và
+ * `crabgeo_cuda` (chỉ nhận khung CUDA) không nối được -> lệnh lỗi. Chỉ thử hai khung đầu. Co một
+ * nửa chứ không co về cỡ tí hon: crabgeo chỉ co tối đa ~15 lần (bảng lọc ≤ 64 tap, xem
+ * kGpuMinScale) — `w=16` trên nguồn 4K là lỗi của phép thử chứ không phải của NVDEC.
+ * `-xerror` + `-t 2`: xem GpuRenderAvailableWithNvdec (codec NVDEC không hỗ trợ -> thoát ngay). */
+bool NvdecDecodes(const std::string& path) {
+  return RunQuiet({"ffmpeg", "-hide_banner", "-v", "error", "-nostdin", "-xerror",
+                   "-init_hw_device", "cuda=cu", "-filter_hw_device", "cu",
+                   "-hwaccel", "cuda", "-hwaccel_device", "cu", "-hwaccel_output_format", "cuda",
+                   "-t", "2", "-i", path, "-frames:v", "2", "-an", "-sn", "-dn",
+                   "-vf", "crabgeo_cuda=w=trunc(iw/4)*2:h=trunc(ih/4)*2", "-f", "null", "-"}) == 0;
+}
+
+/* Định dạng tải khung giải mã CPU lên GPU (`format=<…>,hwupload`) cho từng pix_fmt nguồn,
+ * trong số định dạng crabgeo_cuda nhận. Rỗng = không có đường rẻ (4:2:2, RGB, có alpha…) -> clip
+ * đi đồ thị CPU. 10/12-bit 4:2:0 đổi sang p010 (chỉ dồn lại hai mặt phẳng màu, giữ 10 bit).
+ * TẢI LÊN BẰNG `hwupload`, KHÔNG BẰNG `hwupload_cuda` (sửa 2026-10-03): hwupload_cuda bỏ qua
+ * -filter_hw_device và TỰ TẠO một ngữ cảnh CUDA mới cho mỗi lần xuất hiện (~0,25 s + bộ nhớ GPU mỗi
+ * cái) — mỗi ảnh/chuỗi lớp phủ, mỗi dải đen đệm của clip, nguồn chính đều có một cái. Phim 4K AV1
+ * có 48 phụ đề mỗi batch: 48 hwupload_cuda tốn 13,2 s so với 1,3 s bằng hwupload (dùng thiết bị
+ * `cu` của lệnh, chung với crabgeo/crabblend/NVENC). */
+std::string GpuUploadFormat(const std::string& pixFmt) {
+  if (pixFmt == "yuv420p" || pixFmt == "yuvj420p") return "yuv420p";
+  if (pixFmt == "nv12") return "nv12";
+  if (pixFmt == "yuv420p10le" || pixFmt == "yuv420p12le" || pixFmt == "p010le") return "p010le";
+  if (pixFmt == "yuv444p" || pixFmt == "yuvj444p") return "yuv444p";
+  return "";
+}
+
+/* ---------------------------------------------------------------------------
+ * ĐO THỜI GIAN EXPORT — Bước 0.1 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md.
+ *
+ * LUÔN BẬT, gần như không tốn gì: mỗi lượt ffmpeg của ExportBatch được bấm giờ, và cuối lượt
+ * export sidecar phát một sự kiện `timing` (JSON nằm trong `message`) để backend ghi vào báo
+ * cáo dự án. Trước đây báo cáo chỉ có MỘT con số tổng (dự án phụ đề 39 phút: 2.964,7 s), không
+ * biết batch nào chậm, cũng không biết sidecar mất bao lâu dò nguồn trước khi render.
+ * `source_to` của từng lượt cho thấy lượt đó phải giải mã nguồn TỪ GIÂY 0 tới đâu — batch chưa
+ * seek (mục 1.1), nên batch sau luôn đắt hơn batch trước.
+ *
+ * `CRABBYCUT_EXPORT_BENCH=1` (CHỈ khi đo) ghi thêm vào `<temp>/export_bench/`:
+ *   <nhãn>.cmd.json      dòng lệnh ffmpeg đúng từng tham số + cwd, để bộ đo
+ *                        (tests/scripts/bench_export.js) chạy lại biến thể `-f null` (tách
+ *                        phần encode) và biến thể chỉ giải mã;
+ *   export_filter_batch_*.txt   filter script, GIỮ LẠI thay vì xoá sau khi chạy;
+ *   <nhãn>.log           log mức INFO qua FFREPORT, có dòng `bench: utime=… rtime=…` của
+ *                        `-benchmark`. stderr vẫn `-v error` như thường;
+ *   <nhãn>.progress.txt  `-progress`: frame/fps/speed theo thời gian — lộ ra quãng ffmpeg đứng
+ *                        giải mã suông trước khi tới khung đầu tiên của batch;
+ *   <nhãn>.graphs.json   `-print_graphs_file` (FFmpeg ≥ 8.0): định dạng thương lượng giữa các
+ *                        filter và bộ chuyển đổi tự chèn;
+ *   timing.json          cùng nội dung với sự kiện `timing`.
+ * Mọi đường dẫn trong các cờ trên là TƯƠNG ĐỐI theo cwd = tempDir (xem ExportBatch): FFREPORT
+ * tách khoá bằng `:` và coi `\` là ký tự thoát, nên `C:\…` phải thoát hai lớp; đường dẫn
+ * tương đối không có ký tự nào phải thoát, kể cả khi tên người dùng có dấu.
+ * ------------------------------------------------------------------------- */
+using ExportClock = std::chrono::steady_clock;
+
+double MsSince(ExportClock::time_point start) {
+  return std::chrono::duration<double, std::milli>(ExportClock::now() - start).count();
+}
+
+struct ExportRunTiming {
+  std::string label;
+  std::string mode;
+  size_t intervals = 0;
+  size_t overlays = 0;
+  double sourceFrom = 0.0;
+  double sourceTo = 0.0;
+  double sequenceDuration = 0.0;
+  double seekTo = 0.0;   // 0 = không seek (giải mã nguồn từ giây 0)
+  size_t fastClips = 0;  // số clip lane chính đi đường nhanh YUV (mục 1.3)
+  size_t sourceRanges = 0;  // số input nguồn riêng theo dải (mục 1.1); 0 = mọi clip đọc [0:v]
+  double runMs = 0.0;
+  int exitCode = 0;
+  bool cpuRetry = false;
+  bool gpu = false;           // lượt chạy bằng đồ thị GPU (mục 1.21)
+  bool gpuFallback = false;   // đồ thị GPU lỗi -> chạy lại bằng đồ thị CPU
+  bool cacheHit = false;      // dùng lại batch trong cache render (mục 1.13), không chạy ffmpeg
+};
+
+struct ExportTimingLog {
+  ExportClock::time_point started = ExportClock::now();
+  double probeMs = 0.0;
+  double planMs = 0.0;
+  double concatMs = 0.0;
+  // Cỡ khung mà đồ thị dựng ("WxH"); khác cỡ sequence khi dựng ở cỡ xuất (mục 1.12 pha 2).
+  std::string graphSize;
+  size_t workers = 1;   // số lượt ffmpeg hình chạy cùng lúc (mục 1.8)
+  // "gpu" / "cpu" — thiết bị render của lượt xuất (mục 1.21); "gpu" khi ít nhất một batch đi GPU.
+  std::string render = "cpu";
+  // Kết quả dò GPU lấy từ cache của lượt trước (ReadGpuProbeCache) thay vì chạy lệnh dò.
+  bool gpuProbeCached = false;
+  // Cache render (mục 1.13): thời gian tính khoá, số batch cất vào cache sau lượt này.
+  double cacheKeyMs = 0.0;
+  size_t cacheStored = 0;
+  std::vector<ExportRunTiming> runs;
+};
+
+ExportTimingLog g_exportTiming;
+fs::path g_exportBenchDir;   // rỗng = CRABBYCUT_EXPORT_BENCH đang tắt
+
+bool ExportBenchRequested() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_BENCH");
+  if (!env || !*env) return false;
+  const std::string value = env;
+  return !(value == "0" || value == "false" || value == "off");
+}
+
+bool FfmpegHasPrintGraphs() {
+  static const bool has = CommandOutput({"ffmpeg", "-hide_banner", "-h", "long"}).find("-print_graphs_file") != std::string::npos;
+  return has;
+}
+
+/* Biến môi trường cho ffmpeg CON (CreateProcessW/std::system đều thừa hưởng môi trường của
+ * sidecar). Rỗng = xoá. Gọi cả hai API trên Windows: CreateProcessW đọc khối môi trường của
+ * hệ điều hành, std::system (đường lùi) đọc bản của CRT. */
+void SetChildEnv(const char* name, const std::string& value) {
+#ifdef _WIN32
+  const std::wstring wideName = WidenForProcess(name);
+  SetEnvironmentVariableW(wideName.c_str(), value.empty() ? nullptr : WidenForProcess(value).c_str());
+  _putenv_s(name, value.c_str());
+#else
+  if (value.empty()) unsetenv(name);
+  else setenv(name, value.c_str(), 1);
+#endif
+}
+
+void WriteBenchCommand(const std::string& label, const std::vector<std::string>& cmd, const fs::path& cwd) {
+  std::ofstream out(g_exportBenchDir / (label + ".cmd.json"));
+  out << "{\"cwd\":\"" << EscapeJson(cwd.string()) << "\",\"args\":[";
+  for (size_t i = 0; i < cmd.size(); i++) {
+    if (i > 0) out << ",";
+    out << "\"" << EscapeJson(cmd[i]) << "\"";
+  }
+  out << "]}\n";
+}
+
+std::string ExportTimingJson(const std::string& encoder) {
+  std::ostringstream out;
+  out << std::fixed << std::setprecision(1)
+      << "{\"total_ms\":" << MsSince(g_exportTiming.started)
+      << ",\"probe_ms\":" << g_exportTiming.probeMs
+      << ",\"plan_ms\":" << g_exportTiming.planMs
+      << ",\"concat_ms\":" << g_exportTiming.concatMs
+      << ",\"encoder\":\"" << EscapeJson(encoder) << "\""
+      << ",\"bench\":" << (g_exportBenchDir.empty() ? "false" : "true")
+      << ",\"graph_size\":\"" << EscapeJson(g_exportTiming.graphSize) << "\""
+      << ",\"workers\":" << g_exportTiming.workers
+      << ",\"render\":\"" << g_exportTiming.render << "\""
+      << ",\"gpu_probe_cached\":" << (g_exportTiming.gpuProbeCached ? "true" : "false")
+      << ",\"cache_key_ms\":" << g_exportTiming.cacheKeyMs
+      << ",\"cache_stored\":" << g_exportTiming.cacheStored
+      << ",\"runs\":[";
+  for (size_t i = 0; i < g_exportTiming.runs.size(); i++) {
+    const ExportRunTiming& run = g_exportTiming.runs[i];
+    if (i > 0) out << ",";
+    out << "{\"label\":\"" << EscapeJson(run.label) << "\",\"mode\":\"" << run.mode << "\""
+        << ",\"intervals\":" << run.intervals << ",\"overlays\":" << run.overlays
+        << std::setprecision(3)
+        << ",\"source_from\":" << run.sourceFrom << ",\"source_to\":" << run.sourceTo
+        << ",\"sequence_duration\":" << run.sequenceDuration
+        << ",\"seek_to\":" << run.seekTo
+        << ",\"fast_clips\":" << run.fastClips
+        << ",\"source_ranges\":" << run.sourceRanges
+        << std::setprecision(1)
+        << ",\"run_ms\":" << run.runMs << ",\"exit\":" << run.exitCode
+        << ",\"cpu_retry\":" << (run.cpuRetry ? "true" : "false")
+        << ",\"gpu\":" << (run.gpu ? "true" : "false")
+        << ",\"gpu_fallback\":" << (run.gpuFallback ? "true" : "false")
+        << ",\"cache_hit\":" << (run.cacheHit ? "true" : "false") << "}";
+  }
+  out << "]}";
+  return out.str();
+}
+
+void EmitExportTiming(const std::string& encoder) {
+  const std::string json = ExportTimingJson(encoder);
+  if (!g_exportBenchDir.empty()) {
+    std::ofstream file(g_exportBenchDir / "timing.json");
+    file << json << "\n";
+  }
+  Emit("timing", json);
+}
+
 std::string CpuVideoEncoder(const std::string& codec) {
   if (codec == "hevc") return "libx265";
   if (codec == "prores") return "prores_ks";
@@ -987,6 +1470,75 @@ EncoderPlan CpuEncoderPlan(const ExportSettings& settings) {
   plan.videoEncoder = CpuVideoEncoder(settings.codec);
   plan.hardware = false;
   return plan;
+}
+
+/* CHỌN BỘ MÃ HOÁ PHẦN CỨNG BẰNG PHÉP THỬ THẬT (mục 1.9). Bản ffmpeg nào cũng BIÊN DỊCH SẴN
+ * h264_nvenc/qsv/amf, nên trước đây máy AMD/Intel luôn chọn NVENC (có trong `-encoders`), lỗi ở từng
+ * batch rồi lùi thẳng về libx264 — không bao giờ dùng AMF/QSV của chính máy. Nay mã hoá thử 3 khung
+ * theo thứ tự nvenc -> qsv -> amf, lấy bộ đầu tiên chạy được. Kết quả lưu ở
+ * `%TEMP%/crabbycut_encoder_probe.txt` theo (vân tay ffmpeg, h264/hevc), sống 3 ngày, XOÁ khi bộ mã
+ * hoá phần cứng lỗi lúc xuất (RunExportJobs) — đổi GPU/driver thì lượt sau dò lại. Chưa có máy AMD/
+ * Intel để kiểm AMF/QSV chạy thật trong lượt xuất (tham số giữ như cũ, xem AppendHardwareEncoderArgs). */
+fs::path EncoderProbeCacheFile() {
+  std::error_code ec;
+  return fs::temp_directory_path(ec) / "crabbycut_encoder_probe.txt";
+}
+
+bool EncoderWorks(const std::string& encoder) {
+  return RunQuiet({"ffmpeg", "-hide_banner", "-v", "error", "-nostdin", "-f", "lavfi",
+                   "-i", "color=c=black:s=256x256:r=25:d=0.2", "-frames:v", "3", "-an",
+                   "-c:v", encoder, "-f", "null", "-"}, 15000) == 0;
+}
+
+// "" = không bộ mã hoá phần cứng nào chạy được.
+std::string WorkingHardwareEncoder(const std::string& prefix) {
+  static std::mutex lock;
+  static std::map<std::string, std::string> memo;
+  std::lock_guard<std::mutex> guard(lock);
+  const auto known = memo.find(prefix);
+  if (known != memo.end()) return known->second;
+  std::ostringstream keyStream;
+  keyStream << "v1|" << std::hex << Fnv1a64(FfmpegEncoders()) << std::dec << "|" << prefix;
+  const std::string key = keyStream.str();
+  const fs::path file = EncoderProbeCacheFile();
+  {
+    std::ifstream in(file);
+    std::string line;
+    while (std::getline(in, line)) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      // key \t unix_time \t encoder
+      const size_t a = line.find('\t');
+      const size_t b = a == std::string::npos ? a : line.find('\t', a + 1);
+      if (b == std::string::npos || line.substr(0, a) != key) continue;
+      const long long age = UnixNowSeconds() - std::atoll(line.substr(a + 1, b - a - 1).c_str());
+      const std::string cached = line.substr(b + 1);
+      // Âm tính chỉ nhớ ngắn: NVENC có thể tạm bận (OBS chiếm phiên — card thường giới hạn số phiên).
+      const long long maxAge = cached.empty() ? kProbeNegativeMaxAgeSeconds : kGpuProbeCacheMaxAgeSeconds;
+      if (age >= 0 && age <= maxAge) return memo[prefix] = cached;
+    }
+  }
+  std::string chosen;
+  for (const char* kind : {"_nvenc", "_qsv", "_amf"}) {
+    const std::string encoder = prefix + kind;
+    if (HasFfmpegEncoder(encoder) && EncoderWorks(encoder)) {
+      chosen = encoder;
+      break;
+    }
+  }
+  // Ghi đè dòng cùng khoá, giữ dòng của khoá khác (h264 và hevc).
+  std::vector<std::string> keep;
+  {
+    std::ifstream in(file);
+    std::string line;
+    while (std::getline(in, line)) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      if (!line.empty() && line.compare(0, key.size() + 1, key + "\t") != 0) keep.push_back(line);
+    }
+  }
+  std::ofstream out(file, std::ios::trunc);
+  for (const std::string& line : keep) out << line << "\n";
+  out << key << "\t" << UnixNowSeconds() << "\t" << chosen << "\n";
+  return memo[prefix] = chosen;
 }
 
 EncoderPlan SelectEncoderPlan(const ExportSettings& settings) {
@@ -1008,12 +1560,10 @@ EncoderPlan SelectEncoderPlan(const ExportSettings& settings) {
   if (HasFfmpegEncoder(vt)) return {"videotoolbox", vt, true};
 #endif
 #ifdef _WIN32
-  const std::string nvenc = prefix + "_nvenc";
-  const std::string qsv = prefix + "_qsv";
-  const std::string amf = prefix + "_amf";
-  if (HasFfmpegEncoder(nvenc)) return {"nvenc", nvenc, true};
-  if (HasFfmpegEncoder(qsv)) return {"qsv", qsv, true};
-  if (HasFfmpegEncoder(amf)) return {"amf", amf, true};
+  const std::string hw = WorkingHardwareEncoder(prefix);
+  if (hw == prefix + "_nvenc") return {"nvenc", hw, true};
+  if (hw == prefix + "_qsv") return {"qsv", hw, true};
+  if (hw == prefix + "_amf") return {"amf", hw, true};
 #endif
   return cpu;
 }
@@ -1031,19 +1581,59 @@ double ClampDouble(double value, double minValue, double maxValue) {
   return std::max(minValue, std::min(maxValue, value));
 }
 
-std::string BitrateForHardware(const ExportSettings& settings) {
-  const int width = settings.width > 0 ? settings.width : 1920;
-  const int height = settings.height > 0 ? settings.height : 1080;
+/* Ô "Bitrate" (ExportSettings::rateMode). Payload cũ chỉ có `quality`: Cao -> Khuyến nghị (cùng trần),
+ * Cân bằng -> Thấp hơn (cùng trần), Tệp nhỏ -> Thấp hơn. */
+const double kRateMbpsMin = 0.5;
+const double kRateMbpsMax = 400.0;
+
+std::string RateModeFromQuality(const std::string& quality) {
+  if (quality == "balanced" || quality == "small") return "lower";
+  return "recommended";
+}
+
+bool RateIsCustom(const ExportSettings& settings) {
+  return settings.rateMode == "custom" && settings.rateMbps >= kRateMbpsMin && settings.rateMbps <= kRateMbpsMax;
+}
+
+/* Mức chất lượng cố định của từng mức. NVENC `-cq` (đo VMAF trên 4.320 khung 4K, mục 1.20:
+ * 19 kém bitrate cố định cũ 0,1 điểm mà nhỏ hơn 29%); CPU là CRF của libx264/libx265 — Khuyến nghị
+ * giữ CRF 18 như trước. */
+int RateHardwareCq(const ExportSettings& settings) {
+  if (settings.rateMode == "lower") return 23;
+  if (settings.rateMode == "higher") return 16;
+  return 19;
+}
+
+std::string RateCpuCrf(const ExportSettings& settings) {
+  if (settings.rateMode == "lower") return "23";
+  if (settings.rateMode == "higher") return "16";
+  return "18";
+}
+
+/* Bitrate cho encoder phần cứng, kbps: TRẦN của các mức chất lượng (bitrate cố định cũ của cùng mức,
+ * "Cao hơn" gấp đôi Cao), hoặc bitrate TRUNG BÌNH người dùng nhập ở "Tùy chỉnh" (không nhân theo cỡ
+ * khung — người dùng đã chọn con số). Các mức theo khung THẬT SỰ được mã hoá (cỡ xuất ở mục 1.12). */
+int RateKbps(const ExportSettings& settings) {
+  if (RateIsCustom(settings)) {
+    return static_cast<int>(std::round(settings.rateMbps * 1000.0));
+  }
+  const int width = OutputResized(settings) ? settings.outputWidth : (settings.width > 0 ? settings.width : 1920);
+  const int height = OutputResized(settings) ? settings.outputHeight : (settings.height > 0 ? settings.height : 1080);
   const double pixels = static_cast<double>(std::max(1, width * height));
   const double scale = pixels / (1920.0 * 1080.0);
-  int baseKbps = 9000;
-  if (settings.codec == "hevc") {
-    baseKbps = settings.quality == "small" ? 4500 : (settings.quality == "balanced" ? 7000 : 11000);
-  } else {
-    baseKbps = settings.quality == "small" ? 5500 : (settings.quality == "balanced" ? 8500 : 13000);
-  }
-  const int kbps = ClampInt(static_cast<int>(std::round(baseKbps * scale)), 2500, 80000);
+  const bool hevc = settings.codec == "hevc";
+  int baseKbps = hevc ? 11000 : 13000;
+  if (settings.rateMode == "lower") baseKbps = hevc ? 7000 : 8500;
+  if (settings.rateMode == "higher") baseKbps = hevc ? 22000 : 26000;
+  return ClampInt(static_cast<int>(std::round(baseKbps * scale)), 2500, 80000);
+}
+
+std::string KbpsArg(long long kbps) {
   return std::to_string(kbps) + "k";
+}
+
+std::string BitrateForHardware(const ExportSettings& settings) {
+  return KbpsArg(RateKbps(settings));
 }
 
 std::string PreviewBitrate() {
@@ -1322,6 +1912,102 @@ std::string UntaggedColorFix(bool untagged) {
   return untagged ? "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709," : "";
 }
 
+/* ===== ĐƯỜNG NHANH YUV CHO CLIP LANE CHÍNH (mục 1.3, docs/KE_HOACH_TOI_UU_EXPORT_WIN.md) =====
+ *
+ * Đường cũ của mỗi clip: `color` đen cỡ sequence (RGBA) + clip đổi sang RGBA + `overlay` + đổi về
+ * yuv420p. Tức MỌI khung phim đi YUV -> RGBA -> YUV ở cỡ sequence, kể cả clip 100% nằm giữa
+ * khung — nơi kết quả chính là khung nguồn. Đo 2026-09-29 (batch 4K của dự án phụ đề, -f null):
+ * riêng lane chính 67 khung/s theo đường cũ, 180 khung/s theo đường nhanh (sát trần giải mã AV1).
+ *
+ * Đường nhanh: `scale` (cỡ cố định) -> `crop` phần tràn khung -> `pad` phần thiếu -> yuv420p.
+ * Ba điểm phải giữ cho bản xuất KHÔNG xê dịch so với đường cũ:
+ *  1. MA TRẬN MÀU: swscale đi thẳng YUV -> YUV KHÔNG đổi ma trận (đo: nguồn gắn nhãn BT.601 ra y
+ *     hệt từng bit), còn đường cũ đổi đúng vì YUV -> RGB đọc ma trận của khung. Nên chỉ dùng khi
+ *     nguồn là BT.709 (hoặc HD không nhãn, đã được UntaggedColorFix gán BT.709). Dải màu thì
+ *     swscale có đổi (pc -> tv), nên yuvj/pc vẫn đi được.
+ *     Nhãn dò theo LUỒNG (ffprobe), không theo từng khung: file nối mà đổi ma trận giữa chừng
+ *     (xem "Khám phá Hạ Long" ở ExportBatch) sẽ ra màu lệch ở đoạn đổi. Backend đã chặn phần lớn:
+ *     nguồn khác nhãn thì chuẩn hoá trước khi nối (probeConcatStreamSignature có color_space,
+ *     color_range, pix_fmt). Còn lại là một file tự đổi SPS giữa chừng — chưa gặp.
+ *  2. TOẠ ĐỘ LẺ: đường cũ đặt clip ở trunc((W-w)/2+posX) — số nguyên bất kỳ, vì overlay chạy ở
+ *     RGBA. Ở 4:2:0, cắt lệch một số lẻ điểm ảnh làm mẫu màu lệch nửa mẫu (crop `exact=1` cắt
+ *     mặt phẳng màu ở x>>1). Chữa: cho chính `scale` lấy mẫu màu dời một điểm ảnh luma
+ *     (`out_h/v_chr_pos` = vị trí nguồn + 256), để sau phép cắt lẻ mẫu màu về đúng chỗ. Đo trên
+ *     clip 4K phóng 101% (mép cắt dọc lẻ 9 px): U/V so bản chuẩn 60,5/58,4 dB khi không chữa,
+ *     65,5/64,9 dB khi chữa; đường cũ 54,8/53,9 dB.
+ *     ĐỆM ở toạ độ lẻ (clip nhỏ hơn khung) và clip GIỮ NGUYÊN CỠ bị cắt lẻ (swscale chép thẳng,
+ *     BỎ QUA chr_pos) thì đặt clip ở 4:4:4 rồi hạ về 4:2:0 — xem MainLaneFastPlan.
+ *  3. SỐ KHUNG: nền `color` là thứ đang chốt đúng renderFrames khung (overlay chạy tới input dài
+ *     nhất, clip ngắn thì lặp khung cuối). Thay bằng `tpad` clone (clip ngắn) + `concat` với một
+ *     dải đen (clip không ra khung nào) rồi `trim=end_frame` — xem WriteClipVideoFilters.
+ *  4. CHỈNH MÀU: clip có chuỗi màu co giãn + đặt vị trí ở RGB rồi đổi sang YUV một lần — đúng
+ *     phép tính của đường cũ (kẹp gam RGB như preview), chỉ bỏ nền + overlay. Xem MainLaneFastPlan.
+ * Ngoài đường nhanh: keyframe, hoạt ảnh, xoay, độ mờ < 100%, mặt nạ video, lật (hflip ở 4:2:0
+ * đổi vị trí mẫu màu), nguồn xoay, nguồn không BT.709. Env tắt: CRABBYCUT_EXPORT_FASTPATH=0. */
+bool MainLaneFastPathEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_FASTPATH");
+  if (!env) return true;
+  const std::string value = env;
+  return !(value == "0" || value == "false" || value == "off");
+}
+
+// Vị trí mẫu màu theo chroma_location của ffprobe, đơn vị như `in_h_chr_pos` của scale.
+// Không ghi -> "center", đúng như swscale tự hiểu (ff_sws_chroma_pos).
+void ChromaLocationPos(const std::string& loc, int& h, int& v) {
+  h = 128;
+  v = 128;
+  if (loc == "left") { h = 0; v = 128; }
+  else if (loc == "topleft") { h = 0; v = 0; }
+  else if (loc == "top") { h = 128; v = 0; }
+  else if (loc == "bottomleft") { h = 0; v = 256; }
+  else if (loc == "bottom") { h = 128; v = 256; }
+}
+
+void ProbeMainSourceForFastPath(const std::string& source, ExportSettings& settings) {
+  settings.fastPathSource = false;
+  if (!MainLaneFastPathEnabled()) return;
+  const std::string text = CommandOutput({
+    "ffprobe", "-v", "error",
+    "-select_streams", "v:0",
+    "-show_entries", "stream=width,height,pix_fmt,color_space,chroma_location"
+                     ":stream_tags=rotate:stream_side_data=rotation",
+    "-of", "default=nw=1",
+    source,
+  });
+  std::string pixFmt, space, chromaLoc;
+  long width = 0, height = 0;
+  bool rotated = false;
+  std::istringstream lines(text);
+  std::string line;
+  while (std::getline(lines, line)) {
+    while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back()))) line.pop_back();
+    const size_t eq = line.find('=');
+    if (eq == std::string::npos) continue;
+    const std::string key = line.substr(0, eq);
+    const std::string value = line.substr(eq + 1);
+    if (key == "pix_fmt") pixFmt = value;
+    else if (key == "color_space") space = value;
+    else if (key == "chroma_location") chromaLoc = value;
+    else if (key == "width") { try { width = std::stol(value); } catch (...) { width = 0; } }
+    else if (key == "height") { try { height = std::stol(value); } catch (...) { height = 0; } }
+    else if (key.find("rotat") != std::string::npos) {
+      double deg = 0.0;
+      try { deg = std::stod(value); } catch (...) { deg = 0.0; }
+      if (std::abs(deg) > 0.5) rotated = true;
+    }
+  }
+  // yuva*: đường cũ dựng alpha của nguồn lên nền đen, đường nhanh thì bỏ alpha -> không đi.
+  const bool yuv = pixFmt.rfind("yuv", 0) == 0 && pixFmt.rfind("yuva", 0) != 0;
+  const bool bt709 = space == "bt709" || settings.sourceColorUntagged;
+  // Cỡ nguồn ghi cả khi không đi đường nhanh: số dải nguồn (MaxSourceRanges) cũng cần nó.
+  settings.sourceWidth = width > 0 ? static_cast<int>(width) : 0;
+  settings.sourceHeight = height > 0 ? static_cast<int>(height) : 0;
+  settings.sourcePixFmt = pixFmt;
+  if (!yuv || !bt709 || rotated || width <= 0 || height <= 0) return;
+  ChromaLocationPos(chromaLoc, settings.sourceChromaH, settings.sourceChromaV);
+  settings.fastPathSource = true;
+}
+
 // Nhịp khung của CHÍNH file nguồn (avg_frame_rate). 0.0 nếu không đọc được.
 double MediaStreamFps(const std::string& input) {
   const std::string text = CommandOutput({
@@ -1406,10 +2092,18 @@ std::vector<ExtraAdjustLayer> ReadExtraAdjustLayers(const std::string& obj) {
   return out;
 }
 
+/* Chuỗi màu có thứ biến thiên theo thời gian bên trong: token LOCALT (lớp Điều chỉnh phủ một phần
+ * block, "Viền mờ dần" có keyframe…) hoặc `sendcmd` (keyframe colorbalance/curves/làm mờ đi qua file
+ * lệnh theo giờ CỤC BỘ của block — backend nối nó vào đầu chuỗi). Cắt đôi block như vậy thì nửa sau
+ * chạy lại giờ cục bộ từ 0. Trước 2026-10-01 chỉ dò LOCALT, và lớp phủ không dò chuỗi của chính nó
+ * (mục 1.7, test:export-batch-time-varying). */
+bool ColorChainTimeVarying(const std::string& chain) {
+  return chain.find("LOCALT") != std::string::npos || chain.find("sendcmd") != std::string::npos;
+}
+
 bool ExtraAdjustLayersTimeVarying(const std::vector<ExtraAdjustLayer>& layers) {
   for (const auto& layer : layers) {
-    if (layer.filters.find("LOCALT") != std::string::npos
-        || layer.filtersPost.find("LOCALT") != std::string::npos
+    if (ColorChainTimeVarying(layer.filters) || ColorChainTimeVarying(layer.filtersPost)
         || !layer.eqContrastExpr.empty() || !layer.eqBrightnessExpr.empty()
         || !layer.eqSaturationExpr.empty() || !layer.lutMixExpr.empty()) {
       return true;
@@ -1438,6 +2132,22 @@ bool ReadExportPayload(
   settings.audioBitrate = ExtractStringField(text, "audio_bitrate", "192k");
   settings.mainAudioVolume = ClampDouble(ExtractDoubleFieldOr(text, "main_audio_volume", 100.0), 0.0, 1000.0);
   ApplyResolutionPreset(settings);
+  {
+    // Cỡ xuất (mục 1.12): số chẵn 16..7680, phần hình nằm gọn trong khung xuất; sai thì bỏ qua.
+    const auto evenIn = [](int v) { return v >= 16 && v <= 7680 && v % 2 == 0; };
+    const int ow = ExtractIntField(text, "output_width", 0);
+    const int oh = ExtractIntField(text, "output_height", 0);
+    const int cw = ExtractIntField(text, "output_content_width", ow);
+    const int ch = ExtractIntField(text, "output_content_height", oh);
+    if (evenIn(ow) && evenIn(oh) && evenIn(cw) && evenIn(ch) && cw <= ow && ch <= oh
+        && !(ow == settings.width && oh == settings.height && cw == ow && ch == oh)) {
+      settings.outputWidth = ow;
+      settings.outputHeight = oh;
+      settings.contentWidth = cw;
+      settings.contentHeight = ch;
+      settings.outputScale = ClampDouble(ExtractDoubleFieldOr(text, "output_scale", 0.0), 0.0, 64.0);
+    }
+  }
 
   /* DANH SÁCH NHỊP KHUNG PHẢI PHỦ CẢ NTSC. Trùng EXPORT_FPS_VALUES (backend/server.js) và
    * PREVIEW_FPS_CHOICES (index.html) — ba danh sách này lệch nhau là lỗi im lặng: lựa chọn
@@ -1456,7 +2166,17 @@ bool ReadExportPayload(
   }
   if (!IsAllowed(settings.codec, {"h264", "hevc", "prores"})) settings.codec = "h264";
   if (!IsAllowed(settings.quality, {"small", "balanced", "high"})) settings.quality = "high";
+  settings.rateMode = ExtractStringField(text, "rate_mode", "");
+  settings.rateMbps = ExtractDoubleFieldOr(text, "rate_mbps", 0.0);
+  if (!IsAllowed(settings.rateMode, {"lower", "recommended", "higher", "custom"})) {
+    settings.rateMode = RateModeFromQuality(settings.quality);
+  }
+  if (settings.rateMode == "custom" && !(settings.rateMbps >= kRateMbpsMin && settings.rateMbps <= kRateMbpsMax)) {
+    settings.rateMode = "recommended";
+  }
   if (!IsAllowed(settings.audioBitrate, {"128k", "192k", "320k"})) settings.audioBitrate = "192k";
+  settings.renderDevice = ExtractStringField(text, "render_device", "auto");
+  if (!IsAllowed(settings.renderDevice, {"auto", "gpu", "cpu"})) settings.renderDevice = "auto";
 
   std::string arrayContent;
   if (!ExtractArrayContent(text, "intervals", arrayContent) && !ExtractArrayContent(text, "", arrayContent)) {
@@ -1514,6 +2234,11 @@ bool ReadExportPayload(
     item.adjustFilters = ExtractJsonStringField(objects[i], "adj_filters", "");
     item.adjustMaskPath = ExtractJsonStringField(objects[i], "adj_mask_path", "");
     item.videoMaskPath = ExtractJsonStringField(objects[i], "video_mask_path", "");
+    item.logoMode = ExtractJsonStringField(objects[i], "logo_mode", "");
+    item.logoRects = ExtractJsonStringField(objects[i], "logo_rects", "");
+    item.logoAiDir = ExtractJsonStringField(objects[i], "logo_ai_dir", "");
+    item.logoAiRects = ExtractJsonStringField(objects[i], "logo_ai_rects", "");
+    item.logoAiT0 = std::max(0.0, ExtractDoubleFieldOr(objects[i], "logo_ai_t0", 0.0));
     item.adjEqContrastExpr = ExtractJsonStringField(objects[i], "adj_eq_contrast_expr", "");
     item.adjEqBrightnessExpr = ExtractJsonStringField(objects[i], "adj_eq_brightness_expr", "");
     item.adjEqSaturationExpr = ExtractJsonStringField(objects[i], "adj_eq_saturation_expr", "");
@@ -1554,6 +2279,7 @@ bool ReadExportPayload(
       overlay.positionX = ExtractDoubleFieldOr(overlayObjects[i], "position_x", 0.0);
       overlay.positionY = ExtractDoubleFieldOr(overlayObjects[i], "position_y", 0.0);
       overlay.scale = ClampDouble(ExtractDoubleFieldOr(overlayObjects[i], "scale", 100.0), 1.0, 800.0);
+      overlay.fitScale = ClampDouble(ExtractDoubleFieldOr(overlayObjects[i], "fit_scale", 1.0), 0.001, 64.0);
       overlay.rotation = ExtractDoubleFieldOr(overlayObjects[i], "rotation", 0.0);
       overlay.opacity = ClampDouble(ExtractDoubleFieldOr(overlayObjects[i], "opacity", 100.0), 0.0, 100.0);
       overlay.flipX = ExtractBoolField(overlayObjects[i], "flip_x", false);
@@ -1572,7 +2298,7 @@ bool ReadExportPayload(
       overlay.color = ExtractJsonStringField(overlayObjects[i], "color", "#ffffff");
       overlay.align = ExtractJsonStringField(overlayObjects[i], "align", "center");
       overlay.seqFps = ClampDouble(ExtractDoubleFieldOr(overlayObjects[i], "seq_fps", 30.0), 1.0, 120.0);
-      overlay.frameCount = ClampInt(ExtractIntField(overlayObjects[i], "frame_count", 0), 0, 1000);
+      overlay.frameCount = ClampInt(ExtractIntField(overlayObjects[i], "frame_count", 0), 0, 3600);   // = trần backend
       overlay.animXExpr = ExtractJsonStringField(overlayObjects[i], "anim_x_expr", "");
       overlay.animYExpr = ExtractJsonStringField(overlayObjects[i], "anim_y_expr", "");
       overlay.animSxExpr = ExtractJsonStringField(overlayObjects[i], "anim_sx_expr", "");
@@ -1591,6 +2317,11 @@ bool ReadExportPayload(
       overlay.adjustFilters = ExtractJsonStringField(overlayObjects[i], "adj_filters", "");
       overlay.adjustMaskPath = ExtractJsonStringField(overlayObjects[i], "adj_mask_path", "");
       overlay.videoMaskPath = ExtractJsonStringField(overlayObjects[i], "video_mask_path", "");
+      overlay.logoMode = ExtractJsonStringField(overlayObjects[i], "logo_mode", "");
+      overlay.logoRects = ExtractJsonStringField(overlayObjects[i], "logo_rects", "");
+      overlay.logoAiDir = ExtractJsonStringField(overlayObjects[i], "logo_ai_dir", "");
+      overlay.logoAiRects = ExtractJsonStringField(overlayObjects[i], "logo_ai_rects", "");
+      overlay.logoAiT0 = std::max(0.0, ExtractDoubleFieldOr(overlayObjects[i], "logo_ai_t0", 0.0));
       overlay.adjEqContrastExpr = ExtractJsonStringField(overlayObjects[i], "adj_eq_contrast_expr", "");
       overlay.adjEqBrightnessExpr = ExtractJsonStringField(overlayObjects[i], "adj_eq_brightness_expr", "");
       overlay.adjEqSaturationExpr = ExtractJsonStringField(overlayObjects[i], "adj_eq_saturation_expr", "");
@@ -1669,8 +2400,52 @@ std::string ClipPixelFormat(const ExportSettings& settings) {
  * chuyển luôn đúng, kể cả khi luồng phía trước bị kéo sang pc/bt470bg), rồi `setparams` gắn
  * primaries/transfer — trước đây hai nhãn này ra `unknown` ngay cả ở ca bình thường. */
 std::string OutputColorFilters(const ExportSettings& settings) {
+  /* Cỡ xuất khác cỡ sequence (mục 1.12, pha 1): co cả khung đã dựng về cỡ phần hình ngay ở phép
+   * đổi màu cuối (một lượt swscale), lanczos như các bộ dựng phim khi thu nhỏ; phần hình nhỏ hơn
+   * khung xuất thì đệm đen hai bên, toạ độ chẵn cho 4:2:0. Pha 2 (ApplyOutputScaleToPayload, đang
+   * sau env) dựng thẳng đồ thị ở cỡ phần hình khi co nhỏ, ở đây chỉ còn bước đệm. */
+  if (OutputResized(settings)) {
+    // Pha 2: đồ thị đã ở cỡ phần hình (ApplyOutputScaleToPayload) — chỉ đổi màu, không co nữa.
+    std::string out = settings.builtAtOutputScale
+      ? "scale=out_color_matrix=bt709:out_range=tv," + ClipPixelFormat(settings)
+      : "scale=w=" + std::to_string(settings.contentWidth) + ":h=" + std::to_string(settings.contentHeight)
+        + ":flags=lanczos:out_color_matrix=bt709:out_range=tv," + ClipPixelFormat(settings);
+    if (settings.contentWidth != settings.outputWidth || settings.contentHeight != settings.outputHeight) {
+      const int x = ((settings.outputWidth - settings.contentWidth) / 2) & ~1;
+      const int y = ((settings.outputHeight - settings.contentHeight) / 2) & ~1;
+      out += ",pad=w=" + std::to_string(settings.outputWidth) + ":h=" + std::to_string(settings.outputHeight)
+        + ":x=" + std::to_string(x) + ":y=" + std::to_string(y) + ":color=black";
+    }
+    return out + ",setsar=1,setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709";
+  }
   return "scale=out_color_matrix=bt709:out_range=tv," + ClipPixelFormat(settings)
     + ",setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709";
+}
+
+/* ĐUÔI ĐỒ THỊ GPU (mục 1.21) — bản GPU của OutputColorFilters. Khung tới đây từ nhiều vùng nhớ
+ * CUDA (mỗi crabgeo/crabblend một vùng), mà NVENC chỉ đăng ký khung của MỘT vùng ("Could not
+ * register an input HW frame") -> crabgeo `passthrough=0` chép về vùng nhớ riêng của nó, kiêm luôn
+ * đổi bt709/tv + yuv420p và phép đệm đen của 1.12 (đồ thị dựng ở cỡ phần hình — pha 2). Đồ thị
+ * cần co ở đuôi (pha 1: phóng to, lanczos) thì không đi GPU (BatchGpuEligible).
+ * `sync=1` (mặc định của crabgeo/crabblend bản 2026-10-02, ghi rõ để phép dò GpuRenderAvailable loại
+ * bản build cũ): chờ GPU xong khung rồi mới đưa đi. Bản đầu để GPU chạy không đồng bộ thì bản xuất
+ * có khung RÁCH/lệch thời gian — NVENC đọc khung khi kernel chép chưa xong (hàng 0–671 của khung cũ),
+ * lớp phủ chữ hiện khung cũ hơn 6 hoặc mới hơn 2 — nhiều nhất khi 3 lượt chạy song song (Bin Tom).
+ * Chờ ở mọi bộ lọc CUDA + lúc tải lên thì sạch mà không chậm hơn (mỗi việc GPU chỉ vài ms). */
+std::string GpuOutputFilters(const ExportSettings& settings) {
+  std::string out = "crabgeo_cuda=format=yuv420p:passthrough=0:sync=1";
+  if (OutputResized(settings)
+      && (settings.contentWidth != settings.outputWidth || settings.contentHeight != settings.outputHeight)) {
+    const int x = ((settings.outputWidth - settings.contentWidth) / 2) & ~1;
+    const int y = ((settings.outputHeight - settings.contentHeight) / 2) & ~1;
+    out += ":ow=" + std::to_string(settings.outputWidth) + ":oh=" + std::to_string(settings.outputHeight)
+         + ":x=" + std::to_string(x) + ":y=" + std::to_string(y);
+  }
+  // CHỈ CHO TEST (tests/scripts/export_gpu.js): làm hỏng đồ thị GPU để kiểm đường lùi về đồ thị CPU.
+  if (const char* env = std::getenv("CRABBYCUT_EXPORT_GPU_TEST_FAIL")) {
+    if (std::string(env) == "1") out += ":crabbycut_test_fail=1";
+  }
+  return out + ",setsar=1,setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709";
 }
 
 // Thay token LOCALT (thời gian cục bộ) bằng (<timeVar> - start). timeVar khác nhau theo
@@ -1717,6 +2492,49 @@ bool HasKeyframeExpr(const std::string& sx, const std::string& sr, const std::st
  * overlay x/y, giữ đường xuất rẻ (không rotate, không scale=eval=frame). */
 bool HasAnimGeomExpr(const std::string& sx, const std::string& sy, const std::string& rot) {
   return !sx.empty() || !sy.empty() || !rot.empty();
+}
+
+// File lệnh phụ của filter script đang ghi (lutmix_*.cmd, kfop_*.cmd): nằm cạnh script, tên mang tiền
+// tố là tên script nên mỗi file một tên. Số thứ tự (cũng là tên bộ lọc trong đồ thị: `blend@…lm`,
+// `colorchannelmixer@kfopN`) ĐẾM LẠI TỪ 0 cho mỗi script: đếm suốt tiến trình thì thêm một lớp phủ
+// động ở batch 1 làm đổi chữ của mọi batch sau -> khoá cache render (mục 1.13) của chúng đổi theo.
+static fs::path g_filterAuxDir;   // thư mục của filter script đang ghi (xem WriteFilterScript)
+static std::string g_filterAuxPrefix;   // "<tên script>_"
+static int g_filterAuxSeq = 0;
+
+/* ĐỘ MỜ CÓ KEYFRAME (mục 1.6 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md).
+ *
+ * Trước đây: `geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='clip(op/100,0,1)*alpha(X,Y)'` — geq tính bốn
+ * biểu thức cho TỪNG ĐIỂM ẢNH của từng khung. Đo trên Test.crab (block 150% của nguồn 1366×720 ->
+ * ~2050×1080, 200 khung): ~215 ms/khung, 43 trong 55,6 s của cả lượt xuất.
+ * Nay: `colorchannelmixer` chỉ còn hệ số `aa` (alpha ra = aa × alpha vào; tuỳ chọn có cờ T nên đổi
+ * được lúc chạy), và `sendcmd` cờ [expr] tính độ mờ MỘT LẦN mỗi khung rồi gửi vào — cùng khuôn
+ * ColorAdjustLutBlend: sendcmd đứng TRƯỚC filter nhận lệnh, lệnh nằm trong FILE (dấu phẩy của biểu
+ * thức), biến thời gian là T. Không ghi được file -> giữ geq cũ (thà chậm còn hơn mất keyframe).
+ * Env tắt (A/B, test so với cách cũ): CRABBYCUT_EXPORT_KFOP=0. */
+bool KfOpacityMixerEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_KFOP");
+  return !(env && std::string(env) == "0");
+}
+
+std::string KfOpacityFilter(const std::string& kfOpacityExpr, double start) {
+  const std::string op = SubstituteLocalTimeVar(kfOpacityExpr, start, "T");
+  const std::string geq = ",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='clip((" + op + ")/100,0,1)*alpha(X,Y)'";
+  if (!KfOpacityMixerEnabled()) return geq;
+  const std::string tag = "kfop" + std::to_string(++g_filterAuxSeq);
+  const fs::path dir = g_filterAuxDir.empty() ? fs::temp_directory_path() : g_filterAuxDir;
+  const fs::path cmdPath = dir / (g_filterAuxPrefix + tag + ".cmd");
+  {
+    std::ofstream cmd{cmdPath};
+    if (!cmd) return geq;
+    cmd << "0.0-1000000.0 [expr] colorchannelmixer@" << tag << " aa 'clip((" << op << ")/100,0,1)';\n";
+  }
+  /* `format=gbrap` TRƯỚC colorchannelmixer: geq chỉ nhận RGB tách mặt phẳng nên ffmpeg vẫn tự đổi
+   * sang gbrap ở đây, và `overlay=format=auto` phía sau theo đó kéo LUỒNG CHÍNH qua gbrap. Để
+   * colorchannelmixer chạy ở rgba thì overlay kéo luồng chính qua rgba — swscale đi đường yuv420p
+   * -> rgba nhanh mà kém chính xác, áp cho MỌI khung của cả batch: đo trên Test.crab, so bản chuẩn
+   * 45,5 dB tụt còn 41,6 dB (bộ so 0.3 đánh trượt). Giữ gbrap = giữ nguyên đồ thị quanh nó. */
+  return ",format=gbrap,sendcmd=f='" + FilterPath(cmdPath.string()) + "',colorchannelmixer@" + tag + "=aa=1";
 }
 
 // Nối chuỗi filter biến đổi theo thời gian (rotate -> scale -> opacity) cho 1 stream đã ở
@@ -1768,9 +2586,8 @@ void AppendKfTransformFilters(
   // đánh giá lại w/h mỗi frame -> scale động
   if (!kfScaleExpr.empty() || !animSxExpr.empty() || !animSyExpr.empty()) script << ":eval=frame";
   if (!kfOpacityExpr.empty()) {
-    // opacity biến thiên: geq nhân alpha sẵn có (0..1 * alpha gốc). geq dùng biến thời gian T.
-    const std::string op = SubstituteLocalTimeVar(kfOpacityExpr, start, "T");
-    script << ",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='clip((" << op << ")/100,0,1)*alpha(X,Y)'";
+    // opacity biến thiên: nhân alpha sẵn có với độ mờ của khung (xem KfOpacityFilter).
+    script << KfOpacityFilter(kfOpacityExpr, start);
   } else if (staticOpacity < 0.999) {
     script << ",colorchannelmixer=aa=" << FfmpegDouble(staticOpacity);
   }
@@ -1879,15 +2696,45 @@ std::string ColorAdjustEqFilter(double start,
 //  - Lệnh phải nằm trong FILE (`sendcmd=f=`): viết thẳng `c='…'` thì dấu phẩy của biểu thức
 //    đụng cú pháp tách lệnh của sendcmd, escape qua hai tầng (graph + sendcmd) không qua được.
 //  - Biến thời gian của sendcmd [expr] là T (giây của khung), giống blend cũ.
-static fs::path g_filterAuxDir;   // thư mục của filter script đang ghi (xem WriteFilterScript)
-static int g_filterAuxSeq = 0;
+//  - g_filterAuxDir / g_filterAuxSeq: khai báo ở trên AppendKfTransformFilters (độ mờ keyframe
+//    dùng cùng cơ chế file lệnh).
+/* LUT CHẠY FLOAT (đo 2026-10-03 trên "Yêu Con", nguồn DJI HEVC 10-bit). lut3d nhận định dạng theo
+ * bộ lọc ĐỨNG SAU nó, mà sau chuỗi màu luôn là `format=rgb24`/`format=rgba` -> nguồn 10-bit bị hạ
+ * về RGB 8-bit TRƯỚC khi qua LUT (LUT có độ dốc lớn khuếch đại bậc lượng tử hoá thành vệt dải màu).
+ * So một bản dựng float: LUT tĩnh 39,4 dB -> 49,3 dB khi chạy float. Chèn `format` float ngay trước
+ * lut3d (và trước nhánh trộn hai LUT): một LUT không tốn thêm CPU (60 khung 1080×1920: 5,9 CPU-giây
+ * cả hai cách), hai LUT + blend +20% phần LUT, thời gian thực không đổi. Danh sách hai định dạng:
+ * nguồn có alpha (ảnh PNG lớp phủ) đi gbrapf32le, không thì gbrpf32le — ép một định dạng không alpha
+ * là mất alpha. Env tắt (A/B): CRABBYCUT_EXPORT_LUTF32=0. */
+bool LutFloatEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_LUTF32");
+  return !(env && std::string(env) == "0");
+}
+
+const char* const kLutFloatFormat = "format=gbrpf32le|gbrapf32le";
+
+// Chèn kLutFloatFormat trước mỗi `lut3d=` đứng đầu một filter của chuỗi (đầu chuỗi hoặc sau dấu phẩy).
+std::string WithFloatLut(const std::string& chain) {
+  if (!LutFloatEnabled()) return chain;
+  std::string out;
+  size_t from = 0;
+  for (size_t at = chain.find("lut3d="); at != std::string::npos; at = chain.find("lut3d=", at + 6)) {
+    if (at != 0 && chain[at - 1] != ',') continue;
+    out.append(chain, from, at - from);
+    out += kLutFloatFormat;
+    out += ",";
+    from = at;
+  }
+  out.append(chain, from, std::string::npos);
+  return out;
+}
 
 std::string ColorAdjustLutBlend(double start, const std::string& aPath, const std::string& bPath,
                                 const std::string& mixExpr, const std::string& tag) {
   if (aPath.empty() || bPath.empty() || mixExpr.empty()) return "";
   const std::string mix = SubstituteLocalTimeVar(mixExpr, start, "T");
   const fs::path dir = g_filterAuxDir.empty() ? fs::temp_directory_path() : g_filterAuxDir;
-  const fs::path cmdPath = dir / ("lutmix_" + tag + std::to_string(++g_filterAuxSeq) + ".cmd");
+  const fs::path cmdPath = dir / (g_filterAuxPrefix + "lutmix_" + tag + std::to_string(++g_filterAuxSeq) + ".cmd");
   {
     std::ofstream cmd{cmdPath};
     if (!cmd) return "";   // không ghi được -> bỏ tầng trộn (thà thiếu LUT động còn hơn hỏng graph)
@@ -1900,6 +2747,7 @@ std::string ColorAdjustLutBlend(double start, const std::string& aPath, const st
   }
   std::ostringstream out;
   out << "sendcmd=f='" << FilterPath(cmdPath.string()) << "',";
+  if (LutFloatEnabled()) out << kLutFloatFormat << ",";   // hai nhánh lut3d + blend chạy float
   out << "split[" << tag << "la][" << tag << "lb];\n";
   out << "[" << tag << "la]lut3d=file='" << FilterPath(aPath) << "':interp=trilinear[" << tag << "la2];\n";
   out << "[" << tag << "lb]lut3d=file='" << FilterPath(bPath) << "':interp=trilinear[" << tag << "lb2];\n";
@@ -1923,8 +2771,8 @@ std::string ColorAdjustChain(double start, const std::string& staticFilters,
   // biểu thức thời gian ngay trong `vignette=angle='...':eval=frame` — tức là trong chính chuỗi
   // này, không đi qua field riêng như eq. Token chỉ xuất hiện ở đúng những biểu thức đó nên
   // thay ở đây là an toàn, và mọi filter nhận biểu thức về sau tự dùng được, không cần field mới.
-  const std::string staticSubbed = SubstituteLocalTime(staticFilters, start);
-  const std::string postSubbed = SubstituteLocalTime(postFilters, start);
+  const std::string staticSubbed = WithFloatLut(SubstituteLocalTime(staticFilters, start));
+  const std::string postSubbed = WithFloatLut(SubstituteLocalTime(postFilters, start));
   std::string out;
   const auto add = [&out](const std::string& piece) {
     if (piece.empty()) return;
@@ -1939,7 +2787,7 @@ std::string ColorAdjustChain(double start, const std::string& staticFilters,
   return out;
 }
 
-void AppendColorAdjustFilters(std::ofstream& script, const std::string& filters,
+void AppendColorAdjustFilters(std::ostream& script, const std::string& filters,
                               const std::string& maskPath, const std::string& tag) {
   if (filters.empty()) return;
   if (maskPath.empty()) {
@@ -1964,7 +2812,7 @@ void AppendColorAdjustFilters(std::ofstream& script, const std::string& filters,
 
 // Nối chuỗi màu của các lớp 1..n-1 SAU lớp 0, đúng thứ tự áp. Tag riêng từng lớp: tag đặt tên
 // nhãn nhánh (split/lut3d/blend@…) — trùng tag giữa hai lớp là hỏng cả filtergraph.
-void AppendExtraAdjustLayers(std::ofstream& script, double start,
+void AppendExtraAdjustLayers(std::ostream& script, double start,
                              const std::vector<ExtraAdjustLayer>& layers, const std::string& tagBase) {
   for (size_t k = 0; k < layers.size(); k++) {
     const auto& layer = layers[k];
@@ -1978,6 +2826,223 @@ void AppendExtraAdjustLayers(std::ofstream& script, double start,
   }
 }
 
+/* MÀU THEO TỪNG ĐIỂM ẢNH ÁP SAU BƯỚC CO NHỎ (đo 2026-09-30 trên dự án thật "Yêu Con 1").
+ *
+ * Chuỗi màu vốn chạy ở cỡ NGUỒN, trước bước co về cỡ hiển thị. Nguồn DJI 1728×3072 10-bit trên
+ * sequence 1080×1920, một lớp Điều chỉnh có keyframe cường độ LUT (2×lut3d + blend) tốn ~75 ms
+ * mỗi khung: 85 s trong 118,5 s phần hình của cả lượt. Co trước rồi mới áp màu: xem số ở
+ * docs/KE_HOACH_TOI_UU_EXPORT_WIN.md (mục 1.19).
+ *
+ * Đổi thứ tự chỉ đúng với phép tính TỪNG ĐIỂM ẢNH: eq, colorbalance, curves, lut3d, trộn blend,
+ * vignette (theo toạ độ TƯƠNG ĐỐI của khung). Giá trị ra của một điểm chỉ phụ thuộc chính nó,
+ * nên co trước hay sau chỉ khác ở mép chi tiết (phép co trộn các điểm TRƯỚC hay SAU khi đổi màu).
+ * Hiệu ứng theo LÂN CẬN (unsharp, avgblur, noise) có bán kính tính bằng điểm ảnh của khung mà
+ * frontend khai (ColorAdjust.ffmpegFilters, frameHeight) -> giữ chỗ cũ, cả mọi tầng TRƯỚC nó
+ * (thứ tự áp không được đảo). Mặt nạ màu theo toạ độ nguồn -> tầng có mặt nạ cũng giữ chỗ cũ.
+ * Tên bộ lọc được dò bằng chuỗi con: đường dẫn lỡ chứa "noise" thì chỉ là đi đường cũ.
+ *
+ * Preview (Pixi) áp filter ở cỡ HIỂN THỊ, và Adjustment Layer của Premiere/CapCut áp lên khung
+ * đã dựng ở cỡ sequence, nên thứ tự mới còn gần hai chuẩn đó hơn. Chỉ dời khi phép co làm NHỎ
+ * khung (phóng to thì áp trước mới rẻ) — phía gọi quyết định. */
+bool ColorChainIsPointwise(const std::string& chain) {
+  for (const char* spatial : {"unsharp", "avgblur", "gblur", "boxblur", "noise", "movie="}) {
+    if (chain.find(spatial) != std::string::npos) return false;
+  }
+  return true;
+}
+
+// Env tắt (A/B, test so với thứ tự cũ): CRABBYCUT_EXPORT_COLOR_AFTER_SCALE=0.
+bool ColorAfterScaleEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_COLOR_AFTER_SCALE");
+  return !(env && std::string(env) == "0");
+}
+
+struct ColorStage {
+  std::string chain;   // kết quả của ColorAdjustChain (rỗng = tầng không làm gì)
+  std::string mask;    // mặt nạ màu của tầng (chỉ tầng của chính block có)
+  std::string tag;
+};
+
+struct SplitColorStages {
+  std::string pre;    // phải chạy ở cỡ nguồn, đúng chỗ cũ
+  std::string post;   // chạy sau bước co nhỏ
+};
+
+/* Chia các tầng màu (theo ĐÚNG thứ tự áp) thành phần trước / sau bước co. Phần sau luôn là một
+ * ĐUÔI của danh sách: tầng cuối cùng không dời được giữ lại chính nó và mọi tầng trước nó. */
+SplitColorStages SplitColorStagesForScale(const std::vector<ColorStage>& stages, bool allowPost) {
+  size_t firstPost = stages.size();
+  if (allowPost && ColorAfterScaleEnabled()) {
+    firstPost = 0;
+    for (size_t k = 0; k < stages.size(); k++) {
+      const ColorStage& stage = stages[k];
+      if (stage.chain.empty()) continue;
+      if (!stage.mask.empty() || !ColorChainIsPointwise(stage.chain)) firstPost = k + 1;
+    }
+  }
+  std::ostringstream pre;
+  std::ostringstream post;
+  for (size_t k = 0; k < stages.size(); k++) {
+    AppendColorAdjustFilters(k < firstPost ? pre : post, stages[k].chain, stages[k].mask, stages[k].tag);
+  }
+  return {pre.str(), post.str()};
+}
+
+/* Các tầng màu của một block theo thứ tự áp: chuỗi của chính block (có thể kèm mặt nạ), lớp
+ * Điều chỉnh 0 (gọi với mặt nạ RỖNG — xem WriteClipVideoFilters), rồi các lớp 1..n-1. Gọi
+ * ColorAdjustChain theo đúng thứ tự cũ: nó ghi file lệnh sendcmd có số thứ tự. */
+template <typename Block>
+std::vector<ColorStage> BlockColorStages(const Block& b, double start, const std::string& ownTag,
+                                         const std::string& layerTag) {
+  std::vector<ColorStage> stages;
+  stages.push_back({ColorAdjustChain(start, b.adjustFilters, b.adjEqContrastExpr, b.adjEqBrightnessExpr,
+                                     b.adjEqSaturationExpr, b.adjustFiltersPost, b.adjustLutAPath,
+                                     b.adjustLutBPath, b.adjustLutMixExpr, ownTag),
+                    b.adjustMaskPath, ownTag});
+  stages.push_back({ColorAdjustChain(start, b.adjustLayerFilters, b.adjLayerEqContrastExpr,
+                                     b.adjLayerEqBrightnessExpr, b.adjLayerEqSaturationExpr,
+                                     b.adjustLayerFiltersPost, b.adjustLayerLutAPath,
+                                     b.adjustLayerLutBPath, b.adjustLayerLutMixExpr, layerTag),
+                    "", ""});
+  for (size_t k = 0; k < b.extraAdjustLayers.size(); k++) {
+    const auto& layer = b.extraAdjustLayers[k];
+    const std::string tag = layerTag + "k" + std::to_string(k + 1) + "_";
+    stages.push_back({ColorAdjustChain(start, layer.filters, layer.eqContrastExpr, layer.eqBrightnessExpr,
+                                       layer.eqSaturationExpr, layer.filtersPost, layer.lutAPath,
+                                       layer.lutBPath, layer.lutMixExpr, tag),
+                      "", ""});
+  }
+  return stages;
+}
+
+
+/* XOÁ LOGO của block — chạy TRƯỚC mọi chuỗi màu, ở kích thước NGUỒN (trước scale/xoay),
+ * đúng thứ tự preview: xoá logo sửa ẢNH GỐC, grade/LUT là lớp áp lên kết quả đó.
+ *
+ * `rectsSpec` = "x:y:w:h:p|..." (pixel nguyên, backend dựng lại từ số đã kẹp). Công thức
+ * pixel của cả ba chế độ nằm ở static/js/logo-removal.js — preview chạy bản JS của đúng
+ * các phép dưới đây:
+ *   delogo   -> filter `delogo` (nối thẳng, không nhánh).
+ *   blur     -> crop vùng, `boxblur` power 2, overlay lại đúng chỗ.
+ *   pixelate -> crop vùng, `scale` area xuống n ô, `scale` neighbor lên lại, overlay.
+ * `delogo` là filter GPL — bản FFmpeg build LGPL không có nó. Thiếu thì rơi về làm mờ
+ * thay vì để cả lần xuất đổ vì "No such filter".
+ * Kết thúc bằng `null` (nếu có nhánh) để đoạn sau của caller nối tiếp được bằng dấu phẩy. */
+struct LogoRect {
+  int x = 0;
+  int y = 0;
+  int w = 0;
+  int h = 0;
+  int p = 0;
+};
+
+std::vector<LogoRect> ParseLogoRects(const std::string& spec) {
+  std::vector<LogoRect> out;
+  std::stringstream all(spec);
+  std::string part;
+  while (std::getline(all, part, '|')) {
+    int v[5] = {0, 0, 0, 0, 0};
+    int count = 0;
+    std::stringstream one(part);
+    std::string num;
+    while (count < 5 && std::getline(one, num, ':')) {
+      char* end = nullptr;
+      const long parsed = std::strtol(num.c_str(), &end, 10);
+      if (end == num.c_str()) break;
+      v[count++] = static_cast<int>(parsed);
+    }
+    if (count != 5) continue;
+    LogoRect r;
+    r.x = std::max(0, v[0]);
+    r.y = std::max(0, v[1]);
+    r.w = v[2];
+    r.h = v[3];
+    r.p = std::max(0, v[4]);
+    if (r.w < 6 || r.h < 6) continue;
+    out.push_back(r);
+    if (out.size() >= 4) break;
+  }
+  return out;
+}
+
+void AppendLogoRemovalFilters(std::ofstream& script, const std::string& mode,
+                              const std::string& rectsSpec, const std::string& tag) {
+  const std::vector<LogoRect> rects = ParseLogoRects(rectsSpec);
+  if (rects.empty()) return;
+  std::string m = (mode == "blur" || mode == "pixelate") ? mode : "delogo";
+  if (m == "delogo" && !HasFfmpegFilter("delogo")) m = "blur";
+  if (m == "delogo") {
+    for (const auto& r : rects) {
+      script << ",delogo=x=" << r.x << ":y=" << r.y << ":w=" << r.w << ":h=" << r.h;
+    }
+    return;
+  }
+  for (size_t k = 0; k < rects.size(); k++) {
+    const auto& r = rects[k];
+    const std::string t = tag + std::to_string(k);
+    script << ",split[" << t << "b][" << t << "f];\n";
+    // yuva444p: mọi mặt phẳng CÙNG độ phân giải -> cùng một bán kính/ô cho cả sáng lẫn màu,
+    // đúng như bản JS chạy trên RGB. Để nguồn 4:2:0 thì màu mờ gấp đôi sáng (đo được lệch
+    // 11/255 so với preview). Giữ alpha (overlay PNG) nhưng KHÔNG làm mờ nó.
+    script << "[" << t << "f]crop=" << r.w << ":" << r.h << ":" << r.x << ":" << r.y << ",format=yuva444p";
+    if (m == "pixelate") {
+      const int block = std::max(2, r.p);
+      const int nx = std::max(1, static_cast<int>(std::lround(static_cast<double>(r.w) / block)));
+      const int ny = std::max(1, static_cast<int>(std::lround(static_cast<double>(r.h) / block)));
+      script << ",scale=" << nx << ":" << ny << ":flags=area"
+             << ",scale=" << r.w << ":" << r.h << ":flags=neighbor";
+    } else {
+      // boxblur từ chối cả graph khi bán kính > nửa cạnh ngắn của mặt phẳng. Frontend đã
+      // kẹp p ≤ cạnh ngắn/4; kẹp lại ở đây cho chắc.
+      const int cap = std::max(1, std::min(r.w, r.h) / 4);
+      const int radius = std::max(1, std::min(r.p, cap));
+      script << ",boxblur=luma_radius=" << radius << ":luma_power=2"
+             << ":chroma_radius=" << radius << ":chroma_power=2:alpha_radius=0";
+    }
+    script << "[" << t << "p];\n";
+    script << "[" << t << "b][" << t << "p]overlay=" << r.x << ":" << r.y << ":format=auto[" << t << "o];\n";
+    script << "[" << t << "o]null";
+  }
+}
+
+/* XOÁ LOGO BẰNG AI: dán các miếng vá đã vẽ sẵn (asr/logo_inpaint_sidecar.py) lên luồng nguồn.
+ *
+ * Mỗi vùng là MỘT chuỗi PNG theo đúng PTS của từng khung nguồn, đóng gói bằng `r{k}.ffconcat`
+ * (concat demuxer: mỗi ảnh hiện đúng tới khung sau, nguồn VFR vẫn đúng). Nạp bằng `movie=`
+ * như mặt nạ (xem AppendVideoMaskFilter) để khỏi đánh số lại input của overlay.
+ *
+ * KHỚP TỪNG KHUNG — lý do có tham số `timing`: concat ra PTS bắt đầu từ 0, `setpts=+t0` đưa nó
+ * về ĐÚNG trục PTS nguồn của `[N:v]`, rồi đi qua CHÍNH chuỗi trim/setpts/tốc độ/fps mà nhánh
+ * clip vừa đi (caller truyền nguyên chuỗi đó). Hai luồng cùng PTS vào cùng bộ lọc thì cùng
+ * khung ra — kể cả phép lùi nửa khung nguồn ở mép cắt và `fps=` lấy mẫu lại.
+ * `safe=0` vì danh sách khai `option framerate 90000` cho từng ảnh (timebase mịn — mặc định
+ * 1/25 của PNG làm tròn mọi mốc về lưới 25fps và lệch khung khi đổi tốc độ). Danh sách do
+ * chính sidecar Python sinh ra trong cache của backend, tên file tương đối.
+ * `eof_action=pass`: lượt AI ngắn hơn đoạn cần (không nên xảy ra — frontend chờ đủ trước khi
+ * xuất) thì lộ ảnh gốc, KHÔNG lặp mãi miếng vá cuối lên nền đã trôi đi.
+ * Kết thúc bằng `null` như AppendLogoRemovalFilters. */
+void AppendLogoAiFilters(std::ofstream& script, const std::string& dir, const std::string& rectsSpec,
+                         double t0, const std::string& timing, const std::string& tag) {
+  if (dir.empty()) return;
+  std::stringstream all(rectsSpec);
+  std::string part;
+  int k = 0;
+  while (k < 4 && std::getline(all, part, '|')) {
+    const size_t colon = part.find(':');
+    if (colon == std::string::npos) { k++; continue; }
+    const long x = std::strtol(part.c_str(), nullptr, 10);
+    const long y = std::strtol(part.c_str() + colon + 1, nullptr, 10);
+    const std::string list = FilterPath((fs::path(dir) / ("r" + std::to_string(k) + ".ffconcat")).string());
+    const std::string t = tag + std::to_string(k);
+    script << ",null[" << t << "b];\n";
+    script << "movie='" << list << "':format_name=concat:format_opts='safe=0'"
+           << ",setpts=PTS+" << FfmpegDouble(t0) << "/TB," << timing << ",format=rgba[" << t << "p];\n";
+    script << "[" << t << "b][" << t << "p]overlay=" << std::max(0L, x) << ":" << std::max(0L, y)
+           << ":eof_action=pass:format=auto[" << t << "o];\n";
+    script << "[" << t << "o]null";
+    k++;
+  }
+}
 
 /* MẶT NẠ CẮT HÌNH của block: nhân mặt nạ vào ALPHA của luồng.
  *
@@ -2011,6 +3076,561 @@ void AppendVideoMaskFilter(std::ofstream& script, const std::string& maskPath,
   script << "[" << tag << "va][" << tag << "vm]blend=all_mode=multiply[" << tag << "vam];\n";
   script << "[" << tag << "vc][" << tag << "vam]alphamerge[" << tag << "vk];\n";
   script << "[" << tag << "vk]null";
+}
+
+/* Kế hoạch đường nhanh của một clip (xem khối chú thích ở MainLaneFastPathEnabled). `ok` = false
+ * -> clip đi đường cũ. `geometry` nối ngay sau chuỗi màu của clip, bắt đầu bằng dấu phẩy. */
+struct MainLaneFast {
+  bool ok = false;
+  std::string geometry;
+  /* Chỉ nhánh RGB (clip có chỉnh màu): `geometry` = `scale` + `place`. Tầng màu theo từng điểm
+   * ảnh chen vào GIỮA hai phần khi phép co làm nhỏ khung (`shrinks`) — xem ColorChainIsPointwise. */
+  std::string scale;
+  std::string place;
+  bool shrinks = false;
+  /* Cắt trước khi phóng to (mục 1.4, PreCropPlanAxis): đứng ngay sau xoá logo, TRƯỚC chuỗi màu
+   * (chỉ cắt khi mọi tầng màu theo từng điểm ảnh) — `geometry` đã tính theo vùng cắt này. */
+  std::string preCrop;
+};
+
+// Số clip của lượt đang ghi đi đường nhanh — ghi vào số đo (ExportRunTiming::fastClips).
+static int g_fastClipCount = 0;
+
+// Input mang hình của từng clip trong lượt đang ghi (chỉ số tính từ đầu batch). Rỗng = mọi clip
+// đọc [0:v]. ExportBatch điền trước khi ghi filter script — xem PlanSourceRanges.
+static std::vector<int> g_clipVideoInput;
+
+/* ĐANG GHI BẢN ĐỒ THỊ GPU (mục 1.21, xem PrepareExportBatch). Các hàm ghi clip/lớp phủ/đuôi đồ
+ * thị đổi sang bộ lọc CUDA của bản ffmpeg riêng: crabgeo_cuda (cắt + co + đổi màu + đặt vào
+ * khung), crabblend_cuda (trộn lớp phủ, trùng từng bit với overlay=format=yuv420). Chỉ bật khi
+ * BatchGpuEligible đã cho batch đi GPU. `g_gpuMainNvdec`: NVDEC giải mã được nguồn chính (dò một lần
+ * cho cả lượt xuất). `g_gpuBatchNvdec`: batch đang ghi giải mã nguồn bằng NVDEC ra thẳng khung CUDA —
+ * chỉ khi mọi clip của batch có bản GPU (ClipGpuNative); batch có clip dựng bằng CPU thì giải mã CPU
+ * (bộ lọc CPU không nhận khung CUDA), clip GPU `hwupload` sau `trim`. */
+static bool g_gpuGraph = false;
+static bool g_gpuMainNvdec = false;
+static bool g_gpuBatchNvdec = false;
+
+bool ClipGpuNative(const ExportInterval& item, const ExportSettings& settings, bool nvdec);   // xem dưới BatchGpuEligible
+
+// Clip/lớp phủ có chuỗi màu nào (của chính nó, lớp Điều chỉnh, các lớp thêm) — xem MainLaneFastPlan.
+template <typename Block>
+bool BlockHasColorAdjust(const Block& item) {
+  return !item.adjustFilters.empty() || !item.adjustFiltersPost.empty() || !item.adjustMaskPath.empty()
+      || !item.adjEqContrastExpr.empty() || !item.adjEqBrightnessExpr.empty() || !item.adjEqSaturationExpr.empty()
+      || !item.adjustLutMixExpr.empty()
+      || !item.adjustLayerFilters.empty() || !item.adjustLayerFiltersPost.empty()
+      || !item.adjLayerEqContrastExpr.empty() || !item.adjLayerEqBrightnessExpr.empty()
+      || !item.adjLayerEqSaturationExpr.empty() || !item.adjustLayerLutMixExpr.empty()
+      || !item.extraAdjustLayers.empty();
+}
+
+bool IntervalHasColorAdjust(const ExportInterval& item) {
+  return BlockHasColorAdjust(item);
+}
+
+/* TẦNG MÀU -> tuỳ chọn LUT của crabgeo_cuda (đồ thị GPU, mục 1.21; cần GpuLutAvailable).
+ * Mọi phép màu TĨNH theo từng điểm ảnh của block — eq (số), colorbalance, curves, lut3d (HSL + LUT đã
+ * bake ở frontend), qua mọi tầng (của chính block, lớp Điều chỉnh, các lớp thêm), đúng thứ tự áp — gộp
+ * thành MỘT LUT: một lut3d đơn lẻ thì dùng thẳng tệp của nó, còn lại BAKE (BakeColorLut) — cho ảnh Hald
+ * đồng nhất chạy qua chính chuỗi filter CPU đó rồi đọc ra .cube. Thêm được:
+ *  - một tầng keyframe cường độ LUT (ColorAdjustLutBlend: 2 cube + biểu thức) ĐỨNG CUỐI: các phép tĩnh
+ *    trước nó bake vào cả hai cube -> `lut=A':lut2=B':mix=<biểu thức>` (trộn sau LUT nên đúng như CPU:
+ *    phép trước -> split -> hai lut3d -> blend). Phép đứng SAU tầng trộn thì không gộp được;
+ *  - `:enable='…'` CHUNG cho mọi filter (lớp Điều chỉnh chỉ phủ một phần block) -> `mix=<enable>`
+ *    (crabgeo: gốc + (LUT − gốc)·mix, mix 0/1 = tắt/bật).
+ * Không đạt (block đi đồ thị CPU): keyframe thông số màu (eq theo biểu thức, filter có nhãn `@` mà
+ * sendcmd trỏ tới), mặt nạ màu, hiệu ứng không gian (unsharp/blur/noise/vignette), enable khác nhau.
+ * `ok` = đạt (kể cả khi không có tầng màu nào: `any` = false). Biểu thức theo thời gian thay LOCALT bằng
+ * (t − start), như đường CPU (crabgeo tính `mix` theo mốc khung của chính nó). */
+struct GpuLutSpec {
+  bool ok = true;
+  bool any = false;
+  std::string lut;    // đã thoát cho filter script (FilterPath)
+  std::string lut2;
+  std::string mix;
+};
+
+// Thư mục ghi LUT bake (thư mục tạm của dự án) — CommandExportVideo đặt; rỗng = không bake được.
+static fs::path g_gpuLutBakeDir;
+
+/* Tách chuỗi filter theo dấu phẩy ở cấp ngoài cùng: trong nháy đơn mọi ký tự là chữ (cả `,` và `\`),
+ * ngoài nháy `\` thoát ký tự sau — như av_get_token của lavfi. */
+std::vector<std::string> SplitFilterChain(const std::string& chain) {
+  std::vector<std::string> out;
+  std::string cur;
+  bool quoted = false;
+  for (size_t i = 0; i < chain.size(); i++) {
+    const char ch = chain[i];
+    if (!quoted && ch == '\\' && i + 1 < chain.size()) {
+      cur += ch;
+      cur += chain[++i];
+      continue;
+    }
+    if (ch == '\'') quoted = !quoted;
+    if (ch == ',' && !quoted) {
+      if (!cur.empty()) out.push_back(cur);
+      cur.clear();
+      continue;
+    }
+    cur += ch;
+  }
+  if (!cur.empty()) out.push_back(cur);
+  return out;
+}
+
+/* Filter màu tĩnh theo từng điểm ảnh, bake được: eq / colorbalance / curves / lut3d, KHÔNG nhãn `@`
+ * (nhãn = có lệnh sendcmd keyframe trỏ tới), không biểu thức thời gian. `:enable='…'` ở cuối tách ra. */
+bool BakeableColorFilter(const std::string& filter, std::string& core, std::string& enable) {
+  core = filter;
+  enable.clear();
+  const std::string en = ":enable='";
+  const size_t at = filter.rfind(en);
+  if (at != std::string::npos && filter.size() > at + en.size() && filter.back() == '\'') {
+    enable = filter.substr(at + en.size(), filter.size() - at - en.size() - 1);
+    core = filter.substr(0, at);
+    if (enable.empty() || enable.find('\'') != std::string::npos) return false;
+  }
+  const std::string name = core.substr(0, core.find('='));
+  if (name != "eq" && name != "colorbalance" && name != "curves" && name != "lut3d") return false;
+  if (core.find("LOCALT") != std::string::npos) return false;
+  // eq từ frontend chỉ có số; có nháy/eval là biểu thức theo thời gian (ColorAdjustEqFilter).
+  if (name == "eq" && (core.find('\'') != std::string::npos || core.find("eval") != std::string::npos)) return false;
+  return true;
+}
+
+/* BAKE chuỗi màu tĩnh thành LUT 3D cho crabgeo_cuda (lưới 33³, thứ tự r nhanh nhất như .cube).
+ * Lưới RGB đồng nhất 16-bit do sidecar tự dựng — ảnh gbrp16le N²×N, điểm (x, y) = ô r = x % N,
+ * g = x / N, b = y (haldclutsrc chỉ ra rgb24: làm tròn lưới về 8-bit) — chạy qua CHÍNH chuỗi filter
+ * của đường CPU trong một lượt ffmpeg. Có `eq` (chỉ chạy trên YUV 8-bit) thì đổi lưới sang YUV
+ * bt709/tv trước — đúng miền nguồn mà eq thấy ở đường CPU — các bước đổi sau đó theo nhãn khung.
+ * Đo 2026-10-03 trên nguồn DJI 10-bit, chuỗi eq + colorbalance + curves: GPU so CPU 46,9 dB; so bản
+ * chuẩn của bộ so 0.3 thì 39,2 dB so với CPU 40,7 — bản chuẩn chạy eq 8-bit TRÊN TỪNG ĐIỂM ẢNH nên
+ * mang đúng bậc làm tròn của đường CPU, LUT nào cũng không tái tạo được (đã thử: áp bảng eq đo được
+ * bằng nội suy 38,9; eq trên lưới rgb24 của haldclutsrc 39,5). Không có eq: GPU hơn CPU ~5 dB.
+ * Tên tệp theo băm của chuỗi (đường dẫn cube của backend đã mang băm nội dung) -> dùng lại qua các
+ * lượt xuất. Lỗi -> "" (block đi đồ thị CPU). */
+constexpr int kBakeLutSize = 33;
+
+std::string BakeColorLut(const std::string& chain) {
+  static std::map<std::string, std::string> memo;
+  if (g_gpuLutBakeDir.empty()) return "";
+  const auto known = memo.find(chain);
+  if (known != memo.end()) return known->second;
+  std::error_code ec;
+  fs::create_directories(g_gpuLutBakeDir, ec);
+  char stemBuf[48];
+  std::snprintf(stemBuf, sizeof(stemBuf), "gpu_bake_%016llx", static_cast<unsigned long long>(Fnv1a64("v2|" + chain)));
+  const std::string stem = stemBuf;
+  const fs::path cube = g_gpuLutBakeDir / (stem + ".cube");
+  if (fs::exists(cube, ec)) return memo[chain] = cube.string();
+
+  const int n = kBakeLutSize;
+  const size_t cells = static_cast<size_t>(n) * n * n;
+  const fs::path in = g_gpuLutBakeDir / (stem + ".in.raw");
+  const fs::path out = g_gpuLutBakeDir / (stem + ".out.raw");
+  const fs::path graph = g_gpuLutBakeDir / (stem + ".txt");
+  {
+    std::vector<std::uint16_t> planes(cells * 3);   // gbrp: G, B, R
+    size_t i = 0;
+    for (int b = 0; b < n; b++) {
+      for (int g = 0; g < n; g++) {
+        for (int r = 0; r < n; r++, i++) {
+          const auto q = [n](int v) { return static_cast<std::uint16_t>(std::lround(v * 65535.0 / (n - 1))); };
+          planes[i] = q(g);
+          planes[cells + i] = q(b);
+          planes[2 * cells + i] = q(r);
+        }
+      }
+    }
+    bool hasEq = false;
+    for (const std::string& f : SplitFilterChain(chain)) hasEq = hasEq || f.compare(0, 3, "eq=") == 0;
+    std::ofstream fin(in, std::ios::binary | std::ios::trunc);
+    fin.write(reinterpret_cast<const char*>(planes.data()), static_cast<std::streamsize>(planes.size() * 2));
+    std::ofstream g(graph, std::ios::trunc);
+    if (hasEq) g << "scale=out_color_matrix=bt709:out_range=tv,format=yuv444p16le,";
+    g << chain << ",format=gbrp16le";
+    if (!fin || !g) return memo[chain] = "";
+  }
+  const std::string size = std::to_string(n * n) + "x" + std::to_string(n);
+  const int code = RunQuiet({"ffmpeg", "-hide_banner", "-v", "error", "-nostdin", "-y", "-f", "rawvideo",
+                             "-pix_fmt", "gbrp16le", "-s", size, "-i", in.string(), "-/vf", graph.string(),
+                             "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gbrp16le", out.string()}, 30000);
+  std::vector<std::uint16_t> planes;
+  if (code == 0) {
+    std::ifstream f(out, std::ios::binary);
+    planes.resize(cells * 3);
+    f.read(reinterpret_cast<char*>(planes.data()), static_cast<std::streamsize>(planes.size() * 2));
+    if (!f || f.gcount() != static_cast<std::streamsize>(planes.size() * 2)) planes.clear();
+  }
+  fs::remove(in, ec);
+  fs::remove(out, ec);
+  fs::remove(graph, ec);
+  if (planes.empty()) return memo[chain] = "";
+
+  const fs::path part = g_gpuLutBakeDir / (stem + ".cube.part");
+  {
+    std::ofstream f(part, std::ios::trunc);
+    f << "TITLE \"CrabbyCut GPU bake\"\nLUT_3D_SIZE " << n << "\n";
+    char line[64];
+    for (size_t i = 0; i < cells; i++) {
+      std::snprintf(line, sizeof(line), "%.6f %.6f %.6f\n", planes[2 * cells + i] / 65535.0,
+                    planes[i] / 65535.0, planes[cells + i] / 65535.0);
+      f << line;
+    }
+    if (!f) return memo[chain] = "";
+  }
+  fs::rename(part, cube, ec);
+  if (ec) return memo[chain] = "";
+  return memo[chain] = cube.string();
+}
+
+// `lut3d=file='<đường dẫn đã thoát>':interp=trilinear[:enable='<biểu thức>']` — đúng dạng backend sinh.
+bool ParseStaticLut(const std::string& chain, std::string& path, std::string& enable) {
+  const std::string head = "lut3d=file='";
+  const std::string interp = ":interp=trilinear";
+  if (chain.compare(0, head.size(), head) != 0) return false;
+  const size_t close = chain.find('\'', head.size());
+  if (close == std::string::npos) return false;
+  path = chain.substr(head.size(), close - head.size());
+  std::string rest = chain.substr(close + 1);
+  if (rest.compare(0, interp.size(), interp) != 0) return false;
+  rest = rest.substr(interp.size());
+  enable.clear();
+  if (rest.empty()) return !path.empty();
+  const std::string en = ":enable='";
+  if (rest.compare(0, en.size(), en) != 0 || rest.back() != '\'' || rest.size() <= en.size() + 1) return false;
+  enable = rest.substr(en.size(), rest.size() - en.size() - 1);
+  return !path.empty() && enable.find('\'') == std::string::npos;
+}
+
+// Một tầng màu của block (các trường giống ColorAdjustChain).
+struct GpuColorStage {
+  const std::string* filters;
+  const std::string* post;
+  const std::string* lutA;
+  const std::string* lutB;
+  const std::string* mix;
+  bool eqExpr;
+  bool mask;
+};
+
+/* Gom các tầng (đúng thứ tự áp) thành GpuLutSpec — xem khối chú thích ở GpuLutSpec. `bake` = false: chỉ
+ * xét có đạt không, không chạy ffmpeg (nhưng một tầng cần bake vẫn tính là đạt). */
+GpuLutSpec GpuLutFromStages(const std::vector<GpuColorStage>& stages, double start, bool bake) {
+  GpuLutSpec spec;
+  std::vector<std::string> pre;   // phép tĩnh (đã bỏ enable) trước tầng trộn LUT / toàn bộ nếu không có
+  std::string enable;
+  size_t withEnable = 0;
+  const GpuColorStage* mixStage = nullptr;
+  for (const GpuColorStage& st : stages) {
+    if (st.filters->empty() && st.post->empty() && st.lutA->empty() && st.lutB->empty() && st.mix->empty()
+        && !st.eqExpr && !st.mask) continue;
+    spec.any = true;
+    const bool isMix = !st.lutA->empty() && !st.lutB->empty() && !st.mix->empty();
+    // Keyframe thông số màu, mặt nạ màu, nửa sau tầng trộn LUT, phép đứng SAU tầng trộn: không gộp được.
+    if (st.eqExpr || st.mask || !st.post->empty() || mixStage || (!isMix && !st.mix->empty())) {
+      spec.ok = false;
+      return spec;
+    }
+    for (const std::string& f : SplitFilterChain(*st.filters)) {
+      std::string core;
+      std::string en;
+      if (!BakeableColorFilter(f, core, en)) {
+        spec.ok = false;
+        return spec;
+      }
+      if (!en.empty()) {
+        if (withEnable > 0 && en != enable) {
+          spec.ok = false;
+          return spec;
+        }
+        enable = en;
+        withEnable++;
+      }
+      pre.push_back(core);
+    }
+    if (isMix) mixStage = &st;
+  }
+  if (!spec.any) return spec;
+  // enable phải phủ MỌI phép (một hàm thời gian duy nhất), và không đi cùng tầng trộn LUT.
+  if (withEnable > 0 && (withEnable != pre.size() || mixStage)) {
+    spec.ok = false;
+    return spec;
+  }
+  std::string chain;
+  for (const std::string& f : pre) chain += (chain.empty() ? "" : ",") + f;
+  const auto bakeOrFail = [&](const std::string& c, std::string& out) {
+    if (!bake) {
+      out = "?";
+      return true;
+    }
+    const std::string path = BakeColorLut(c);
+    if (path.empty()) return false;
+    out = FilterPath(path);
+    return true;
+  };
+  if (mixStage) {
+    if (chain.empty()) {
+      spec.lut = FilterPath(*mixStage->lutA);
+      spec.lut2 = FilterPath(*mixStage->lutB);
+    } else {
+      const auto lutOf = [&](const std::string& p) { return chain + ",lut3d=file='" + FilterPath(p) + "':interp=trilinear"; };
+      if (!bakeOrFail(lutOf(*mixStage->lutA), spec.lut) || !bakeOrFail(lutOf(*mixStage->lutB), spec.lut2)) {
+        spec.ok = false;
+        return spec;
+      }
+    }
+    spec.mix = SubstituteLocalTimeVar(*mixStage->mix, start, "t");
+    return spec;
+  }
+  std::string path;
+  std::string unusedEnable;
+  if (pre.size() == 1 && ParseStaticLut(pre[0], path, unusedEnable)) {
+    spec.lut = path;   // một lut3d đơn lẻ: tệp của chính nó
+  } else if (!bakeOrFail(chain, spec.lut)) {
+    spec.ok = false;
+    return spec;
+  }
+  if (withEnable > 0) spec.mix = SubstituteLocalTimeVar(enable, start, "t");
+  return spec;
+}
+
+template <typename Block>
+GpuLutSpec BlockGpuLut(const Block& b, double start, bool bake = true) {
+  std::vector<GpuColorStage> stages;
+  stages.push_back({&b.adjustFilters, &b.adjustFiltersPost, &b.adjustLutAPath, &b.adjustLutBPath, &b.adjustLutMixExpr,
+                    !b.adjEqContrastExpr.empty() || !b.adjEqBrightnessExpr.empty() || !b.adjEqSaturationExpr.empty(),
+                    !b.adjustMaskPath.empty()});
+  stages.push_back({&b.adjustLayerFilters, &b.adjustLayerFiltersPost, &b.adjustLayerLutAPath, &b.adjustLayerLutBPath,
+                    &b.adjustLayerLutMixExpr,
+                    !b.adjLayerEqContrastExpr.empty() || !b.adjLayerEqBrightnessExpr.empty()
+                      || !b.adjLayerEqSaturationExpr.empty(),
+                    false});
+  for (const auto& layer : b.extraAdjustLayers) {
+    stages.push_back({&layer.filters, &layer.filtersPost, &layer.lutAPath, &layer.lutBPath, &layer.lutMixExpr,
+                      !layer.eqContrastExpr.empty() || !layer.eqBrightnessExpr.empty() || !layer.eqSaturationExpr.empty(),
+                      false});
+  }
+  return GpuLutFromStages(stages, start, bake);
+}
+
+// Tuỳ chọn LUT nối vào sau tham số của crabgeo_cuda (rỗng khi block không có tầng màu).
+std::string GpuLutOptions(const GpuLutSpec& spec) {
+  if (!spec.ok || !spec.any) return "";
+  std::string out = ":lut='" + spec.lut + "'";
+  if (!spec.lut2.empty()) out += ":lut2='" + spec.lut2 + "'";
+  if (!spec.mix.empty()) out += ":mix='" + spec.mix + "'";
+  return out;
+}
+
+// Tầng màu của block có bản GPU (không có tầng màu, hoặc chỉ là LUT và bản ffmpeg có LUT trong crabgeo).
+template <typename Block>
+bool BlockColorGpuReady(const Block& b) {
+  if (!BlockHasColorAdjust(b)) return true;
+  if (!GpuLutAvailable()) return false;
+  // Bake ngay ở đây (có cache): bake lỗi thì block đi CPU thay vì đồ thị GPU hỏng.
+  const GpuLutSpec spec = BlockGpuLut(b, 0.0);
+  return spec.ok && spec.any;
+}
+
+/* ===== CẮT TRƯỚC KHI PHÓNG TO (mục 1.4, docs/KE_HOACH_TOI_UU_EXPORT_WIN.md) =====
+ *
+ * Clip phóng to thì đường nhanh co CẢ khung nguồn lên rồi mới cắt lấy cửa sổ sequence. Test.crab:
+ * nguồn 1366×720 nằm giữa khung chuẩn hoá 3840×2160 (viền đen), clip 108% -> mỗi khung co lên
+ * 5830×3280 (19 triệu điểm ảnh) để giữ lại 1920×1080; cắt trước: 14,6 -> 11,1 s cả lượt xuất.
+ *
+ * Cắt trước làm đổi vị trí lấy mẫu của swscale, trừ khi vùng cắt nằm trên LƯỚI TỈ LỆ RÚT GỌN:
+ * w/iw = p/q (tối giản), vùng cắt bắt đầu ở bội của q và dài bội của q -> phép co vùng cắt có
+ * đúng tỉ lệ cũ (bước lấy mẫu xInc của swscale tính từ cùng một phân số) và mốc của nó trùng một
+ * điểm ảnh nguyên của ảnh co cũ (c0·p/q). Bội của 2q để mẫu màu 4:2:0 (nửa độ phân giải) cũng
+ * trùng lưới. Chừa lề kPreCropMargin điểm ảnh nguồn cho nhân nội suy (bicubic lấy 2 điểm mỗi bên,
+ * mặt phẳng màu ở nửa độ phân giải). Phép đặt vị trí phía sau giữ nguyên: ảnh co của vùng cắt là
+ * một mảnh của ảnh co cũ, đặt ở vị trí cũ + mốc của mảnh. Env tắt: CRABBYCUT_EXPORT_PRECROP=0. */
+const int kPreCropMargin = 8;
+const double kPreCropMinZoom = 1.3;
+
+bool PreCropEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_PRECROP");
+  return !(env && std::string(env) == "0");
+}
+
+struct PreCropAxis {
+  int start = 0;       // mốc cắt trên nguồn
+  int len = 0;         // độ dài cắt trên nguồn
+  int scaledLen = 0;   // độ dài sau co giãn (= len·p/q, chẵn)
+  int scaledOff = 0;   // mốc của mảnh trong ảnh co cũ (= start·p/q)
+};
+
+/* Một chiều: nguồn dài `in`, co thành `out`, đặt ở `pos` trong khung dài `seq`. false = không cắt
+ * được gì đáng kể (hoặc không ra số chẵn) -> giữ đường cũ cho chiều này. */
+bool PreCropPlanAxis(int in, int out, int pos, int seq, PreCropAxis& r) {
+  if (in <= 0 || out <= 0) return false;
+  const long long g = std::gcd(static_cast<long long>(out), static_cast<long long>(in));
+  const long long p = out / g;
+  const long long q = in / g;
+  const long long grid = 2 * q;
+  // Phần ảnh co lọt vào khung, theo toạ độ của ảnh co.
+  const int v0 = std::max(0, -pos);
+  const int v1 = std::min(out, seq - pos);
+  if (v1 - v0 < 2) return false;
+  const double ratio = static_cast<double>(in) / out;
+  const long long i0 = std::max(0LL, static_cast<long long>(std::floor(v0 * ratio)) - kPreCropMargin);
+  const long long i1 = std::min(static_cast<long long>(in), static_cast<long long>(std::ceil(v1 * ratio)) + kPreCropMargin);
+  const long long c0 = (i0 / grid) * grid;
+  const long long c1 = std::min(static_cast<long long>(in), ((i1 + grid - 1) / grid) * grid);
+  const long long len = c1 - c0;
+  if (len <= 0 || len >= in || len % q != 0) return false;
+  const long long scaledLen = len * p / q;
+  if (scaledLen % 2 != 0 || scaledLen < 2) return false;
+  r.start = static_cast<int>(c0);
+  r.len = static_cast<int>(len);
+  r.scaledLen = static_cast<int>(scaledLen);
+  r.scaledOff = static_cast<int>(c0 * p / q);
+  return true;
+}
+
+// Mọi tầng màu của clip theo từng điểm ảnh, không mặt nạ -> cắt trước chúng cũng không đổi kết quả.
+bool IntervalColorPointwise(const ExportInterval& item) {
+  if (!item.adjustMaskPath.empty()) return false;
+  for (const std::string* chain : {&item.adjustFilters, &item.adjustFiltersPost,
+                                   &item.adjustLayerFilters, &item.adjustLayerFiltersPost}) {
+    if (!ColorChainIsPointwise(*chain)) return false;
+  }
+  for (const auto& layer : item.extraAdjustLayers) {
+    if (!ColorChainIsPointwise(layer.filters) || !ColorChainIsPointwise(layer.filtersPost)) return false;
+  }
+  return true;
+}
+
+MainLaneFast MainLaneFastPlan(const ExportInterval& item, const ExportSettings& settings,
+                              bool dynamicClip, double scaleValue, double opacityValue) {
+  MainLaneFast plan;
+  if (!settings.fastPathSource || dynamicClip) return plan;
+  if (item.renderFrames <= 0 || !(ParseFpsValue(settings.renderFps) > 0.0)) return plan;
+  if (std::abs(item.rotation) > 1e-6 || opacityValue < 0.999) return plan;
+  if (item.flipX || item.flipY || !item.videoMaskPath.empty()) return plan;
+  const int seqW = settings.width > 0 ? settings.width : 1920;
+  const int seqH = settings.height > 0 ? settings.height : 1080;
+  const int iw = settings.sourceWidth;
+  const int ih = settings.sourceHeight;
+  if (iw <= 0 || ih <= 0) return plan;
+
+  /* CÙNG PHÉP TÍNH với đường cũ, trên CÙNG con số đã in ra filter script (6 chữ số): cỡ
+   * `max(2,ceil(iw*s/2)*2)` và toạ độ `(W-w)/2+posX` mà overlay RGBA cắt về số nguyên bằng (int). */
+  const double s = std::stod(FfmpegDouble(scaleValue));
+  // Cỡ + vị trí của ẢNH ĐEM ĐẶT vào khung. Cắt trước (mục 1.4) thì đổi thành mảnh của ảnh co.
+  int w = static_cast<int>(std::max(2.0, std::ceil(iw * s / 2) * 2));
+  int h = static_cast<int>(std::max(2.0, std::ceil(ih * s / 2) * 2));
+  int x = static_cast<int>((seqW - w) / 2.0 + std::stod(FfmpegDouble(item.positionX)));
+  int y = static_cast<int>((seqH - h) / 2.0 + std::stod(FfmpegDouble(item.positionY)));
+  int inW = iw;   // cỡ đi vào phép co (vùng cắt trước, nếu có)
+  int inH = ih;
+  const bool chromaSubV = settings.codec != "prores";   // yuv420p; ProRes là yuv422p10le
+
+  /* Một chiều. ĐỆM TRƯỚC, CẮT SAU: clip (cỡ luôn chẵn) được đệm vào khung `len` ở vị trí `ox`,
+   * rồi cắt cửa sổ sequence từ `wx`. Không làm ngược lại (cắt phần thấy được rồi mới đệm): phần
+   * thấy được có thể rộng lẻ, mà `pad` làm tròn bề rộng ĐẦU VÀO xuống số chẵn -> mất một cột ở
+   * mép clip (đã mắc: clip 75% cắt lẻ bên trái, mép phải hụt 1 px). */
+  struct Axis {
+    int ox = 0, wx = 0, len = 0;
+    bool oddCrop = false, oddPad = false;
+  };
+  const auto axis = [](int size, int seq, int pos, bool subsampled, Axis& out) {
+    out.ox = std::max(0, pos);
+    out.wx = std::max(0, -pos);
+    out.len = std::max(out.ox + size, out.wx + seq);
+    if (out.len % 2) out.len += 1;   // `pad` cũng làm tròn cỡ RA xuống số chẵn
+    out.oddCrop = subsampled && (out.wx % 2) != 0;
+    out.oddPad = subsampled && (out.ox % 2) != 0;
+    // Phần clip nằm trong khung phải có ít nhất 2 điểm ảnh, không thì để đường cũ lo.
+    return std::min(out.ox + size, out.wx + seq) - std::max(out.ox, out.wx) >= 2;
+  };
+  /* CLIP CÓ CHỈNH MÀU -> co giãn + đặt vị trí ở RGB, đổi sang YUV một lần ở cuối. Tức là ĐÚNG
+   * phép tính của đường cũ, chỉ bỏ nền `color` + overlay RGBA:
+   *  - curves/lut3d/colorbalance… ra RGB; để swscale vừa đổi RGB -> YUV vừa co giãn thì nó đổi
+   *    TRƯỚC rồi mới co giãn, nên chỗ vọt/kẹp ở cạnh khác đường cũ (đo trên testsrc2 + curves,
+   *    luma so bản chuẩn 47,8 dB so với 54,4 dB khi co giãn ở RGB);
+   *  - chuỗi màu YUV (eq tăng bão hoà) thì đường cũ kẹp gam RGB ngay sau nó, giống preview
+   *    (WebGL áp màu trên RGB). Giữ YUV nguyên vẹn là bản xuất khác preview ở vùng rất bão hoà.
+   * RGB không hạ mẫu màu nên toạ độ lẻ nào cũng đúng. */
+  const bool rgbRoute = IntervalHasColorAdjust(item);
+  if (PreCropEnabled() && s >= kPreCropMinZoom && (!rgbRoute || IntervalColorPointwise(item))) {
+    PreCropAxis cx, cy;
+    const bool okX = PreCropPlanAxis(iw, w, x, seqW, cx);
+    const bool okY = PreCropPlanAxis(ih, h, y, seqH, cy);
+    // Mỗi chiều cắt được thì cắt; chiều nào không thì giữ trọn chiều đó. Chỉ đáng khi bớt ≥ 25%.
+    const int cw = okX ? cx.len : iw, ch = okY ? cy.len : ih;
+    if ((okX || okY) && static_cast<double>(cw) * ch <= 0.75 * static_cast<double>(iw) * ih) {
+      const int c0x = okX ? cx.start : 0, c0y = okY ? cy.start : 0;
+      plan.preCrop = ",crop=w=" + std::to_string(cw) + ":h=" + std::to_string(ch)
+                   + ":x=" + std::to_string(c0x) + ":y=" + std::to_string(c0y) + ":exact=1";
+      if (okX) { w = cx.scaledLen; x += cx.scaledOff; }
+      if (okY) { h = cy.scaledLen; y += cy.scaledOff; }
+      inW = cw;
+      inH = ch;
+    }
+  }
+  Axis ax, ay;
+  if (!axis(w, seqW, x, !rgbRoute, ax) || !axis(h, seqH, y, chromaSubV && !rgbRoute, ay)) return plan;
+  if (rgbRoute) {
+    std::ostringstream g;
+    // Co ở định dạng NGUỒN; tầng màu dời ra sau phép co (nếu có) chạy ngay đây, rồi mới về RGB.
+    plan.scale = ",scale=w=" + std::to_string(w) + ":h=" + std::to_string(h);
+    plan.shrinks = static_cast<long long>(w) * h < static_cast<long long>(inW) * inH;
+    g << ",format=rgb24";
+    if (ax.len != w || ay.len != h || ax.ox != 0 || ay.ox != 0) {
+      g << ",pad=width=" << ax.len << ":height=" << ay.len
+        << ":x=" << ax.ox << ":y=" << ay.ox << ":color=black";
+    }
+    if (ax.wx != 0 || ay.wx != 0 || ax.len != seqW || ay.len != seqH) {
+      g << ",crop=w=" << seqW << ":h=" << seqH << ":x=" << ax.wx << ":y=" << ay.wx;
+    }
+    g << ",scale=out_color_matrix=bt709:out_range=tv";
+    plan.ok = true;
+    plan.place = g.str();
+    plan.geometry = plan.scale + plan.place;
+    return plan;
+  }
+  /* Hai cách xử lý toạ độ lẻ:
+   *  - CẮT lẻ mà clip tràn kín khung theo chiều đó: `scale` dời mẫu màu 1 điểm ảnh luma
+   *    (chr_pos + 256) để sau `crop exact` mẫu màu về đúng chỗ. Rẻ, ở nguyên 4:2:0.
+   *  - ĐỆM lẻ, cắt lẻ mà mép clip nằm trong khung, và clip GIỮ NGUYÊN CỠ bị cắt lẻ: đặt clip ở 4:4:4 rồi mới hạ
+   *    về 4:2:0. Với phép đệm, mẫu màu ở mép clip giáp nền đen phải là trung bình (đen, cột đầu
+   *    của clip) — đường cũ ghép RGBA rồi hạ mẫu nên ra đúng vậy, còn mẫu đã dời thì lấy trọn
+   *    màu đen: đo (clip 80%, đệm lẻ cả hai chiều) kênh U so bản chuẩn 30,2 dB theo mẹo dời,
+   *    32,3 dB theo đường cũ. Clip giữ nguyên cỡ thì swscale chép thẳng và BỎ QUA chr_pos (đo:
+   *    hai bản y hệt). Ở 4:4:4 mọi toạ độ đều đúng; chỉ không đi vòng qua RGB như đường cũ. */
+  const bool sameSize = w == inW && h == inH;
+  /* Cắt lẻ mà clip KHÔNG phủ kín khung theo chiều đó: mép xa của clip (giáp nền đen) rơi vào
+   * cột lẻ -> cùng chuyện mép như phép đệm lẻ (đo: clip 75% cắt lẻ trái, kênh V 32,6 so với
+   * 33,3 dB của đường cũ). Mẹo dời mẫu màu chỉ dùng khi clip tràn kín khung. */
+  const bool edgeInsideX = ax.oddCrop && ax.ox + w < ax.wx + seqW;
+  const bool edgeInsideY = ay.oddCrop && ay.ox + h < ay.wx + seqH;
+  const bool full444 = ax.oddPad || ay.oddPad || edgeInsideX || edgeInsideY
+                       || ((ax.oddCrop || ay.oddCrop) && sameSize);
+  const bool shiftH = !full444 && ax.oddCrop;
+  const bool shiftV = !full444 && ay.oddCrop;
+
+  std::ostringstream g;
+  g << ",scale=w=" << w << ":h=" << h << ":out_color_matrix=bt709:out_range=tv";
+  if (shiftH) {
+    g << ":in_h_chr_pos=" << settings.sourceChromaH << ":out_h_chr_pos=" << (settings.sourceChromaH + 256);
+  }
+  if (shiftV) {
+    g << ":in_v_chr_pos=" << settings.sourceChromaV << ":out_v_chr_pos=" << (settings.sourceChromaV + 256);
+  }
+  if (full444) g << (settings.codec == "prores" ? ",format=yuv444p10le" : ",format=yuv444p");
+  if (ax.len != w || ay.len != h || ax.ox != 0 || ay.ox != 0) {
+    g << ",pad=width=" << ax.len << ":height=" << ay.len
+      << ":x=" << ax.ox << ":y=" << ay.ox << ":color=black";
+  }
+  if (ax.wx != 0 || ay.wx != 0 || ax.len != seqW || ay.len != seqH) {
+    g << ",crop=w=" << seqW << ":h=" << seqH << ":x=" << ax.wx << ":y=" << ay.wx << ":exact=1";
+  }
+  plan.ok = true;
+  plan.geometry = g.str();
+  return plan;
 }
 
 void WriteClipVideoFilters(
@@ -2048,10 +3668,6 @@ void WriteClipVideoFilters(
     ? static_cast<double>(item.renderFrames) / renderFpsValue
     : duration;
 
-  script << "color=c=black:s=" << seqW << "x" << seqH
-         << ":d=" << FixedSeconds(baseDuration)
-         << ":r=" << settings.renderFps << "[base" << idx << "];\n";
-
   // KEYFRAME clip lane chính (0-based -> start=0). Có keyframe -> scale/rotate/opacity
   // biến thiên theo thời gian (AppendKfTransformFilters) thay cho tĩnh; vị trí lấy theo kf.
   const bool clipKf = HasKeyframeExpr(item.kfScaleExpr, item.kfRotExpr, item.kfOpacityExpr,
@@ -2060,6 +3676,15 @@ void WriteClipVideoFilters(
   // việc bỏ bước scale tĩnh phía trước format=rgba (nếu không thì scale HAI lần).
   const bool clipDynTransform = clipKf
     || HasAnimGeomExpr(item.animSxExpr, item.animSyExpr, item.animRotExpr);
+  // Đường nhanh YUV (mục 1.3): không nền `color`, không RGBA, không overlay.
+  const MainLaneFast fast = MainLaneFastPlan(item, settings, clipKf || clipDynTransform || clipHasAnim,
+                                             scaleValue, opacityValue);
+
+  if (!fast.ok) {
+    script << "color=c=black:s=" << seqW << "x" << seqH
+           << ":d=" << FixedSeconds(baseDuration)
+           << ":r=" << settings.renderFps << "[base" << idx << "];\n";
+  }
 
   /* CỬA SỔ CẮT PHẢI ĐỔI SANG TRỤC THỜI GIAN CỦA FILE NGUỒN, VÀ CẮT Ở GIỮA HAI KHUNG.
    *
@@ -2086,15 +3711,19 @@ void WriteClipVideoFilters(
     trimEnd -= halfFrame;
   }
   trimStart = std::max(0.0, trimStart);
-  script << "[0:v]" << UntaggedColorFix(settings.sourceColorUntagged)
-         << "trim=start=" << FixedSeconds(trimStart) << ":end=" << FixedSeconds(trimEnd)
+  // Input mang hình của clip này: 0, hoặc input riêng của dải nguồn chứa nó (xem PlanSourceRanges).
+  const int videoInput = localIndex < g_clipVideoInput.size() ? g_clipVideoInput[localIndex] : 0;
+  // Chuỗi THỜI GIAN của nhánh clip dựng thành chuỗi riêng: Xoá logo AI phải cho luồng miếng
+  // vá đi qua ĐÚNG chuỗi này (xem AppendLogoAiFilters).
+  std::ostringstream timing;
+  timing << "trim=start=" << FixedSeconds(trimStart) << ":end=" << FixedSeconds(trimEnd)
          << ",setpts=PTS-STARTPTS";
   // TỐC ĐỘ: nén/dãn trục thời gian TRƯỚC bước `fps=` — sau `fps=` thì khung đã bị
   // resample về lưới renderFps rồi, đổi PTS lúc đó là lặp/bỏ khung không đều.
   if (std::abs(item.speedRate - 1.0) >= 1e-4) {
-    script << ",setpts=PTS/" << FormatFilterNumber(item.speedRate);
+    timing << ",setpts=PTS/" << FormatFilterNumber(item.speedRate);
   }
-  script
+  timing
          // Chuẩn hoá nguồn về đúng lưới renderFps: nguồn VFR/lệch fps mà overlay
          // lên base CFR sẽ bị lặp/bỏ frame không đều (giật) ở khâu resample ngầm
          << ",fps=" << settings.renderFps;
@@ -2106,33 +3735,97 @@ void WriteClipVideoFilters(
   // thật dài thêm 1 khung và đẩy lệch mọi block phía sau.
   // Ngược lại, clip NGẮN hơn thì nền giữ đủ độ dài và overlay lặp khung cuối.
   if (item.renderFrames > 0) {
-    script << ",trim=end_frame=" << item.renderFrames;
+    timing << ",trim=end_frame=" << item.renderFrames;
+  }
+  // Đồ thị GPU: nguồn không nhãn được crabgeo đọc theo bt709 (`in_matrix`) thay cho setparams.
+  const bool gpuClip = fast.ok && g_gpuGraph && ClipGpuNative(item, settings, g_gpuBatchNvdec);
+  /* Clip chưa có bản GPU trong batch GPU (keyframe zoom/pan, xoay, mặt nạ, hiệu ứng không gian, xoá
+   * logo…): chuỗi CPU như cũ, cuối cùng đổi về đúng bt709/tv như đầu ra crabgeo (từ FFmpeg 7.1 ma
+   * trận/dải màu được đàm phán theo liên kết, mà khung CUDA không tự đổi được) rồi tải lên. Batch đó
+   * giải mã nguồn bằng CPU (g_gpuBatchNvdec). */
+  const std::string cpuClipToGpu = (g_gpuGraph && !gpuClip)
+    ? ",scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,hwupload" : "";
+  script << "[" << videoInput << ":v]" << (gpuClip ? std::string() : UntaggedColorFix(settings.sourceColorUntagged))
+         << timing.str();
+  if (!item.logoAiDir.empty()) {
+    AppendLogoAiFilters(script, item.logoAiDir, item.logoAiRects, item.logoAiT0, timing.str(), "logoaic" + idx + "_");
+  } else {
+    AppendLogoRemovalFilters(script, item.logoMode, item.logoRects, "logoc" + idx + "_");
+  }
+  if (gpuClip) {
+    /* ĐỒ THỊ GPU (mục 1.21): clip không xoá logo, tầng màu rỗng hoặc chỉ là LUT (BatchGpuEligible).
+     * Một crabgeo_cuda thay cả hình học đường nhanh — co nguyên khung nguồn về w×h rồi đặt ở (x, y)
+     * trên khung sequence, mẫu màu tính đúng vị trí nên không cần mẹo dời chroma / 4:4:4 / cắt
+     * trước như đường CPU (bộ lọc chỉ lấy mẫu phần thấy được). Cỡ + vị trí CÙNG phép tính với
+     * MainLaneFastPlan. LUT (BlockGpuLut) áp lên nội dung SAU phép co — như "màu sau khi co" của
+     * đường CPU (mục 1.19), tính float từ khung nguồn 10-bit chứ không qua RGB 8-bit. Nguồn giải mã
+     * CPU: tải lên sau `trim` (chỉ khung được dùng), trước `tpad` (khung nhân bản ở đuôi là khung
+     * GPU, không tải lại). */
+    const double s = std::stod(FfmpegDouble(scaleValue));
+    const int gw = static_cast<int>(std::max(2.0, std::ceil(settings.sourceWidth * s / 2) * 2));
+    const int gh = static_cast<int>(std::max(2.0, std::ceil(settings.sourceHeight * s / 2) * 2));
+    const int gx = static_cast<int>((seqW - gw) / 2.0 + std::stod(FfmpegDouble(item.positionX)));
+    const int gy = static_cast<int>((seqH - gh) / 2.0 + std::stod(FfmpegDouble(item.positionY)));
+    if (!g_gpuBatchNvdec) script << ",format=" << GpuUploadFormat(settings.sourcePixFmt) << ",hwupload";
+    script << ",tpad=stop=-1:stop_mode=clone,crabgeo_cuda=w=" << gw << ":h=" << gh
+           << ":ow=" << seqW << ":oh=" << seqH << ":x=" << gx << ":y=" << gy << ":format=yuv420p";
+    if (settings.sourceColorUntagged) script << ":in_matrix=bt709";
+    script << GpuLutOptions(BlockGpuLut(item, 0.0)) << ",setsar=1[fc" << idx << "];\n";
+    script << "color=c=black:s=" << seqW << "x" << seqH
+           << ":d=" << FixedSeconds(baseDuration)
+           << ":r=" << settings.renderFps << ",format=yuv420p,hwupload[fk" << idx << "];\n";
+    script << "[fc" << idx << "][fk" << idx << "]concat=n=2:v=1:a=0,trim=end_frame=" << item.renderFrames
+           << "[v" << idx << "];\n";
+    g_fastClipCount++;
+    return;
   }
   // Clip lane chính đã setpts 0-based -> LOCALT trừ mốc 0.
-  AppendColorAdjustFilters(script,
-                           ColorAdjustChain(0.0, item.adjustFilters, item.adjEqContrastExpr,
-                                            item.adjEqBrightnessExpr, item.adjEqSaturationExpr,
-                                            item.adjustFiltersPost, item.adjustLutAPath,
-                                            item.adjustLutBPath, item.adjustLutMixExpr,
-                                            "adjc" + idx + "_"),
-                           item.adjustMaskPath, "adjc" + idx + "_");
-  // Lớp Điều chỉnh: gọi LẦN HAI với mặt nạ RỖNG. Nhờ vậy nó nối vào chuỗi hiện tại
-  // (sau nhánh mặt nạ đã đóng ở lời gọi trên), đúng như preview áp lượt 2 lên TOÀN khung.
-  // Dựng qua ColorAdjustChain như chuỗi block -> có đủ keyframe eq + trộn cường độ LUT.
-  AppendColorAdjustFilters(script,
-                           ColorAdjustChain(0.0, item.adjustLayerFilters, item.adjLayerEqContrastExpr,
-                                            item.adjLayerEqBrightnessExpr, item.adjLayerEqSaturationExpr,
-                                            item.adjustLayerFiltersPost, item.adjustLayerLutAPath,
-                                            item.adjustLayerLutBPath, item.adjustLayerLutMixExpr,
-                                            "adjl" + idx + "_"),
-                           "", "");
-  AppendExtraAdjustLayers(script, 0.0, item.extraAdjustLayers, "adjl" + idx + "_");
+  // Lớp Điều chỉnh là tầng THỨ HAI, mặt nạ RỖNG: nó nối sau nhánh mặt nạ của chính block (đã
+  // đóng ở tầng đầu), đúng như preview áp lượt 2 lên TOÀN khung. Dựng qua ColorAdjustChain như
+  // chuỗi block -> có đủ keyframe eq + trộn cường độ LUT. Tầng theo từng điểm ảnh ở ĐUÔI danh
+  // sách chạy sau phép co khi phép co làm nhỏ khung (xem ColorChainIsPointwise).
+  const bool colorAfterScale = fast.ok
+    ? (fast.shrinks && !fast.scale.empty())
+    : (!clipDynTransform && item.videoMaskPath.empty() && scaleValue < 1.0);
+  const SplitColorStages color = SplitColorStagesForScale(
+    BlockColorStages(item, 0.0, "adjc" + idx + "_", "adjl" + idx + "_"), colorAfterScale);
+  if (fast.ok) script << fast.preCrop;
+  script << color.pre;
+  if (fast.ok) {
+    /* Chốt đúng renderFrames khung — việc nền `color` + overlay của đường cũ vẫn làm:
+     *  - clip ngắn hơn: `tpad` clone lặp khung cuối MÃI, nên `concat` không bao giờ sang đoạn 2;
+     *  - clip không nhả khung nào (mốc cắt ngoài nguồn): tpad hết ngay, `concat` sang dải đen.
+     *    `tpad=stop_mode=add` KHÔNG làm được việc này: đầu vào rỗng thì nó cũng không ra khung
+     *    nào (đã thử, Gyan 8.1.1) — lúc đó mọi clip phía sau bị xô sớm lên.
+     * Dải đen chỉ được kéo khung khi `concat` thật sự sang nó, nên ca thường không tốn gì.
+     * `tpad` đứng TRƯỚC hình học (sau chuỗi màu — chuỗi màu có thể theo thời gian): để nhân bản
+     * khung cuối, tpad giữ một tham chiếu tới MỌI khung đi qua, nên khung nó nhả ra "không ghi
+     * được" và `overlay` đầu tiên phía sau phải chép nguyên khung trước khi trộn. Đứng trước
+     * `scale` thì khung ra khỏi scale là bộ đệm mới. Hình học là phép cố định nên nhân bản trước
+     * hay sau nó cho ra y hệt (đo: md5 trùng trên 4.320 khung 4K). Đo batch 180 s 4K, 70 phụ đề,
+     * `-f null`: 33,2 -> 28,1 s.
+     * Có tầng màu chạy sau phép co thì tpad đứng SAU tầng đó (vẫn trước bước đổi định dạng,
+     * nên khung ra vẫn là bộ đệm mới): khung nhân bản giữ nguyên màu của khung cuối như cũ. */
+    if (color.post.empty()) {
+      script << ",tpad=stop=-1:stop_mode=clone" << fast.geometry;
+    } else {
+      script << fast.scale << color.post << ",tpad=stop=-1:stop_mode=clone" << fast.place;
+    }
+    script << ",setsar=1," << ClipPixelFormat(settings) << "[fc" << idx << "];\n";
+    script << "color=c=black:s=" << seqW << "x" << seqH
+           << ":d=" << FixedSeconds(baseDuration)
+           << ":r=" << settings.renderFps << "[fk" << idx << "];\n";
+    script << "[fc" << idx << "][fk" << idx << "]concat=n=2:v=1:a=0,trim=end_frame=" << item.renderFrames
+           << cpuClipToGpu << "[v" << idx << "];\n";
+    g_fastClipCount++;
+    return;
+  }
   AppendVideoMaskFilter(script, item.videoMaskPath, "vmc" + idx + "_");
   if (!clipDynTransform) {
     script << ",scale=max(2\\,ceil(iw*" << FfmpegDouble(scaleValue) << "/2)*2)"
            << ":max(2\\,ceil(ih*" << FfmpegDouble(scaleValue) << "/2)*2)";
   }
-  script << ",format=rgba";
+  script << color.post << ",format=rgba";
   if (item.flipX) {
     script << ",hflip";
   }
@@ -2182,7 +3875,7 @@ void WriteClipVideoFilters(
     script << "x=(" << seqW << "-w)/2" << (item.positionX >= 0 ? "+" : "") << FfmpegDouble(item.positionX)
            << ":y=(" << seqH << "-h)/2" << (item.positionY >= 0 ? "+" : "") << FfmpegDouble(item.positionY);
   }
-  script << ":format=auto,setsar=1," << ClipPixelFormat(settings) << "[v" << idx << "];\n";
+  script << ":format=auto,setsar=1," << ClipPixelFormat(settings) << cpuClipToGpu << "[v" << idx << "];\n";
 }
 
 bool OverlayNeedsInput(const ExportOverlay& overlay) {
@@ -2244,10 +3937,30 @@ std::string HexColorForDrawText(std::string color) {
  * xa gấp đôi khoảng nới. Và với chuỗi khung thì khung nội dung đầu tiên vẫn nằm ở đúng
  * `start`, nên nới cửa sổ không đổi thứ được vẽ — chỉ thôi vứt mất nó.
  */
+// Video/ảnh tĩnh lớp phủ đặt sớm chừng này (giây) để ca "hoà" với khung nền luôn rơi đúng phía —
+// xem writeSetpts ở WriteVisualOverlayFilter.
+constexpr double kOverlayTieEpsilon = 1e-4;
+
 double OverlayEnableStart(double start, const ExportSettings& settings) {
   const double fps = ParseFpsValue(settings.renderFps);
   if (!(fps > 0.0)) return start;
   return std::max(0.0, start - 0.5 / fps);
+}
+
+/* ẢNH TĨNH HẾT ĐÚNG MÉP CUỐI (sửa 2026-10-03 — lộ ra khi đổi mốc cắt batch ở mục 1.13). Luồng ảnh tĩnh
+ * chạy theo nhịp của chính nó (PNG: 25 khung/s): `trim=duration=D` cho khung ảnh cuối ở start + D − 1/25,
+ * và framesync coi lớp phủ đã HẾT ngay ở mốc khung đó (eof_action=pass) — khung nền trong 1/25 s cuối của
+ * cửa sổ mất lớp phủ: 1–2 khung ở 30 khung/s, 2–3 khung ở 60 khung/s (hai phụ đề nối liền nháy trống ở
+ * chỗ chuyển). Ở batch, `setpts=…+start/TB` còn cắt phần lẻ trên timebase 1/25 nên chuỗi ảnh sớm thêm tới
+ * 1/25 s và bản chia batch mất thêm một khung so với bản một lượt (test:export-parallel, kịch bản B).
+ * Nay luồng ảnh dài dư kStillTailSeconds và một mình `enable` chặn mép cuối, lùi nửa khung như mép đầu:
+ * khung nền hiện lớp phủ khi mốc của nó thuộc [start, end) — như preview và Premiere. */
+constexpr double kStillTailSeconds = 0.25;
+
+double OverlayEnableEnd(const ExportOverlay& overlay, double end, const ExportSettings& settings) {
+  const double fps = ParseFpsValue(settings.renderFps);
+  if (!OverlayIsImageLike(overlay) || !(fps > 0.0)) return end;
+  return end - 0.5 / fps;
 }
 
 /* ===== CHIA LƯỢT XUẤT THEO THỜI GIAN KHI DỰ ÁN CÓ LỚP PHỦ ======================
@@ -2282,6 +3995,11 @@ constexpr double kOverlayBatchTargetSeconds = 180.0;
 constexpr double kOverlayBatchMinTotalSeconds = 240.0;
 // Dò xa nhất bao nhiêu để tìm một mốc cắt an toàn trước khi bỏ cuộc (xem vòng dò bên dưới).
 constexpr double kOverlayBatchScanSeconds = 90.0;
+/* Batch ngắn nhất khi chia để chạy SONG SONG (mục 1.8): mỗi lượt ffmpeg tốn ~0,5–1 s khởi động
+ * (dò, mở bộ giải mã, seek về keyframe trước mốc, Defender quét PNG lần đầu). */
+constexpr double kParallelMinBatchSeconds = 8.0;
+// Lớp phủ tĩnh bị xén ở cuối batch kéo dài thêm chừng này qua mép (xem OverlaysForBatch).
+constexpr double kBatchOverlayTailSeconds = 1.0;
 
 bool HasAnyExpr(std::initializer_list<const std::string*> exprs) {
   for (const auto* expr : exprs) {
@@ -2292,12 +4010,11 @@ bool HasAnyExpr(std::initializer_list<const std::string*> exprs) {
 
 // Clip có thuộc tính biến thiên theo thời gian -> KHÔNG được cắt đôi.
 bool IntervalIsTimeVarying(const ExportInterval& item) {
-  /* Chuỗi màu chứa token LOCALT = có biểu thức theo thời gian bên trong: lớp Điều chỉnh
-   * phủ MỘT PHẦN block (`enable='between(LOCALT,..)'`), "Viền mờ dần" có keyframe… Cắt đôi
-   * block như vậy là nửa sau chạy lại từ t=0 và cửa sổ thời gian rơi sai chỗ. */
-  const auto hasLocalT = [](const std::string& s) { return s.find("LOCALT") != std::string::npos; };
-  if (hasLocalT(item.adjustLayerFilters) || hasLocalT(item.adjustFilters)
-      || hasLocalT(item.adjustFiltersPost) || hasLocalT(item.adjustLayerFiltersPost)
+  /* Chuỗi màu có biểu thức / lệnh theo thời gian bên trong (ColorChainTimeVarying): lớp Điều
+   * chỉnh phủ MỘT PHẦN block (`enable='between(LOCALT,..)'`), keyframe màu qua sendcmd… Cắt
+   * đôi block như vậy là nửa sau chạy lại từ t=0 và cửa sổ thời gian rơi sai chỗ. */
+  if (ColorChainTimeVarying(item.adjustLayerFilters) || ColorChainTimeVarying(item.adjustFilters)
+      || ColorChainTimeVarying(item.adjustFiltersPost) || ColorChainTimeVarying(item.adjustLayerFiltersPost)
       || ExtraAdjustLayersTimeVarying(item.extraAdjustLayers)) {
     return true;
   }
@@ -2312,10 +4029,21 @@ bool IntervalIsTimeVarying(const ExportInterval& item) {
 /* Lớp phủ có thuộc tính biến thiên theo thời gian -> không được cắt qua nó.
  * Chuỗi khung hoạt ảnh (`image_sequence`) cũng tính là biến thiên: nội dung nó ĐỔI theo
  * khung, xén đầu là lệch pha cả chuỗi. */
+bool OverlayHasTimeVaryingProps(const ExportOverlay& overlay);
+
 bool OverlayIsTimeVarying(const ExportOverlay& overlay) {
   if (OverlayIsImageSequence(overlay)) return true;
   if (!OverlayIsImageLike(overlay)) return true;      // video/audio: có trục thời gian riêng
+  return OverlayHasTimeVaryingProps(overlay);
+}
+
+/* Thuộc tính biến thiên theo thời gian NGOÀI nội dung (hoạt ảnh In/Out, keyframe, chuỗi màu có
+ * LOCALT/sendcmd, lớp Điều chỉnh) — mọi thứ phụ thuộc giờ CỤC BỘ tính từ đầu lớp phủ, nên xén đầu
+ * lớp phủ là lệch pha chúng. */
+bool OverlayHasTimeVaryingProps(const ExportOverlay& overlay) {
   if (overlay.animInDur > 0.001 || overlay.animOutDur > 0.001) return true;
+  // Chuỗi màu CỦA CHÍNH lớp phủ cũng có thể mang LOCALT / sendcmd (xem ColorChainTimeVarying).
+  if (ColorChainTimeVarying(overlay.adjustFilters) || ColorChainTimeVarying(overlay.adjustFiltersPost)) return true;
   if (!overlay.adjustLayerFilters.empty() || !overlay.adjLayerEqContrastExpr.empty()
       || !overlay.adjLayerEqBrightnessExpr.empty() || !overlay.adjLayerEqSaturationExpr.empty()
       || !overlay.adjustLayerLutMixExpr.empty() || !overlay.extraAdjustLayers.empty()) return true;
@@ -2367,11 +4095,65 @@ bool OverlayTouchesWindow(const ExportOverlay& overlay, double from, double to, 
   return end > from && start < to;
 }
 
-// Lớp phủ nằm VẮT QUA mốc `at` (không phải chỉ chạm đúng hai đầu).
+/* Lớp phủ VẮT QUA mốc cắt `at` = có khung HIỆN ở cả hai phía. `at` là biên khung (khung ở `at` thuộc batch
+ * sau); khung hiện = khung có mốc trong cửa sổ `enable` của lớp phủ: mở ở start − nửa khung
+ * (OverlayEnableStart), đóng ở end (video), end − nửa khung (ảnh tĩnh, OverlayEnableEnd), start + duration −
+ * nửa khung chuỗi (chuỗi khung, seqEndTrim của WriteVisualOverlayFilter). Hiện ở phía trước <=> mép mở ≤ khung
+ * at − 1/fps; hiện ở phía sau <=> mép đóng ≥ at; chừa một phần tư khung cho sai số µs của mốc khung.
+ * Trước đây nới cả hai đầu MỘT KHUNG: phụ đề động bắt đầu sau biên clip một khung (11,73 so với 11,7 s) hay
+ * kết thúc trước biên một khung vẫn bị coi là vắt qua — "Yêu Con" không cắt được ở 4/5 biên clip, batch đầu
+ * dài 25,9/37,8 s và quyết định cả thời gian xuất. */
 bool OverlayStraddles(const ExportOverlay& overlay, double at, double fps) {
-  const double pad = (fps > 0.0) ? (1.0 / fps) : 0.04;
-  return (overlay.timelineStart - pad) < at
-      && (overlay.timelineStart + std::max(0.05, overlay.duration) + pad) > at;
+  if (!(fps > 0.0)) {
+    return (overlay.timelineStart - 0.04) < at && (overlay.timelineStart + std::max(0.05, overlay.duration) + 0.04) > at;
+  }
+  const double start = overlay.timelineStart;
+  const double first = start - 0.5 / fps;
+  double last = start + std::max(0.05, overlay.duration);
+  if (OverlayIsImageSequence(overlay) && overlay.seqFps > 1.0) {
+    last = start + std::max(0.05, overlay.duration - 0.5 / overlay.seqFps);
+  } else if (OverlayIsImageLike(overlay)) {
+    last -= 0.5 / fps;
+  }
+  return first < at - 0.75 / fps && last > at - 0.25 / fps;
+}
+
+/* CẮT XUYÊN QUA CHUỖI KHUNG "TRƠN" (khung chuyển cảnh, chữ/hình động không keyframe — mục 25 của
+ * docs/KE_HOACH_TOI_UU_EXPORT_WIN.md). Chuỗi khung chỉ biến thiên ở SỐ THỨ TỰ khung: batch sau nạp
+ * chuỗi bằng `-start_number k` (OverlaysForBatch) là thấy đúng khung mà bản một lượt thấy ở mốc cắt.
+ * Điều kiện: không thuộc tính biến thiên nào khác (OverlayHasTimeVaryingProps), mốc cắt rơi ĐÚNG biên
+ * khung của chuỗi (k nguyên — backend đặt đầu chuỗi trên lưới khung xuất, chuỗi vẽ trước dựng ở fps
+ * xuất), và k < số khung thật (khung nhân bản ở đuôi không phải tệp, xem SequenceTailFrames).
+ * Trước đây mọi chuỗi khung chặn mốc cắt: dự án có chuyển cảnh ở mọi biên clip (Magic Fill) thành
+ * MỘT batch — mất chạy song song lẫn cache render. Env tắt: CRABBYCUT_EXPORT_SEQCUT=0. */
+bool SequenceCutEnabled() {
+  static const bool enabled = [] {
+    const char* env = std::getenv("CRABBYCUT_EXPORT_SEQCUT");
+    if (!env) return true;
+    const std::string value = env;
+    return !(value == "0" || value == "false" || value == "off");
+  }();
+  return enabled;
+}
+
+// Số khung của chuỗi tính từ đầu chuỗi tới mốc `at` nếu cắt được ở đó, -1 nếu không.
+long long SequenceCutFrame(const ExportOverlay& overlay, double at) {
+  if (!SequenceCutEnabled() || !OverlayIsImageSequence(overlay) || !(overlay.seqFps > 1.0)
+      || overlay.frameCount <= 1 || OverlayHasTimeVaryingProps(overlay)) return -1;
+  const double exact = (at - overlay.timelineStart) * overlay.seqFps;
+  const long long k = std::llround(exact);
+  if (std::fabs(exact - static_cast<double>(k)) > 1e-3) return -1;
+  if (k < 1 || k >= overlay.frameCount) return -1;
+  return k;
+}
+
+/* MỐC CẮT MONG MUỐN KẾ TIẾP — theo LƯỚI CỐ ĐỊNH k × target trên trục sequence (mục 1.13), không
+ * theo "đầu batch + target". Theo đầu batch thì một mốc bị đẩy lùi (lớp phủ động vắt qua, cắt ở biên
+ * clip) kéo lệch MỌI mốc sau nó -> mọi batch phía sau đổi nội dung, cache render lỡ hết. Theo lưới thì
+ * mốc sau quay về đúng chỗ cũ. Mốc lưới gần đầu batch hơn nửa target thì lấy mốc kế tiếp: batch dài
+ * trong khoảng [0,5; 1,5] × target. */
+double NextBatchMark(double batchStart, double target) {
+  return (std::floor((batchStart + 0.5 * target) / target) + 1.0) * target;
 }
 
 /* Chia cả lượt xuất thành các cửa sổ thời gian cắt được AN TOÀN (ba điều kiện ở khối chú
@@ -2380,7 +4162,10 @@ bool OverlayStraddles(const ExportOverlay& overlay, double at, double fps) {
 std::vector<OverlayBatch> PlanOverlayBatches(
   const std::vector<ExportInterval>& intervals,
   const std::vector<ExportOverlay>& overlays,
-  const ExportSettings& settings
+  const ExportSettings& settings,
+  double targetSeconds = kOverlayBatchTargetSeconds,
+  double minTotalSeconds = kOverlayBatchMinTotalSeconds,
+  bool splitInsideClips = true
 ) {
   std::vector<OverlayBatch> batches;
   const double fps = ParseFpsValue(settings.renderFps);
@@ -2389,7 +4174,7 @@ std::vector<OverlayBatch> PlanOverlayBatches(
   single.intervals = intervals;
   single.sequenceStart = 0.0;
   single.sequenceDuration = total;
-  if (!(fps > 0.0) || total < kOverlayBatchMinTotalSeconds) return {single};
+  if (!(fps > 0.0) || total < minTotalSeconds) return {single};
 
   OverlayBatch current;
   current.sequenceStart = 0.0;
@@ -2412,11 +4197,14 @@ std::vector<OverlayBatch> PlanOverlayBatches(
      cho từng lớp phủ, là hàng trăm triệu phép so vô ích trên dự án dài. */
   std::vector<const ExportOverlay*> blocking;
   for (const auto& overlay : overlays) {
-    if (OverlayIsTimeVarying(overlay)) blocking.push_back(&overlay);
+    /* Chỉ lớp phủ CÓ HÌNH chặn mốc cắt: batch chỉ dựng hình (FilterScriptMode::VideoOnly), tiếng
+     * là MỘT lượt liền cho cả phim. Trước đây lớp nhạc nền phủ cả bài ("Yêu Con 1": 0–37,8 s)
+     * chặn mọi mốc cắt, nên dự án không chia được batch nào. */
+    if (OverlayIsVisual(overlay) && OverlayIsTimeVarying(overlay)) blocking.push_back(&overlay);
   }
   auto safeToCutAt = [&](double at) {
     for (const auto* overlay : blocking) {
-      if (OverlayStraddles(*overlay, at, fps)) return false;
+      if (OverlayStraddles(*overlay, at, fps) && SequenceCutFrame(*overlay, at) < 0) return false;
     }
     return true;
   };
@@ -2435,8 +4223,8 @@ std::vector<OverlayBatch> PlanOverlayBatches(
 
     /* Cắt BÊN TRONG một clip chỉ được phép khi clip đó không có hiệu ứng biến thiên. Vòng
      * lặp: chừng nào clip hiện tại còn vắt qua mốc cắt mong muốn thì xén một khúc ra. */
-    while (!IntervalIsTimeVarying(item) && item.renderFrames > 1) {
-      const double want = batchStart + kOverlayBatchTargetSeconds;
+    while (splitInsideClips && !IntervalIsTimeVarying(item) && item.renderFrames > 1) {
+      const double want = NextBatchMark(batchStart, targetSeconds);
       const double itemEnd = itemStart + (static_cast<double>(item.renderFrames) / fps);
       if (want >= itemEnd) break;                       // mốc mong muốn nằm sau clip này
       long long frame = std::llround((want - itemStart) * fps);
@@ -2459,7 +4247,7 @@ std::vector<OverlayBatch> PlanOverlayBatches(
     }
     current.intervals.push_back(item);
     // Biên giữa hai clip cũng là một mốc cắt hợp lệ, nếu batch đã đủ dài và mốc đó an toàn.
-    if (cursor - batchStart >= kOverlayBatchTargetSeconds && safeToCutAt(cursor)
+    if (cursor >= NextBatchMark(batchStart, targetSeconds) - 1e-6 && safeToCutAt(cursor)
         && cursor < total - 0.5) {
       closeBatch(cursor);
     }
@@ -2488,6 +4276,8 @@ std::vector<ExportOverlay> OverlaysForBatch(
   std::vector<ExportOverlay> out;
   int nextInput = 0;
   for (const auto& source : overlays) {
+    // Batch chỉ dựng hình: lớp phủ chỉ-tiếng đi lượt tiếng (OverlaysForAudioPass), không nạp ở đây.
+    if (!OverlayIsVisual(source)) continue;
     if (!OverlayTouchesWindow(source, from, to, fps)) continue;
     ExportOverlay overlay = source;
     const double start = overlay.timelineStart - from;
@@ -2495,8 +4285,26 @@ std::vector<ExportOverlay> OverlaysForBatch(
     const double clippedStart = std::max(0.0, start);
     const double clippedEnd = std::min(batch.sequenceDuration, end);
     if (clippedEnd - clippedStart < 1e-6) continue;
+    /* Chuỗi khung bắt đầu TRƯỚC batch = mốc cắt xuyên qua nó (SequenceCutFrame): nạp từ khung k để khung
+     * ở đầu batch đúng là khung bản một lượt thấy ở mốc đó; số khung còn lại cho phép tính khung đuôi. */
+    if (OverlayIsImageSequence(overlay) && start < -1e-9) {
+      const long long k = SequenceCutFrame(source, from);
+      if (k < 0) {
+        // PlanOverlayBatches không đặt mốc cắt qua chuỗi không cắt được — tới đây là lỗi lập kế hoạch.
+        Emit("progress", "Cảnh báo: chuỗi khung " + overlay.id + " bị cắt ở mốc không hợp lệ.");
+      } else {
+        overlay.seqStartFrame = source.seqStartFrame + static_cast<int>(k);
+        overlay.frameCount = source.frameCount - static_cast<int>(k);
+      }
+    }
     overlay.timelineStart = clippedStart;
     overlay.duration = clippedEnd - clippedStart;
+    /* Xén ở CUỐI batch thì cho dài dư qua mép (nội dung tĩnh nên vô hại; batch hết thì thôi).
+     * Xén khít mép là mất khung nền CUỐI của batch: luồng ảnh chạy theo nhịp của chính nó (PNG
+     * 25 khung/s), khung ảnh cuối ở mép − 1/25 s, sau đó framesync coi lớp phủ đã hết
+     * (eof_action=pass) — khung nền ở mép − 1/30 s mất lớp phủ, bản một lượt thì không
+     * (tests/scripts/export_parallel.js: khung 419 của mốc cắt 14 s). */
+    if (end > batch.sequenceDuration + 1e-6) overlay.duration += kBatchOverlayTailSeconds;
     if (OverlayNeedsInput(overlay)) overlay.assetInputIndex = nextInput++;
     out.push_back(overlay);
   }
@@ -2570,22 +4378,228 @@ void WriteTextOverlayFilter(
  *
  * Alpha = khoảng cách tới mép gần nhất / featherPx, kẹp về [0,1]. Chỉ đụng kênh ALPHA;
  * R/G/B đi qua nguyên vẹn.
+ *
+ * DỐC MÉP TÍNH MỘT LẦN (mục 1.6): trước đây `geq` tính bốn biểu thức cho TỪNG điểm ảnh của TỪNG
+ * khung (r/g/b chỉ là chép lại), dù dốc mép không đổi theo thời gian — cỡ khung ở đây cố định
+ * (sau phép co tĩnh, trước mọi biến đổi theo thời gian). Nay: tách một khung, `geq` vẽ dốc mép
+ * lên KHUNG ĐÓ (một lần), rồi `blend=multiply` nhân vào alpha của mọi khung — nhánh dốc chỉ có
+ * một khung nên framesync lặp lại khung cuối của nó (repeatlast), đúng lối mặt nạ màu ở
+ * AppendColorAdjustFilters. Đo trên "Yêu Con 1" (2 miếng vá ~510×490, 294 khung): ~5 s.
+ * Ở gbrap như geq cũ (geq chỉ nhận RGB tách mặt phẳng): đổi định dạng ra là đổi luôn đường
+ * chuyển đổi của các filter phía sau (xem KfOpacityFilter). Env tắt: CRABBYCUT_EXPORT_FEATHER1=0.
  * ------------------------------------------------------------------------- */
 void AppendFeatherAlpha(std::ofstream& script, int featherPx) {
   if (featherPx <= 0) return;
   const std::string f = std::to_string(featherPx);
-  // Dấu nháy đơn đã bảo vệ dấu phẩy bên trong biểu thức — cùng quy ước với geq của
-  // nhánh keyframe opacity ngay phía trên, đừng escape thêm.
-  script << ",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)'"
-         << ":a='alpha(X,Y)*min(1,min(min(X,W-1-X),min(Y,H-1-Y))/" << f << ")'";
+  const char* env = std::getenv("CRABBYCUT_EXPORT_FEATHER1");
+  if (env && std::string(env) == "0") {
+    // Dấu nháy đơn đã bảo vệ dấu phẩy bên trong biểu thức — đừng escape thêm.
+    script << ",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)'"
+           << ":a='alpha(X,Y)*min(1,min(min(X,W-1-X),min(Y,H-1-Y))/" << f << ")'";
+    return;
+  }
+  const std::string t = "fth" + std::to_string(++g_filterAuxSeq) + "_";
+  script << ",format=gbrap,split[" << t << "s][" << t << "m];\n";
+  script << "[" << t << "m]trim=end_frame=1,alphaextract"
+         << ",geq=lum='255*min(1,min(min(X,W-1-X),min(Y,H-1-Y))/" << f << ")'[" << t << "r];\n";
+  script << "[" << t << "s]split[" << t << "c][" << t << "x];\n";
+  script << "[" << t << "x]alphaextract[" << t << "a];\n";
+  script << "[" << t << "a][" << t << "r]blend=all_mode=multiply[" << t << "am];\n";
+  script << "[" << t << "c][" << t << "am]alphamerge[" << t << "k];\n";
+  script << "[" << t << "k]null";
 }
 
+/* ===== GHÉP LỚP PHỦ Ở YUV (mục 1.5, docs/KE_HOACH_TOI_UU_EXPORT_WIN.md) =====
+ *
+ * `overlay=format=auto` với lớp phủ RGBA kéo CẢ luồng chính sang RGBA (log: yuv420p -> rgba):
+ * mỗi khung 4K là 33 MB RGBA đi qua cả chuỗi lớp phủ bằng mã C, rồi mới đổi về yuv420p ở cuối.
+ * Nay lớp phủ vẫn dựng ở RGBA (feather, độ mờ, lật… nhận RGBA), đổi sang yuva420p bằng ma trận
+ * BT.709/tv NÓI RÕ — cùng ma trận mà luồng chính đang mang ở liên kết này (FFmpeg 8 thương
+ * lượng không gian màu theo liên kết, và `overlay` ép mọi đầu vào về chung một không gian) —
+ * rồi `overlay=format=yuv420` (có SIMD SSE4.1). Luồng chính ở yuv420p suốt chuỗi.
+ *
+ * TOẠ ĐỘ LẺ: ở yuv420 `overlay` làm tròn x/y XUỐNG số chẵn (normalize_xy), còn RGBA đặt được ở
+ * mọi số nguyên. Giữ đúng vị trí bằng cách đệm lớp phủ 1 px TRONG SUỐT ở mép trái/trên khi toạ
+ * độ lẻ (`pad`, tính theo chính `iw` của lớp phủ), rồi đặt ở toạ độ chẵn ngay trước đó. Toạ độ
+ * cũ = trunc((W−w)/2 + dx) — đúng phép cắt mà `overlay` RGBA đang làm ((int) về phía 0).
+ *
+ * CHỈ lớp phủ đứng yên và không xoay: vị trí theo keyframe/hoạt ảnh đổi từng khung, mà phần đệm
+ * chẵn/lẻ chốt một lần lúc cấu hình; xoay làm bề rộng thành lẻ. Lớp phủ đó vẫn ghép RGBA như cũ,
+ * kèm một phép đổi về yuv420p BT.709 NGAY sau nó để phần còn lại của chuỗi ở YUV.
+ * ProRes (yuv422p10) giữ đường cũ.
+ *
+ * BẬT MẶC ĐỊNH (người dùng chốt 2026-09-29), tắt bằng CRABBYCUT_EXPORT_YUVCOMP=0. Bản xuất gần bản
+ * chuẩn hơn hẳn (Bin Tom 52,5 so với 40,3 dB) nên lệch khỏi bản cũ quá ngưỡng "PSNR mới/cũ ≥ 45 dB"
+ * cũ — người dùng chọn nới ngưỡng đó cho trường hợp này (xem mục 1.5 của kế hoạch).
+ * MÀU Ở MÉP: đổi thẳng RGBA -> yuva420p lấy trung bình màu của khối 2×2 GỒM CẢ điểm ảnh trong suốt
+ * (màu đen) -> mép chữ màu bị pha loãng (chữ vàng: U 41,6 so với 46,1 dB của đường cũ). Đã chữa
+ * bằng AlphaWeightedYuva420 (44,8 dB). `alpha=premultiplied` của overlay làm luma tệ hơn
+ * (39,3 dB). */
+bool YuvCompositeEnabled(const ExportSettings& settings) {
+  if (settings.codec == "prores") return false;
+  const char* env = std::getenv("CRABBYCUT_EXPORT_YUVCOMP");
+  if (!env) return true;
+  const std::string value = env;
+  return !(value == "0" || value == "false" || value == "off");
+}
+
+/* MÀU Ở MÉP KHI HẠ LỚP PHỦ CÓ ALPHA XUỐNG 4:2:0 (mục 1.5).
+ *
+ * `overlay` ở yuv420 trộn mẫu màu theo alpha TRUNG BÌNH của khối 2×2: kết quả = Ā·U + (1−Ā)·nền.
+ * Muốn bằng đường cũ (ghép RGBA ở cỡ đầy đủ rồi mới hạ mẫu) thì U của lớp phủ phải là trung bình
+ * CÓ TRỌNG SỐ ALPHA của khối: Σ aᵢUᵢ / Σ aᵢ. Phép đổi thẳng RGBA -> yuva420p thì lấy trung bình
+ * THƯỜNG, gồm cả điểm ảnh trong suốt (canvas lưu chúng là đen) -> mép chữ màu bị pha loãng hai lần.
+ * Chuỗi dưới tính đúng trọng số: premultiply -> thu nửa cỡ (hộp 2×2) -> unpremultiply, ở 16-bit để
+ * vùng đục không lệch 1 mức (premultiply 8-bit nhân (U−128)·a >> 8, tức ×255/256), rồi ghép với
+ * luma + alpha đầy đủ bằng `mergeplanes`. Đo (chữ vàng khử răng cưa trên nền xanh đậm, so bản
+ * chuẩn): kênh U 41,6 dB -> 44,8 dB (đường cũ 46,1; phần còn lệch là nhân hạ mẫu hộp 2×2 so với
+ * nhân của swscale). Luma và V như cũ. Lớp phủ VIDEO đục hoàn toàn thì không cần. */
+// Env tắt riêng cho phép chữa màu mép (A/B): CRABBYCUT_EXPORT_ALPHACHROMA=0.
+bool AlphaChromaEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_ALPHACHROMA");
+  if (!env) return true;
+  const std::string value = env;
+  return !(value == "0" || value == "false" || value == "off");
+}
+
+std::string AlphaWeightedYuva420(const std::string& tag) {
+  const std::string p = tag + "yp";
+  const std::string q = tag + "yq";
+  const std::string p8 = tag + "y8";
+  const std::string c8 = tag + "yc";
+  return ",split[" + p + "][" + q + "];\n"
+    "[" + p + "]scale=out_color_matrix=bt709:out_range=tv,format=yuva444p[" + p8 + "];\n"
+    "[" + q + "]scale=out_color_matrix=bt709:out_range=tv,format=yuva444p16le,premultiply=inplace=1"
+    ",scale=w=iw/2:h=ih/2:flags=area,unpremultiply=inplace=1,scale=sws_dither=none,format=yuva444p[" + c8 + "];\n"
+    "[" + p8 + "][" + c8 + "]mergeplanes=map0s=0:map0p=0:map1s=1:map1p=1:map2s=1:map2p=2:map3s=0:map3p=3"
+    ":format=yuva420p";
+}
+
+/* ẢNH TĨNH XỬ LÝ MỘT LẦN (mục 1.5; cùng ý với 1.7b). Env tắt: CRABBYCUT_EXPORT_STILL1=0.
+ *
+ * `-loop 1 -i ảnh.png` cho 25 khung/giây, và MỖI khung đi lại đủ: giải mã PNG, scale, format,
+ * pad, đổi màu… cho một tấm ảnh không hề đổi. Nay input chỉ ra đúng MỘT khung, chuỗi xử lý chạy
+ * một lần, rồi `loop=loop=-1:size=1` lặp khung đã xử lý (chỉ tăng tham chiếu, không chép), và
+ * trim/setpts dời ra sau đó. Đã kiểm: dãy PTS ra y hệt `-loop 1` (34/34 khung).
+ * Chỉ cho ảnh tĩnh THẬT: không hoạt ảnh/keyframe/lớp Điều chỉnh (OverlayIsTimeVarying), không
+ * chuỗi màu (biểu thức có thể mang LOCALT), không mặt nạ video (`movie=` + blend). */
+bool StillOnceEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_STILL1");
+  if (!env) return true;
+  const std::string value = env;
+  return !(value == "0" || value == "false" || value == "off");
+}
+
+bool OverlayStillOnce(const ExportOverlay& overlay) {
+  return StillOnceEnabled() && OverlayIsImageLike(overlay) && !OverlayIsImageSequence(overlay)
+      && !OverlayIsTimeVarying(overlay)
+      && overlay.adjustFilters.empty() && overlay.adjustFiltersPost.empty()
+      && overlay.adjustMaskPath.empty() && overlay.videoMaskPath.empty();
+}
+
+/* GIỮ KHUNG CUỐI CỦA CHUỖI KHUNG HOẠT ẢNH BẰNG KHUNG NHÂN BẢN, KHÔNG BẰNG eof_action=repeat.
+ *
+ * Chuỗi PNG của item hoạt ảnh phủ trọn cửa sổ In→Hold→Out, nhưng `setpts=…+start/TB` cắt phần lẻ
+ * (D2TS) nên cả chuỗi có thể sớm lên gần một khung và hết TRƯỚC mép cửa sổ 1–3 khung nền (nay chuỗi
+ * đặt đúng sớm ¼ khung trên timebase µs, xem writeSetpts ở WriteVisualOverlayFilter; K dưới đây tính
+ * cho trường hợp sớm một khung nên vẫn dư). Trước
+ * đây giữ khung cuối bằng `eof_action=repeat` — đúng hình, nhưng đắt: đo 2026-09-30 trên "Bin Tom"
+ * (17 chuỗi, 1.043 khung): cả lượt 14,8 s so với 11,0–11,3 s khi `pass`; luồng filter 8,6 so với
+ * 4,2 CPU-giây, kể cả khi thay khung PNG bằng ảnh 16×16 — tức là phí của khung sườn chứ không phải
+ * của phép trộn. `pass` trơn thì mất đúng 10 khung ở mép cửa sổ (426–427, 697–698, …).
+ * Cách mới: nối K khung nhân bản khung cuối (`tpad clone`, chỉ tăng tham chiếu) rồi `pass`. K đủ
+ * để chuỗi còn khung tới hết cửa sổ: mép cửa sổ ≤ start + duration − 0,5/fps, chuỗi (đã sớm tối đa
+ * một khung) có N + K khung -> K > duration·fps + 0,5 − N; cộng 1 khung dư. Khung nhân bản quá
+ * cửa sổ bị `enable` che như với repeat. Không biết N (payload cũ) thì giữ repeat.
+ * Env tắt: CRABBYCUT_EXPORT_SEQPASS=0. */
+int SequenceTailFrames(const ExportOverlay& overlay) {
+  if (!OverlayIsImageSequence(overlay) || overlay.frameCount <= 0 || !(overlay.seqFps > 0.0)) return 0;
+  const char* env = std::getenv("CRABBYCUT_EXPORT_SEQPASS");
+  if (env) {
+    const std::string value = env;
+    if (value == "0" || value == "false" || value == "off") return 0;
+  }
+  const double needed = overlay.duration * overlay.seqFps + 0.5 - static_cast<double>(overlay.frameCount);
+  return std::max(1, static_cast<int>(std::ceil(needed)) + 1);
+}
+
+/* MỐC THỜI GIAN CỦA LỚP PHỦ — dùng chung cho đồ thị CPU (WriteVisualOverlayFilter) và GPU
+ * (WriteVisualOverlayFilterGpu, mục 1.21). Nén/dãn trục thời gian TRƯỚC khi dời về mốc tuyệt đối
+ * trên sequence: chia cả biểu thức đã cộng `start` thì mốc bắt đầu của overlay cũng bị chia theo
+ * và lớp lệch chỗ. */
+/* CHUỖI KHUNG (chữ/hình động) đặt sớm ¼ khung xuất, trên timebase µs (mục 1.8). Hai lỗi cũ:
+ *  - `setpts=…+start/TB` CẮT phần lẻ (D2TS), mà chuỗi nạp bằng `-framerate` có timebase 1/fps —
+ *    mốc đầu bị cắt về SỐ KHUNG nguyên. "Bin Tom" (29,99926 khung/s): chữ ở 20,067 s -> 601,995
+ *    khung -> 601, sớm một khung, khung 0 rơi trước cửa sổ `enable` (mất khung đầu hoạt ảnh); cùng
+ *    chữ ở batch bắt đầu 14,365 s -> 171,06 -> 171 + 431 = 602 — bản chia batch khác bản một lượt.
+ *  - chuỗi được bake ĐÚNG nhịp xuất nên khung k trùng mốc khung nền S+k, một ca "hoà" mà framesync
+ *    phân xử bằng làm tròn µs của hai phía: timebase của `-framerate 29.999261` không đúng hệt
+ *    1218000/40601 của lưới xuất -> lệch 1 µs là chữ trễ một khung, tuỳ chỗ cắt batch.
+ * Sớm ¼ khung thì khung k nằm hẳn giữa hai khung nền và luôn hiện ở đúng khung S+k. Cửa sổ
+ * `enable` (mở sớm ½ khung) và khung đuôi (SequenceTailFrames, tính dư một khung) không đổi.
+ * Video/ảnh tĩnh: cắt phần lẻ như cũ (mốc ra luôn ≤ start — làm tròn lên thì khung ảnh tĩnh 1/25 s
+ * đầu tiên có thể trễ hơn khung nền đầu cửa sổ). VIDEO sớm thêm kOverlayTieEpsilon: video CÙNG nhịp
+ * xuất đặt đúng lưới cũng "hoà" ở mọi khung, và ca ở khung CUỐI cửa sổ (khung video cuối trùng mốc
+ * khung nền) đổi phe theo làm tròn µs — test:export-parallel, khung 1019. 0,1 ms lớn hơn hẳn sai số
+ * làm tròn (~1 µs) mà nhỏ hơn hẳn khoảng cách khung khi nhịp khác nhau (25 trên 30: ≥ 6,7 ms), nên
+ * chỉ ca "hoà" đổi — về đúng phía. KHÔNG cho ảnh tĩnh: timebase 1/25 nên (8 − 0,0001) × 25 bị cắt
+ * về 199 — cả ảnh sớm 40 ms, hết sớm 40 ms, mất khung nền cuối cửa sổ; nội dung không đổi nên ca
+ * "hoà" của ảnh tĩnh không hiện ra gì. */
+void WriteOverlaySetpts(std::ostream& out, const ExportOverlay& overlay, const ExportSettings& settings) {
+  const double start = overlay.timelineStart;
+  const double setptsStart = (!OverlayIsImageLike(overlay) && !OverlayIsImageSequence(overlay))
+    ? start - kOverlayTieEpsilon : start;
+  const double renderFpsForSeq = ParseFpsValue(settings.renderFps);
+  if (OverlayIsImageSequence(overlay) && renderFpsForSeq > 0.0) {
+    out << "settb=AVTB,setpts=PTS-STARTPTS+round(" << FfmpegDouble(start - 0.25 / renderFpsForSeq) << "/TB)";
+    return;
+  }
+  if (std::abs(overlay.speedRate - 1.0) >= 1e-4 && !OverlayIsImageSequence(overlay)) {
+    out << "setpts=(PTS-STARTPTS)/" << FormatFilterNumber(overlay.speedRate)
+        << "+" << FfmpegDouble(setptsStart) << "/TB";
+  } else {
+    out << "setpts=PTS-STARTPTS+" << FfmpegDouble(setptsStart) << "/TB";
+  }
+}
+
+/* Chuỗi THỜI GIAN của lớp phủ (trim + setpts). Ảnh tĩnh xử lý một lần: rỗng — trim/setpts dời ra
+ * sau `loop` ở cuối chuỗi (xem OverlayStillOnce). */
+std::string OverlayTimingChain(const ExportOverlay& overlay, const ExportSettings& settings) {
+  if (OverlayStillOnce(overlay)) return "";
+  std::ostringstream timing;
+  if (OverlayIsImageSequence(overlay)) {
+    // Sequence hữu hạn đã đúng độ dài cửa sổ hoạt ảnh — không trim;
+    // sau frame cuối overlay tự biến mất nhờ eof_action=pass
+  } else if (!OverlayIsImageLike(overlay)) {
+    // Độ dài NGUỒN = độ dài timeline × tốc độ (xem WriteOverlayAudioFilter).
+    const double videoSourceSpan = overlay.duration * (overlay.speedRate > 0.0 ? overlay.speedRate : 1.0);
+    timing << "trim=start=" << FixedSeconds(overlay.sourceStart) << ":duration=" << FixedSeconds(videoSourceSpan) << ",";
+    /* Xoá logo AI: luồng miếng vá đi qua CHÍNH chuỗi này (AppendLogoAiFilters) nhưng có timebase
+     * riêng (concat 1/90000) — `(start − kOverlayTieEpsilon)/TB` cắt phần lẻ khác nhau trên hai
+     * timebase (video 1/15360: 0,9999 -> 0,99987 s; miếng vá: 0,9999 s), miếng vá trễ hơn khung nền
+     * một chút và `overlay` lấy miếng vá của khung TRƯỚC (test:logo-ai đỏ từ 83b8307). Cùng
+     * timebase µs thì hai luồng ra cùng PTS. */
+    if (!overlay.logoAiDir.empty()) timing << "settb=AVTB,";
+  } else {
+    // Dài dư qua mép cuối: `enable` chặn mép (xem kStillTailSeconds).
+    timing << "trim=duration=" << FixedSeconds(overlay.duration + kStillTailSeconds) << ",";
+  }
+  WriteOverlaySetpts(timing, overlay, settings);
+  return timing.str();
+}
+
+// Cách lớp phủ đi trên đồ thị GPU — xem OverlayGpuModeFor.
+enum class OverlayGpu { None, Native, CpuYuv, CpuCanvas };
+
+/* `gpu` (đồ thị GPU, xem OverlayGpuModeFor): CpuYuv = chuỗi CPU này tới yuva420p rồi tải lên +
+ * crabblend; CpuCanvas = ghép RGBA lên khung trong suốt rồi tải lên + crabblend. None = đồ thị CPU. */
 void WriteVisualOverlayFilter(
   std::ofstream& script,
   const ExportOverlay& overlay,
   const std::string& inputLabel,
   const std::string& outputLabel,
-  const ExportSettings& settings
+  const ExportSettings& settings,
+  OverlayGpu gpu = OverlayGpu::None
 ) {
   // VIDEO overlay có hoạt ảnh: opacity qua fade, dịch chuyển qua overlay x/y theo t,
   // thu phóng/xoay qua nhánh AppendKfTransformFilters (khi hiệu ứng có dùng hai kênh đó).
@@ -2593,7 +4607,9 @@ void WriteVisualOverlayFilter(
   const int inputIndex = 1 + overlay.assetInputIndex;
   const int seqW = settings.width > 0 ? settings.width : 1920;
   const int seqH = settings.height > 0 ? settings.height : 1080;
-  const double scaleValue = std::max(0.01, overlay.scale / 100.0);
+  // SCALE HIỆU DỤNG = scale của người dùng × hệ số vừa khung (xem ExportOverlay::fitScale), như lane chính.
+  const double overlayFit = (overlay.fitScale > 0.0) ? overlay.fitScale : 1.0;
+  const double scaleValue = std::max(0.01, (overlay.scale / 100.0) * overlayFit);
   const double opacityValue = ClampDouble(overlay.opacity / 100.0, 0.0, 1.0);
   const double rotationRad = overlay.rotation * 3.14159265358979323846 / 180.0;
   const std::string id = std::to_string(overlay.index);
@@ -2607,17 +4623,15 @@ void WriteVisualOverlayFilter(
     : 0.0;
   const double end = overlay.timelineStart + std::max(0.05, overlay.duration - seqEndTrim);
 
+  // Mốc thời gian dùng chung với đồ thị GPU — xem WriteOverlaySetpts / OverlayTimingChain.
+  const auto writeSetpts = [&](std::ostream& out) { WriteOverlaySetpts(out, overlay, settings); };
+  // Ảnh tĩnh xử lý MỘT lần: trim/setpts dời ra sau `loop` ở cuối chuỗi (xem OverlayStillOnce).
+  const bool stillOnce = OverlayStillOnce(overlay);
+
   script << "[" << inputIndex << ":v]" << UntaggedColorFix(overlay.colorUntagged);
-  if (OverlayIsImageSequence(overlay)) {
-    // Sequence hữu hạn đã đúng độ dài cửa sổ hoạt ảnh — không trim;
-    // sau frame cuối overlay tự biến mất nhờ eof_action=pass
-  } else if (!OverlayIsImageLike(overlay)) {
-    // Độ dài NGUỒN = độ dài timeline × tốc độ (xem WriteOverlayAudioFilter).
-    const double videoSourceSpan = overlay.duration * (overlay.speedRate > 0.0 ? overlay.speedRate : 1.0);
-    script << "trim=start=" << FixedSeconds(overlay.sourceStart) << ":duration=" << FixedSeconds(videoSourceSpan) << ",";
-  } else {
-    script << "trim=duration=" << FixedSeconds(overlay.duration) << ",";
-  }
+  // Chuỗi THỜI GIAN của overlay (trim + setpts), giữ riêng cho Xoá logo AI (xem AppendLogoAiFilters).
+  std::ostringstream timing;
+  timing << OverlayTimingChain(overlay, settings);
   // KEYFRAME overlay (start tuyệt đối -> LOCALT = t-start). Có keyframe -> scale/rotate/
   // opacity biến thiên theo thời gian; vị trí lấy theo kf (cộng thêm offset hoạt ảnh nếu có).
   const bool overlayKf = HasKeyframeExpr(overlay.kfScaleExpr, overlay.kfRotExpr, overlay.kfOpacityExpr,
@@ -2627,37 +4641,28 @@ void WriteVisualOverlayFilter(
   const bool overlayDynTransform = overlayKf
     || HasAnimGeomExpr(overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr);
 
-  // Nén/dãn trục thời gian TRƯỚC khi dời về mốc tuyệt đối trên sequence: chia cả biểu
-  // thức đã cộng `start` thì mốc bắt đầu của overlay cũng bị chia theo và lớp lệch chỗ.
-  if (std::abs(overlay.speedRate - 1.0) >= 1e-4 && !OverlayIsImageSequence(overlay)) {
-    script << "setpts=(PTS-STARTPTS)/" << FormatFilterNumber(overlay.speedRate)
-           << "+" << FfmpegDouble(start) << "/TB";
+  // Ảnh tĩnh một lần: `null` (setpts ở cuối chuỗi); loại khác: trim + setpts của `timing`.
+  script << (stillOnce ? std::string("null") : timing.str());
+  // Xoá logo ngay sau setpts (ảnh tĩnh một lần: xoá MỘT lần), trước chuỗi màu. AI chỉ cho overlay
+  // VIDEO: ảnh tĩnh/chuỗi khung đã bake xoá logo ở frontend.
+  if (!overlay.logoAiDir.empty() && !OverlayIsImageLike(overlay) && !OverlayIsImageSequence(overlay)) {
+    AppendLogoAiFilters(script, overlay.logoAiDir, overlay.logoAiRects, overlay.logoAiT0, timing.str(), "logoaio" + id + "_");
   } else {
-    script << "setpts=PTS-STARTPTS+" << FfmpegDouble(start) << "/TB";
+    AppendLogoRemovalFilters(script, overlay.logoMode, overlay.logoRects, "logoo" + id + "_");
   }
   // Overlay giữ mốc tuyệt đối sau setpts -> LOCALT trừ timeline_start.
-  AppendColorAdjustFilters(script,
-                           ColorAdjustChain(start, overlay.adjustFilters, overlay.adjEqContrastExpr,
-                                            overlay.adjEqBrightnessExpr, overlay.adjEqSaturationExpr,
-                                            overlay.adjustFiltersPost, overlay.adjustLutAPath,
-                                            overlay.adjustLutBPath, overlay.adjustLutMixExpr,
-                                            "adjo" + id + "_"),
-                           overlay.adjustMaskPath, "adjo" + id + "_");
-  // Lớp Điều chỉnh — xem ghi chú ở WriteClipVideoFilters.
-  AppendColorAdjustFilters(script,
-                           ColorAdjustChain(start, overlay.adjustLayerFilters, overlay.adjLayerEqContrastExpr,
-                                            overlay.adjLayerEqBrightnessExpr, overlay.adjLayerEqSaturationExpr,
-                                            overlay.adjustLayerFiltersPost, overlay.adjustLayerLutAPath,
-                                            overlay.adjustLayerLutBPath, overlay.adjustLayerLutMixExpr,
-                                            "adjlo" + id + "_"),
-                           "", "");
-  AppendExtraAdjustLayers(script, start, overlay.extraAdjustLayers, "adjlo" + id + "_");
+  // Tầng màu của chính block, rồi lớp Điều chỉnh — xem ghi chú ở WriteClipVideoFilters (cùng cách
+  // chia tầng trước / sau phép co).
+  const SplitColorStages color = SplitColorStagesForScale(
+    BlockColorStages(overlay, start, "adjo" + id + "_", "adjlo" + id + "_"),
+    !overlayDynTransform && overlay.videoMaskPath.empty() && scaleValue < 1.0);
+  script << color.pre;
   AppendVideoMaskFilter(script, overlay.videoMaskPath, "vmo" + id + "_");
   if (!overlayDynTransform) {
     script << ",scale=max(2\\,ceil(iw*" << FfmpegDouble(scaleValue) << "/2)*2)"
            << ":max(2\\,ceil(ih*" << FfmpegDouble(scaleValue) << "/2)*2)";
   }
-  script << ",format=rgba";
+  script << color.post << ",format=rgba";
   AppendFeatherAlpha(script, overlay.featherPx);
   if (overlay.flipX) {
     script << ",hflip";
@@ -2668,7 +4673,7 @@ void WriteVisualOverlayFilter(
   if (overlayDynTransform) {
     AppendKfTransformFilters(script, start, overlay.kfScaleExpr, overlay.kfRotExpr, overlay.kfOpacityExpr,
                              overlay.scale, overlay.rotation, opacityValue,
-                             overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr);
+                             overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr, overlayFit);
   } else {
     if (std::abs(rotationRad) > 0.000001) {
       const std::string angle = FfmpegDouble(rotationRad);
@@ -2689,10 +4694,68 @@ void WriteVisualOverlayFilter(
              << ":d=" << FfmpegDouble(overlay.animOutDur) << ":alpha=1";
     }
   }
+  // Ghép ở YUV (xem YuvCompositeEnabled). `yuvStatic` = lớp phủ đứng yên, không xoay.
+  const bool yuvChain = YuvCompositeEnabled(settings);
+  const bool yuvStatic = yuvChain && !overlayKf && !hasVideoAnim && !overlayDynTransform
+                         && std::abs(rotationRad) <= 0.000001;
+  const std::string posX = "(" + FfmpegDouble(overlay.positionX) + ")";
+  const std::string posY = "(" + FfmpegDouble(overlay.positionY) + ")";
+  if (yuvStatic) {
+    // Đệm 1 px trong suốt ở mép trái/trên khi toạ độ gốc lẻ; `iw`/`ih` lúc này là cỡ lớp phủ
+    // mà nhánh RGBA cũ dùng làm `w`/`h`. Bề rộng dựng từ scale luôn chẵn nên iw+4 vẫn chẵn.
+    // +4 chứ không +2: ở CỘT/HÀNG MẪU MÀU CUỐI của lớp phủ, `overlay` yuv420 chỉ lấy alpha của
+    // điểm ảnh đầu cặp (vf_overlay: nhánh `k+1 < src_wp` sai ở mẫu cuối) chứ không lấy trung bình.
+    // Với mẫu màu có trọng số alpha, cặp cuối (đục, đệm trong suốt) thành màu đặc -> tràn 1 cột
+    // màu sang phải (đo: hộp đỏ ở toạ độ lẻ). Đệm dư để cặp cuối luôn trong suốt hẳn.
+    script << ",pad=w=iw+4:h=ih+4"
+           << ":x='mod(trunc((" << seqW << "-iw)/2+" << posX << "),2)'"
+           << ":y='mod(trunc((" << seqH << "-ih)/2+" << posY << "),2)'"
+           << ":color=black@0";
+    /* Ảnh tĩnh (có alpha): mẫu màu theo trung bình có trọng số alpha (xem AlphaWeightedYuva420)
+     * — chạy MỘT lần nhờ OverlayStillOnce nên gần như miễn phí. CHUỖI KHUNG (chữ động) thì đổi
+     * thẳng: chuỗi chữa màu 16-bit chạy lại ở từng khung. Đo 2026-09-29 trên Bin Tom (17 chuỗi
+     * khung chữ): áp cho cả chuỗi khung thì xuất 29–31 s -> 33–35 s (+13%) mà so bản chuẩn gần
+     * như không đổi (52,50 -> 52,53 dB). Video lớp phủ đục hoàn toàn nên cũng đổi thẳng. */
+    if (stillOnce && AlphaChromaEnabled()) script << AlphaWeightedYuva420("ov" + id);
+    else script << ",scale=out_color_matrix=bt709:out_range=tv,format=yuva420p";
+    // Đồ thị GPU: tải lên TRƯỚC loop/tpad — khung lặp lại chỉ là tham chiếu tới khung GPU đã tải.
+    if (gpu == OverlayGpu::CpuYuv) script << ",hwupload";
+  }
+  if (stillOnce) {
+    script << ",loop=loop=-1:size=1,trim=duration=" << FixedSeconds(overlay.duration + kStillTailSeconds) << ",";
+    writeSetpts(script);
+  }
+  // Chuỗi khung: nối khung nhân bản ở đuôi thay cho eof_action=repeat (xem SequenceTailFrames).
+  const int seqTail = SequenceTailFrames(overlay);
+  if (seqTail > 0) script << ",tpad=stop=" << seqTail << ":stop_mode=clone";
   script << "[ov" << id << "];\n";
 
-  script << inputLabel << "[ov" << id << "]overlay=";
-  if (overlayKf || hasVideoAnim) {
+  if (gpu == OverlayGpu::CpuCanvas) {
+    /* Khung trong suốt cỡ sequence ĐÚNG lưới khung của luồng chính (setpts dời số khung nguyên trên
+     * timebase 1/r), phủ từ một khung trước cửa sổ `enable` tới hai khung sau mép cuối — lớp phủ ghép
+     * lên nó y như ghép lên luồng chính ở đường CPU (cùng mốc, cùng `t` cho x/y/enable).
+     * `overlay=format=rgb` lên nền alpha 0: vf_overlay bù alpha nền (UNPREMULTIPLY_ALPHA) nên màu
+     * ra đúng màu lớp phủ, alpha ra đúng alpha lớp phủ — khung ra là RGBA "thẳng" như crabblend cần. */
+    const double fps = ParseFpsValue(settings.renderFps);
+    long long n0 = 0;
+    double span = end + 1.0;
+    if (fps > 0.0) {
+      n0 = std::max(0LL, static_cast<long long>(std::floor(OverlayEnableStart(start, settings) * fps)) - 1);
+      const long long n1 = static_cast<long long>(std::ceil(end * fps)) + 2;
+      span = static_cast<double>(std::max(1LL, n1 - n0)) / fps;
+    }
+    script << "color=c=black@0:s=" << seqW << "x" << seqH << ":r=" << settings.renderFps
+           << ":d=" << FixedSeconds(span) << ",format=rgba,setpts=PTS+" << n0 << "[cv" << id << "];\n";
+    script << "[cv" << id << "][ov" << id << "]overlay=";
+  } else {
+    script << inputLabel << "[ov" << id << "]" << (gpu == OverlayGpu::CpuYuv ? "crabblend_cuda=" : "overlay=");
+  }
+  if (yuvStatic) {
+    // `w`/`h` ở đây là cỡ ĐÃ ĐỆM (+4). Toạ độ gốc trunc(...) trừ đi phần đệm trái/trên -> chẵn.
+    const std::string bx = "trunc((" + std::to_string(seqW) + "-(w-4))/2+" + posX + ")";
+    const std::string by = "trunc((" + std::to_string(seqH) + "-(h-4))/2+" + posY + ")";
+    script << "x='" << bx << "-mod(" << bx << ",2)':y='" << by << "-mod(" << by << ",2)'";
+  } else if (overlayKf || hasVideoAnim) {
     // Vị trí = tâm + kf/tĩnh + offset(t) hoạt ảnh. Bọc nháy đơn vì biểu thức có dấu phẩy.
     const std::string xPos = overlayKf ? KfOverlayPos(overlay.kfXExpr, start, overlay.positionX)
                                        : ("(" + FfmpegDouble(overlay.positionX) + ")");
@@ -2708,12 +4771,205 @@ void WriteVisualOverlayFilter(
            << ":y=(" << seqH << "-h)/2"
            << (overlay.positionY >= 0 ? "+" : "") << FfmpegDouble(overlay.positionY);
   }
-  script << ":enable='between(t," << FfmpegDouble(OverlayEnableStart(start, settings)) << "," << FfmpegDouble(end) << ")'"
-         // Sequence hoạt ảnh: GIỮ frame cuối sau EOF (repeat) — nếu pass, text sẽ
-         // biến mất đúng 1 frame tại ranh giới sequence->hold gây "nháy"; enable
-         // window vẫn gate hiển thị đúng đoạn nên repeat không làm dư hình
-         << ":eof_action=" << (OverlayIsImageSequence(overlay) ? "repeat" : "pass")
-         << ":format=auto" << outputLabel << ";\n";
+  script << ":enable='between(t," << FfmpegDouble(OverlayEnableStart(start, settings)) << ","
+         << FfmpegDouble(OverlayEnableEnd(overlay, end, settings)) << ")'"
+         // Sequence hoạt ảnh: GIỮ frame cuối sau EOF — nếu pass mà chuỗi hết sớm, text
+         // biến mất 1–3 frame ở cuối cửa sổ gây "nháy"; enable window vẫn gate hiển thị.
+         // Nay giữ bằng các khung nhân bản ở đuôi chuỗi (SequenceTailFrames) + pass; chỉ
+         // khi không biết số khung mới dùng repeat (đắt, xem SequenceTailFrames).
+         << ":eof_action=" << ((OverlayIsImageSequence(overlay) && seqTail == 0) ? "repeat" : "pass");
+  // crabblend (CpuYuv) không có tuỳ chọn format: nó chỉ trộn yuva420p lên yuv420p, trùng từng bit
+  // với overlay=format=yuv420.
+  if (gpu == OverlayGpu::CpuCanvas) script << ":format=rgb";
+  else if (gpu != OverlayGpu::CpuYuv) script << ":format=" << (yuvStatic ? "yuv420" : "auto");
+  if (gpu == OverlayGpu::CpuCanvas) {
+    /* Ghép xong thì dời khung trong suốt SỚM 1 ms trước khi trộn: mốc khung luồng chính ở chỗ trộn
+     * đã qua timebase µs của các bộ trộn trước (6,666666 s cho khung 200), mốc n/r đúng thì muộn hơn
+     * 1 µs và crabblend lấy khung trong suốt TRƯỚC đó — đo trên "Yêu Con": chuỗi khung có keyframe cỡ
+     * hiện chậm một khung ở 2/3 số khung đầu và cuối cửa sổ (28 dB so với CPU). Dời TRƯỚC khi ghép thì
+     * sai chỗ khác: ảnh/video lớp phủ chỉ sớm 0,1 ms (kOverlayTieEpsilon) nên khung đầu bị bỏ. */
+    script << ",settb=AVTB,setpts=PTS-round(0.001/TB)";
+    script << ",hwupload,crabgeo_cuda=format=yuva420p:bg=transparent:alpha_chroma=1:passthrough=0[ovu" << id << "];\n";
+    script << inputLabel << "[ovu" << id << "]crabblend_cuda=x=0:y=0:eof_action=pass";
+  } else if (yuvChain && !yuvStatic) {
+    // Lớp phủ động trong chuỗi YUV: ghép RGBA như cũ rồi về ngay yuv420p BT.709/tv, để lớp sau
+    // (và cả phần còn lại của chuỗi) không phải kéo luồng chính qua RGBA.
+    script << ",scale=out_color_matrix=bt709:out_range=tv,format=yuv420p";
+  }
+  script << outputLabel << ";\n";
+}
+
+/* LỚP PHỦ TRÊN ĐỒ THỊ GPU (mục 1.21). Chỉ cho lớp phủ "yuvStatic" của đường CPU — đứng yên, không
+ * xoay/keyframe hình học/hoạt ảnh/mặt nạ/mép mềm/lật, màu chỉ là LUT (OverlayGpuNative); keyframe ĐỘ
+ * MỜ thì đi biểu thức `opacity` của crabblend (đường CPU ghép lớp đó ở RGBA). Cùng phép tính với nhánh
+ * yuvStatic của WriteVisualOverlayFilter: cỡ `max(2,ceil(iw*s/2)*2)`, đệm 4 điểm ảnh trong suốt ở
+ * toạ độ `mod(...,2)`, toạ độ trộn chẵn, cùng cửa sổ `enable`/`eof_action`/khung đuôi. Khác ở:
+ *  - scale + format=rgba + pad + đổi bt709 + yuva420p gộp vào MỘT crabgeo_cuda; ảnh/chuỗi khung
+ *    giải mã CPU (PNG) rồi tải lên dạng RGBA, video giải mã NVDEC ra thẳng khung CUDA;
+ *  - ảnh tĩnh: màu mép theo trọng số alpha ngay trong crabgeo (alpha_chroma) thay cho chuỗi
+ *    premultiply/area/unpremultiply/mergeplanes của AlphaWeightedYuva420;
+ *  - độ mờ tĩnh < 1 đi vào crabblend_cuda (opacity) thay cho colorchannelmixer. */
+void WriteVisualOverlayFilterGpu(
+  std::ofstream& script,
+  const ExportOverlay& overlay,
+  const std::string& inputLabel,
+  const std::string& outputLabel,
+  const ExportSettings& settings
+) {
+  const int inputIndex = 1 + overlay.assetInputIndex;
+  const int seqW = settings.width > 0 ? settings.width : 1920;
+  const int seqH = settings.height > 0 ? settings.height : 1080;
+  const double overlayFit = (overlay.fitScale > 0.0) ? overlay.fitScale : 1.0;
+  const double scaleValue = std::max(0.01, (overlay.scale / 100.0) * overlayFit);
+  const double opacityValue = ClampDouble(overlay.opacity / 100.0, 0.0, 1.0);
+  const std::string id = std::to_string(overlay.index);
+  const double start = overlay.timelineStart;
+  const double seqEndTrim = OverlayIsImageSequence(overlay) && overlay.seqFps > 1.0 ? 0.5 / overlay.seqFps : 0.0;
+  const double end = overlay.timelineStart + std::max(0.05, overlay.duration - seqEndTrim);
+  const bool stillOnce = OverlayStillOnce(overlay);
+  const bool image = OverlayIsImageLike(overlay) || OverlayIsImageSequence(overlay);
+  const std::string S = FfmpegDouble(scaleValue);
+  const std::string posX = "(" + FfmpegDouble(overlay.positionX) + ")";
+  const std::string posY = "(" + FfmpegDouble(overlay.positionY) + ")";
+
+  script << "[" << inputIndex << ":v]" << (stillOnce ? std::string("null") : OverlayTimingChain(overlay, settings));
+  /* Ảnh/chuỗi khung (PNG, JPG): đổi RGBA ở CPU rồi tải lên. Video NVDEC không giải mã được: tải
+   * lên dạng yuva420p — giữ alpha nếu nguồn có (ProRes 4444…); đường CPU cũng hạ về RGBA 8-bit. */
+  if (image) script << ",format=rgba,hwupload";
+  else if (!overlay.gpuNvdec) script << ",format=yuva420p,hwupload";
+  // `w`/`h` của crabgeo = cỡ ảnh nội dung đã co (chính là `iw`/`ih` của `pad` ở đường CPU).
+  script << ",crabgeo_cuda=w='max(2,ceil(iw*" << S << "/2)*2)':h='max(2,ceil(ih*" << S << "/2)*2)'"
+         << ":ow=w+4:oh=h+4"
+         << ":x='mod(trunc((" << seqW << "-w)/2+" << posX << "),2)'"
+         << ":y='mod(trunc((" << seqH << "-h)/2+" << posY << "),2)'"
+         << ":format=yuva420p:bg=transparent";
+  // Video không gắn nhãn ma trận: đọc theo bt709 như UntaggedColorFix của đường CPU.
+  if (!image && overlay.colorUntagged) script << ":in_matrix=bt709";
+  if (stillOnce && AlphaChromaEnabled()) script << ":alpha_chroma=1";
+  // LUT (lớp Điều chỉnh / HSL + LUT): mốc thời gian tuyệt đối sau setpts -> LOCALT = t − start.
+  script << GpuLutOptions(BlockGpuLut(overlay, start));
+  if (stillOnce) {
+    script << ",loop=loop=-1:size=1,trim=duration=" << FixedSeconds(overlay.duration + kStillTailSeconds) << ",";
+    WriteOverlaySetpts(script, overlay, settings);
+  }
+  const int seqTail = SequenceTailFrames(overlay);
+  if (seqTail > 0) script << ",tpad=stop=" << seqTail << ":stop_mode=clone";
+  script << "[ov" << id << "];\n";
+
+  const std::string bx = "trunc((" + std::to_string(seqW) + "-(w-4))/2+" + posX + ")";
+  const std::string by = "trunc((" + std::to_string(seqH) + "-(h-4))/2+" + posY + ")";
+  script << inputLabel << "[ov" << id << "]crabblend_cuda="
+         << "x='" << bx << "-mod(" << bx << ",2)':y='" << by << "-mod(" << by << ",2)'"
+         << ":enable='between(t," << FfmpegDouble(OverlayEnableStart(start, settings)) << ","
+         << FfmpegDouble(OverlayEnableEnd(overlay, end, settings)) << ")'"
+         << ":eof_action=" << ((OverlayIsImageSequence(overlay) && seqTail == 0) ? "repeat" : "pass");
+  if (!overlay.kfOpacityExpr.empty()) {
+    /* Keyframe độ mờ (đơn vị %, LOCALT = t − start) THAY giá trị tĩnh — như KfOpacityFilter của
+     * đường CPU (ở đó sendcmd tính theo mốc khung lớp phủ, ở đây theo mốc khung nền: lớp phủ khác
+     * nhịp xuất thì lệch dưới một khung về thời gian của đường cong độ mờ). */
+    script << ":opacity='clip((" << SubstituteLocalTimeVar(overlay.kfOpacityExpr, start, "t") << ")/100,0,1)'";
+  } else if (opacityValue < 0.999) {
+    script << ":opacity=" << FfmpegDouble(opacityValue);
+  }
+  script << outputLabel << ";\n";
+}
+
+/* BATCH ĐI ĐỒ THỊ GPU ĐƯỢC KHÔNG (mục 1.21). Bộ lọc CUDA hiện có hình học tĩnh + LUT (crabgeo) và
+ * phép trộn có độ mờ (crabblend): clip phải đi đường nhanh YUV của CPU (MainLaneFastPlan), không xoá
+ * logo, tầng màu rỗng hoặc chỉ là LUT (BlockGpuLut); lớp phủ nào cũng đi được (OverlayGpuModeFor —
+ * chưa có bản GPU thì dựng bằng CPU rồi tải lên), trừ text. Một clip không đạt là CẢ batch đi đồ
+ * thị CPU (giải mã NVDEC ra khung CUDA cho cả input, chưa có đường tải xuống giữa đồ thị).
+ * crabgeo co nhỏ tối đa ~15,7 lần mỗi mặt phẳng (bicubic: ceil(4·tỉ lệ)+1 ≤ 64 tap). Mặt phẳng màu
+ * của nguồn RGBA (ảnh) co gấp đôi mặt phẳng sáng khi ra 4:2:0 -> ảnh chỉ tới ~7,8 lần. */
+const double kGpuMinScale = 1.0 / 15.0;
+const double kGpuMinScaleRgba = 2.0 / 15.0;
+
+/* Clip có bản GPU riêng (crabgeo, WriteClipVideoFilters): đi đường nhanh YUV, không xoá logo, tầng
+ * màu rỗng hoặc gộp được thành LUT, không co nhỏ quá ~15 lần; `nvdec` sai thì nguồn phải tải lên được
+ * (GpuUploadFormat). Clip không đạt vẫn ở trong batch GPU — dựng bằng chuỗi CPU rồi tải lên. */
+bool ClipGpuNative(const ExportInterval& item, const ExportSettings& settings, bool nvdec) {
+  if (!BlockColorGpuReady(item) || !item.logoAiDir.empty() || !item.logoRects.empty()) return false;
+  if (!nvdec && GpuUploadFormat(settings.sourcePixFmt).empty()) return false;
+  // Cùng các cờ mà WriteClipVideoFilters đưa vào MainLaneFastPlan.
+  const bool dynamicClip = HasKeyframeExpr(item.kfScaleExpr, item.kfRotExpr, item.kfOpacityExpr, item.kfXExpr, item.kfYExpr)
+    || HasAnimGeomExpr(item.animSxExpr, item.animSyExpr, item.animRotExpr) || !item.animXExpr.empty();
+  const double fitScale = (item.fitScale > 0.0) ? item.fitScale : 1.0;
+  const double scaleValue = std::max(0.01, (item.scale / 100.0) * fitScale);
+  const double opacityValue = std::max(0.0, std::min(1.0, item.opacity / 100.0));
+  if (scaleValue < kGpuMinScale) return false;
+  return MainLaneFastPlan(item, settings, dynamicClip, scaleValue, opacityValue).ok;
+}
+
+/* Lớp phủ có bản GPU riêng (WriteVisualOverlayFilterGpu): đứng yên, không xoay/lật/mép mềm/mặt nạ/
+ * xoá logo, tầng màu rỗng hoặc chỉ là LUT. Keyframe ĐỘ MỜ một mình thì được: crabblend nhận biểu thức
+ * `opacity` theo `t`. Keyframe vị trí/cỡ/xoay, hoạt ảnh -> không (đi OverlayGpu::CpuCanvas). */
+bool OverlayGpuNative(const ExportOverlay& overlay, const ExportSettings& settings) {
+  if (!YuvCompositeEnabled(settings) || overlay.type == "text") return false;
+  const double overlayFit = (overlay.fitScale > 0.0) ? overlay.fitScale : 1.0;
+  const double scaleValue = std::max(0.01, (overlay.scale / 100.0) * overlayFit);
+  const bool image = OverlayIsImageLike(overlay) || OverlayIsImageSequence(overlay);
+  if (scaleValue < (image ? kGpuMinScaleRgba : kGpuMinScale)) return false;
+  if (HasKeyframeExpr(overlay.kfScaleExpr, overlay.kfRotExpr, "", overlay.kfXExpr, overlay.kfYExpr)
+      || HasAnimGeomExpr(overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr) || !overlay.animXExpr.empty()
+      || overlay.animInDur > 0.001 || overlay.animOutDur > 0.001) return false;
+  if (std::abs(overlay.rotation) > 1e-6 || overlay.flipX || overlay.flipY || overlay.featherPx > 0) return false;
+  if (!overlay.videoMaskPath.empty() || !BlockColorGpuReady(overlay)) return false;
+  // Ảnh tĩnh xử lý một lần: crabgeo chạy trên khung duy nhất (mốc 0) -> LUT có `mix` theo thời gian sai.
+  if (BlockHasColorAdjust(overlay) && OverlayStillOnce(overlay)) return false;
+  return overlay.logoAiDir.empty() && overlay.logoRects.empty();
+}
+
+/* Lớp phủ "yuvStatic" của đường CPU (WriteVisualOverlayFilter): chuỗi riêng của lớp phủ ra yuva420p
+ * đã đệm, trộn bằng `overlay=format=yuv420` ở toạ độ chẵn. */
+bool OverlayYuvStatic(const ExportOverlay& overlay, const ExportSettings& settings) {
+  const bool overlayKf = HasKeyframeExpr(overlay.kfScaleExpr, overlay.kfRotExpr, overlay.kfOpacityExpr,
+                                         overlay.kfXExpr, overlay.kfYExpr);
+  return YuvCompositeEnabled(settings) && !overlayKf && overlay.animXExpr.empty()
+      && !HasAnimGeomExpr(overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr)
+      && std::abs(overlay.rotation) <= 1e-6;
+}
+
+/* LỚP PHỦ TRÊN ĐỒ THỊ GPU — bốn cách (WriteFilterScript):
+ *  Native    bản GPU riêng (WriteVisualOverlayFilterGpu): crabgeo + crabblend.
+ *  CpuYuv    lớp phủ yuvStatic chưa có bản GPU (mép mềm, chuỗi màu, mặt nạ, lật, xoá logo…): CHÍNH
+ *            chuỗi CPU của nó (giải mã + xử lý ở cỡ lớp phủ, thường nhỏ) tới yuva420p đã đệm, rồi
+ *            `hwupload` và crabblend thay `overlay=format=yuv420` — trùng từng bit với CPU.
+ *  CpuCanvas lớp phủ động (keyframe vị trí/cỡ/xoay, hoạt ảnh): đường CPU ghép RGBA lên luồng chính ở
+ *            toạ độ/cỡ đổi theo khung. Ở đây ghép RGBA lên một khung TRONG SUỐT cỡ sequence (chỉ trong
+ *            cửa sổ của lớp phủ), tải lên, crabgeo đổi yuva420p (màu mép theo trọng số alpha), rồi
+ *            crabblend ở (0, 0) — luồng chính không phải đi vòng YUV -> RGB -> YUV như đường CPU.
+ *  None      text (drawtext) -> cả batch đi đồ thị CPU.
+ * Trước đây (phiên 10) mọi lớp phủ không Native kéo cả batch về CPU — dự án "Yêu Con" có 2 miếng vá
+ * Retouch mép mềm + một chuỗi khung có keyframe cỡ nên batch 45 s của nó không bao giờ đi GPU.
+ * (enum OverlayGpu khai ở trên WriteVisualOverlayFilter.) */
+OverlayGpu OverlayGpuModeFor(const ExportOverlay& overlay, const ExportSettings& settings) {
+  if (!YuvCompositeEnabled(settings) || overlay.type == "text") return OverlayGpu::None;
+  if (OverlayGpuNative(overlay, settings)) return OverlayGpu::Native;
+  return OverlayYuvStatic(overlay, settings) ? OverlayGpu::CpuYuv : OverlayGpu::CpuCanvas;
+}
+
+// Lượt xuất này dựng đồ thị GPU cho batch đạt — CommandExportVideo đặt sau các phép dò.
+static bool g_gpuRender = false;
+
+/* Batch đi đồ thị GPU: mọi clip (clip chưa có bản GPU dựng bằng CPU rồi tải lên — ClipGpuNative) và
+ * mọi lớp phủ trừ text. Trước 2026-10-03 một clip có keyframe zoom/pan, xoay, mặt nạ, hiệu ứng không
+ * gian hay xoá logo kéo CẢ batch về CPU. Đặt `g_gpuBatchNvdec` cho lượt ghi kịch bản GPU của batch. */
+bool BatchGpuEligible(const std::vector<ExportInterval>& intervals, size_t offset, size_t count,
+                      const std::vector<ExportOverlay>& overlays, const ExportSettings& settings) {
+  if (!g_gpuRender || count == 0) return false;
+  if (OutputResized(settings) && !settings.builtAtOutputScale) return false;
+  g_gpuBatchNvdec = g_gpuMainNvdec;
+  for (size_t i = 0; g_gpuBatchNvdec && i < count; i++) {
+    if (!ClipGpuNative(intervals[offset + i], settings, true)) g_gpuBatchNvdec = false;
+  }
+  // Cùng phép lọc lớp phủ với WriteFilterScript (lớp nào bị bỏ qua ở đó thì không tính).
+  for (const auto& overlay : overlays) {
+    if (!OverlayIsVisual(overlay)) continue;
+    if (overlay.type != "text" && overlay.assetInputIndex < 0) continue;
+    if (overlay.type == "text" && !TextOverlaySupported()) continue;
+    if (OverlayGpuModeFor(overlay, settings) == OverlayGpu::None) return false;
+  }
+  return true;
 }
 
 void WriteOverlayAudioFilter(std::ofstream& script, const ExportOverlay& overlay, std::vector<std::string>& audioLabels) {
@@ -2739,13 +4995,17 @@ void AppendCpuEncoderArgs(std::vector<std::string>& cmd, const ExportSettings& s
     cmd.insert(cmd.end(), {"-c:v", "prores_ks", "-profile:v", "3", "-c:a", "pcm_s16le"});
     return;
   }
-  const std::string crf = settings.quality == "small" ? "28" : (settings.quality == "balanced" ? "23" : "18");
   const std::string preset = QualityPreset(settings);
-  if (settings.codec == "hevc") {
-    cmd.insert(cmd.end(), {"-c:v", "libx265", "-preset", preset, "-crf", crf, "-tag:v", "hvc1"});
+  cmd.insert(cmd.end(), {"-c:v", settings.codec == "hevc" ? "libx265" : "libx264", "-preset", preset});
+  if (RateIsCustom(settings)) {
+    // "Tùy chỉnh": bitrate trung bình người dùng nhập, đỉnh ×1,5 (bộ đệm 2 giây của đỉnh).
+    const long long kbps = RateKbps(settings);
+    cmd.insert(cmd.end(), {"-b:v", KbpsArg(kbps), "-maxrate", KbpsArg(kbps * 3 / 2), "-bufsize", KbpsArg(kbps * 3)});
   } else {
-    cmd.insert(cmd.end(), {"-c:v", "libx264", "-preset", preset, "-crf", crf});
+    // Các mức chất lượng: CRF không trần — đúng hành vi CPU trước giờ (Khuyến nghị = CRF 18 cũ).
+    cmd.insert(cmd.end(), {"-crf", RateCpuCrf(settings)});
   }
+  if (settings.codec == "hevc") cmd.insert(cmd.end(), {"-tag:v", "hvc1"});
   cmd.insert(cmd.end(), {"-c:a", "aac", "-b:a", settings.audioBitrate});
 }
 
@@ -2759,8 +5019,20 @@ void AppendHardwareEncoderArgs(std::vector<std::string>& cmd, const ExportSettin
   if (plan.mode == "videotoolbox") {
     cmd.insert(cmd.end(), {"-c:v", plan.videoEncoder, "-b:v", bitrate, "-realtime", "1", "-prio_speed", "1"});
   } else if (plan.mode == "nvenc") {
-    cmd.insert(cmd.end(), {"-c:v", plan.videoEncoder, "-preset", "fast", "-b:v", bitrate});
+    /* `-preset fast` = p1 + tune hq (md5 trùng khi thử trên cùng khung). Mức chất lượng: VBR đích 0
+     * + `-cq` + trần `-maxrate` — cảnh khó chạm trần thì như bitrate cố định cũ, cảnh dễ thì nhỏ
+     * hẳn. Đo (mục 1.20): tốc độ như nhau ở mọi mức; phim AV1 4K 39,1 -> 27,7 Mbps ở cq 19. */
+    const long long kbps = RateKbps(settings);
+    cmd.insert(cmd.end(), {"-c:v", plan.videoEncoder, "-preset", "fast", "-rc", "vbr"});
+    if (RateIsCustom(settings)) {
+      cmd.insert(cmd.end(), {"-b:v", KbpsArg(kbps), "-maxrate", KbpsArg(kbps * 3 / 2), "-bufsize", KbpsArg(kbps * 3)});
+    } else {
+      cmd.insert(cmd.end(), {"-cq", std::to_string(RateHardwareCq(settings)), "-b:v", "0",
+                             "-maxrate", KbpsArg(kbps), "-bufsize", KbpsArg(kbps * 2)});
+    }
   } else if (plan.mode == "qsv") {
+    /* QSV/AMF/VideoToolbox: chưa có máy để đo chế độ chất lượng của chúng -> giữ bitrate cố định như
+     * trước, với con số của mức đã chọn (trần của mức chất lượng = bitrate cố định cũ cùng mức). */
     cmd.insert(cmd.end(), {"-c:v", plan.videoEncoder, "-preset", "veryfast", "-b:v", bitrate});
   } else if (plan.mode == "amf") {
     cmd.insert(cmd.end(), {"-c:v", plan.videoEncoder, "-quality", "speed", "-b:v", bitrate});
@@ -2830,10 +5102,28 @@ bool WriteFilterScript(
   std::ofstream script(scriptPath);
   if (!script) return false;
   g_filterAuxDir = scriptPath.parent_path();   // file lệnh phụ (lutmix_*.cmd) nằm cạnh script
+  g_filterAuxPrefix = scriptPath.stem().string() + "_";
+  g_filterAuxSeq = 0;
+  g_fastClipCount = 0;
   const double renderFpsValue = ParseFpsValue(settings.renderFps);
+  /* LƯỢT CHỈ-TIẾNG NỐI KÈM ĐOẠN HÌNH GIẢ (mục 1.8). Ở lượt có hình, `concat` nối hình CÙNG tiếng
+   * (`v=1:a=1`): mỗi đoạn dài bằng luồng dài hơn, tiếng ngắn hơn hình thì được đệm lặng tới cuối
+   * đoạn hình. Nối tiếng một mình thì các đoạn nối theo đúng số mẫu — lệch dưới một mẫu mỗi đoạn,
+   * dồn qua 20 đoạn ("Bin Tom") là bản xuất chia batch khác bản một lượt ở từng mẫu tiếng. Đoạn
+   * hình giả 16×16, đúng nhịp + đúng số khung của đoạn thật, cho `concat` cùng mốc cuối đoạn (nó
+   * lấy mốc khung cuối × n/(n−1)) nên tiếng ra y hệt; hình giả đổ vào nullsink. */
+  bool dummyVideo = !wantVideo && wantAudio && renderFpsValue > 0.0 && count > 0;
+  for (size_t i = 0; dummyVideo && i < count; i++) {
+    if (intervals[offset + i].renderFrames <= 0) dummyVideo = false;
+  }
   for (size_t i = 0; i < count; i++) {
     const auto& item = intervals[offset + i];
     if (wantVideo) WriteClipVideoFilters(script, item, i, settings);
+    if (dummyVideo) {
+      script << "color=c=black:s=16x16:r=" << settings.renderFps
+             << ":d=" << FixedSeconds(static_cast<double>(item.renderFrames + 1) / renderFpsValue)
+             << ",trim=end_frame=" << item.renderFrames << "[dv" << i << "];\n";
+    }
     if (!wantAudio) continue;
     // Tiếng cắt theo ĐÚNG số khung của hình (xem BuildTimelineFrameGrid). Cắt theo giây
     // trong khi hình đi theo khung thì mỗi segment lệch nhau tới một khung, và `concat`
@@ -2863,21 +5153,30 @@ bool WriteFilterScript(
   }
   for (size_t i = 0; i < count; i++) {
     if (wantVideo) script << "[v" << i << "]";
+    if (dummyVideo) script << "[dv" << i << "]";
     if (wantAudio) script << "[a" << i << "]";
   }
   const std::string concatSpec = std::string("concat=n=") + std::to_string(count)
-    + ":v=" + (wantVideo ? "1" : "0") + ":a=" + (wantAudio ? "1" : "0");
+    + ":v=" + (wantVideo || dummyVideo ? "1" : "0") + ":a=" + (wantAudio ? "1" : "0");
   if (overlays.empty()) {
     if (wantVideo) {
       script << concatSpec << "[vcat]" << (wantAudio ? "[a]" : "") << ";\n";
-      script << "[vcat]" << OutputColorFilters(settings) << "[v]\n";
+      script << "[vcat]" << (g_gpuGraph ? GpuOutputFilters(settings) : OutputColorFilters(settings)) << "[v]\n";
+    } else if (dummyVideo) {
+      script << concatSpec << "[dvcat][a];\n[dvcat]nullsink\n";
     } else {
       script << concatSpec << (wantAudio ? "[a]" : "") << "\n";
     }
     return true;
   }
 
-  script << concatSpec << (wantVideo ? "[mainv]" : "") << (wantAudio ? "[maina]" : "") << ";\n";
+  if (wantVideo) {
+    script << concatSpec << "[mainv]" << (wantAudio ? "[maina]" : "") << ";\n";
+  } else if (dummyVideo) {
+    script << concatSpec << "[dvcat][maina];\n[dvcat]nullsink;\n";
+  } else {
+    script << concatSpec << "[maina];\n";
+  }
 
   std::string currentVideo = "[mainv]";
   size_t visualIndex = 0;
@@ -2889,12 +5188,19 @@ bool WriteFilterScript(
     const std::string outputLabel = "[vov" + std::to_string(visualIndex++) + "]";
     if (overlay.type == "text") {
       WriteTextOverlayFilter(script, overlay, currentVideo, outputLabel, settings);
+    } else if (g_gpuGraph) {
+      const OverlayGpu mode = OverlayGpuModeFor(overlay, settings);
+      if (mode == OverlayGpu::Native) WriteVisualOverlayFilterGpu(script, overlay, currentVideo, outputLabel, settings);
+      else WriteVisualOverlayFilter(script, overlay, currentVideo, outputLabel, settings, mode);
     } else {
       WriteVisualOverlayFilter(script, overlay, currentVideo, outputLabel, settings);
     }
     currentVideo = outputLabel;
   }
-  if (wantVideo) script << currentVideo << "setsar=1," << OutputColorFilters(settings) << "[v];\n";
+  if (wantVideo) {
+    script << currentVideo << (g_gpuGraph ? GpuOutputFilters(settings) : "setsar=1," + OutputColorFilters(settings))
+           << "[v];\n";
+  }
   if (!wantAudio) return true;
 
   std::vector<std::string> audioLabels;
@@ -2939,11 +5245,166 @@ std::string ShortInputPath(const std::string& absolutePath, const fs::path& base
   return text.size() < absolutePath.size() ? text : absolutePath;
 }
 
+/* ===== SEEK THEO BATCH (mục 1.1 bước đầu, docs/KE_HOACH_TOI_UU_EXPORT_WIN.md) =====
+ *
+ * Mỗi batch mở `temp_input.mp4` bằng `-i` KHÔNG seek, nên ffmpeg giải mã từ giây 0 tới mốc cuối
+ * mà batch cần — batch thứ k trả lại toàn bộ phần của k−1 batch trước. Đo 2026-09-28 (dự án
+ * phụ đề 4K AV1, bản cắt 300 s, 2 batch): batch 2 giải mã 0..300 s mất 29 s trong khi chỉ cần
+ * 120 s cuối; với bản 39 phút (13 batch) tổng giải mã ~6,9× số khung thật sự dùng.
+ *
+ * Cách chữa KHÔNG đổi một mốc thời gian nào: `-itsoffset S -ss S -i`. Không có -copyts thì
+ * ffmpeg_demux.c đặt ts_offset = itsoffset − (S + start_time) = −start_time, ĐÚNG bằng khi
+ * không seek, nên PTS mọi khung giữ nguyên từng bit và mọi `trim`/`atrim` trong filter script
+ * dùng lại y nguyên. Trim mà -ss tự chèn là `start=0` (trim_start_us = 0 khi không copyts), chỉ
+ * bỏ khung pts < 0 — tức không bỏ gì; các khung dư giữa keyframe và S bị chính `trim` của
+ * clip loại như hôm nay.
+ *
+ * S = mốc cắt SỚM NHẤT của batch − kBatchSeekMarginSeconds. Lề 1 s để một khung nguồn lệch dấu
+ * phẩy động không bao giờ lọt ra trước S; tốn thêm tối đa 1 s giải mã mỗi batch. S dưới
+ * kBatchSeekMinSeconds thì không seek (lợi không đáng). Tắt: CRABBYCUT_EXPORT_SEEK=0.
+ *
+ * CHỈ BATCH CHỈ-HÌNH (FilterScriptMode::VideoOnly) — đúng loại batch của dự án có lớp phủ dài,
+ * nơi cấp số cộng này ăn ~27 phút. Batch có tiếng thì KHÔNG seek: bộ giải mã AAC mang trạng
+ * thái theo số gói đã giải mã (bộ sinh nhiễu PNS), nên giải mã từ giữa file cho mẫu float khác
+ * — đo 2026-09-28: cùng `atrim=12.25:13`, giải mã từ 0 và từ `-ss 11.25` khác nhau ở hầu hết
+ * mẫu, sau encode lệch tối đa 1 LSB. Không nghe được, nhưng tiếng hôm nay khớp từng bit giữa
+ * các lượt xuất và không có lý do gì để đổi điều đó. Đo xong: hình khớp từng khung (framemd5). */
+constexpr double kBatchSeekMarginSeconds = 1.0;
+constexpr double kBatchSeekMinSeconds = 5.0;
+
+bool BatchSeekEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_SEEK");
+  if (!env) return true;
+  const std::string value = env;
+  return !(value == "0" || value == "false" || value == "off");
+}
+
+/* Seek vào GIỮA bản nối có an toàn không. Bản nối `-c copy` từ nhiều nguồn khác extradata
+ * (SPS/PPS…) mang nhiều sample description; demuxer mp4 báo chỗ đổi bằng side data
+ * "New Extradata" trên gói. Có chỗ đổi thì không seek — giải mã từ 0 như cũ, chậm mà chắc.
+ * Một nguồn, hoặc bản nối đã chuẩn hoá (cùng một cấu hình x264), thì không có chỗ đổi nào.
+ * Chỉ đọc header gói (không giải mã) nên rẻ: ~1 s cho 56.757 gói của nguồn AV1 39 phút. */
+bool SourceSeekSafe(const std::string& source) {
+  const std::string out = CommandOutput({
+    "ffprobe", "-v", "error", "-select_streams", "v:0",
+    "-show_entries", "packet_side_data=side_data_type", "-of", "csv=p=0", source
+  });
+  return out.find("New Extradata") == std::string::npos;
+}
+
+double BatchSeekSeconds(const std::vector<ExportInterval>& intervals, size_t offset, size_t count,
+                        const ExportSettings& settings, FilterScriptMode mode) {
+  if (!settings.seekSafe || count == 0 || mode != FilterScriptMode::VideoOnly) return 0.0;
+  double earliest = 0.0;
+  for (size_t i = 0; i < count; i++) {
+    const ExportInterval& item = intervals[offset + i];
+    const double cut = item.start + settings.videoStart;
+    earliest = i == 0 ? cut : std::min(earliest, cut);
+  }
+  const double seekTo = earliest - kBatchSeekMarginSeconds;
+  return seekTo >= kBatchSeekMinSeconds ? seekTo : 0.0;
+}
+
+/* ===== MỖI DẢI NGUỒN MỘT INPUT (mục 1.1, docs/KE_HOACH_TOI_UU_EXPORT_WIN.md) =====
+ *
+ * Mọi clip lane chính đọc CÙNG một [0:v]: bộ giải mã chạy một mạch từ đầu tới mốc cuối mà batch
+ * cần, và MỖI khung được phát tới đủ N nhánh `trim` rồi phần lớn bị vứt. Dự án cắt theo kịch bản
+ * (clip rải khắp nguồn) trả giá nặng nhất. Đo 2026-09-30 trên "Bin Tom - Tap 3" (20 clip, dùng
+ * 76,6 s trên dải nguồn 9,96 → 265 s, H.264 1080×1920): 19–21 s -> 16,1–16,5 s khi gom thành 12
+ * dải, CPU 95 -> 67 CPU-giây, bản xuất trùng framemd5 2.297/2.297 khung; RAM 1,53 -> 1,68 GB.
+ *
+ * Cách làm y như seek theo batch (xem khối chú thích ở trên): mỗi dải là một input
+ * `-itsoffset S -ss S -i nguồn`, PTS giữ nguyên nên `trim` của từng clip dùng nguyên. Dải = các
+ * cửa sổ `trim` (tính y như WriteClipVideoFilters) xếp theo mốc nguồn, gộp khi cách nhau dưới
+ * kRangeMergeGapSeconds; quá MaxSourceRanges thì gộp hai dải có khe nhỏ nhất. Mọi bộ giải mã
+ * khởi động cùng lúc (đồ hình chỉ cấu hình khi mọi input đã có khung), nên số dải giảm theo độ
+ * phân giải nguồn. Lượt tiếng không dùng dải: tiếng vẫn giải mã từ 0 trên input 0 (xem lý do AAC
+ * ở trên). Batch chỉ-hình thì dải đầu dùng luôn input 0 — một dải là đúng seek theo batch cũ.
+ * Chỉ khi seek an toàn (SourceSeekSafe). Tắt: CRABBYCUT_EXPORT_RANGES=0. */
+constexpr double kRangeMergeGapSeconds = 2.0;
+
+bool SourceRangesEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_RANGES");
+  if (!env) return true;
+  const std::string value = env;
+  return !(value == "0" || value == "false" || value == "off");
+}
+
+// 12 dải ở ≤ 1080p, 6 ở 4K (giảm theo căn bậc hai số điểm ảnh); chưa đo được cỡ nguồn thì 6.
+size_t MaxSourceRanges(const ExportSettings& settings) {
+  if (settings.sourceWidth <= 0 || settings.sourceHeight <= 0) return 6;
+  const double pixels = static_cast<double>(settings.sourceWidth) * settings.sourceHeight;
+  const long n = std::lround(12.0 * std::sqrt((1920.0 * 1080.0) / std::max(1.0, pixels)));
+  return static_cast<size_t>(std::max(4L, std::min(12L, n)));
+}
+
+struct SourceRangePlan {
+  std::vector<double> seekTo;     // mỗi dải một mốc seek (0 = không seek)
+  std::vector<size_t> clipRange;  // clip (chỉ số trong batch) -> dải
+  bool inputZeroIsRange = false;  // dải 0 dùng luôn input 0 (batch chỉ-hình)
+  bool active() const { return !seekTo.empty(); }
+};
+
+SourceRangePlan PlanSourceRanges(const std::vector<ExportInterval>& intervals, size_t offset, size_t count,
+                                 const ExportSettings& settings, FilterScriptMode mode) {
+  SourceRangePlan plan;
+  if (!SourceRangesEnabled() || !BatchSeekEnabled() || !settings.seekSafe || count == 0
+      || mode == FilterScriptMode::AudioOnly) {
+    return plan;
+  }
+  struct Group { double from; double to; std::vector<size_t> clips; };
+  std::vector<Group> wins;
+  const double half = settings.sourceFps > 0.0 ? 0.5 / settings.sourceFps : 0.0;
+  for (size_t i = 0; i < count; i++) {
+    const ExportInterval& item = intervals[offset + i];
+    const double from = std::max(0.0, item.start + settings.videoStart - half);
+    const double to = std::max(from, item.end + settings.videoStart - half);
+    wins.push_back({from, to, {i}});
+  }
+  std::stable_sort(wins.begin(), wins.end(), [](const Group& a, const Group& b) { return a.from < b.from; });
+  std::vector<Group> groups;
+  for (auto& w : wins) {
+    if (!groups.empty() && w.from - groups.back().to < kRangeMergeGapSeconds) {
+      groups.back().to = std::max(groups.back().to, w.to);
+      groups.back().clips.push_back(w.clips.front());
+    } else {
+      groups.push_back(w);
+    }
+  }
+  const size_t maxRanges = MaxSourceRanges(settings);
+  while (groups.size() > maxRanges) {
+    size_t best = 0;
+    for (size_t i = 1; i + 1 < groups.size(); i++) {
+      if (groups[i + 1].from - groups[i].to < groups[best + 1].from - groups[best].to) best = i;
+    }
+    groups[best].to = std::max(groups[best].to, groups[best + 1].to);
+    groups[best].clips.insert(groups[best].clips.end(), groups[best + 1].clips.begin(), groups[best + 1].clips.end());
+    groups.erase(groups.begin() + static_cast<long>(best) + 1);
+  }
+  plan.inputZeroIsRange = mode == FilterScriptMode::VideoOnly;
+  plan.clipRange.assign(count, 0);
+  for (size_t k = 0; k < groups.size(); k++) {
+    const double seek = groups[k].from - kBatchSeekMarginSeconds;
+    plan.seekTo.push_back(seek >= kBatchSeekMinSeconds ? seek : 0.0);
+    for (size_t clip : groups[k].clips) plan.clipRange[clip] = k;
+  }
+  // Batch có tiếng, một dải, không seek = đúng [0:v] như cũ: giữ nguyên lệnh.
+  if (!plan.inputZeroIsRange && groups.size() == 1 && plan.seekTo[0] <= 0.0) return SourceRangePlan();
+  return plan;
+}
+
+// Cờ giải mã NVDEC ra thẳng khung CUDA cho một input của đồ thị GPU (thiết bị `cu`, xem PrepareExportBatch).
+void AppendNvdecInputArgs(std::vector<std::string>& cmd) {
+  cmd.insert(cmd.end(), {"-hwaccel", "cuda", "-hwaccel_device", "cu", "-hwaccel_output_format", "cuda"});
+}
+
 void AppendOverlayInputArgs(
   std::vector<std::string>& cmd,
   const std::vector<ExportOverlay>& overlays,
   double sequenceDuration,
-  const fs::path& baseDir
+  const fs::path& baseDir,
+  const ExportSettings& settings,
+  bool gpuGraph = false
 ) {
   for (const auto& overlay : overlays) {
     if (!OverlayNeedsInput(overlay)) continue;
@@ -2951,16 +5412,37 @@ void AppendOverlayInputArgs(
     if (OverlayIsImageSequence(overlay)) {
       cmd.insert(cmd.end(), {
         "-framerate", FfmpegDouble(overlay.seqFps),
-        "-start_number", "0",
+        "-start_number", std::to_string(overlay.seqStartFrame),
         "-i", assetPath
       });
+    } else if (OverlayStillOnce(overlay)) {
+      // Một khung duy nhất; `loop` trong filter lặp lại khung đã xử lý (xem OverlayStillOnce).
+      cmd.insert(cmd.end(), {"-i", assetPath});
     } else if (OverlayIsImageLike(overlay)) {
+      // Dư 1 s: lớp phủ tĩnh xén ở cuối batch dài quá mép batch (xem OverlaysForBatch).
       cmd.insert(cmd.end(), {
         "-loop", "1",
-        "-t", FixedSeconds(std::max(0.05, sequenceDuration)),
+        "-t", FixedSeconds(std::max(0.05, sequenceDuration + kBatchOverlayTailSeconds)),
         "-i", assetPath
       });
     } else {
+      /* `-reinit_filter:v 0` — CÙNG LÝ DO với input lane chính (xem ExportBatch), và ở đây
+       * thiếu nó thì không chỉ chớp đen mà TREO VĨNH VIỄN.
+       * Video mà luồng hình của chính nó đổi pix_fmt/color_range/colorspace giữa chừng (bản
+       * nối `-c copy` nhiều nguồn: `yuv420p/tv/bt709` -> `yuvj420p/pc/bt470bg` tại chỗ nối)
+       * làm fftools dựng lại CẢ filtergraph ngay giữa lượt. Lane chính `concat` từ 3 clip trở
+       * lên + lớp phủ vắt qua chỗ đổi đó = ffmpeg đứng im, 0% CPU, không lỗi, không thoát.
+       * Tái hiện 2026-09-27 trên BtbN N-123955, Gyan 8.1.1 và BtbN master; có cờ thì xong
+       * trong vài giây. Màu đoạn sau chỗ đổi vẫn đúng: `scale`/bộ chuyển định dạng tự đọc
+       * thuộc tính màu của TỪNG khung.
+       * Chỉ luồng HÌNH (`:v`): với tiếng, buffersrc từ chối hẳn khung đổi thông số (EINVAL)
+       * khi không được dựng lại, nên tiếng giữ hành vi cũ.
+       * Test: tests/scripts/export_concat_video_overlay.js. */
+      cmd.insert(cmd.end(), {"-reinit_filter:v", "0"});
+      // NVDEC chỉ cho lớp phủ có bản GPU riêng: CpuYuv/CpuCanvas xử lý khung ở CPU.
+      if (gpuGraph && overlay.gpuNvdec && OverlayGpuModeFor(overlay, settings) == OverlayGpu::Native) {
+        AppendNvdecInputArgs(cmd);
+      }
       cmd.insert(cmd.end(), {"-i", assetPath});
     }
   }
@@ -2969,9 +5451,14 @@ void AppendOverlayInputArgs(
 /* Map luồng theo chế độ. `-vn`/`-an` là BẮT BUỘC chứ không thừa: ở chế độ VideoOnly
  * filtergraph không có nhãn [a] nào, mà ffmpeg vẫn TỰ NHẶT rãnh tiếng của input 0 nếu không
  * cấm — bản xuất ra có tiếng CHƯA qua bộ lọc (sai âm lượng, chưa khử ồn, thiếu tiếng của
- * lớp phủ). Hỏng kiểu đó phải nghe mới biết, nhìn không thấy. */
+ * lớp phủ). Hỏng kiểu đó phải nghe mới biết, nhìn không thấy.
+ *
+ * `-/filter_complex <file>` (có từ FFmpeg 7.0), KHÔNG dùng `-filter_complex_script`: FFmpeg
+ * master đã XOÁ hẳn tùy chọn đó (commit 07407fff61, có trong 9.0). Bộ cài cũ tải BtbN
+ * `latest` nên máy cài mới nhận đúng bản đã xoá và mọi lượt export chết với "Unrecognized
+ * option". Tiền tố `/` đọc giá trị từ file qua avio nên đường dẫn Unicode vẫn an toàn. */
 void AppendStreamMapArgs(std::vector<std::string>& cmd, const fs::path& scriptPath, FilterScriptMode mode) {
-  cmd.insert(cmd.end(), {"-filter_complex_script", scriptPath.string()});
+  cmd.insert(cmd.end(), {"-/filter_complex", scriptPath.string()});
   if (mode != FilterScriptMode::AudioOnly) cmd.insert(cmd.end(), {"-map", "[v]"});
   else cmd.push_back("-vn");
   if (mode != FilterScriptMode::VideoOnly) cmd.insert(cmd.end(), {"-map", "[a]"});
@@ -2991,7 +5478,641 @@ void AppendEncoderArgsForMode(std::vector<std::string>& cmd, const ExportSetting
   AppendEncoderArgs(cmd, settings, plan);
 }
 
-int ExportBatch(
+/* ===== BỘ NHỚ ĐỆM RENDER CHO LƯỢT XUẤT LẠI (mục 1.13, docs/KE_HOACH_TOI_UU_EXPORT_WIN.md) =====
+ * Kiểu "Use Previews" của Premiere / "Use render cached images" của Resolve, nhưng KHÔNG có đánh đổi
+ * chất lượng: một batch hình chỉ được dùng lại khi KHOÁ của nó trùng, mà khoá là SHA-256 của MỌI
+ * thứ ffmpeg nhìn thấy khi render batch đó:
+ *  - dòng lệnh (trừ tham số đo và tệp ra), tức cả tham số bộ mã hoá, mốc seek, `-t` của lớp phủ;
+ *  - nội dung filter script, trong đó mọi đường dẫn tệp (LUT, mặt nạ, tệp lệnh sendcmd, danh sách
+ *    ffconcat của Retouch) được thay bằng ĐỊNH DANH NỘI DUNG của tệp — xem RenderCacheScriptId;
+ *  - định danh nội dung của mọi tệp `-i` (nguồn, ảnh lớp phủ, chuỗi khung) — RenderCacheFileId;
+ *  - vân tay bản ffmpeg (`-version` + cỡ/mtime của exe và DLL), bản dựng sidecar (__DATE__ __TIME__:
+ *    đổi ở mọi lần biên dịch tệp này) và driver GPU khi bộ mã hoá/bộ lọc là phần cứng.
+ * Định danh theo NỘI DUNG chứ không theo đường dẫn/mtime: temp_input.mp4 và ảnh phụ đề được dựng lại
+ * ở mỗi lần mở dự án / mỗi lượt xuất với nội dung y hệt. Tệp nhỏ (≤ 16 MB) băm cả tệp; tệp lớn (video)
+ * băm cỡ + 5 khúc 1 MB (đầu, 1/4, 1/2, 3/4, cuối) — mã hoá lại một video luôn đổi cỡ hoặc `moov`.
+ * Bật khi backend truyền CRABBYCUT_RENDER_CACHE_DIR (Cài đặt › Xuất video); sidecar chạy tay/test
+ * không truyền thì tắt. Áp cho các batch hình + lượt tiếng của lượt xuất nhiều batch (lượt một batch ghi thẳng ra đích). */
+constexpr const char* kRenderCacheFormat = "crabbycut-render-cache-1";
+constexpr std::uintmax_t kRenderCacheFullHashBytes = 16ULL * 1024 * 1024;
+constexpr std::uintmax_t kRenderCacheSampleBytes = 1024ULL * 1024;
+constexpr std::uintmax_t kRenderCacheDefaultMaxBytes = 20ULL * 1024 * 1024 * 1024;
+// Giữ lại batch mà ổ còn ít hơn chừng này thì thôi — cache không được làm đầy ổ của người dùng.
+constexpr std::uintmax_t kRenderCacheDefaultMinFreeBytes = 5ULL * 1024 * 1024 * 1024;
+constexpr long long kRenderCacheMaxAgeSeconds = 30LL * 24 * 3600;
+
+struct Sha256 {
+  std::uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+  unsigned char buf[64] = {};
+  size_t used = 0;
+  std::uint64_t bytes = 0;
+
+  static std::uint32_t Rotr(std::uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
+  void Block(const unsigned char* p) {
+    static const std::uint32_t k[64] = {
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+      0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+    std::uint32_t w[64];
+    for (int i = 0; i < 16; i++) {
+      w[i] = (std::uint32_t(p[4 * i]) << 24) | (std::uint32_t(p[4 * i + 1]) << 16)
+           | (std::uint32_t(p[4 * i + 2]) << 8) | std::uint32_t(p[4 * i + 3]);
+    }
+    for (int i = 16; i < 64; i++) {
+      const std::uint32_t s0 = Rotr(w[i - 15], 7) ^ Rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+      const std::uint32_t s1 = Rotr(w[i - 2], 17) ^ Rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+      w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    std::uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+    for (int i = 0; i < 64; i++) {
+      const std::uint32_t t1 = hh + (Rotr(e, 6) ^ Rotr(e, 11) ^ Rotr(e, 25)) + ((e & f) ^ (~e & g)) + k[i] + w[i];
+      const std::uint32_t t2 = (Rotr(a, 2) ^ Rotr(a, 13) ^ Rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
+      hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+  }
+  void Update(const void* data, size_t len) {
+    const unsigned char* p = static_cast<const unsigned char*>(data);
+    bytes += len;
+    while (len > 0) {
+      if (used == 0 && len >= 64) { Block(p); p += 64; len -= 64; continue; }
+      const size_t take = std::min(len, sizeof(buf) - used);
+      std::memcpy(buf + used, p, take);
+      used += take; p += take; len -= take;
+      if (used == sizeof(buf)) { Block(buf); used = 0; }
+    }
+  }
+  void Update(const std::string& text) { Update(text.data(), text.size()); }
+  std::string Hex() {
+    const std::uint64_t bits = bytes * 8;
+    const unsigned char one = 0x80, zero = 0;
+    Update(&one, 1);
+    while (used != 56) Update(&zero, 1);
+    unsigned char length[8];
+    for (int i = 0; i < 8; i++) length[i] = static_cast<unsigned char>(bits >> (56 - 8 * i));
+    Update(length, 8);
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (std::uint32_t v : h) out << std::setw(8) << v;
+    return out.str();
+  }
+};
+
+std::string Sha256Hex(const std::string& text) {
+  Sha256 sha;
+  sha.Update(text);
+  return sha.Hex();
+}
+
+/* xxHash64 (thuật toán công khai của Yann Collet) — băm NỘI DUNG TỆP cho định danh cache. SHA-256 tự viết
+ * chỉ ~170 MB/s: "Yêu Con" có hàng trăm MB khung PNG chữ động, khâu tính khoá mất 7,3 s và chặn việc khởi
+ * chạy batch. xxHash64 nhanh hơn hàng chục lần; định danh dùng hai hạt giống (128 bit) + cỡ tệp, khoá tổng
+ * vẫn là SHA-256 trên các định danh đó. */
+std::uint64_t XxHash64(const unsigned char* p, size_t len, std::uint64_t seed) {
+  constexpr std::uint64_t P1 = 0x9E3779B185EBCA87ULL, P2 = 0xC2B2AE3D27D4EB4FULL, P3 = 0x165667B19E3779F9ULL,
+                          P4 = 0x85EBCA77C2B2AE63ULL, P5 = 0x27D4EB2F165667C5ULL;
+  const auto rotl = [](std::uint64_t x, int r) { return (x << r) | (x >> (64 - r)); };
+  const auto read64 = [](const unsigned char* q) { std::uint64_t v; std::memcpy(&v, q, 8); return v; };
+  const auto read32 = [](const unsigned char* q) { std::uint32_t v; std::memcpy(&v, q, 4); return v; };
+  const auto mix = [&](std::uint64_t acc, std::uint64_t input) { acc += input * P2; acc = rotl(acc, 31); return acc * P1; };
+  const auto merge = [&](std::uint64_t acc, std::uint64_t value) { acc ^= mix(0, value); return acc * P1 + P4; };
+  const unsigned char* end = p + len;
+  std::uint64_t h;
+  if (len >= 32) {
+    std::uint64_t v1 = seed + P1 + P2, v2 = seed + P2, v3 = seed, v4 = seed - P1;
+    const unsigned char* limit = end - 32;
+    do {
+      v1 = mix(v1, read64(p)); v2 = mix(v2, read64(p + 8)); v3 = mix(v3, read64(p + 16)); v4 = mix(v4, read64(p + 24));
+      p += 32;
+    } while (p <= limit);
+    h = rotl(v1, 1) + rotl(v2, 7) + rotl(v3, 12) + rotl(v4, 18);
+    h = merge(h, v1); h = merge(h, v2); h = merge(h, v3); h = merge(h, v4);
+  } else {
+    h = seed + P5;
+  }
+  h += static_cast<std::uint64_t>(len);
+  for (; p + 8 <= end; p += 8) { h ^= mix(0, read64(p)); h = rotl(h, 27) * P1 + P4; }
+  if (p + 4 <= end) { h ^= static_cast<std::uint64_t>(read32(p)) * P1; h = rotl(h, 23) * P2 + P3; p += 4; }
+  for (; p < end; p++) { h ^= static_cast<std::uint64_t>(*p) * P5; h = rotl(h, 11) * P1; }
+  h ^= h >> 33; h *= P2; h ^= h >> 29; h *= P3; h ^= h >> 32;
+  return h;
+}
+
+std::string ContentHash(const std::string& data) {
+  const auto* bytes = reinterpret_cast<const unsigned char*>(data.data());
+  std::ostringstream out;
+  out << std::hex << std::setfill('0') << std::setw(16) << XxHash64(bytes, data.size(), 0)
+      << std::setw(16) << XxHash64(bytes, data.size(), 0x2545F4914F6CDD1DULL);
+  return out.str();
+}
+
+fs::path g_renderCacheDir;   // rỗng = tắt (xem RenderCacheConfigure)
+std::uintmax_t g_renderCacheMaxBytes = kRenderCacheDefaultMaxBytes;
+std::uintmax_t g_renderCacheMinFreeBytes = kRenderCacheDefaultMinFreeBytes;
+std::map<std::string, std::string> g_renderCacheIds;   // đường dẫn -> định danh (một lượt xuất)
+
+std::uintmax_t EnvBytes(const char* name, std::uintmax_t fallback) {
+  const char* env = std::getenv(name);
+  if (!env || !*env) return fallback;
+  char* end = nullptr;
+  const unsigned long long value = std::strtoull(env, &end, 10);
+  return (end && end != env) ? static_cast<std::uintmax_t>(value) : fallback;
+}
+
+void RenderCacheLoadStamps();
+
+void RenderCacheConfigure() {
+  g_renderCacheDir.clear();
+  const char* dir = std::getenv("CRABBYCUT_RENDER_CACHE_DIR");
+  if (!dir || !*dir) return;
+  std::error_code ec;
+  fs::create_directories(fs::path(dir), ec);
+  if (ec || !fs::is_directory(fs::path(dir), ec)) return;
+  g_renderCacheDir = fs::path(dir);
+  g_renderCacheMaxBytes = EnvBytes("CRABBYCUT_RENDER_CACHE_MAX_BYTES", kRenderCacheDefaultMaxBytes);
+  g_renderCacheMinFreeBytes = EnvBytes("CRABBYCUT_RENDER_CACHE_MIN_FREE_BYTES", kRenderCacheDefaultMinFreeBytes);
+  RenderCacheLoadStamps();
+}
+
+// Vân tay bản ffmpeg: `-version` (phiên bản + cấu hình + bản thư viện) và cỡ/mtime của exe + DLL.
+std::string FfmpegFingerprint() {
+  static const std::string fingerprint = [] {
+    std::string out = CommandOutput({"ffmpeg", "-version"});
+#ifdef _WIN32
+    wchar_t found[MAX_PATH * 2];
+    const DWORD n = SearchPathW(nullptr, L"ffmpeg.exe", nullptr, MAX_PATH * 2, found, nullptr);
+    if (n > 0 && n < MAX_PATH * 2) {
+      const fs::path exe(found);
+      std::vector<std::string> stamps;
+      std::error_code ec;
+      for (const auto& entry : fs::directory_iterator(exe.parent_path(), ec)) {
+        const std::string name = entry.path().filename().string();
+        const std::string ext = entry.path().extension().string();
+        if (ext == ".dll" || entry.path() == exe) stamps.push_back(name + "|" + FileStamp(entry.path().string()));
+      }
+      std::sort(stamps.begin(), stamps.end());
+      for (const auto& s : stamps) out += "\n" + s;
+    }
+#endif
+    return out;
+  }();
+  return fingerprint;
+}
+
+// Driver GPU (bộ mã hoá phần cứng / bộ lọc CUDA): driver mới có thể đổi SPS/PPS của NVENC, mà ghép
+// `-c copy` giữ SPS/PPS của batch đầu — batch cũ không được ghép với batch của driver khác.
+std::string GpuDriverFingerprint() {
+  static const std::string fingerprint = [] {
+    std::string out;
+#ifdef _WIN32
+    wchar_t system[MAX_PATH];
+    const UINT n = GetSystemDirectoryW(system, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+      const fs::path dir(system);
+      for (const wchar_t* dll : {L"nvcuda.dll", L"nvEncodeAPI64.dll", L"amfrt64.dll", L"libmfxhw64.dll", L"libvpl.dll"}) {
+        std::error_code ec;
+        const fs::path p = dir / dll;
+        if (fs::is_regular_file(p, ec)) out += FileStamp(p.string()) + "\n";
+      }
+    }
+#endif
+    return out;
+  }();
+  return fingerprint;
+}
+
+bool ReadFileRange(const fs::path& path, std::uintmax_t offset, std::uintmax_t length, std::string& out) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return false;
+  in.seekg(static_cast<std::streamoff>(offset));
+  out.assign(static_cast<size_t>(length), '\0');
+  in.read(&out[0], static_cast<std::streamsize>(length));
+  out.resize(static_cast<size_t>(in.gcount()));
+  return in.gcount() == static_cast<std::streamsize>(length);
+}
+
+std::string RenderCacheFileId(const fs::path& path, int depth = 0);
+
+/* Danh sách ffconcat (khung miếng vá Retouch nạp bằng `movie=…:format_name=concat`): định danh gồm
+ * nội dung từng tệp nó liệt kê, không chỉ chữ của danh sách. "" = có tệp không đọc được. */
+std::string RenderCacheConcatListId(const fs::path& list, const std::string& text, int depth) {
+  std::istringstream lines(text);
+  std::string line;
+  Sha256 sha;
+  while (std::getline(lines, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    size_t at = line.find_first_not_of(" \t");
+    if (at != std::string::npos && line.compare(at, 5, "file ") == 0) {
+      std::string name = line.substr(at + 5);
+      name.erase(0, name.find_first_not_of(" \t"));
+      if (name.size() >= 2 && name.front() == '\'' && name.back() == '\'') name = name.substr(1, name.size() - 2);
+      fs::path p = fs::path(name);
+      if (p.is_relative()) p = list.parent_path() / p;
+      const std::string id = RenderCacheFileId(p, depth + 1);
+      if (id.empty()) return "";
+      line = "file " + id;
+    }
+    sha.Update(line + "\n");
+  }
+  return sha.Hex();
+}
+
+/* Định danh nội dung một tệp (không đụng biến toàn cục — chạy được trên nhiều luồng, xem
+ * RenderCacheHashFiles). Danh sách ffconcat thì trả "" + `isList` (định danh của nó cần định danh từng tệp
+ * nó liệt kê, nơi gọi tính tiếp trên luồng chính). */
+std::string RenderCacheHashContent(const fs::path& path, std::uintmax_t size, bool& isList, std::string* listText) {
+  isList = false;
+  if (size <= kRenderCacheFullHashBytes) {
+    std::string text;
+    if (!ReadFileRange(path, 0, size, text)) return "";
+    if (path.extension() == ".ffconcat" || text.compare(0, 8, "ffconcat") == 0) {
+      isList = true;
+      if (listText) *listText = std::move(text);
+      return "";
+    }
+    return "f" + std::to_string(size) + ":" + ContentHash(text);
+  }
+  std::string samples;
+  const std::uintmax_t last = size - kRenderCacheSampleBytes;
+  for (const std::uintmax_t offset : {std::uintmax_t(0), last / 4, last / 2, last / 4 * 3, last}) {
+    std::string chunk;
+    if (!ReadFileRange(path, offset, kRenderCacheSampleBytes, chunk)) return "";
+    samples += chunk;
+  }
+  return "b" + std::to_string(size) + ":" + ContentHash(samples);
+}
+
+/* ĐỊNH DANH NHỚ GIỮA CÁC LƯỢT XUẤT (`file_ids.tsv` trong thư mục cache): (đường dẫn, cỡ, mtime) -> định
+ * danh nội dung, như index của git. Đo trên "Yêu Con": lượt xuất lại tốn 2,0 s chỉ để đọc lại hàng nghìn
+ * khung PNG chữ động không đổi. Tệp ghi lại (mtime mới) thì băm lại — ảnh bake lại với nội dung y hệt vẫn
+ * ra cùng định danh, chỉ tốn lần đọc. Mục không dùng quá 30 ngày thì bỏ khi ghi lại tệp. */
+struct RenderCacheStamp {
+  std::uintmax_t size = 0;
+  long long mtime = 0;
+  std::string id;
+  long long used = 0;
+};
+std::map<std::string, RenderCacheStamp> g_renderCacheStamps;
+bool g_renderCacheStampsDirty = false;
+// Khác null = lượt GOM: RenderCacheFileId chỉ ghi lại đường dẫn cần băm (xem RenderCachePrefetch).
+std::vector<fs::path>* g_renderCacheCollect = nullptr;
+
+fs::path RenderCacheStampFile() { return g_renderCacheDir / "file_ids.tsv"; }
+
+void RenderCacheLoadStamps() {
+  g_renderCacheStamps.clear();
+  g_renderCacheStampsDirty = false;
+  std::ifstream in(RenderCacheStampFile(), std::ios::binary);
+  std::string line;
+  while (std::getline(in, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    std::istringstream fields(line);
+    RenderCacheStamp stamp;
+    std::string size, mtime, used, path;
+    if (!std::getline(fields, stamp.id, '\t') || !std::getline(fields, size, '\t')
+        || !std::getline(fields, mtime, '\t') || !std::getline(fields, used, '\t') || !std::getline(fields, path)) {
+      continue;
+    }
+    stamp.size = static_cast<std::uintmax_t>(std::strtoull(size.c_str(), nullptr, 10));
+    stamp.mtime = std::strtoll(mtime.c_str(), nullptr, 10);
+    stamp.used = std::strtoll(used.c_str(), nullptr, 10);
+    if (!stamp.id.empty() && !path.empty()) g_renderCacheStamps[path] = stamp;
+  }
+}
+
+void RenderCacheSaveStamps() {
+  if (g_renderCacheDir.empty() || !g_renderCacheStampsDirty) return;
+  const long long now = UnixNowSeconds();
+  const fs::path file = RenderCacheStampFile();
+  const fs::path tmp = fs::path(file.string() + ".tmp");
+  {
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+    if (!out) return;
+    for (const auto& [path, stamp] : g_renderCacheStamps) {
+      if (now - stamp.used > kRenderCacheMaxAgeSeconds) continue;
+      out << stamp.id << '\t' << stamp.size << '\t' << stamp.mtime << '\t' << stamp.used << '\t' << path << '\n';
+    }
+  }
+  std::error_code ec;
+  fs::rename(tmp, file, ec);
+  if (ec) fs::remove(tmp, ec);
+  g_renderCacheStampsDirty = false;
+}
+
+bool RenderCacheStat(const fs::path& path, std::uintmax_t& size, long long& mtime) {
+  std::error_code ec;
+  if (!fs::is_regular_file(path, ec)) return false;
+  size = fs::file_size(path, ec);
+  if (ec) return false;
+  const auto time = fs::last_write_time(path, ec);
+  if (ec) return false;
+  mtime = static_cast<long long>(time.time_since_epoch().count());
+  return true;
+}
+
+void RenderCacheRemember(const std::string& key, std::uintmax_t size, long long mtime, const std::string& id) {
+  g_renderCacheIds[key] = id;
+  RenderCacheStamp& stamp = g_renderCacheStamps[key];
+  stamp.size = size;
+  stamp.mtime = mtime;
+  stamp.id = id;
+  stamp.used = UnixNowSeconds();
+  g_renderCacheStampsDirty = true;
+}
+
+std::string RenderCacheFileId(const fs::path& path, int depth) {
+  const std::string key = path.string();
+  const auto memo = g_renderCacheIds.find(key);
+  if (memo != g_renderCacheIds.end()) return memo->second;
+  std::uintmax_t size = 0;
+  long long mtime = 0;
+  if (depth > 2 || !RenderCacheStat(path, size, mtime)) return "";
+  const auto stamp = g_renderCacheStamps.find(key);
+  if (stamp != g_renderCacheStamps.end() && stamp->second.size == size && stamp->second.mtime == mtime) {
+    stamp->second.used = UnixNowSeconds();
+    g_renderCacheStampsDirty = true;
+    g_renderCacheIds[key] = stamp->second.id;
+    return stamp->second.id;
+  }
+  // Lượt gom: tệp thường để dành băm song song; danh sách ffconcat đọc ngay để gom các tệp nó liệt kê.
+  if (g_renderCacheCollect && path.extension() != ".ffconcat") {
+    g_renderCacheCollect->push_back(path);
+    return "?";
+  }
+  bool isList = false;
+  std::string listText;
+  std::string id = RenderCacheHashContent(path, size, isList, &listText);
+  if (isList) {
+    const std::string listId = RenderCacheConcatListId(path, listText, depth);
+    if (listId.empty()) return "";
+    id = "l" + std::to_string(size) + ":" + listId;
+  }
+  if (id.empty()) return "";
+  if (g_renderCacheCollect) return id;   // định danh của danh sách lúc gom dựa trên "?" -> không nhớ
+  RenderCacheRemember(key, size, mtime, id);
+  return id;
+}
+
+/* Băm song song các tệp đã gom (khung PNG chữ động: hàng nghìn tệp vừa ghi — lần mở đầu tiên của mỗi tệp
+ * tốn chủ yếu ở trình quét virus, không ở phép băm). Danh sách ffconcat lộ ra lúc này thì bỏ qua: luồng
+ * chính tính nó sau, bằng đường thường. */
+void RenderCacheHashFiles(std::vector<fs::path> paths) {
+  std::sort(paths.begin(), paths.end());
+  paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
+  struct Item { fs::path path; std::uintmax_t size = 0; long long mtime = 0; std::string id; };
+  std::vector<Item> todo;
+  for (const auto& path : paths) {
+    if (g_renderCacheIds.count(path.string())) continue;
+    Item item;
+    item.path = path;
+    if (RenderCacheStat(path, item.size, item.mtime)) todo.push_back(std::move(item));
+  }
+  if (todo.empty()) return;
+  std::atomic<size_t> next{0};
+  const auto worker = [&] {
+    for (size_t i = next++; i < todo.size(); i = next++) {
+      bool isList = false;
+      todo[i].id = RenderCacheHashContent(todo[i].path, todo[i].size, isList, nullptr);
+    }
+  };
+  const size_t threads = std::min<size_t>({8, todo.size(), std::max<size_t>(1, std::thread::hardware_concurrency())});
+  std::vector<std::thread> pool;
+  for (size_t t = 1; t < threads; t++) pool.emplace_back(worker);
+  worker();
+  for (auto& thread : pool) thread.join();
+  for (const auto& item : todo) {
+    if (!item.id.empty()) RenderCacheRemember(item.path.string(), item.size, item.mtime, item.id);
+  }
+}
+
+/* Tham số `-i`: tệp, hoặc mẫu chuỗi khung (`…%05d.png`, đánh số từ 0 — xem AppendOverlayInputArgs). */
+std::string RenderCacheInputId(const std::string& arg, const fs::path& baseDir) {
+  fs::path path(arg);
+  if (path.is_relative()) path = baseDir / path;
+  std::error_code ec;
+  if (fs::is_regular_file(path, ec)) return RenderCacheFileId(path);
+  const std::string text = path.string();
+  const size_t pct = text.rfind('%');
+  if (pct == std::string::npos) return "";
+  size_t end = pct + 1;
+  int width = 0;
+  while (end < text.size() && std::isdigit(static_cast<unsigned char>(text[end]))) {
+    width = width * 10 + (text[end] - '0');
+    end++;
+  }
+  if (end >= text.size() || text[end] != 'd') return "";
+  Sha256 sha;
+  int count = 0;
+  for (int n = 0;; n++) {
+    std::string number = std::to_string(n);
+    if (static_cast<int>(number.size()) < width) number.insert(0, static_cast<size_t>(width) - number.size(), '0');
+    const fs::path frame(text.substr(0, pct) + number + text.substr(end + 1));
+    if (!fs::is_regular_file(frame, ec)) break;
+    const std::string id = RenderCacheFileId(frame);
+    if (id.empty()) return "";
+    sha.Update(id + "\n");
+    count++;
+  }
+  return count > 0 ? "s" + std::to_string(count) + ":" + sha.Hex() : "";
+}
+
+/* Filter script: mọi đoạn trong nháy đơn mà là đường dẫn tới một tệp có thật (FilterPath và
+ * filterPath() của frontend luôn đặt đường dẫn trong nháy, `:` escape thành `\:`) được thay bằng định
+ * danh nội dung — tên tệp phụ (lutmix_*.cmd, LUT bake theo từng lượt) đổi mà nội dung không đổi thì
+ * khoá vẫn trùng. Đoạn nào không phải tệp thì giữ nguyên chữ, nên đọc nhầm chỉ làm lỡ cache chứ
+ * không bao giờ cho trùng khoá sai. */
+std::string RenderCacheScriptId(const fs::path& scriptPath) {
+  std::string text;
+  std::error_code ec;
+  const std::uintmax_t size = fs::file_size(scriptPath, ec);
+  if (ec || !ReadFileRange(scriptPath, 0, size, text)) return "";
+  std::string normalized;
+  normalized.reserve(text.size());
+  size_t i = 0;
+  while (i < text.size()) {
+    const size_t open = text.find('\'', i);
+    if (open == std::string::npos) { normalized.append(text, i, std::string::npos); break; }
+    const size_t close = text.find('\'', open + 1);
+    if (close == std::string::npos) { normalized.append(text, i, std::string::npos); break; }
+    normalized.append(text, i, open - i + 1);
+    const std::string quoted = text.substr(open + 1, close - open - 1);
+    std::string unescaped;
+    for (size_t k = 0; k < quoted.size(); k++) {
+      if (quoted[k] == '\\' && k + 1 < quoted.size()) { unescaped.push_back(quoted[++k]); continue; }
+      unescaped.push_back(quoted[k]);
+    }
+    const bool looksLikePath = unescaped.find('/') != std::string::npos || unescaped.find('\\') != std::string::npos;
+    const fs::path candidate(unescaped);
+    std::string id;
+    if (looksLikePath && candidate.is_absolute() && fs::is_regular_file(candidate, ec)) id = RenderCacheFileId(candidate);
+    normalized += id.empty() ? quoted : "<" + id + ">";
+    normalized.push_back('\'');
+    i = close + 1;
+  }
+  return "c" + std::to_string(normalized.size()) + ":" + Sha256Hex(normalized);
+}
+
+/* MỘT LƯỢT FFMPEG ĐÃ CHUẨN BỊ, CHƯA CHẠY (mục 1.8). PrepareExportBatch ghi filter script và dựng
+ * sẵn mọi thứ của dòng lệnh trừ bộ mã hoá; `buildCmd(plan, nhãn)` ghép nốt phần bộ mã hoá — lỗi
+ * phần cứng thì dựng lại với plan CPU. Tách hai bước để nhiều batch chạy SONG SONG được: bước
+ * chuẩn bị đụng biến toàn cục (g_clipVideoInput, g_filterAuxSeq, g_fastClipCount) nên chạy tuần
+ * tự ở luồng chính; bước chạy chỉ là tiến trình ffmpeg (xem RunBatchJobs). */
+struct BatchJob {
+  ExportRunTiming timing;
+  fs::path scriptPath;
+  fs::path tempDir;
+  bool video = true;   // false = lượt chỉ-tiếng: không phụ thuộc bộ mã hoá hình
+  std::string progressText;   // "batch 2/4 (7 đoạn)" — dòng tiến độ lúc khởi chạy
+  std::function<std::vector<std::string>(const EncoderPlan&, const std::string&)> buildCmd;
+  /* ĐỒ THỊ GPU (mục 1.21): batch đạt BatchGpuEligible thì `buildCmd` chạy bản GPU (`gpuScriptPath`);
+   * bản CPU (`scriptPath`, `buildCmdCpu`) luôn được ghi sẵn để chạy lại khi lượt GPU lỗi hoặc khi
+   * bộ mã hoá lùi về CPU (libx264 không nhận khung CUDA) — xem UseCpuGraph. */
+  bool gpu = false;
+  fs::path gpuScriptPath;
+  std::function<std::vector<std::string>(const EncoderPlan&, const std::string&)> buildCmdCpu;
+  /* CACHE RENDER (mục 1.13): batch hình + lượt tiếng của lượt xuất nhiều batch (`cacheable`). RunBatchJobs
+   * tính `cacheKey` theo đúng dòng lệnh sắp chạy; trùng thì `cacheHit` = tệp trong cache, không chạy
+   * ffmpeg. Lượt xuất xong thì RenderCacheStore cất `output` của batch vừa render vào cache. */
+  fs::path output;
+  bool cacheable = false;
+  std::string cacheKey;
+  fs::path cacheHit;
+};
+
+void UseCpuGraph(BatchJob& job) {
+  if (!job.gpu) return;
+  job.gpu = false;
+  job.timing.gpu = false;
+  job.buildCmd = job.buildCmdCpu;
+}
+
+fs::path RenderCacheEntry(const std::string& key, const fs::path& output) {
+  return g_renderCacheDir / (key + output.extension().string());
+}
+
+// "" = không tính được (có tệp vào không đọc được) -> batch chạy như không có cache.
+std::string RenderCacheKey(const BatchJob& job, const std::vector<std::string>& cmd) {
+  if (cmd.size() < 2) return "";
+  Sha256 sha;
+  const auto add = [&](const std::string& part) { sha.Update(part); sha.Update("\n", 1); };
+  add(kRenderCacheFormat);
+  add(std::string("sidecar ") + __DATE__ + " " + __TIME__);
+  add(FfmpegFingerprint());
+  bool hardware = false;
+  const size_t outputIndex = cmd.size() - 1;
+  for (size_t i = 1; i < outputIndex; i++) {
+    const std::string& arg = cmd[i];
+    if (arg == "-benchmark") continue;
+    if ((arg == "-progress" || arg == "-print_graphs_file") && i + 1 < outputIndex) { i++; continue; }
+    if (arg == "-i" && i + 1 < outputIndex) {
+      const std::string id = RenderCacheInputId(cmd[++i], job.tempDir);
+      if (id.empty()) return "";
+      add("-i " + id);
+      continue;
+    }
+    if (arg == "-/filter_complex" && i + 1 < outputIndex) {
+      const std::string id = RenderCacheScriptId(fs::path(cmd[++i]));
+      if (id.empty()) return "";
+      add("-/filter_complex " + id);
+      continue;
+    }
+    if (arg.find("_nvenc") != std::string::npos || arg.find("_qsv") != std::string::npos
+        || arg.find("_amf") != std::string::npos || arg == "-init_hw_device") {
+      hardware = true;
+    }
+    add(arg);
+  }
+  if (hardware) add(GpuDriverFingerprint());
+  add("out " + fs::path(cmd[outputIndex]).extension().string());
+  return sha.Hex();
+}
+
+bool IsRenderCacheEntryName(const std::string& name) {
+  if (name.size() != 68) return false;   // 64 hex + ".mp4"/".mov"/".m4a"
+  for (size_t i = 0; i < 64; i++) {
+    if (!std::isxdigit(static_cast<unsigned char>(name[i]))) return false;
+  }
+  const std::string ext = name.substr(64);
+  return ext == ".mp4" || ext == ".mov" || ext == ".m4a";
+}
+
+/* Dọn cache: bỏ mục quá 30 ngày không dùng, rồi giữ các mục MỚI DÙNG nhất trong trần dung lượng
+ * (mtime = lần dùng cuối, xem RenderCacheStore). Tệp `.part` sót lại (sidecar bị tắt giữa lúc chép)
+ * quá một ngày thì xoá. */
+void RenderCachePrune() {
+  if (g_renderCacheDir.empty()) return;
+  struct Entry { fs::path path; std::uintmax_t size; fs::file_time_type time; };
+  std::vector<Entry> entries;
+  std::error_code ec;
+  const auto now = fs::file_time_type::clock::now();
+  for (const auto& item : fs::directory_iterator(g_renderCacheDir, ec)) {
+    std::error_code itemEc;
+    if (!item.is_regular_file(itemEc)) continue;
+    const fs::path path = item.path();
+    const auto time = fs::last_write_time(path, itemEc);
+    if (itemEc) continue;
+    const long long age = std::chrono::duration_cast<std::chrono::seconds>(now - time).count();
+    if (path.extension() == ".part") {
+      if (age > 24 * 3600) fs::remove(path, itemEc);
+      continue;
+    }
+    if (!IsRenderCacheEntryName(path.filename().string())) continue;
+    if (age > kRenderCacheMaxAgeSeconds) { fs::remove(path, itemEc); continue; }
+    const std::uintmax_t size = item.file_size(itemEc);
+    if (!itemEc) entries.push_back({path, size, time});
+  }
+  std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) { return a.time > b.time; });
+  std::uintmax_t kept = 0;
+  for (const auto& entry : entries) {
+    if (kept + entry.size > g_renderCacheMaxBytes) { fs::remove(entry.path, ec); continue; }
+    kept += entry.size;
+  }
+}
+
+/* Sau khi GHÉP XONG (bước ghép đọc chính các tệp batch): cất batch vừa render vào cache bằng ĐỔI TÊN
+ * (cache nằm cạnh temp_uploads trong thư mục dữ liệu người dùng -> cùng ổ, tức thì), chạm mtime các
+ * mục vừa dùng lại (LRU), rồi dọn. Ổ còn ít hơn g_renderCacheMinFreeBytes thì không giữ gì: batch bị
+ * xoá như trước (RemoveExportBatches). Khác ổ thì chép, khi ổ đích còn đủ chỗ. */
+void RenderCacheStore(const std::vector<BatchJob>& jobs) {
+  if (g_renderCacheDir.empty()) return;
+  const auto now = fs::file_time_type::clock::now();
+  for (const auto& job : jobs) {
+    if (!job.cacheable || job.cacheKey.empty()) continue;
+    std::error_code ec;
+    if (!job.cacheHit.empty()) {
+      fs::last_write_time(job.cacheHit, now, ec);
+      continue;
+    }
+    if (job.timing.exitCode != 0) continue;
+    const std::uintmax_t size = fs::file_size(job.output, ec);
+    if (ec || size == 0) continue;
+    const fs::space_info space = fs::space(g_renderCacheDir, ec);
+    if (ec || space.available < g_renderCacheMinFreeBytes) continue;
+    const fs::path entry = RenderCacheEntry(job.cacheKey, job.output);
+    const fs::path part = fs::path(entry.string() + ".part");
+    fs::rename(job.output, part, ec);
+    if (ec) {
+      if (space.available < size + g_renderCacheMinFreeBytes) continue;
+      ec.clear();
+      fs::copy_file(job.output, part, fs::copy_options::overwrite_existing, ec);
+      if (ec) { fs::remove(part, ec); continue; }
+    }
+    fs::rename(part, entry, ec);
+    if (ec) { fs::remove(part, ec); continue; }
+    fs::last_write_time(entry, now, ec);
+    g_exportTiming.cacheStored++;
+  }
+  RenderCachePrune();
+  RenderCacheSaveStamps();
+}
+
+bool PrepareExportBatch(
+  BatchJob& job,
   const std::string& source,
   const std::string& output,
   const fs::path& tempDir,
@@ -3001,19 +6122,40 @@ int ExportBatch(
   size_t batchIndex,
   size_t batchCount,
   const ExportSettings& settings,
-  EncoderPlan& plan,
   const std::vector<ExportOverlay>& overlays,
   FilterScriptMode mode = FilterScriptMode::Full
 ) {
   fs::create_directories(fs::path(output).parent_path());
-  fs::path scriptPath = tempDir / ("export_filter_batch_" + std::to_string(batchIndex) + ".txt");
-  if (!WriteFilterScript(scriptPath, intervals, offset, count, settings, overlays, mode)) {
+  const fs::path scriptPath = tempDir / ("export_filter_batch_" + std::to_string(batchIndex) + ".txt");
+  /* Dải nguồn (mục 1.1, xem PlanSourceRanges): input thêm đứng SAU input lớp phủ, nên chỉ số
+   * lớp phủ (1 + assetInputIndex) giữ nguyên. Phải biết trước khi ghi filter script. */
+  const SourceRangePlan ranges = PlanSourceRanges(intervals, offset, count, settings, mode);
+  int overlayInputs = 0;
+  for (const auto& overlay : overlays) {
+    if (OverlayNeedsInput(overlay)) overlayInputs++;
+  }
+  const size_t firstExtraRange = ranges.inputZeroIsRange ? 1 : 0;
+  g_clipVideoInput.clear();
+  for (size_t i = 0; ranges.active() && i < count; i++) {
+    const size_t k = ranges.clipRange[i];
+    g_clipVideoInput.push_back(k < firstExtraRange ? 0 : 1 + overlayInputs + static_cast<int>(k - firstExtraRange));
+  }
+  const bool scriptOk = WriteFilterScript(scriptPath, intervals, offset, count, settings, overlays, mode);
+  /* Bản GPU của cùng batch (cùng dải nguồn, cùng chỉ số input) — xem BatchJob. Ghi lỗi thì thôi,
+   * batch đi bản CPU. */
+  bool gpu = false;
+  const fs::path gpuScriptPath = tempDir / ("export_filter_batch_" + std::to_string(batchIndex) + "_gpu.txt");
+  if (scriptOk && mode != FilterScriptMode::AudioOnly && BatchGpuEligible(intervals, offset, count, overlays, settings)) {
+    g_gpuGraph = true;
+    gpu = WriteFilterScript(gpuScriptPath, intervals, offset, count, settings, overlays, mode);
+    g_gpuGraph = false;
+  }
+  g_clipVideoInput.clear();
+  if (!scriptOk) {
     Emit("error", "cannot write ffmpeg filter script", 6);
-    return 6;
+    return false;
   }
 
-  Emit("progress", "Đang render batch " + std::to_string(batchIndex + 1) + "/" + std::to_string(batchCount)
-                   + " (" + std::to_string(count) + " đoạn)...");
   /* `-reinit_filter 0` — ĐÂY LÀ THỨ DẸP CHỚP ĐEN Ở ĐIỂM NỐI CẢNH.
    * (Port từ nhánh CrabbyCut_v2.0.0, commit 6dd4f6d — đã đo ở đó, xem số liệu bên dưới.)
    *
@@ -3039,37 +6181,389 @@ int ExportBatch(
    * thuộc tính của TỪNG khung nên phép chuyển màu vẫn đúng.
    * ĐỔI ĐỘ PHÂN GIẢI giữa chừng cũng an toàn — đã thử 320x240 -> 640x480: đúng số khung,
    * không khung hỏng, không vùng đen. */
-  const std::vector<std::string> baseCmd = {
-    "ffmpeg", "-y", "-hide_banner", "-v", "error", "-nostdin",
-    "-reinit_filter", "0",   // PHẢI đứng TRƯỚC -i: đây là tuỳ chọn của INPUT
-    "-i", source
-  };
-  std::vector<std::string> cmd = baseCmd;
-  AppendOverlayInputArgs(cmd, overlays, SequenceDuration(intervals, offset, count), tempDir);
-  AppendStreamMapArgs(cmd, scriptPath, mode);
-  AppendEncoderArgsForMode(cmd, settings, plan, mode);
-  cmd.insert(cmd.end(), {"-movflags", "+faststart", output});
+  // Seek theo batch: xem khối chú thích ở BatchSeekSeconds — PTS không đổi nên filter script
+  // viết ở trên dùng nguyên được.
+  const double seekTo = ranges.inputZeroIsRange ? ranges.seekTo[0]
+                                                : BatchSeekSeconds(intervals, offset, count, settings, mode);
+  ExportRunTiming& timing = job.timing;
+  timing = ExportRunTiming{};
+  timing.seekTo = seekTo;
+  timing.fastClips = static_cast<size_t>(g_fastClipCount);
+  timing.sourceRanges = ranges.seekTo.size();
+  timing.mode = mode == FilterScriptMode::AudioOnly ? "audio"
+              : (mode == FilterScriptMode::VideoOnly ? "video" : "full");
+  timing.label = mode == FilterScriptMode::AudioOnly
+    ? std::string("audio")
+    : "batch_" + std::to_string(10000 + static_cast<int>(batchIndex)).substr(1);
+  timing.intervals = count;
+  timing.overlays = overlays.size();
+  timing.sequenceDuration = SequenceDuration(intervals, offset, count);
+  for (size_t i = 0; i < count; i++) {
+    const ExportInterval& item = intervals[offset + i];
+    timing.sourceFrom = i == 0 ? item.start : std::min(timing.sourceFrom, item.start);
+    timing.sourceTo = std::max(timing.sourceTo, item.end);
+  }
+  job.scriptPath = scriptPath;
+  job.tempDir = tempDir;
+  job.output = fs::path(output);
+  job.video = mode != FilterScriptMode::AudioOnly;
+  job.progressText = "batch " + std::to_string(batchIndex + 1) + "/" + std::to_string(batchCount)
+                   + " (" + std::to_string(count) + " đoạn)";
   /* CHẠY VỚI THƯ MỤC LÀM VIỆC = tempDir. Đây là thứ làm cho đường dẫn tương đối ở
      AppendOverlayInputArgs trỏ đúng tệp. `source`, `output` và tệp kịch bản filter vẫn
      tuyệt đối nên không phụ thuộc vào cwd; đường dẫn NẰM TRONG kịch bản filter (LUT, mặt nạ)
-     cũng tuyệt đối — xem FilterPath. */
-  int code = RunIn(cmd, tempDir);
-  if (code != 0 && plan.hardware) {
-    Emit("progress", "Encoder phần cứng " + plan.videoEncoder + " lỗi, chuyển batch export sang CPU...");
-    plan = CpuEncoderPlan(settings);
-    cmd = baseCmd;
-    AppendOverlayInputArgs(cmd, overlays, SequenceDuration(intervals, offset, count), tempDir);
-    AppendStreamMapArgs(cmd, scriptPath, mode);
-    AppendEncoderArgsForMode(cmd, settings, plan, mode);
-    cmd.insert(cmd.end(), {"-movflags", "+faststart", output});
-    code = RunIn(cmd, tempDir);
+     cũng tuyệt đối — xem FilterPath. Dựng lệnh là bản sao toàn bộ dữ liệu cần (lambda giữ
+     theo giá trị): lớp phủ của batch là biến tạm ở nơi gọi. */
+  const double sequenceDuration = timing.sequenceDuration;
+  /* Đồ thị GPU: thiết bị CUDA `cu` khởi tạo một lần cho cả lệnh (bộ lọc dùng qua -filter_hw_device,
+   * NVDEC qua -hwaccel_device) để mọi khung chung một ngữ cảnh CUDA với NVENC. NVDEC theo batch
+   * (BatchGpuEligible đặt g_gpuBatchNvdec ngay trước khi ghi kịch bản GPU ở trên). */
+  const bool nvdecMain = gpu && g_gpuBatchNvdec;
+  const auto makeBuildCmd = [=](bool gpuGraph) {
+    const fs::path graphPath = gpuGraph ? gpuScriptPath : scriptPath;
+    const bool nvdec = gpuGraph && nvdecMain;
+    return [=](const EncoderPlan& plan, const std::string& runLabel) {
+      std::vector<std::string> cmd = {"ffmpeg", "-y", "-hide_banner", "-v", "error", "-nostdin"};
+      if (gpuGraph) cmd.insert(cmd.end(), {"-init_hw_device", "cuda=cu", "-filter_hw_device", "cu"});
+      cmd.insert(cmd.end(), {"-reinit_filter", "0"});   // PHẢI đứng TRƯỚC -i: đây là tuỳ chọn của INPUT
+      if (seekTo > 0.0) {
+        cmd.insert(cmd.end(), {"-itsoffset", FixedSeconds(seekTo), "-ss", FixedSeconds(seekTo)});
+      }
+      if (nvdec) AppendNvdecInputArgs(cmd);
+      cmd.insert(cmd.end(), {"-i", source});
+      AppendOverlayInputArgs(cmd, overlays, sequenceDuration, tempDir, settings, gpuGraph);
+      for (size_t k = firstExtraRange; k < ranges.seekTo.size(); k++) {
+        cmd.insert(cmd.end(), {"-reinit_filter", "0"});
+        if (ranges.seekTo[k] > 0.0) {
+          cmd.insert(cmd.end(), {"-itsoffset", FixedSeconds(ranges.seekTo[k]), "-ss", FixedSeconds(ranges.seekTo[k])});
+        }
+        if (nvdec) AppendNvdecInputArgs(cmd);
+        cmd.insert(cmd.end(), {"-i", source});
+      }
+      AppendStreamMapArgs(cmd, graphPath, mode);
+      AppendEncoderArgsForMode(cmd, settings, plan, mode);
+      if (!g_exportBenchDir.empty()) {
+        const std::string rel = "export_bench/" + runLabel;
+        cmd.insert(cmd.end(), {"-benchmark", "-progress", rel + ".progress.txt"});
+        if (FfmpegHasPrintGraphs()) cmd.insert(cmd.end(), {"-print_graphs_file", rel + ".graphs.json"});
+      }
+      /* `+faststart` chỉ cho tệp CUỐI (một batch ghi thẳng ra đích). Batch trung gian và lượt
+       * tiếng chỉ là đầu vào của bước ghép: dời `moov` lên đầu là đọc + ghi lại cả tệp lần hai
+       * cho không ai dùng (đo: ~0,6 s mỗi batch 4K 180 s). */
+      if (batchCount <= 1) cmd.insert(cmd.end(), {"-movflags", "+faststart"});
+      cmd.push_back(output);
+      return cmd;
+    };
+  };
+  job.buildCmdCpu = makeBuildCmd(false);
+  job.gpu = gpu;
+  job.timing.gpu = gpu;
+  job.gpuScriptPath = gpu ? gpuScriptPath : fs::path();
+  if (gpu) job.buildCmd = makeBuildCmd(true);
+  else job.buildCmd = job.buildCmdCpu;
+  return true;
+}
+
+// Dòng lệnh của một lần chạy job: ghi cmd.json + bật FFREPORT khi đo (CRABBYCUT_EXPORT_BENCH).
+// FFREPORT là biến môi trường của TIẾN TRÌNH CON, chốt lúc khởi chạy — đặt ngay trước mỗi lần
+// spawn ở luồng chính là đủ, kể cả khi các ffmpeg khác đang chạy.
+std::vector<std::string> JobCommandForRun(const BatchJob& job, const EncoderPlan& plan, const std::string& runLabel) {
+  std::vector<std::string> cmd = job.buildCmd(plan, runLabel);
+  if (!g_exportBenchDir.empty()) {
+    WriteBenchCommand(runLabel, cmd, job.tempDir);
+    SetChildEnv("FFREPORT", "file=export_bench/" + runLabel + ".log:level=32");
   }
-  if (code != 0) {
-    Emit("error", "ffmpeg batch export failed", code);
-    return code;
+  return cmd;
+}
+
+/* SỐ LƯỢT FFMPEG CHẠY SONG SONG (mục 1.8). Đồ thị của một lượt có chuỗi lớp phủ chạy trên MỘT
+ * luồng filter: Bin Tom (20 clip, 19 lớp phủ) chỉ dùng 40–55% của 16 luồng CPU. Đo cả lượt xuất
+ * (phát lại, Ryzen 7 2700X 16 luồng), 1 / 2 / 3 / 4 lượt hình cùng lúc: Bin Tom 20,7 / 15,0 /
+ * 14,1 / 13,8 s; Test.crab 13,5 / 11,4 / 11,0 s; "Yêu Con 1" 60 / 52 / 52 s (chỉ cắt được một
+ * mốc); phim 4K AV1 300 s đã bão hoà CPU nên không đổi (67 / 67 / 66 s). Mặc định: 1 lượt hình
+ * cho mỗi 4 luồng CPU, tối đa 3; bớt khi RAM ít — mỗi lượt giữ khung của nhiều bộ giải mã (dải
+ * nguồn mục 1.1) và của chuỗi lớp phủ: ~1,5 GB ở ≤ 1080p, ~3 GB ở 4K.
+ * Env: CRABBYCUT_EXPORT_PARALLEL=N (0/1 = tắt, chạy nối tiếp như trước). */
+size_t ExportParallelWorkers(const ExportSettings& settings) {
+  if (const char* env = std::getenv("CRABBYCUT_EXPORT_PARALLEL")) {
+    if (*env) return static_cast<size_t>(std::max(1, std::min(8, std::atoi(env))));
   }
-  fs::remove(scriptPath);
+  const unsigned threads = std::max(1u, std::thread::hardware_concurrency());
+  size_t workers = std::max<size_t>(1, std::min<size_t>(3, threads / 4));
+#ifdef _WIN32
+  MEMORYSTATUSEX mem;
+  mem.dwLength = sizeof(mem);
+  if (GlobalMemoryStatusEx(&mem)) {
+    const double totalGb = static_cast<double>(mem.ullTotalPhys) / (1024.0 * 1024.0 * 1024.0);
+    const double pixels = static_cast<double>(std::max(1, settings.width)) * std::max(1, settings.height);
+    const double perWorkerGb = pixels > 1920.0 * 1080.0 * 1.5 ? 3.0 : 1.5;
+    workers = std::min(workers, std::max<size_t>(1, static_cast<size_t>(totalGb * 0.5 / perWorkerGb)));
+  }
+#else
+  (void)settings;
+  workers = 1;   // chưa có đường spawn không chờ cho macOS/Linux (xem RunBatchJobs)
+#endif
+  return workers;
+}
+
+/* Chạy các job, tối đa `concurrency` tiến trình cùng lúc (Windows: CreateProcessW không chờ +
+ * WaitForMultipleObjects; nơi khác: nối tiếp). Job lỗi được báo trong `codes`, không dừng job
+ * khác — nơi gọi quyết định chạy lại. */
+/* Băm TRƯỚC, song song, mọi tệp mà khoá của các job sắp chạy cần (lượt "gom" của RenderCacheKey ghi lại
+ * đường dẫn thay vì băm). Không có bước này thì khoá của từng job tính tuần tự ngay trước khi khởi chạy job
+ * đó: "Bin Tom" lượt đầu 6,8 s chặn việc khởi chạy batch (lần mở đầu tiên của ~1.600 khung PNG vừa ghi). */
+void RenderCachePrefetch(std::vector<BatchJob*>& jobs, const EncoderPlan& plan, const std::string& labelSuffix) {
+  if (g_renderCacheDir.empty()) return;
+  const auto started = ExportClock::now();
+  std::vector<fs::path> paths;
+  g_renderCacheCollect = &paths;
+  for (BatchJob* job : jobs) {
+    if (job->cacheable) RenderCacheKey(*job, job->buildCmd(plan, job->timing.label + labelSuffix));
+  }
+  g_renderCacheCollect = nullptr;
+  RenderCacheHashFiles(std::move(paths));
+  g_exportTiming.cacheKeyMs += MsSince(started);
+}
+
+/* Tra cache ngay trước khi chạy một job (mọi lần chạy, kể cả lượt chạy lại bằng đồ thị CPU / bộ mã hoá
+ * CPU: khoá tính theo dòng lệnh của CHÍNH lần chạy đó, nên lùi về libx264 là tra khoá libx264 — không
+ * bao giờ ghép batch NVENC cũ với batch libx264 mới). true = trùng, không cần chạy ffmpeg. */
+bool RenderCacheLookup(BatchJob& job, const EncoderPlan& plan, const std::string& runLabel) {
+  job.cacheHit.clear();
+  job.cacheKey.clear();
+  job.timing.cacheHit = false;
+  if (g_renderCacheDir.empty() || !job.cacheable) return false;
+  const auto started = ExportClock::now();
+  job.cacheKey = RenderCacheKey(job, job.buildCmd(plan, runLabel));
+  g_exportTiming.cacheKeyMs += MsSince(started);
+  if (job.cacheKey.empty()) return false;
+  const fs::path entry = RenderCacheEntry(job.cacheKey, job.output);
+  std::error_code ec;
+  if (!fs::is_regular_file(entry, ec) || fs::file_size(entry, ec) == 0 || ec) return false;
+  job.cacheHit = entry;
+  job.timing.cacheHit = true;
+  Emit("progress", "Dùng lại " + job.progressText + " đã render ở lượt xuất trước.");
+  return true;
+}
+
+std::vector<int> RunBatchJobs(std::vector<BatchJob*>& jobs, const EncoderPlan& plan, size_t concurrency,
+                              const std::string& labelSuffix) {
+  std::vector<int> codes(jobs.size(), 0);
+  /* Gom + băm cho cache render ngay trước job CÓ CACHE đầu tiên — tức SAU khi lượt tiếng (đứng đầu thứ
+   * tự, xem RunExportJobs) đã chạy: phần băm (~1 s ở lượt đầu) chồng lên lượt tiếng thay vì đứng trước nó. */
+  bool prefetched = false;
+  const auto prefetchBefore = [&](const BatchJob& job) {
+    if (prefetched || !job.cacheable) return;
+    prefetched = true;
+    RenderCachePrefetch(jobs, plan, labelSuffix);
+  };
+  concurrency = std::max<size_t>(1, concurrency);
+#ifdef _WIN32
+  struct Active { size_t index; HANDLE process; ExportClock::time_point started; };
+  std::vector<Active> active;
+  size_t next = 0;
+  while (next < jobs.size() || !active.empty()) {
+    while (next < jobs.size() && active.size() < concurrency) {
+      BatchJob& job = *jobs[next];
+      const std::string runLabel = job.timing.label + labelSuffix;
+      prefetchBefore(job);
+      if (RenderCacheLookup(job, plan, runLabel)) { codes[next++] = 0; continue; }
+      const std::vector<std::string> cmd = JobCommandForRun(job, plan, runLabel);
+      Emit("progress", "Đang render " + job.progressText
+                       + (concurrency > 1 ? " — " + std::to_string(active.size() + 1) + " lượt chạy cùng lúc" : "") + "...");
+      int immediate = 0;
+      const auto started = ExportClock::now();
+      HANDLE process = SpawnIn(cmd, job.tempDir, immediate);
+      if (process) {
+        active.push_back({next, process, started});
+      } else if (immediate != 0) {
+        codes[next] = immediate;
+      } else {
+        // CreateProcessW hỏng: chạy chờ như RunIn (lùi về std::system).
+        codes[next] = RunIn(cmd, job.tempDir);
+        job.timing.runMs += MsSince(started);
+      }
+      if (!g_exportBenchDir.empty()) SetChildEnv("FFREPORT", "");
+      next++;
+    }
+    if (active.empty()) continue;
+    std::vector<HANDLE> handles;
+    for (const auto& a : active) handles.push_back(a.process);
+    const DWORD waited = WaitForMultipleObjects(static_cast<DWORD>(handles.size()), handles.data(), FALSE, INFINITE);
+    if (waited < WAIT_OBJECT_0 || waited >= WAIT_OBJECT_0 + handles.size()) {
+      // Không chờ được (không nên xảy ra): chờ lần lượt cho chắc.
+      for (const auto& a : active) WaitForSingleObject(a.process, INFINITE);
+    }
+    for (size_t i = 0; i < active.size();) {
+      if (WaitForSingleObject(active[i].process, 0) != WAIT_OBJECT_0) { i++; continue; }
+      DWORD exitCode = 1;
+      GetExitCodeProcess(active[i].process, &exitCode);
+      CloseHandle(active[i].process);
+      codes[active[i].index] = static_cast<int>(exitCode);
+      jobs[active[i].index]->timing.runMs += MsSince(active[i].started);
+      active.erase(active.begin() + static_cast<std::ptrdiff_t>(i));
+    }
+  }
+#else
+  (void)concurrency;
+  for (size_t i = 0; i < jobs.size(); i++) {
+    BatchJob& job = *jobs[i];
+    prefetchBefore(job);
+    if (RenderCacheLookup(job, plan, job.timing.label + labelSuffix)) { codes[i] = 0; continue; }
+    Emit("progress", "Đang render " + job.progressText + "...");
+    const std::vector<std::string> cmd = JobCommandForRun(job, plan, job.timing.label + labelSuffix);
+    const auto started = ExportClock::now();
+    codes[i] = RunIn(cmd, job.tempDir);
+    job.timing.runMs += MsSince(started);
+    if (!g_exportBenchDir.empty()) SetChildEnv("FFREPORT", "");
+  }
+#endif
+  return codes;
+}
+
+/* Chạy cả bộ job, tối đa `concurrency` tiến trình cùng lúc, rồi xử lý lỗi:
+ *  - job hình lỗi khi dùng bộ mã hoá PHẦN CỨNG:
+ *      chạy song song -> chạy lại từng cái MỘT bằng chính bộ mã hoá đó trước (lỗi có thể chỉ vì
+ *      nhiều phiên NVENC cùng lúc — GeForce có trần số phiên, dùng chung với OBS/ShadowPlay);
+ *      vẫn lỗi (hoặc chạy nối tiếp) -> chạy lại MỌI job hình của bộ bằng CPU. Không ghép lẫn
+ *      batch NVENC với batch libx264: ghép `-c copy` giữ SPS/PPS của batch đầu.
+ *  - lỗi khác, hoặc lỗi cả khi đã ở CPU: trả mã lỗi.
+ * Ghi timing của mọi job vào g_exportTiming theo thứ tự job; xoá filter script khi không đo. */
+int RunExportJobs(std::vector<BatchJob>& jobs, EncoderPlan& plan, size_t concurrency, const ExportSettings& settings) {
+  // Lượt tiếng khởi chạy TRƯỚC: nó nhẹ và chạy suốt, xong sớm thì nhường chỗ cho batch hình.
+  std::vector<size_t> order;
+  for (size_t i = 0; i < jobs.size(); i++) if (!jobs[i].video) order.push_back(i);
+  for (size_t i = 0; i < jobs.size(); i++) if (jobs[i].video) order.push_back(i);
+  std::vector<BatchJob*> all;
+  for (size_t i : order) all.push_back(&jobs[i]);
+  const std::vector<int> ordered = RunBatchJobs(all, plan, concurrency, "");
+  std::vector<int> codes(jobs.size(), 0);
+  for (size_t k = 0; k < order.size(); k++) codes[order[k]] = ordered[k];
+  /* Đồ thị GPU lỗi (mục 1.21): chạy lại CHÍNH batch đó bằng đồ thị CPU, cùng bộ mã hoá, TRƯỚC logic
+   * lùi bộ mã hoá bên dưới — lỗi thường ở NVDEC/bộ lọc CUDA chứ không ở NVENC. Vẫn lỗi thì rơi vào
+   * logic cũ như mọi batch CPU. */
+  std::vector<size_t> gpuFailed;
+  for (size_t i = 0; i < jobs.size(); i++) {
+    if (codes[i] != 0 && jobs[i].gpu) gpuFailed.push_back(i);
+  }
+  if (!gpuFailed.empty()) {
+    Emit("progress", "Đồ thị GPU lỗi ở " + std::to_string(gpuFailed.size()) + " lượt — chạy lại bằng CPU...");
+    // Kết quả dò GPU đã lưu có thể đã cũ (driver/GPU đổi) -> lượt sau dò lại (xem GpuProbeResult).
+    std::error_code cacheEc;
+    fs::remove(GpuProbeCacheFile(jobs[gpuFailed.front()].tempDir), cacheEc);
+    std::vector<BatchJob*> retry;
+    for (size_t i : gpuFailed) {
+      UseCpuGraph(jobs[i]);
+      jobs[i].timing.gpuFallback = true;
+      retry.push_back(&jobs[i]);
+    }
+    const std::vector<int> again = RunBatchJobs(retry, plan, concurrency, "_gpufb");
+    for (size_t k = 0; k < retry.size(); k++) codes[gpuFailed[k]] = again[k];
+  }
+  int failure = 0;
+  std::vector<size_t> hardwareFailed;
+  for (size_t i = 0; i < jobs.size(); i++) {
+    if (codes[i] == 0) continue;
+    if (jobs[i].video && plan.hardware) hardwareFailed.push_back(i);
+    else failure = codes[i];
+  }
+  if (!failure && !hardwareFailed.empty()) {
+    bool needCpu = true;
+    if (concurrency > 1) {
+      Emit("progress", "Encoder phần cứng " + plan.videoEncoder + " lỗi ở " + std::to_string(hardwareFailed.size())
+                       + " lượt chạy cùng lúc — chạy lại lần lượt...");
+      std::vector<BatchJob*> retry;
+      for (size_t i : hardwareFailed) retry.push_back(&jobs[i]);
+      const std::vector<int> again = RunBatchJobs(retry, plan, 1, "_retry");
+      needCpu = false;
+      for (size_t k = 0; k < retry.size(); k++) {
+        codes[hardwareFailed[k]] = again[k];
+        if (again[k] != 0) needCpu = true;
+      }
+    }
+    if (needCpu) {
+      Emit("progress", "Encoder phần cứng " + plan.videoEncoder + " lỗi, chuyển batch export sang CPU...");
+      // Kết quả thử bộ mã hoá đã lưu có thể đã cũ (driver/GPU đổi) -> lượt sau thử lại (WorkingHardwareEncoder).
+      std::error_code probeEc;
+      fs::remove(EncoderProbeCacheFile(), probeEc);
+      plan = CpuEncoderPlan(settings);
+      std::vector<BatchJob*> videoJobs;
+      std::vector<size_t> videoIndex;
+      for (size_t i = 0; i < jobs.size(); i++) {
+        if (!jobs[i].video) continue;
+        jobs[i].timing.cpuRetry = true;
+        UseCpuGraph(jobs[i]);   // libx264/libx265 không nhận khung CUDA
+        videoJobs.push_back(&jobs[i]);
+        videoIndex.push_back(i);
+      }
+      const std::vector<int> cpu = RunBatchJobs(videoJobs, plan, concurrency, "_cpu");
+      for (size_t k = 0; k < videoJobs.size(); k++) {
+        codes[videoIndex[k]] = cpu[k];
+        if (cpu[k] != 0) failure = cpu[k];
+      }
+    }
+  }
+  for (size_t i = 0; i < jobs.size(); i++) {
+    jobs[i].timing.exitCode = codes[i];
+    if (jobs[i].gpu && codes[i] == 0 && jobs[i].cacheHit.empty()) g_exportTiming.render = "gpu";
+    g_exportTiming.runs.push_back(jobs[i].timing);
+  }
+  if (failure != 0) {
+    Emit("error", "ffmpeg batch export failed", failure);
+    return failure;
+  }
+  if (g_exportBenchDir.empty()) {
+    for (const auto& job : jobs) {
+      std::error_code ec;
+      fs::remove(job.scriptPath, ec);
+      if (!job.gpuScriptPath.empty()) fs::remove(job.gpuScriptPath, ec);
+    }
+  }
   return 0;
+}
+
+// Một batch, chạy ngay (nối tiếp) — mọi đường xuất không song song.
+int ExportBatch(
+  const std::string& source,
+  const std::string& output,
+  const fs::path& tempDir,
+  const std::vector<ExportInterval>& intervals,
+  size_t offset,
+  size_t count,
+  size_t batchIndex,
+  size_t batchCount,
+  const ExportSettings& settings,
+  EncoderPlan& plan,
+  const std::vector<ExportOverlay>& overlays,
+  FilterScriptMode mode = FilterScriptMode::Full
+) {
+  std::vector<BatchJob> jobs(1);
+  if (!PrepareExportBatch(jobs[0], source, output, tempDir, intervals, offset, count, batchIndex, batchCount,
+                          settings, overlays, mode)) {
+    return 6;
+  }
+  return RunExportJobs(jobs, plan, 1, settings);
+}
+
+/* Xoá thư mục batch trung gian. Lỗi thì bỏ qua (Defender/trình xem file có thể đang giữ một
+ * file): lượt xuất sau vẫn remove_all trước khi dùng, như trước đây. */
+void RemoveExportBatches(const fs::path& batchDir) {
+  std::error_code ec;
+  fs::remove_all(batchDir, ec);
+}
+
+/* CHỖ DÀNH SẴN CHO `moov` Ở ĐẦU TỆP (`-moov_size`, bước ghép cuối của lượt xuất nhiều batch).
+ * `+faststart` ghi xong cả tệp rồi mới dời `moov` lên đầu, tức đọc + ghi lại TOÀN BỘ tệp lần hai
+ * (bản 39 phút 4K: 11,5 GB). Dành sẵn chỗ thì `moov` ghi thẳng vào đó, phần dư thành hộp `free`.
+ * Ước DƯ theo số mẫu: mỗi mẫu tốn tối đa ~36 byte trong bảng mẫu (stsz 4 + co64 8 + stsc 12 +
+ * ctts 8 + stss 4); tiếng tính như AAC 96 kHz (1024 mẫu/gói) cho chắc. Thiếu thì ffmpeg báo
+ * "reserved_moov_size is too small" và nơi gọi ghép lại bằng `+faststart`. Chỉ dùng cho lượt xuất
+ * nhiều batch (≥ kOverlayBatchMinTotalSeconds), nên phần dư không đáng kể so với cỡ tệp. */
+int MoovReserveBytes(double seconds, double fps) {
+  const double videoSamples = std::max(0.0, seconds) * std::max(1.0, fps);
+  const double audioSamples = std::max(0.0, seconds) * (96000.0 / 1024.0);
+  const double bytes = 262144.0 + 40.0 * (videoSamples + audioSamples);
+  return static_cast<int>(std::min(bytes, 1.0e9));
 }
 
 EncoderPlan SelectPreviewPlan() {
@@ -3200,6 +6694,85 @@ int CommandPreviewProxy(int argc, char** argv) {
   return 0;
 }
 
+/* ===== ĐỒ THỊ DỰNG Ở CỠ XUẤT (mục 1.12 pha 2) =====
+ *
+ * Pha 1 dựng cả đồ thị ở cỡ sequence rồi co ở đuôi (OutputColorFilters): xuất 1080p từ sequence
+ * 4K là ghép lane chính, đổi màu, trộn mọi lớp phủ trên khung 4K cho một bản ra chỉ bằng 1/4 số
+ * điểm ảnh — rồi thêm một lượt lanczos 4K -> 1080p trên luồng filter. Đo bản cắt 300 s 4K (100
+ * phụ đề): xuất 1080p theo pha 1 CHẬM HƠN xuất đúng cỡ 4K (75,7 so với 70,0 s).
+ *
+ * Nay khi cỡ xuất NHỎ hơn sequence, dựng đồ thị thẳng ở cỡ phần hình (content*): cả cảnh co đều
+ * quanh tâm khung theo hệ số s của backend (`output_scale`, exportOutputFrame). Mọi số đo theo
+ * ĐIỂM ẢNH SEQUENCE nhân s:
+ *   - scale hiệu dụng, qua `fitScale` — nên áp cho cả nhánh keyframe scale (AppendKfTransformFilters
+ *     nhân fitScale vào biểu thức);
+ *   - vị trí tĩnh, biểu thức vị trí keyframe và độ dời của hoạt ảnh (đơn vị px);
+ *   - cỡ chữ drawtext, bề rộng mép mềm (tính trên lớp phủ ĐÃ co).
+ * Không đổi: số đo theo điểm ảnh NGUỒN (xoá logo, mặt nạ, bán kính làm mờ — đều đứng trước phép
+ * co), hệ số nhân của hoạt ảnh, góc xoay, độ mờ. PNG chữ vẫn bake ở mật độ sequence; chuỗi của lớp
+ * phủ co nó (ảnh tĩnh: một lần).
+ *
+ * fitScale nhân thêm (1 − 2e-6): hệ số in ra 6 chữ số thập phân (FfmpegDouble), và với s = 2/3
+ * (1080p -> 720p) "0.666667" làm 1920 điểm ảnh thành 1280,0006 -> ceil(·/2)*2 = 1282, clip vừa
+ * khung tràn 2 px. Hụt đi một chút thì mọi tích đáng lẽ là số chẵn tròn ra đúng số đó (ở 7680 px
+ * hụt 0,015 px), còn tích không tròn thì ceil cho như cũ.
+ * Phóng to (cỡ xuất lớn hơn sequence) giữ cách pha 1.
+ *
+ * BẬT MẶC ĐỊNH (người dùng chốt 2026-10-02) — tắt bằng CRABBYCUT_EXPORT_OUTSCALE=0. Đo: 4K -> 1080p (bản cắt
+ * 300 s, 100 phụ đề) 81,5 -> 67,5 s (−17%); Test.crab 1080p -> 720p 17,0 -> 13,1 s (−23%); Bin Tom
+ * 1080×1920 -> 720×1280 25,1 -> 22,7 s (−10%). Bộ so 0.3 trên Test.crab: (b) ĐẠT (mới/cũ 49,9 dB,
+ * VMAF 97,6, khung tệ nhất 40,1) nhưng (a) TRƯỢT: so bản chuẩn 45,49 -> 42,86 dB. Bản chuẩn dựng từ
+ * CHÍNH đồ thị pha 1 (dựng ở cỡ sequence ở độ chính xác cao rồi co lanczos), nên cách nào lấy mẫu
+ * khác thứ tự đều "xa" nó hơn — chỗ lệch nhiều nhất là clip 4K ở 107%: pha 1 co hai lần (0,535 rồi
+ * 2/3), pha 2 co một lần (0,357). Co bằng lanczos thay bicubic không thu hẹp (42,39 dB). Người dùng
+ * chốt miễn tiêu chí (a) cho mục này vì (b) đạt (xem mục 1.12 của kế hoạch). */
+bool OutputScaleEnabled() {
+  const char* env = std::getenv("CRABBYCUT_EXPORT_OUTSCALE");
+  return !(env && std::string(env) == "0");
+}
+
+bool ApplyOutputScaleToPayload(ExportSettings& settings, std::vector<ExportInterval>& intervals,
+                               std::vector<ExportOverlay>& overlays) {
+  if (!OutputResized(settings) || !OutputScaleEnabled() || settings.width <= 0 || settings.height <= 0) return false;
+  const double s = settings.outputScale;
+  if (!(s > 0.0 && s < 0.999)) return false;
+  // Phần hình phải đúng là khung sequence nhân s (lệch do làm tròn chẵn ≤ 1 px; bị kẹp trần thì
+  // không còn là phép co đều -> giữ pha 1).
+  if (std::abs(settings.width * s - settings.contentWidth) > 2.0
+      || std::abs(settings.height * s - settings.contentHeight) > 2.0) return false;
+  std::ostringstream factorText;
+  factorText << std::setprecision(12) << s;
+  const std::string factor = factorText.str();
+  const auto scaledExpr = [&](std::string& expr) {
+    if (!expr.empty()) expr = "((" + expr + ")*" + factor + ")";
+  };
+  const double fitFactor = s * (1.0 - 2e-6);
+  for (auto& item : intervals) {
+    item.fitScale *= fitFactor;
+    item.positionX *= s;
+    item.positionY *= s;
+    scaledExpr(item.kfXExpr);
+    scaledExpr(item.kfYExpr);
+    scaledExpr(item.animXExpr);
+    scaledExpr(item.animYExpr);
+  }
+  for (auto& overlay : overlays) {
+    overlay.fitScale *= fitFactor;
+    overlay.positionX *= s;
+    overlay.positionY *= s;
+    scaledExpr(overlay.kfXExpr);
+    scaledExpr(overlay.kfYExpr);
+    scaledExpr(overlay.animXExpr);
+    scaledExpr(overlay.animYExpr);
+    if (overlay.featherPx > 0) overlay.featherPx = std::max(1, static_cast<int>(std::lround(overlay.featherPx * s)));
+    overlay.fontSize = std::max(1, static_cast<int>(std::lround(overlay.fontSize * s)));
+  }
+  settings.width = settings.contentWidth;
+  settings.height = settings.contentHeight;
+  settings.builtAtOutputScale = true;
+  return true;
+}
+
 int CommandExportVideo(int argc, char** argv) {
   if (argc < 8) {
     Emit("error", "export-video expects source output timeline_json_file temp_dir preset fps", 2);
@@ -3211,6 +6784,17 @@ int CommandExportVideo(int argc, char** argv) {
   const fs::path tempDir = argv[5];
   std::string preset = argv[6];
   std::string fps = argv[7];
+  g_exportTiming = ExportTimingLog{};
+  g_exportBenchDir.clear();
+  RenderCacheConfigure();
+  g_renderCacheIds.clear();
+  if (ExportBenchRequested()) {
+    g_exportBenchDir = tempDir / "export_bench";
+    std::error_code ec;
+    fs::remove_all(g_exportBenchDir, ec);
+    fs::create_directories(g_exportBenchDir, ec);
+    Emit("progress", "CRABBYCUT_EXPORT_BENCH: ghi dòng lệnh + log ffmpeg vào " + g_exportBenchDir.string());
+  }
 
   std::vector<ExportInterval> intervals;
   std::vector<ExportOverlay> overlays;
@@ -3220,16 +6804,87 @@ int CommandExportVideo(int argc, char** argv) {
     Emit("error", payloadError, 4);
     return 4;
   }
+  if (ApplyOutputScaleToPayload(settings, intervals, overlays)) {
+    Emit("progress", "Dựng đồ thị ở cỡ xuất " + std::to_string(settings.width) + "x" + std::to_string(settings.height)
+                     + " (hệ số " + FfmpegDouble(settings.outputScale) + ").");
+  }
+  g_exportTiming.graphSize = std::to_string(settings.width) + "x" + std::to_string(settings.height);
   /* ĐO TRỤC THỜI GIAN CỦA FILE NGUỒN — MỘT LẦN cho cả lượt export.
    * Xem khối chú thích ở ExportSettings::videoStart: mọi mốc `trim`/`atrim` phải cộng thêm
    * mốc bắt đầu thật của luồng, nếu không mỗi điểm nối lẻ ra một khung của cảnh trước. */
-  settings.videoStart = MediaStreamStartTime(source, "v:0");
-  settings.audioStart = MediaStreamStartTime(source, "a:0");
-  settings.sourceFps = MediaStreamFps(source);
+  /* Các lần dò nguồn độc lập nhau chạy SONG SONG: mỗi lần là một tiến trình ffprobe (~120 ms
+   * khởi động trên Windows), gọi nối tiếp cả lượt dò mất 1,8 s trên Bin Tom. Chỉ những hàm không
+   * có trạng thái chung (CommandOutput dùng biến cục bộ); MediaColorUntagged có cache tĩnh nên
+   * chạy ở luồng này, cùng lúc với các lần dò kia. */
+  auto videoStartProbe = std::async(std::launch::async, [&source]() { return MediaStreamStartTime(source, "v:0"); });
+  auto audioStartProbe = std::async(std::launch::async, [&source]() { return MediaStreamStartTime(source, "a:0"); });
+  auto fpsProbe = std::async(std::launch::async, [&source]() { return MediaStreamFps(source); });
+  // Seek vào giữa nguồn có an toàn không (seek theo batch + dải nguồn mục 1.1): chỉ đọc header gói.
+  auto seekSafeProbe = std::async(std::launch::async, [&source]() {
+    return BatchSeekEnabled() ? SourceSeekSafe(source) : false;
+  });
+  // Thử bộ mã hoá phần cứng (WorkingHardwareEncoder, có cache) song song với các phép dò khác;
+  // SelectEncoderPlan ở dưới đọc lại kết quả đã nhớ.
+  auto encoderProbe = std::async(std::launch::async, [codec = settings.codec]() {
+#ifdef _WIN32
+    if (HardwareExportEnabled() && codec != "prores") {
+      WorkingHardwareEncoder(codec == "hevc" ? "hevc" : "h264");
+    }
+#endif
+    return 0;
+  });
+  /* ĐỒ THỊ GPU (mục 1.21, xem GpuRenderWanted): dò cùng lúc với các phép dò trên — bản ffmpeg có bộ
+   * lọc CUDA của CrabbyCut và chạy được chuỗi CUDA -> NVENC; nguồn chính và từng video lớp phủ có
+   * giải mã được bằng NVDEC không. Bản ffmpeg thường (không có crabgeo_cuda) thì không chạy lệnh dò
+   * nào. Video lớp phủ: tối đa kGpuOverlayProbes tệp khác nhau, còn lại giải mã CPU rồi tải lên. */
+  g_gpuRender = false;
+  g_gpuMainNvdec = false;
+  g_gpuGraph = false;
+  const bool gpuWanted = GpuRenderWanted(settings) && settings.codec != "prores";
+  const std::string nvencName = std::string(settings.codec == "hevc" ? "hevc" : "h264") + "_nvenc";
+  const auto crabFilters = [gpuWanted]() { return gpuWanted && HasFfmpegFilter("crabgeo_cuda"); };
+  const size_t kGpuOverlayProbes = 8;
+  std::vector<std::string> overlayVideoPaths;
+  for (const auto& overlay : overlays) {
+    if (overlay.type != "media" || overlay.assetPath.empty() || OverlayIsImageLike(overlay)
+        || OverlayIsImageSequence(overlay)) continue;
+    if (std::find(overlayVideoPaths.begin(), overlayVideoPaths.end(), overlay.assetPath) != overlayVideoPaths.end()) continue;
+    if (overlayVideoPaths.size() >= kGpuOverlayProbes) break;
+    overlayVideoPaths.push_back(overlay.assetPath);
+  }
+  /* Cả khâu dò GPU trong MỘT luồng song song: cache của lượt trước (GpuProbeResult) trùng khoá thì
+   * dùng luôn, không thì dò (NVDEC từng video lớp phủ chạy song song với phép dò nguồn chính) rồi
+   * ghi cache. Env CRABBYCUT_EXPORT_GPU_PROBE_CACHE=0: luôn dò. */
+  g_gpuLutKnown = -1;
+  g_gpuLutBakeDir = tempDir / "gpu_color_luts";   // LUT bake của chuỗi màu tĩnh (BakeColorLut)
+  const fs::path gpuCacheFile = GpuProbeCacheFile(tempDir);
+  const char* cacheEnv = std::getenv("CRABBYCUT_EXPORT_GPU_PROBE_CACHE");
+  const bool gpuCacheOn = !(cacheEnv && std::string(cacheEnv) == "0");
+  auto gpuProbe = std::async(std::launch::async, [crabFilters, nvencName, &source, overlayVideoPaths, gpuCacheFile, gpuCacheOn]() {
+    GpuProbeResult r;
+    r.overlayNvdec.assign(overlayVideoPaths.size(), false);
+    if (!crabFilters() || !HasFfmpegEncoder(nvencName)) return r;
+    const std::string key = GpuProbeKey(nvencName, source, overlayVideoPaths);
+    if (gpuCacheOn && ReadGpuProbeCache(gpuCacheFile, key, overlayVideoPaths.size(), r)) return r;
+    std::vector<std::future<bool>> overlayNvdec;
+    for (const std::string& path : overlayVideoPaths) {
+      overlayNvdec.push_back(std::async(std::launch::async, [path]() { return NvdecDecodes(path); }));
+    }
+    r.lut = GpuLutAvailable();
+    r.main = GpuRenderAvailableWithNvdec(nvencName, source) ? 2 : (GpuRenderAvailable(nvencName) ? 1 : 0);
+    for (size_t k = 0; k < overlayNvdec.size(); k++) r.overlayNvdec[k] = overlayNvdec[k].get();
+    if (gpuCacheOn) WriteGpuProbeCache(gpuCacheFile, key, r);
+    return r;
+  });
   settings.sourceColorUntagged = MediaColorUntagged(source);
+  settings.videoStart = videoStartProbe.get();
+  settings.audioStart = audioStartProbe.get();
+  settings.sourceFps = fpsProbe.get();
   if (settings.sourceColorUntagged) {
     Emit("progress", "Nguồn không gắn nhãn màu — đọc theo BT.709 cho khớp preview.");
   }
+  // Sau MediaColorUntagged: nguồn HD không nhãn được gán BT.709 nên cũng đi đường nhanh được.
+  ProbeMainSourceForFastPath(source, settings);
   for (auto& overlay : overlays) {
     if (overlay.type == "media" && !overlay.assetPath.empty()
         && !OverlayIsImageLike(overlay) && !OverlayIsImageSequence(overlay)) {
@@ -3245,20 +6900,76 @@ int CommandExportVideo(int argc, char** argv) {
   for (auto& overlay : overlays) {
     if (OverlayNeedsInput(overlay)) overlay.assetInputIndex = nextOverlayInput++;
   }
+  encoderProbe.get();
   EncoderPlan plan = SelectEncoderPlan(settings);
   Emit("progress", "Export encoder: " + plan.videoEncoder + (plan.hardware ? " (hardware)" : " (CPU)"));
   if (std::any_of(overlays.begin(), overlays.end(), [](const ExportOverlay& overlay) { return overlay.type == "text"; })
       && !TextOverlaySupported()) {
     Emit("progress", "FFmpeg hiện tại không có drawtext; text overlay sẽ bị bỏ qua khi export.");
   }
+  // Kết quả dò GPU (chạy song song từ đầu lượt, xem gpuProbe). Đồ thị GPU chỉ đi cùng NVENC.
+  const GpuProbeResult gpuProbed = gpuProbe.get();
+  g_exportTiming.gpuProbeCached = gpuProbed.cached;
+  if (gpuProbed.cached) g_gpuLutKnown = gpuProbed.lut ? 1 : 0;
+  g_gpuRender = gpuProbed.main > 0 && plan.mode == "nvenc";
+  g_gpuMainNvdec = gpuProbed.main == 2 && g_gpuRender;
+  for (size_t k = 0; k < overlayVideoPaths.size(); k++) {
+    const bool nvdec = gpuProbed.overlayNvdec[k] && g_gpuRender;
+    for (auto& overlay : overlays) {
+      if (overlay.assetPath == overlayVideoPaths[k]) overlay.gpuNvdec = nvdec;
+    }
+  }
+  if (g_gpuRender) {
+    Emit("progress", std::string("Render bằng GPU (bộ lọc CUDA + NVENC") + (g_gpuMainNvdec ? ", giải mã NVDEC" : "")
+                     + ") — batch có hiệu ứng chưa có bản GPU vẫn render bằng CPU.");
+  } else if (crabFilters()) {
+    Emit("progress", "GPU không dùng được cho lượt này — render bằng CPU.");
+  }
+  // Kết quả dò seek (chạy song song từ đầu lượt, xem seekSafeProbe).
+  settings.seekSafe = seekSafeProbe.get();
+  if (BatchSeekEnabled()) {
+    if (!settings.seekSafe) {
+      Emit("progress", "Video nguồn là bản nối nhiều cấu hình mã hoá — không seek theo batch/dải.");
+    }
+  }
+  g_exportTiming.probeMs = MsSince(g_exportTiming.started);
 
   if (!overlays.empty()) {
     /* DỰ ÁN CÓ LỚP PHỦ — chia theo THỜI GIAN nếu cắt được (xem PlanOverlayBatches).
      * Không chia được thì `batches` có đúng một phần tử và mọi thứ chạy y như bản cũ. */
-    const std::vector<OverlayBatch> batches = PlanOverlayBatches(intervals, overlays, settings);
+    const auto planStarted = ExportClock::now();
+    /* SONG SONG (mục 1.8, xem ExportParallelWorkers): dự án NGẮN hơn ngưỡng chia batch theo độ
+     * dài vẫn được chia thành 2 batch cho mỗi tiến trình (tối thiểu kParallelMinBatchSeconds mỗi
+     * batch) để chạy cùng lúc; batch nhiều hơn tiến trình để san tải — lớp phủ thường dồn ở một
+     * đoạn (Bin Tom: 15/19 lớp phủ ở 27 s đầu). Dự án dài giữ batch 180 s, chạy song song. */
+    const size_t workers = ExportParallelWorkers(settings);
+    const double totalSeconds = SequenceDuration(intervals, 0, intervals.size());
+    double batchTarget = kOverlayBatchTargetSeconds;
+    double batchMinTotal = kOverlayBatchMinTotalSeconds;
+    /* Chỉ cắt ở BIÊN CLIP: cắt giữa clip là nửa sau khởi động lại `fps` từ khung nguồn đầu tiên của
+     * nó — nguồn khác nhịp bản xuất (30 -> 25) thì chọn khung nguồn lệch pha (Test.crab: khung tệ
+     * nhất 13 dB so với bản một lượt). Dự án dài vẫn cắt giữa clip như trước (phim một clip). */
+    bool splitInsideClips = true;
+    if (workers > 1 && totalSeconds < kOverlayBatchMinTotalSeconds
+        && totalSeconds >= 2.0 * kParallelMinBatchSeconds) {
+      const double pieces = std::min(2.0 * static_cast<double>(workers), std::floor(totalSeconds / kParallelMinBatchSeconds));
+      /* Làm tròn XUỐNG theo bậc (8, 10, 12, 15, 20 … s): độ dài batch theo đúng tổng/số phần thì sửa
+       * dài/ngắn timeline một chút là đổi mọi mốc cắt, kể cả các batch TRƯỚC chỗ sửa -> cache render
+       * (mục 1.13) lỡ hết. Theo bậc thì các batch trước chỗ sửa giữ nguyên. */
+      batchTarget = kParallelMinBatchSeconds;
+      for (const double step : {10.0, 12.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0, 80.0, 100.0, 120.0}) {
+        if (step <= totalSeconds / pieces) batchTarget = step;
+      }
+      batchMinTotal = 0.0;
+      splitInsideClips = false;
+    }
+    const std::vector<OverlayBatch> batches = PlanOverlayBatches(intervals, overlays, settings, batchTarget, batchMinTotal,
+                                                                 splitInsideClips);
+    g_exportTiming.planMs = MsSince(planStarted);
     if (batches.size() <= 1) {
       int code = ExportBatch(source, output, tempDir, intervals, 0, intervals.size(), 0, 1, settings, plan, overlays);
       if (code != 0) return code;
+      EmitExportTiming(plan.videoEncoder);
       Emit("result", "export complete", 0, output);
       return 0;
     }
@@ -3267,17 +6978,23 @@ int CommandExportVideo(int argc, char** argv) {
     fs::remove_all(batchDir);
     fs::create_directories(batchDir);
     const std::string ext = settings.codec == "prores" ? ".mov" : ".mp4";
-    Emit("progress", "Chia " + std::to_string(batches.size()) + " lượt render theo thời gian "
-                     + "(giữ chuỗi lớp phủ ngắn để render không chậm dần theo độ dài phim)...");
+    g_exportTiming.workers = workers;
+    Emit("progress", "Chia " + std::to_string(batches.size()) + " lượt render theo thời gian"
+                     + (workers > 1 ? ", chạy " + std::to_string(workers) + " lượt hình cùng lúc" : std::string())
+                     + "...");
 
+    /* Ghi MỌI filter script trước (tuần tự — xem BatchJob), rồi mới chạy. */
+    std::vector<BatchJob> jobs(batches.size() + 1);
     std::vector<std::string> batchPaths;
     for (size_t i = 0; i < batches.size(); i++) {
       const OverlayBatch& batch = batches[i];
       const std::vector<ExportOverlay> batchOverlays = OverlaysForBatch(overlays, batch, settings);
       fs::path batchPath = batchDir / ("batch_" + std::to_string(10000 + static_cast<int>(i)).substr(1) + ext);
-      int code = ExportBatch(source, batchPath.string(), tempDir, batch.intervals, 0, batch.intervals.size(),
-                             i, batches.size(), settings, plan, batchOverlays, FilterScriptMode::VideoOnly);
-      if (code != 0) return code;
+      if (!PrepareExportBatch(jobs[i], source, batchPath.string(), tempDir, batch.intervals, 0, batch.intervals.size(),
+                              i, batches.size(), settings, batchOverlays, FilterScriptMode::VideoOnly)) {
+        return 6;
+      }
+      jobs[i].cacheable = true;   // cache render (mục 1.13)
       batchPaths.push_back(batchPath.string());
     }
 
@@ -3285,18 +7002,30 @@ int CommandExportVideo(int argc, char** argv) {
      * Xem khối chú thích ở FilterScriptMode — nối tiếng theo batch là mỗi mối ghép dài thêm
      * 23ms và nghe rõ chỗ ngắt. Lớp phủ lọc còn những cái CÓ TIẾNG và đánh số input lại
      * (xem OverlaysForAudioPass): nạp cả ảnh phụ đề vào lượt này là nổ dòng lệnh. */
-    Emit("progress", "Đang render tiếng (một lượt liền mạch cho cả phim)...");
     /* Đuôi theo CODEC TIẾNG, không phải theo thói quen: ProRes đi kèm `pcm_s16le` (xem
      * AppendEncoderArgsForMode), mà container mp4/m4a không chứa PCM — ffmpeg từ chối ngay
      * ở khâu mux. `.mov` chứa được cả hai. */
     fs::path audioPath = batchDir / (settings.codec == "prores" ? "audio.mov" : "audio.m4a");
+    if (!PrepareExportBatch(jobs.back(), source, audioPath.string(), tempDir, intervals, 0, intervals.size(),
+                            batches.size(), batches.size() + 1, settings,
+                            OverlaysForAudioPass(overlays), FilterScriptMode::AudioOnly)) {
+      return 6;
+    }
+    jobs.back().progressText = "tiếng (một lượt liền mạch cho cả phim)";
+    /* Cache render cho cả lượt tiếng: xuất lại sau khi sửa phụ đề/màu thì tiếng không đổi, mà lượt tiếng
+     * chiếm phần lớn thời gian còn lại (Bin Tom 2,3/5,7 s, phim 300 s 6/10,6 s). Khoá theo dòng lệnh +
+     * filter script + tệp tiếng như batch hình — đổi âm lượng, nhạc nền, khử ồn… là đổi khoá. */
+    jobs.back().cacheable = true;
+    // Lượt tiếng nhẹ (bộ mã hoá AAC một luồng) — chạy kèm, không chiếm chỗ của một lượt hình.
     {
-      EncoderPlan audioPlan = plan;
-      int code = ExportBatch(source, audioPath.string(), tempDir, intervals, 0, intervals.size(),
-                             batches.size(), batches.size() + 1, settings, audioPlan,
-                             OverlaysForAudioPass(overlays), FilterScriptMode::AudioOnly);
+      const int code = RunExportJobs(jobs, plan, workers > 1 ? workers + 1 : 1, settings);
       if (code != 0) return code;
     }
+    // Batch trùng khoá cache: ghép thẳng tệp trong cache (xem RenderCacheLookup), không chép ra.
+    for (size_t i = 0; i < batches.size(); i++) {
+      if (!jobs[i].cacheHit.empty()) batchPaths[i] = jobs[i].cacheHit.string();
+    }
+    if (!jobs.back().cacheHit.empty()) audioPath = jobs.back().cacheHit;
 
     fs::path concatList = tempDir / "concat_export_batches_native.txt";
     if (!WriteConcatList(concatList, batchPaths)) {
@@ -3306,19 +7035,47 @@ int CommandExportVideo(int argc, char** argv) {
     fs::create_directories(fs::path(output).parent_path());
     Emit("progress", "Đang ghép " + std::to_string(batchPaths.size()) + " lượt hình với tiếng...");
     /* Hình `-c copy` (nối chính xác từng khung), tiếng cũng `-c copy` (đã encode một lượt ở
-     * trên). `-shortest` phòng khi hai luồng lệch nhau vài mili giây ở khung cuối. */
-    int code = RunIn({
-      "ffmpeg", "-y", "-v", "error", "-nostdin",
-      "-f", "concat", "-safe", "0", "-i", concatList.string(),
-      "-i", audioPath.string(),
-      "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-shortest",
-      "-movflags", "+faststart", output,
-    }, tempDir);
+     * trên). KHÔNG `-shortest`: tiếng thường hết trước hình vài µs (29,97 khung/s, 42 s: tiếng
+     * 42,008625 s, hình 42,008633 s) và `-shortest` cắt luôn KHUNG HÌNH CUỐI — bản xuất nhiều batch
+     * mất khung cuối phim. Lượt một batch giữ nguyên độ dài cả hai luồng; lượt tiếng riêng nay ra
+     * đúng tiếng của lượt đó (đoạn hình giả, xem WriteFilterScript), nên ghép giữ nguyên là trùng.
+     * `moov` ở đầu tệp bằng CHỖ DÀNH SẴN (xem MoovReserveBytes) thay cho `+faststart`; ffmpeg báo
+     * thiếu chỗ thì ghép lại theo cách cũ. ProRes (.mov, tiếng PCM) giữ `+faststart`. */
+    const auto concatStarted = ExportClock::now();
+    const auto finalMux = [&](bool reserveMoov) {
+      std::vector<std::string> cmd = {
+        "ffmpeg", "-y", "-v", "error", "-nostdin",
+        "-f", "concat", "-safe", "0", "-i", concatList.string(),
+        "-i", audioPath.string(),
+        "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
+      };
+      if (reserveMoov) {
+        cmd.insert(cmd.end(), {"-moov_size", std::to_string(MoovReserveBytes(
+          SequenceDuration(intervals, 0, intervals.size()), ParseFpsValue(settings.renderFps)))});
+      } else {
+        cmd.insert(cmd.end(), {"-movflags", "+faststart"});
+      }
+      cmd.push_back(output);
+      return RunIn(cmd, tempDir);
+    };
+    const bool reserveMoov = settings.codec != "prores";
+    int code = finalMux(reserveMoov);
+    if (code != 0 && reserveMoov) {
+      Emit("progress", "Chỗ dành cho mục lục video không đủ — ghép lại theo cách cũ...");
+      code = finalMux(false);
+    }
+    g_exportTiming.concatMs = MsSince(concatStarted);
     fs::remove(concatList);
     if (code != 0) {
       Emit("error", "ffmpeg final concat failed", code);
       return code;
     }
+    /* Dọn các batch trung gian NGAY khi đã ghép xong: chúng to bằng chính bản xuất (dự án
+     * phụ đề 4K 39 phút: ~11,5 GB) và trước đây nằm lại trong thư mục tạm tới lượt xuất sau.
+     * Cache render bật thì batch hình + lượt tiếng được cất vào cache trước (đổi tên, xem RenderCacheStore). */
+    RenderCacheStore(jobs);
+    RemoveExportBatches(batchDir);
+    EmitExportTiming(plan.videoEncoder);
     Emit("result", "export complete", 0, output);
     return 0;
   }
@@ -3332,6 +7089,7 @@ int CommandExportVideo(int argc, char** argv) {
   if (batchCount <= 1) {
     int code = ExportBatch(source, output, tempDir, intervals, 0, intervals.size(), 0, 1, settings, plan, overlays);
     if (code != 0) return code;
+    EmitExportTiming(plan.videoEncoder);
     Emit("result", "export complete", 0, output);
     return 0;
   }
@@ -3353,12 +7111,16 @@ int CommandExportVideo(int argc, char** argv) {
     return 5;
   }
   fs::create_directories(fs::path(output).parent_path());
+  const auto concatStarted = ExportClock::now();
   int code = Run({"ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", concatList.string(), "-c", "copy", output});
+  g_exportTiming.concatMs = MsSince(concatStarted);
   fs::remove(concatList);
   if (code != 0) {
     Emit("error", "ffmpeg final concat failed", code);
     return code;
   }
+  RemoveExportBatches(batchDir);   // xem chỗ gọi ở nhánh có lớp phủ
+  EmitExportTiming(plan.videoEncoder);
   Emit("result", "export complete", 0, output);
   return 0;
 }

@@ -38,6 +38,8 @@ contextBridge.exposeInMainWorld('desktopEnv', {
     ipcRenderer.invoke('subtitle-save-srt', { projectPath, content, suggestedName, silent }),
   saveFrameImage: async (dataBase64, suggestedName) =>
     ipcRenderer.invoke('save-frame-image', { dataBase64, suggestedName }),
+  // Xuất video: chọn chỗ lưu TRƯỚC khi render, trả { path, ticket } | { canceled } | { unsupported }.
+  pickExportOutput: async (opts) => ipcRenderer.invoke('export-pick-output', opts || {}),
   readProjectFile: async (filePath) => ipcRenderer.invoke('project-read', filePath),
   statMedia: async (entries) => ipcRenderer.invoke('media-stat', entries),
   // "Mở vị trí tệp" của menu chuột phải ở panel Tệp phương tiện: mở Explorer/Finder và

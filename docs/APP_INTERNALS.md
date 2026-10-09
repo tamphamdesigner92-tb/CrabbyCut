@@ -2552,6 +2552,15 @@ KIỂM CHỨNG (npm run test:audio-denoise, đã nằm trong npm test):
   temp_uploads/color_luts/bake_<sha1>.cube rồi tự nối `lut3d=file=...:interp=trilinear`.
   Tên file theo sha1 nội dung -> nhiều block cùng thông số dùng chung 1 file.
   interp=trilinear (không để mặc định tetrahedral) để KHỚP phép nội suy của shader.
+- LUT CHẠY FLOAT Ở SIDECAR (sửa 2026-10-03 — LỖI CÓ SẴN): lut3d nhận định dạng theo bộ lọc ĐỨNG
+  SAU nó, mà sau chuỗi màu luôn là `format=rgb24`/`rgba` -> nguồn 10-bit bị hạ về RGB 8-bit TRƯỚC
+  khi qua LUT (LUT dốc biến bậc lượng tử thành vệt dải màu). Sidecar (`WithFloatLut`,
+  `ColorAdjustLutBlend`) chèn `format=gbrpf32le|gbrapf32le` ngay trước mỗi lut3d và trước nhánh
+  trộn hai LUT (danh sách hai định dạng: nguồn có alpha giữ alpha). Đo trên nguồn DJI 10-bit: một
+  LUT tĩnh so bản dựng float 39,4 -> 49,3 dB, không tốn thêm CPU; cả lượt "Yêu Con" (chủ yếu hai
+  LUT trộn, vốn đã 10-bit) so bản chuẩn 42,95 -> 43,87 dB, thời gian 51,8 / 52,7 s (trong dao
+  động). Env tắt: `CRABBYCUT_EXPORT_LUTF32=0`. Kéo theo: fixture mép miếng vá của
+  `test:retouch-export` nâng 2/255 -> 4/255 (2/255 nay bị LUT nén dưới một mức).
 
 - CÔNG THỨC CHÉP THEO MÃ NGUỒN FFMPEG, đã đo thực nghiệm — đừng "sửa cho đẹp":
   - `eq` chạy trên YUV (brightness/contrast lên plane Y, saturation lên U/V) nên shader
@@ -3052,7 +3061,7 @@ KIẾN TRÚC (chốt sau khảo sát, xem lý do bên dưới):
   PHA — mặt bám sau chuyển động thật, quay đầu nhanh là thấy. Chỉ làm mượt trong đoạn
   LIÊN TỤC có mặt và khi SỐ MẶT ổn định (bắc cầu qua chỗ mất dấu = kéo mặt cũ sang
   cảnh mới; ghép nhầm mặt A với mặt B khi số mặt đổi).
-- `/api/retouch/track` + cache đĩa `temp_uploads/retouch_faces/`.
+- `/api/retouch/track` + cache đĩa `<USER_DATA_ROOT>/retouch_cache/` (từ 2026-10-03; trước đó `temp_uploads/retouch_faces/` nên mở lại dự án là bám lại — "Yêu Con" 11 s mỗi lần, lượt xuất thật 48,5 -> 37,9 s khi đã có cache). Khoá = đường dẫn + size + mtime nguồn + block + tham số; temp_input.mp4 khôi phục bằng liên kết cứng nên giữ mtime. Mục quá 30 ngày không dùng bị dọn lúc khởi động (`pruneRetouchCache`), dọn tay ở Cài đặt › Bộ nhớ đệm › "Bám khuôn mặt (Retouch)". Test đặt `CRAB_TEMP_DIR` mà không đặt `CRAB_RETOUCH_CACHE_DIR` thì cache ở lại trong temp như cũ.
   KHOÁ CACHE GỒM CẢ mtime+size CỦA NGUỒN: dự án ghi đè `temp_input.mp4` mỗi lần ingest,
   chỉ băm đường dẫn là lần sau dùng lại landmark của video CŨ -> mặt nạ dán sai chỗ.
 - `static/js/retouch.js`: mô hình 13 thông số chia 3 nhóm kỹ thuật + vùng FaceMesh +
@@ -5134,6 +5143,7 @@ HỆ QUẢ CÓ CHỦ Ý: trên desktop, chọn TỆP LẺ nay là LINK chứ kh�
   - h264_nvenc/hevc_nvenc nếu có NVIDIA NVENC.
   - h264_qsv/hevc_qsv nếu có Intel Quick Sync.
   - h264_amf/hevc_amf nếu FFmpeg build có AMD AMF.
+  - CHỌN BẰNG PHÉP THỬ THẬT (sửa 2026-10-03, mục 1.9 của kế hoạch export, `WorkingHardwareEncoder`): bản ffmpeg nào cũng biên dịch sẵn cả ba nên chỉ xem `-encoders` thì máy AMD/Intel luôn chọn NVENC, lỗi từng batch rồi lùi thẳng về libx264. Nay mã hoá thử 3 khung theo thứ tự nvenc -> qsv -> amf, lấy bộ đầu tiên chạy được; chạy song song với các phép dò ở đầu lượt xuất. Kết quả nhớ ở `%TEMP%/crabbycut_encoder_probe.txt` theo (vân tay ffmpeg, h264/hevc): dương tính 3 ngày (xoá khi bộ mã hoá phần cứng lỗi lúc xuất), ÂM TÍNH chỉ 10 phút (NVENC có thể tạm bận — OBS chiếm phiên, driver khởi động lại; đường CPU không có lỗi nào để xoá cache). Cache dò GPU (`gpu_probe_cache.txt`) cũng nhớ âm tính chỉ 10 phút. Đã kiểm: máy có NVIDIA chọn h264_nvenc; giấu CUDA (`CUDA_VISIBLE_DEVICES=-1`) chọn libx264 ngay, không còn lượt NVENC lỗi. Chưa có máy AMD/Intel để kiểm AMF/QSV chạy thật.
 - Nếu encoder phần cứng không có hoặc chạy lỗi, sidecar retry batch đó bằng CPU và chuyển các batch sau sang CPU.
 - CPU fallback:
   - h264 dùng libx264.
@@ -5141,22 +5151,33 @@ HỆ QUẢ CÓ CHỦ Ý: trên desktop, chọn TỆP LẺ nay là LINK chứ kh�
   - prores dùng prores_ks profile 3.
 - Audio h264/hevc dùng AAC với bitrate 128k/192k/320k; ProRes dùng pcm_s16le.
 - Project report ghi lại encoder export thực tế qua dòng `[encoder]`.
+- Dựng hình bằng GPU (bộ lọc CUDA của bản ffmpeg riêng, đi cùng NVENC): xem mục
+  "Xuất video bằng GPU" ở cuối tệp; report có dòng `[render_device]`.
 ```
 
 ### Preset Và Quality Export
 
 ```text
-- CPU fallback:
-  - quality=high: CRF 18, preset `veryfast`.
-  - quality=balanced: CRF 23, preset `veryfast`.
-  - quality=small: CRF 28, preset `ultrafast`.
-- Hardware encoder không dùng CRF thống nhất; sidecar map quality sang bitrate theo độ phân giải export.
+- Từ 2026-10-01 hộp thoại Xuất có ô "Bitrate" kiểu CapCut THAY ô "Chất lượng"
+  (`export_settings.rate_mode` = lower | recommended | higher | custom, `rate_mbps` cho custom;
+  người dùng chốt, xem mục 1.20 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md):
+  - Thấp hơn / Khuyến nghị (mặc định) / Cao hơn = CHẤT LƯỢNG CỐ ĐỊNH có TRẦN:
+    NVENC `-rc vbr -cq 23/19/16 -b:v 0 -maxrate TRẦN -bufsize 2×TRẦN`;
+    TRẦN = bitrate cố định cũ của Cân bằng / Cao / 2×Cao = 8.500 / 13.000 / 26.000 kbps (H.265:
+    7.000 / 11.000 / 22.000) cho 1080p, nhân theo số điểm ảnh của khung xuất, kẹp 2.500..80.000.
+    CPU: CRF 23/18/16, không trần (như trước).
+  - Tùy chỉnh (Mbps, 0,5..400): `-b:v T -maxrate 1,5T -bufsize 3T` (NVENC và CPU).
+  - QSV/AMF/VideoToolbox: chưa đo chế độ chất lượng của chúng -> `-b:v` = trần của mức (hoặc T).
+  - Payload cũ chỉ có `quality`: high -> recommended, balanced/small -> lower (backend + sidecar).
+  - ProRes không dùng bitrate -> ô bị khoá.
+- `quality` vẫn còn (suy từ mức: lower -> balanced, còn lại -> high) cho preset CPU và báo cáo:
+  - preset `veryfast`; quality=small (payload cũ) -> `ultrafast`.
 - Hardware encoder dùng chế độ ưu tiên tốc độ:
   - VideoToolbox: `-realtime 1 -prio_speed 1`.
-  - NVENC: `-preset fast`.
+  - NVENC: `-preset fast` (= p1 + tune hq).
   - QSV: `-preset veryfast`.
   - AMF: `-quality speed`.
-- Giá trị mặc định khi UI/backend không gửi đủ setting: codec=h264, quality=high, fps=source, resolution=source, audio_bitrate=192k.
+- Giá trị mặc định khi UI/backend không gửi đủ setting: codec=h264, rate_mode=recommended, fps=source, resolution=source, audio_bitrate=192k.
 ```
 
 ### Sequence, Resize Và Transform Khi Export
@@ -9786,3 +9807,267 @@ Kéo resizer trái ở 1920: 528 -> 384px, inline ghi đè đúng. **Còn tồn 
 của thanh điều khiển preview vốn đã chạm nút Play với panel 288px ("… / 00:00:06:"); panel 330px
 che thêm ("… / 00:00:"). Không có phần tử nào báo tràn (`scrollWidth`) — nút Play nằm đè lên chữ.
 
+## Đo thời gian xuất video — dụng cụ và số nền (Bước 0, 2026-09-28)
+
+Kế hoạch đầy đủ, quyết định và bảng tách khâu: `docs/KE_HOACH_TOI_UU_EXPORT_WIN.md`, mục "Kết quả Bước 0".
+Mục này chỉ ghi những gì cần biết khi đọc báo cáo hoặc đo lại.
+
+**Báo cáo dự án (`reports/report_project_*.txt`, khối EXPORT) giờ tách theo khâu:**
+- `client_prebake_ms` (+ `client_prebake_detail`: `text_png`, `anim_seq`, `retouch`, `color`, `transition`, `serialize`…): phần vẽ trước trong renderer. `duration_ms` cũ bắt đầu từ lúc TẢI LÊN nên chưa bao giờ gồm phần này.
+- `upload_ms`, `sdr_overrides_ms` (hạ SDR asset HDR ngay trong lượt xuất), `normalize_ms`, `prepare_ms`, `sidecar_ms`, `verify_ms`.
+- `sidecar_probe_ms` / `sidecar_plan_ms` / `sidecar_concat_ms` và **một dòng cho mỗi lượt ffmpeg**: `run_ms`, số clip/lớp phủ, `source=a..b` (khoảng nguồn được giải mã), `seek=` (nếu batch được seek).
+- `source_codec` / `source_format` của `temp_input.mp4` — thứ ffmpeg thật sự giải mã (AV1 4K `-c copy` và H.264 đã chuẩn hoá chênh nhau ~2,5× tốc độ giải mã).
+- Bước tải file về renderer xảy ra SAU khi báo cáo được ghi, nên không có ở đây.
+
+**Sidecar:** sự kiện `timing` luôn phát (JSON trong `message`). `CRABBYCUT_EXPORT_BENCH=1` giữ filter script và ghi `<temp>/export_bench/` (`*.cmd.json`, log FFREPORT có dòng `bench:`, `-progress`, `-print_graphs_file`).
+
+**Đo lại:** `npm run bench:export -- --crab <dự án> [--cut 300] [--runs 3] [--split]` (Electron thật một lượt, rồi phát lại payload); `node tests/scripts/export_fidelity.js` cho tiêu chí chất lượng. Chạy A/B xen kẽ, không chạy dồn một phía: số trôi ~20% trong một giờ vì máy nóng.
+
+**Số nền** (Ryzen 7 2700X + GTX 1060, Gyan 8.1.1, NVENC; giây):
+
+| Dự án | Nguồn giải mã | Trong app | Vẽ trước | Hạ SDR | ffmpeg hình | Ghép + tải về | Phát lại (trung vị) |
+|---|---|---|---|---|---|---|---|
+| Bin Tom - Tap 3 (76,6 s, 19 lớp phủ) | H.264 1080×1920 | 129,2 | 7,1 | 72,5 | 44,3 | 0,5 | 42,4 |
+| Phụ đề 4K, cắt 300 s (100 phụ đề) | AV1 3840×1646 | 248,4 | 0,8 | 0 | 228,5 | 11,1 | 204,5 |
+| Phụ đề 4K, 39 phút (1.116 phụ đề) | AV1 3840×1646 | 3.334,9 | 6,5 | 0,1 | 3.147,7 | 130,0 | (xem kế hoạch) |
+
+Bốn điều số đo lật ra, dễ đoán sai nếu không đo:
+1. **Filter chứ không phải encode** là nút thắt: 58–77% thời gian ffmpeg, NVENC chỉ 5–10%.
+2. **Batch sau giải mã lại từ giây 0**: dự án 39 phút, batch 180 s đầu 135 s, batch cuối (24,8 s phim) 255 s. Sửa bằng seek theo batch (`BatchSeekSeconds`, chỉ batch chỉ-hình — AAC giải mã từ giữa file cho mẫu khác vài LSB): phát lại 2.978,8 → 1.392,5 s (2,14×), bản xuất giống hệt từng gói (đo trên bản cắt 300 s).
+3. **Lượt xuất đầu hạ SDR cả asset không dùng**: `sdrOverridesForEditingAssets` từng duyệt cả thư viện dự án; nay chỉ asset có item.
+4. **Preview tự phát sau khi mở dự án** (mặc định `autoPlay` của `PIXI.Texture.from(video)`), và vòng phát giành CPU với ffmpeg suốt lượt xuất (chậm 21–30%). `performVideoExport` nay dừng preview trước khi xuất; bản thân việc tự phát chưa sửa.
+
+## Xuất video: lane chính đi thẳng YUV, lớp phủ ở YUV (Bước 1, mục 1.3 + 1.5, 2026-09-29)
+
+**Đo ra khoản lớn nhất không nằm ở chuỗi lớp phủ mà ở LANE CHÍNH.** Batch 4K của dự án phụ đề (30 s phim, chỉ đồ thị filter): đồ thị cũ 43 khung/s; chỉ riêng lane chính theo đường cũ đã chỉ còn 67 khung/s, vì mỗi clip được dựng lên nền `color` đen ở RGBA rồi `overlay` rồi đổi về yuv420p — tức mọi khung phim đi YUV → RGBA → YUV ở cỡ sequence, kể cả clip 100% nằm giữa khung.
+
+**1.3 — đường nhanh** (`MainLaneFastPlan`, bật mặc định, tắt bằng `CRABBYCUT_EXPORT_FASTPATH=0`): `scale` → `pad` → `crop exact` ở yuv420p, không nền, không overlay. Chỉ khi nguồn là BT.709 (hoặc HD không nhãn đã được gán BT.709): swscale đi YUV → YUV **không đổi ma trận**, nên nguồn BT.601 phải giữ đường cũ. Ba nhánh:
+- toạ độ chẵn, hoặc cắt lẻ khi clip tràn kín khung: 4:2:0, với `scale` dời vị trí mẫu màu 1 điểm ảnh (`in/out_*_chr_pos` +256) để phép cắt lẻ không làm màu lệch nửa mẫu;
+- đệm lẻ / mép clip nằm ở cột lẻ / clip 100% cắt lẻ: đặt ở 4:4:4 rồi hạ về 4:2:0 (swscale bỏ qua `chr_pos` khi không co giãn; mẫu màu ở mép clip giáp nền đen phải là trung bình như đường cũ);
+- clip có chuỗi màu: co giãn + đặt vị trí ở RGB, đổi YUV một lần — đúng phép tính của đường cũ (kẹp gam RGB như preview WebGL), chỉ bỏ nền + overlay.
+Số khung chốt bằng `tpad` clone + `concat` với dải đen + `trim` (tpad `stop_mode=add` không ra khung nào khi đầu vào rỗng). `pad` làm tròn bề rộng ĐẦU VÀO xuống số chẵn → luôn đệm trước, cắt sau.
+
+**1.5 — lớp phủ ở YUV** (bật mặc định, tắt bằng `CRABBYCUT_EXPORT_YUVCOMP=0`; người dùng nới tiêu chí "PSNR mới/cũ ≥ 45 dB" cho ca bản mới gần bản chuẩn hơn hẳn — Bin Tom 40,3 → 52,5 dB): lớp phủ đứng yên đổi sang yuva420p, ghép `overlay=format=yuv420`.
+- Màu mép: phép đổi thẳng lấy trung bình 2×2 gồm cả điểm ảnh trong suốt (canvas lưu là đen) → mép chữ màu nhạt đi. `AlphaWeightedYuva420` tính mẫu màu theo trọng số alpha (premultiply → thu nửa cỡ → unpremultiply ở 16-bit, `mergeplanes` với luma/alpha đầy đủ). Chỉ cho ẢNH TĨNH (chạy một lần); chuỗi khung chữ động đổi thẳng — chữa ở từng khung làm Bin Tom chậm 13% mà không đổi chất lượng đo được.
+- `overlay` yuv420 ở cột/hàng mẫu màu CUỐI chỉ lấy alpha của điểm ảnh đầu cặp → đệm lớp phủ `+4` để cặp cuối luôn trong suốt.
+- `OverlayStillOnce` (bật mặc định, cả đường RGBA): ảnh tĩnh là input MỘT khung, xử lý một lần, `loop` lặp khung đã xử lý — thay cho `-loop 1` (25 khung/giây, mỗi khung giải mã PNG + đổi màu lại).
+
+Kết quả (phát lại, Ryzen 7 2700X + GTX 1060, Gyan 8.1.1): Bin Tom 49,6–56,4 s → 1.3: 39–40 s → 1.3 + 1.5: 29–35 s; phụ đề 4K cắt 300 s 191–196 s → 111–113 s → 81–91 s. Trong app, Bin Tom 129,2 s → 39,1 s (cộng 1.15/1.16/1.17).
+
+**Cùng đợt (người dùng chốt 2026-09-29):**
+- **Cache bản SDR** (`SDR_CACHE_DIR`, backend): bản hạ SDR của video HDR sống qua các lần mở dự án; `editing_assets/sdr/…` chỉ là liên kết cứng tới cache (renderer nhận asset dự án bằng đường dẫn dưới `editing_assets/`). Trần 20 GB, hạn 30 ngày, dọn được trong Cài đặt → Bộ nhớ đệm.
+- **Hỏi chỗ lưu TRƯỚC khi xuất**: `export-pick-output` (main) → ffmpeg ghi thẳng ra `<tên>.exporting.mp4` cạnh đích rồi đổi tên; server trả JSON. Backend chỉ nhận `output_path` có HMAC của main (khoá phiên qua env `CRAB_EXPORT_OUTPUT_SECRET`) — HTTP API không kiểm nguồn gọi. Hết vòng tải cả file vào Blob và bản sao trong `blob_storage`.
+- **Preview không tự phát khi mở dự án**: `PIXI.Texture.from(video, { resourceOptions: { autoPlay: false } })` + `parkPreviewAtSequenceStart()` (dừng ở đầu sequence, vẽ đồng hồ ngay). Test: `test:export-fast-path`, `test:export-yuv-composite`; cả bộ export: `npm run test:export-all`. Chi tiết, số đo từng ca và các bẫy: mục 1.3/1.5 của `docs/KE_HOACH_TOI_UU_EXPORT_WIN.md`.
+
+**Phiên 4 (2026-09-30) — bản phụ đề 4K 39 phút 731,3 s → 552,9 s (phát lại; số nền ban đầu 3.334,9 s):**
+- **Khung "không ghi được" làm `overlay` chép cả khung.** `overlay` (framesync) gọi `ff_inlink_make_frame_writable` với khung chính trước khi trộn; khung còn tham chiếu thứ hai thì bị chép nguyên (4K ≈ 9,5 MB). `tpad=stop_mode=clone` giữ tham chiếu tới MỌI khung (để nhân bản khung cuối), nên đặt nó sau hình học là bắt lớp phủ đầu tiên chép mọi khung: một `overlay` trong suốt đã tốn ~5 s/batch 180 s, trong khi 70 lớp chỉ tốn thêm ~3 s. Nay `tpad` đứng ngay trước `fast.geometry` (khung ra khỏi `scale` là bộ đệm mới) — bản xuất trùng md5. Bài học chung: thêm filter giữ tham chiếu (tpad clone, fps khi lặp khung, split) ngay trước chuỗi `overlay` là trả thêm một lượt chép khung.
+- **Bước ghép cuối không ghi lại cả tệp.** Batch trung gian bỏ `+faststart`; tệp cuối đặt `moov` vào chỗ dành sẵn (`-moov_size`, `MoovReserveBytes`), thiếu chỗ thì ffmpeg báo lỗi và sidecar ghép lại bằng `+faststart`. Ghép 11,5 GB: 84,3 → 27,2 s.
+- **Ô "Kích thước video" có tác dụng** (mục 1.12 pha 1, trước bị ẩn): backend `exportOutputFrame` → `output_*` trong payload; sidecar co ở `OutputColorFilters` (lanczos) + `pad` đen khi khổ lệch. Khổ lệch thì làm như Premiere "Scale To Fit" (đúng cỡ preset + viền đen; người dùng chốt 2026-09-30) — hằng `EXPORT_SCALE_MODE = 'fit'`, nhánh `'short'` (kiểu CapCut) còn giữ. Test `test:export-resolution`.
+- `fs.rmSync({ maxRetries })` bị Node 24 bỏ qua khi EPERM; Node 20 của Electron thì vẫn đợi. Bài kiểm chạy bằng Node của máy nên phải tự lặp (xem `concat_cache.js`).
+
+**Phiên 5 (2026-09-30) — mỗi dải nguồn một input (mục 1.1):** trước đây mọi clip lane chính đọc cùng `[0:v]`: bộ giải mã chạy một mạch qua cả phần nguồn bị bỏ, mỗi khung phát tới đủ N nhánh `trim`. `PlanSourceRanges` gom cửa sổ `trim` thành dải (khe < 2 s thì gộp, trần 12 dải ở ≤ 1080p / 6 ở 4K), mỗi dải một input `-itsoffset S -ss S` sau các input lớp phủ; clip đọc `[k:v]` của dải mình (`g_clipVideoInput`, điền trong `ExportBatch` trước khi ghi filter script). PTS giữ nguyên nên bản xuất trùng framemd5. Bin Tom (20 clip rải trên 255 s nguồn): −12%. Tắt: `CRABBYCUT_EXPORT_RANGES=0`; test `test:export-source-ranges`. Chú ý khi đặt đột biến cho phép seek: `-ss` nhảy về keyframe TRƯỚC mốc và không vứt khung (không `-copyts`), nên seek lố dưới một GOP không làm hỏng gì — phải lố quá một GOP mới lộ.
+
+**Cùng phiên — chuỗi khung hoạt ảnh không còn dùng `eof_action=repeat`.** Chuỗi PNG của item hoạt ảnh (In→Hold→Out liền mạch, cả ảnh tĩnh có retouch dạng 2 khung) cần giữ khung cuối vì `setpts` cắt phần lẻ làm chuỗi hết sớm 1–3 khung trước mép cửa sổ. `repeat` giữ đúng nhưng làm luồng filter tốn thêm ~5 CPU-giây trên Bin Tom (17 chuỗi) — kể cả khi khung chỉ 16×16. Nay `SequenceTailFrames` nối K khung nhân bản (`tpad clone`) + `pass`; bản xuất trùng framemd5, Bin Tom −15%. Tắt: `CRABBYCUT_EXPORT_SEQPASS=0`; test `test:export-seq-tail`. Cách tìm ra: đọc CPU-giây từng luồng của ffmpeg khi chạy (luồng filter là luồng ăn gần bằng thời gian thực) rồi thu hẹp bằng các biến thể đồ thị.
+
+**Dò nguồn song song:** `CommandExportVideo` chạy các lần `ffprobe` không có trạng thái chung (mốc hình/tiếng, fps, `SourceSeekSafe`) bằng `std::async`; `MediaColorUntagged` có cache tĩnh nên ở luồng chính. Thêm lần dò mới thì chỉ đưa vào `std::async` nếu hàm đó không đụng biến tĩnh/toàn cục.
+
+## Xoá logo — tab Retouch > subtab "Xoá logo" (2026-09-29)
+
+Xoá logo / watermark **cố định** (logo kênh, TikTok…) trên clip lane chính và media overlay
+(video + ảnh). Dữ liệu gắn theo block như retouch: `clip.logo_removal` / `item.logo_removal` =
+`{ enabled, mode: 'delogo'|'blur'|'pixelate', strength 0..100, regions: [{x,y,w,h}] }`, vùng theo
+**tỉ lệ 0..1 của vùng ảnh thật** của block (lane chính: `mainClipContentRect`; overlay: cả asset),
+tối đa 4 vùng. Tắt công tắc nhưng còn vùng thì GIỮ field (`isEmpty` ≠ `isActive`).
+
+**Một nguồn sự thật — `static/js/logo-removal.js`:** chuẩn hoá, `exportRects` (vùng -> pixel
+CHẴN, lề 2px vì `delogo` từ chối vùng chạm mép: hợp lệ khi `x ≥ 1` và `x + w ≤ W − 1`), công thức
+pixel cho preview và bộ tự nhận diện.
+
+| Chế độ | Preview (JS trên ImageData) | Xuất (sidecar) | Đối chiếu trong test |
+|---|---|---|---|
+| delogo | `delogoRgba` | `delogo=x:y:w:h` | trùng TỪNG PIXEL (YUV444) |
+| blur | `boxBlurRgba` (hộp 2 lượt, mép phản xạ) | `crop,format=yuva444p,boxblur=r:2:r:2:alpha_radius=0` + overlay | lệch TB ≤ 2.5 |
+| pixelate | `pixelateRgba` | `crop,format=yuva444p,scale=area,scale=neighbor` + overlay | lệch TB ≤ 6 |
+
+- **`delogo` hiện hành lấy mẫu NGOÀI vùng:** FFmpeg nới vùng 1px (band = 1) rồi lấy hàng/cột
+  ngoài cùng làm mẫu và thay CẢ vùng. Bản đầu chép công thức cũ (mẫu là mép của chính vùng) nên
+  lệch tới 109/255 — test `logo_removal` giờ so từng pixel với `delogo` thật.
+- **`format=yuva444p` trong nhánh blur/khảm là bắt buộc:** nguồn 4:2:0 có mặt phẳng màu nửa độ
+  phân giải, cùng bán kính là màu mờ gấp đôi sáng (đo được lệch 11/255 so với preview).
+- `delogo` là filter GPL: FFmpeg không có nó thì sidecar rơi về làm mờ thay vì đổ cả lần xuất.
+
+**Đường vẽ.** `sourceFxDrawable` (editing-runtime.js) = Retouch rồi Xoá logo; MỌI chỗ trước đây gọi
+`retouchedDrawable` nay gọi nó (preview Pixi lane chính, canvas fx overlay, chuyển cảnh preview +
+bake, miếng vá Retouch, ảnh tĩnh). `logoRemovedDrawable` chỉ `getImageData` cỡ vùng (+1px) nên rẻ
+dù nguồn 4K. Overlay có logo đi đường canvas fx (`itemHasColorAdjust`), như retouch.
+
+**Xuất.** Lane chính và overlay KHÔNG bake: frontend gửi `logo_removal_px = { mode, rects:[{x,y,w,h,p}] }`
+(pixel của stream: khung nối cho `[0:v]`, cỡ gốc asset cho overlay) -> backend
+`normalizeLogoRemovalFields` dựng lại `logo_mode` + `logo_rects` ("x:y:w:h:p|…") từ số đã kẹp ->
+sidecar `AppendLogoRemovalFilters` chèn NGAY SAU trim/fps, TRƯỚC chuỗi màu và scale. Chuỗi khung đã
+bake (`animation_render`) không nhận `logo_*` — frontend đã xoá trong từng khung.
+
+**Tự nhận diện** (`detectLogoRegions`, chạy trong renderer, không cần Python): 16 khung rải trên CẢ
+file nguồn (overlay: cả asset; lane chính: đoạn của file đó trong khung nối — block ngắn gần như là
+cảnh tĩnh), thu về 480px, TRUNG VỊ gradient theo thời gian (cạnh nền động triệt nhau, cạnh logo ở
+lại), chỉ xét 4 góc (bỏ dải chữ thập giữa khung: phụ đề cứng, bảng tên). Ngưỡng tính trên CẢ vùng
+góc, có trần 60 — bản đầu chỉ tính trên pixel điểm > 0 nên chính logo kéo ngưỡng lên cao hơn logo
+và video thật không tìm ra gì. Nền gần như đứng yên -> `staticScene`, UI cảnh báo có thể nhận nhầm.
+
+**Tay cầm.** Dùng chung `maskSourceFrame` với mặt nạ (vùng nằm trong không gian nguồn nên đi theo
+xoay/lật/phóng). "Vẽ vùng" nghe ở shell pha capture như ống hút màu; kéo góc giữ góc đối diện; một
+cú kéo = một undo.
+
+Test: `npm run test:logo-removal` (mô hình, khớp FFmpeg, nhận diện, backend, sidecar end-to-end cả
+lane chính lẫn overlay).
+
+### Chế độ AI — "AI vẽ lại nền (MI-GAN)" (2026-09-29)
+
+`mode: 'ai'`: mô hình inpainting **MI-GAN** (Picsart, MIT; ONNX "pipeline v2", 28 MB, ghim theo commit
++ SHA-256 ở `backend/logo-ai.js` → `MODEL`) VẼ LẠI nền phía sau logo. Đo trên máy dev (CPU,
+onnxruntime 1.29): 0,27 s/khung/vùng; LaMa chất lượng tương đương trên logo nhưng 1,07 s và 208 MB.
+Model tải ở lần đầu vào `%LOCALAPPDATA%\CrabbyCut\models\logo_ai` (có thanh tiến trình ở thanh trạng
+thái), nhóm Python `logo_ai` = onnxruntime + opencv + numpy.
+
+**Là một LƯỢT XỬ LÝ TRƯỚC, không phải công thức pixel:** `asr/logo_inpaint_sidecar.py` đọc TỪNG khung
+thật của đoạn nguồn (`-fps_mode passthrough`, PTS thật từ `showinfo`, crop sẵn trong ffmpeg), vẽ lại
+vùng, ghi miếng vá PNG RGBA (vùng + viền mềm 4–24 px) + `r{k}.ffconcat` + `index.json`
+(`times[]` theo TRỤC XUẤT, `rects[k].frames[i]` = số file miếng vá của khung i). Cảnh đứng yên (vành
+ngữ cảnh lệch TB < 2,2/255 so với khung vẽ gần nhất) DÙNG LẠI miếng vá → hết "sôi" và nhanh hơn.
+Nguồn HD không nhãn ma trận → gắn bt709 trước khi đổi RGB, CÙNG luật `MediaColorUntagged`.
+
+**Backend** (`backend/logo-ai.js`): khoá = nguồn + mtime/size + vùng pixel + khổ khung + model; cache
+`<USER_DATA>/logo_ai_cache/<khoá>/<run>/` (ngoài temp_uploads, khoá không dùng quá 30 ngày thì dọn — `CACHE_TTL_MS`).
+MỘT job tại một thời điểm; lượt có sẵn PHỦ khoảng xin thì trả ngay; khoảng chồng/sát (< 2 s) thì gộp,
+khoảng XA thì lượt riêng (không chạy AI cho quãng giữa không ai dùng). API: `POST /api/logo-ai/status|
+process`, `GET /api/logo-ai/job/:id`, `POST .../cancel`, `GET /api/logo-ai/patch/:key/:run/:file`. Nguồn
+qua cùng cổng an toàn với Retouch (`resolveRetouchSource`).
+
+**Preview** (`editing-runtime.js`, khối "XOÁ LOGO BẰNG AI"): `logoRemovedDrawable` nhận thêm `sourceTime`
+→ `logoAiPatchesAt` chọn khung cuối có PTS ≤ t, nạp PNG (LRU 240, nạp trước 12 khung) và vẽ theo tỉ lệ
+texture/nguồn (proxy LQ vẫn đúng chỗ). Chưa có miếng vá → delogo trên CÙNG vùng
+(`LogoRemoval.fallbackMode`), panel ghi rõ "đang xem tạm". Chọn chế độ AI là tự chạy; sửa vùng sau đó
+thì bấm "Xử lý bằng AI". Các đường BAKE (chuyển cảnh, miếng vá retouch, ảnh tĩnh) `await
+logoAiPrepareAt` trước khi vẽ đồng bộ.
+
+**Xuất:** `performVideoExport` chờ `ensureLogoAiForExport()` (chạy nốt block còn thiếu). Block đủ lượt
+gửi `logo_removal_px = { mode:'ai', key, run, rects }` → backend dựng `logo_ai_dir/rects/t0` TỪ INDEX
+TRÊN ĐĨA (lượt mất → delogo trên `rects`). Sidecar `AppendLogoAiFilters`: `movie=r{k}.ffconcat` →
+`setpts=+t0` → **đúng chuỗi trim/setpts/tốc độ/fps của nhánh clip** (dựng thành chuỗi `timing` dùng cho
+cả hai) → overlay `eof_action=pass`. Hai cái bẫy đã gặp:
+- crop LẺ trên nguồn 4:2:0 bị ffmpeg làm tròn cạnh → đọc pipe lệch byte, ảnh trượt và mất khung cuối →
+  hộp crop luôn CHẴN và kiểm cỡ khung qua `showinfo`.
+- concat lấy timebase 1/25 của PNG → mọi mốc bị làm tròn về lưới 25 fps, ở 1.5x miếng vá lệch khung
+  toàn đoạn → `.ffconcat` khai `option framerate 90000` cho từng ảnh, mở bằng `format_opts='safe=0'`.
+
+Test: `npm run test:logo-ai` — backend với bộ chạy giả; sidecar Python `CRAB_LOGO_AI_FAKE=1` (lấp bằng
+màu TB của khung, không cần model) trên nguồn ĐỔI MÀU MỖI KHUNG → dán lệch một khung là lộ ngay (có ca
+đối chứng cố tình lệch 1 khung phải đo ra > 30/255); CFR + VFR, 1x + 1.5x, lane chính + overlay; có model
+thì chạy thêm MI-GAN thật trên một ảnh.
+
+## "Scale 100%" của media overlay = vừa khung, như lane chính; sóng âm có tầng riêng (2026-09-30)
+
+**Lỗi người dùng báo (dự án `G:\Work\AI\Test CrabbyCut\Test Export\Test.crab`):** cùng nguồn `DSCF3442.MOV` 3840×2160 trên sequence 1920×1080 — block lane chính 107% trông bằng block lane overlay 55%. Lane chính lấy **vừa khung** làm 100% (`MainLane.fitScale`, theo CapCut), còn overlay lấy **số pixel của chính tệp**. Premiere lẫn CapCut đều dùng MỘT mốc cho mọi track (Premiere: cỡ gốc, CapCut: vừa khung); CrabbyCut theo mốc của lane chính.
+
+- `itemBaseSize` của media = cỡ gốc × `mediaAssetFitScale(asset)` (= `MainLane.fitScale({width, height}, seqW, seqH)`; chưa biết cỡ asset thì 1, khung dự phòng như cũ). Mọi thứ hiển thị (preview, khung chọn, kéo, chuyển cảnh, miếng vá Retouch ghép lên canvas sequence) đi qua hàm này nên tự đúng.
+- `itemNativeSize` = số pixel của tệp, cho những gì sống trong KHÔNG GIAN NGUỒN: canvas bake chuỗi khung hoạt ảnh ảnh (giữ độ nét), biên độ hoạt ảnh (`slideDist` — giữ đúng số cũ để hoạt ảnh dự án cũ không đổi, preview và export cùng dùng). Mặt nạ cắt hình dùng toạ độ chuẩn hoá 0..1 theo tỉ lệ khung nên không phụ thuộc cỡ hộp.
+- Export: renderer ghi `fit_scale` cho mỗi block media → backend chuyển vào overlay (ảnh chữ/hình khối, payload cũ: 1) → sidecar `scaleValue = scale/100 × fitScale`, nhánh keyframe truyền `fitScale` vào `AppendKfTransformFilters` như lane chính.
+- **Dự án cũ:** `getHistoryState` ghi `mediaScaleBasis: 'fit'`; `restoreEditingHistoryState` thiếu khoá đó thì `migrateMediaScaleToFit()` (scale và keyframe scale chia cho hệ số) sau khi nạp `editingAssets` — cỡ trên canvas y hệt, chạy đúng một lần (undo/redo mang dấu mốc). Test.crab: block overlay 55 → 110.
+- Đổi khổ sequence (`rescaleOverlaysForSequenceResize`) không còn nhân scale của media: mốc vừa khung tự theo khổ mới. Magic Fill (ảnh phủ kín, logo giữ cỡ gốc, ảnh đặt trong ô) và "sao clip lane chính sang overlay" chia cho hệ số của asset.
+- Test `npm run test:media-scale-fit`: hàm thật trong VM (cỡ nền, bằng lane chính cùng nguồn, quy đổi giữ cỡ trên canvas, dấu mốc) + sidecar (scale 100 + fit 0,5 trùng framemd5 bản scale 50 kiểu cũ, cả nhánh keyframe; thiếu `fit_scale` giữ nghĩa cũ). E2E Electron trên Test.crab: khung chọn overlay/lane chính tỉ lệ 1,0280 = 110/107.
+
+**Sóng âm trên block video overlay** (cùng báo cáo): canvas sóng phủ viewport ở z25 — TRÊN cả block đang chọn (z24) — và dải sóng media 24px sát đáy; block overlay chỉ cao 45px nên sóng vẽ đè giữa thumbnail, và vì dải chỉ thụt 4px trong khi tay cầm trim rộng 8px nên nửa tay cầm bị sóng che. Nay: khoảng thụt = bề rộng tay cầm thật (8px, kẹp 25% block) + 2px cho MỌI block; video overlay có tiếng (`.has-audio`) chia hai tầng — dải phim `bottom: 19px`, sóng 14px ở đáy (`WAVE_OVERLAY_*`, kind `overlay` trong `waveformStripRect`).
+
+## Xuất video: chuỗi màu theo từng điểm ảnh chạy SAU phép co nhỏ (2026-10-01)
+
+**Người dùng báo:** dự án ngắn "Yêu Con 1" (37,8 s, nguồn DJI HEVC 10-bit 1728×3072 trên sequence 1080×1920) xuất ~2 phút, chỉ nhanh hơn bản cũ ~1,5 lần. Tách khâu: phần hình 118,5 s thì **~85 s là lớp Điều chỉnh** có keyframe cường độ LUT (`split` → 2×`lut3d` → `blend`), vì mọi chuỗi màu chạy ở cỡ NGUỒN rồi mới co về cỡ hiển thị (2,56 lần số điểm ảnh, lại ở 10-bit). Bitrate/encoder chỉ ~1,5 s.
+
+- Sidecar chia các tầng màu của block theo thứ tự áp (`BlockColorStages`: chuỗi của block + mặt nạ, lớp Điều chỉnh 0, lớp 1..n-1) thành phần trước / sau phép co (`SplitColorStagesForScale`). Phần sau là một ĐUÔI: tầng cuối cùng không dời được (theo lân cận — `unsharp`/`avgblur`/`noise`, bán kính tính theo điểm ảnh nguồn; hoặc có mặt nạ màu) giữ lại chính nó và mọi tầng trước nó.
+- Chỉ dời khi phép co làm NHỎ khung và là phép co tĩnh: đường nhanh lane chính (`MainLaneFast::scale` + `place`, `shrinks`), đường cũ lane chính và lớp phủ khi `scale < 1`, không keyframe hình học, không mặt nạ video. Đường nhanh: co ở định dạng NGUỒN (YUV 10-bit) → màu → `tpad` → `format=rgb24` → đặt chỗ; co về rgb24 trước rồi mới áp LUT thì chỉ 43,8 dB so với thứ tự cũ (LUT chạy trên 8-bit), co YUV rồi áp: 57,95 dB gộp, khung tệ nhất 55,2 dB.
+- Hợp với chuẩn: Adjustment Layer của Premiere/CapCut áp lên khung đã dựng ở cỡ sequence; preview Pixi áp filter ở cỡ hiển thị.
+- Kết quả: server của lượt phát lại 120,8 → 58,0 s. Env tắt `CRABBYCUT_EXPORT_COLOR_AFTER_SCALE=0`. Test `npm run test:export-color-after-scale` (8 ca: đúng chỗ trong script, ca không dời thì script trùng từng chữ, so FFV1 từng khung với thứ tự cũ; đột biến trễ lệnh trộn một khung tụt còn 12 dB). Bẫy khi viết test: file lệnh `lutmix_*.cmd` đánh số lại từ 1 mỗi tiến trình nên lượt xuất sau ghi đè lượt trước — phải dựng lại FFV1 NGAY sau mỗi lượt.
+
+## Xuất video: bỏ `geq` từng điểm ảnh, cắt trước khi phóng to (2026-10-01, mục 1.6 + 1.4)
+
+Dự án mẫu `G:\Work\AI\Test CrabbyCut\Test Export\Test.crab` (người dùng chỉ định): lượt xuất 55,6 → 14,2 s.
+
+- **Độ mờ có keyframe** (`KfOpacityFilter`, dùng chung cho lớp phủ và clip lane chính trong `AppendKfTransformFilters`): trước là `geq` tính r/g/b/a cho từng điểm ảnh từng khung (~215 ms/khung ở ~2050×1080, 43 s trên Test.crab). Nay `format=gbrap,sendcmd=f='kfopN.cmd',colorchannelmixer@kfopN=aa=1`, file lệnh tính `aa = clip(op/100,0,1)` một lần mỗi khung (biến T, như `ColorAdjustLutBlend`). PHẢI ở gbrap: colorchannelmixer chạy rgba thì `overlay=format=auto` kéo cả luồng chính qua rgba (đường yuv420p→rgba của swscale kém chính xác, so bản chuẩn tụt 4 dB trên mọi khung). Env tắt `CRABBYCUT_EXPORT_KFOP=0`.
+- **Mép mềm miếng vá Retouch** (`AppendFeatherAlpha`): dốc mép vẽ bằng `geq=lum=…` trên MỘT khung tách ra (`trim=end_frame=1`), `blend=multiply` vào alpha của mọi khung (framesync lặp khung cuối nhánh dốc), `alphamerge`. Env tắt `CRABBYCUT_EXPORT_FEATHER1=0`.
+- **Cắt trước khi phóng to** (`PreCropPlanAxis`, `MainLaneFast::preCrop`): clip lane chính đường nhanh phóng ≥ 1,3× thì cắt vùng nguồn cần trên lưới 2q của tỉ lệ rút gọn w/iw = p/q (lề 8 px) rồi mới co — phép co giữ đúng tỉ lệ nên vị trí lấy mẫu gần như y hệt (63,95 dB so với cách cũ). Cắt đứng sau xoá logo, trước chuỗi màu (chỉ khi mọi tầng màu theo từng điểm ảnh). Env tắt `CRABBYCUT_EXPORT_PRECROP=0`.
+- Test: `npm run test:export-alpha-filters` (lớp phủ 150% keyframe độ mờ có đoạn giữ 100% và đoạn về 0, clip lane chính, chuỗi PNG alpha + mép mềm; đột biến lệch độ mờ ~10% tụt 32 dB), `npm run test:export-precrop`.
+
+## Xuất video: khung nguồn cho bước dựng Retouch lấy từ backend (2026-10-01, nhánh 1B)
+
+Bước vẽ trước dựng miếng vá Retouch bằng đúng hàm của preview (`retouchedDrawable`). Trước đây khung nguồn có bằng cách TUA thẻ `<video>` từng mốc (`eachSourceFrame`) — mỗi lần tua trình duyệt giải mã lại từ khung khoá: 81 ms/khung trên nguồn DJI HEVC 10-bit 1728×3072 59,94 fps, song song nhiều thẻ không nhanh hơn.
+
+- **Backend** `POST /api/retouch/frames` (`backend/retouch-frames.js`, cổng an toàn nguồn chung với `/api/retouch/track`): `{source_path, times[], crop?}` → luồng RGBA, header `X-Frame-Width/Height`, `X-Source-Width/Height`, `X-Crop-X/Y`. ffmpeg `-copyts -hwaccel auto -ss … -t …`, `crop` (toạ độ chuẩn hoá → pixel chẵn + lề 8 px) trước `scale=in_color_matrix…,format=rgba,showinfo`; PTS từ showinfo ghép với khung stdout. Chọn khung CUỐI có PTS ≤ đích; đích = t + start_time LUỒNG HÌNH (lane chính, `source_path` rỗng = temp_input.mp4 — đúng quy ước `videoStart` của sidecar) hoặc t + start_time TỆP (asset). Màu như `UntaggedColorFix`. HDR → 415. Đệm gửi tối đa 64 MB để ffmpeg giải mã trước trong lúc renderer xử lý. Env tắt `CRAB_RETOUCH_FRAMES=0` (giải mã GPU: `CRAB_RETOUCH_FRAMES_HW=0`).
+- **Renderer** `eachSourceFrameBest`: backend trước (`eachSourceFrameFromBackend`), phần thiếu (tắt, HDR, lỗi, đứt giữa chừng) tua `<video>` như cũ. `retouchSourceRegion` tính vùng nguồn cần: hợp qua mọi khung của bốn góc miếng vá đổi NGƯỢC qua phép đặt (`sequencePointToLayer`) và hộp raster của Retouch (`Retouch.faceBounds(face, MASK_BOUNDS_PAD)`), lề 4%; xoá logo hoặc bake cả khung thì không cắt. Có vùng cắt thì `onFrame(canvas cỡ vùng, …, view)`: `retouchedDrawable(…, view)` đổi landmark sang toạ độ vùng (`faceToView`), `blitLayerAt(…, sub)` / `drawMainClipLayer({sourceRect})` vẽ vùng vào đúng phần hộp lớp. Canvas phụ là canvas phần mềm (`bakeCanvas(role, w, h, {cpu:true})`, `retouchScratchCpu`). `bakedFrameSink(…, {pipeline:true})` mã hoá bằng 3 worker (`imageEncodePool`) — caller phải `await sink.flush()`.
+- Kết quả "Yêu Con 1": phần dựng khung 28,3 → 18,0 s; miếng vá so đường cũ 47,4 dB cùng khung / 32–33 dB lệch ±1 khung. Phụ lợi: miếng vá lấy điểm ảnh từ cùng bộ giải mã với phần khung quanh nó (sidecar). Số đo `retouch_faces_ms` (chờ bám mặt) nay có trong `client_prebake_detail`.
+- Test `npm run test:retouch-frames` (quy tắc chọn khung, endpoint thật trên video mỗi khung một mức xám ở cả ba quy ước trục, vùng cắt trùng từng byte, các ca từ chối).
+
+## Xuất video bằng GPU — đồ thị CUDA của bản ffmpeg riêng (2026-10-02, mục 1.21)
+
+Người dùng chốt: máy có GPU thì xuất bằng GPU (Cài đặt › Xuất video › "Render bằng", mặc định GPU). Bộ lọc CUDA của CrabbyCut nằm trong bản ffmpeg riêng: `crabgeo_cuda` (cắt + co bicubic như swscale + đổi ma trận/dải màu + đặt vào khung, RGBA -> yuva420p có màu mép theo alpha) và `crabblend_cuda` (trộn lớp phủ trùng từng bit với `overlay=format=yuv420`, thêm `opacity`). Bản ffmpeg thường (Gyan/BtbN) không có hai bộ lọc này -> mọi thứ như cũ.
+
+- **Bản ffmpeg riêng ở đâu** (G5, 2026-10-03): repo https://github.com/tamphamdesigner92-tb/ffmpeg-for-CrabbyCut — `build.sh` (MSYS2 UCRT64) clone FFmpeg `n8.1.1` + nv-codec-headers `n12.2.72.0` gốc, áp `patches/ffmpeg/*` (thứ tự trong `series`), build shared GPL v3, gom DLL rồi đóng zip `ffmpeg-<bản>-win64-gpl-shared.zip` kèm `licenses/` và `README.txt` (commit FFmpeg, mã băm bản vá, phiên bản từng gói MSYS2). Zip là asset của Release cùng tên tag; `scripts/ffmpeg_pin.js` trỏ vào đó (bước package in sẵn các trường). Tên bản nằm trong `CRABBYCUT_VERSION` của repo đó, = chuỗi `ffmpeg -version` = `versionPrefix`.
+- **Build lại / sửa bộ lọc:** README của repo đó. Bản fork để phát triển: `D:\CrabbyCut_ffmpeg\ffmpeg` (nhánh `crabbycut-8.1.1` = n8.1.1 + mỗi bản vá một commit); dựng từ fork bằng `FFMPEG_SRC=<fork> WORK=<thư mục> ./build.sh fetch configure make install` (bản `-crabbycut-dev`, không đóng gói được), commit vào fork rồi `scripts/export-patches.sh <fork>`. Phát hành: tăng `CRABBYCUT_VERSION`, dựng sạch, chạy bộ test xuất video của CrabbyCut trên `bin/` của zip (GPU tự động và `CRABBYCUT_EXPORT_GPU=0`), tag + Release, sửa `ffmpeg_pin.js`.
+- **DLL nhập tĩnh:** `build.sh` dừng nếu bản dựng nhập tĩnh DLL ngoài danh sách DLL của Windows (DLL driver như `nvcuda.dll` nhập tĩnh = ffmpeg chết trên máy không có driver đó). `vulkan-1.dll` được KÈM trong `bin/`: libplacebo (avfilter nạp tĩnh) nhập tĩnh nó, máy không có driver Vulkan sẽ không có tệp này -> ffmpeg không khởi động (bản Gyan nạp Vulkan động nên không gặp). Có bộ nạp kèm theo thì máy đó chỉ trượt phép dò `vulkanTonemapUsable` và lùi về zscale.
+
+- **Bật khi nào** (`CommandExportVideo`, dò song song với các phép dò khác): `render_device` != "cpu" (backend gửi theo cài đặt; env `CRABBYCUT_EXPORT_GPU=0|1` ép), codec không phải ProRes, bộ mã hoá là NVENC, và `GpuRenderAvailable` chạy được trọn chuỗi tải lên -> crabgeo -> NVENC. `NvdecDecodes` dò nguồn chính và từng video lớp phủ: giải mã được thì NVDEC ra thẳng khung CUDA, không thì giải mã CPU rồi `format=<GpuUploadFormat>,hwupload_cuda` sau `trim`.
+- **Theo từng batch** (`BatchGpuEligible`): mọi batch đi GPU trừ batch có lớp phủ text (drawtext) hoặc xuất nhỏ hơn sequence mà chưa dựng ở cỡ xuất. Clip có bản GPU (`ClipGpuNative`: đi đường nhanh YUV, không xoá logo, tầng màu rỗng hoặc gộp được thành LUT, không co nhỏ quá ~15 lần — bảng lọc crabgeo ≤ 64 tap) đi crabgeo; clip còn lại (keyframe zoom/pan, xoay, mặt nạ, hiệu ứng không gian, xoá logo, keyframe màu…) dựng bằng CHÍNH chuỗi CPU của nó, đổi về bt709/tv (khung CUDA không tự đổi màu giữa các liên kết) rồi `hwupload` (2026-10-03 — trước đó một clip như vậy kéo cả batch về CPU). Batch có clip CPU thì giải mã nguồn bằng CPU (`g_gpuBatchNvdec`), không có thì NVDEC. Batch đạt được ghi thêm `export_filter_batch_N_gpu.txt`; batch khác đi đồ thị CPU trong cùng lượt (cùng NVENC nên ghép `-c copy` được).
+- **LUT trên GPU** (`BlockGpuLut`, 2026-10-03, cần bản ffmpeg `n8.1.1-crabbycut.2` — `GpuLutAvailable` dò `lut2` trong `-h filter=crabgeo_cuda`; bản `.1` thì clip có LUT đi CPU như trước): mọi phép màu TĨNH theo từng điểm ảnh của block — `eq` (số), `colorbalance`, `curves`, `lut3d` — qua mọi tầng (block, lớp Điều chỉnh, lớp thêm), đúng thứ tự, gộp thành MỘT LUT: một lut3d đơn lẻ dùng thẳng tệp của nó, còn lại BAKE (`BakeColorLut`: lưới RGB 33³ 16-bit do sidecar dựng chạy qua chính chuỗi filter CPU trong một lượt ffmpeg — có eq thì đổi lưới sang YUV bt709/tv trước — ghi `<temp>/gpu_color_luts/gpu_bake_<băm>.cube`, dùng lại qua các lần xuất). Thêm được một tầng keyframe cường độ LUT ĐỨNG CUỐI (phép tĩnh trước nó bake vào cả hai cube -> `lut=A':lut2=B':mix=<biểu thức>`), và `:enable='…'` CHUNG cho mọi phép (lớp Điều chỉnh phủ một phần) -> `mix`. Keyframe thông số màu (eq biểu thức, filter có nhãn `@` của sendcmd), mặt nạ màu, hiệu ứng không gian (unsharp/blur/noise/vignette), phép đứng sau tầng trộn LUT -> CPU. Chất lượng bake (nguồn DJI 10-bit, eq + colorbalance + curves): GPU so CPU 46,9 dB; so bản chuẩn của bộ so 0.3 thì GPU 39,2 so với CPU 40,7 dB — bản chuẩn chạy `eq` 8-bit trên từng điểm ảnh nên mang đúng bậc làm tròn của CPU mà LUT nào cũng không tái tạo được (đã thử: áp bảng eq đo được 38,9; eq trên lưới rgb24 của haldclutsrc 39,5); không có eq thì GPU hơn CPU ~5 dB. crabgeo áp LUT lên nội dung SAU phép co, tính float từ khung 10-bit (đường CPU từng hạ nguồn về RGB 8-bit TRƯỚC LUT — so một bản dựng float: CPU 39,4 dB, GPU 49,3 dB; đã sửa cùng ngày, xem "LUT CHẠY FLOAT Ở SIDECAR").
+- **Lớp phủ chưa có bản GPU** (`OverlayGpuModeFor`): `Native` = bản GPU riêng (`WriteVisualOverlayFilterGpu`: đứng yên, không xoay/lật/mép mềm/mặt nạ, màu chỉ là LUT); `CpuYuv` = lớp phủ "yuvStatic" còn lại (mép mềm, chuỗi màu bất kỳ, mặt nạ, lật, xoá logo…): chính chuỗi CPU của nó tới yuva420p đã đệm, `hwupload_cuda` trước `loop`/`tpad`, rồi crabblend thay `overlay=format=yuv420` — trùng từng bit với CPU; `CpuCanvas` = lớp phủ động (keyframe vị trí/cỡ/xoay, hoạt ảnh): ghép RGBA lên khung trong suốt cỡ sequence (chỉ trong cửa sổ của nó) bằng `overlay=format=rgb`, dời sớm 1 ms, tải lên, crabgeo đổi yuva420p (`alpha_chroma=1`), crabblend ở (0, 0). Video lớp phủ chỉ giải mã NVDEC khi `Native`. Dời 1 ms là bắt buộc: mốc khung luồng chính ở chỗ trộn đã làm tròn theo µs (6,666666 s), mốc n/30 đúng muộn hơn 1 µs và crabblend lấy khung trong suốt trước đó (Yêu Con: chuỗi khung keyframe cỡ chậm một khung, 28 dB) — dời TRƯỚC khi ghép thì sai chỗ khác (ảnh/video lớp phủ chỉ sớm 0,1 ms). Ảnh tĩnh lặp: đường khung trong suốt hiện đủ tới mép cuối cửa sổ, đường CPU (và `Native`) tắt sớm một khung ở mép cuối (`eof_action=pass` coi khung lặp cuối hết hạn ngay ở mốc của nó).
+- **Kết quả dò lưu giữa các lần xuất** (2026-10-03, `GpuProbeResult`): `<temp dự án>/gpu_probe_cache.txt`, khoá = dấu vân tay bản ffmpeg (FNV-1a của `-filters` + `-encoders`) + tên NVENC + đường dẫn/cỡ/mốc sửa của nguồn và từng video lớp phủ được dò, sống 3 ngày; batch GPU lỗi thì xoá. Test.crab: khâu dò 1,23 -> 0,33 s, cả lượt 11,5 -> 10,4 s. Timing có `gpu_probe_cached`. Env `CRABBYCUT_EXPORT_GPU_PROBE_CACHE=0` để luôn dò.
+- **Lùi:** batch GPU lỗi -> chạy lại bằng đồ thị CPU (`gpu_fallback` trong timing) trước logic lùi NVENC -> libx264; khi lùi về libx264 thì mọi batch đi đồ thị CPU (libx264 không nhận khung CUDA).
+- **Chờ GPU từng khung** (`sync=1`, mặc định của crabgeo/crabblend; hwcontext_cuda chờ cả lúc tải lên): để GPU chạy không đồng bộ thì bản xuất có khung rách / lớp phủ lệch 2–6 khung khi luồng lọc chạy trước GPU — chỉ lộ khi ra thẳng NVENC và nhiều batch song song; ra FFV1 qua `hwdownload` thì che mất. Chờ không chậm hơn trên các phép đo.
+- **Tải lên bằng `hwupload`, KHÔNG BẰNG `hwupload_cuda`** (sửa 2026-10-03): hwupload_cuda bỏ qua `-filter_hw_device` và tự tạo một ngữ cảnh CUDA mới cho MỖI lần xuất hiện (~0,25 s + bộ nhớ GPU mỗi cái) — mỗi ảnh/chuỗi lớp phủ, mỗi dải đen đệm của clip, nguồn chính. 48 cái (phim 4K có 48 phụ đề mỗi batch) tốn 13,2 s so với 1,3 s bằng `hwupload` (dùng thiết bị `cu` chung với crabgeo/crabblend/NVENC). Trước khi sửa, đường GPU của phim đó CHẬM hơn CPU (84 so với 59 s).
+- **Dò NVDEC có `-xerror` + `-t 2`** (sửa 2026-10-03): codec NVDEC không hỗ trợ (AV1 trên GTX 10xx) thì bộ giải mã lỗi ở từng gói mà ffmpeg vẫn đọc tiếp — lệnh dò đọc hết nguồn tới thời gian chờ 20 s (phim 4K AV1: khâu dò 20,8 s). Nay ~0,3 s.
+- **Số đo** (phát lại, GTX 1060, bản ffmpeg `.2`, sau hai sửa trên): **Yêu Con 51,8 (CPU) -> 17,4 s**; **Bin Tom 14,9 -> 9,1 s**; Test.crab ~14 -> 9,8 s; phim 4K AV1 300 s, 48 phụ đề/batch (GTX 1060 không giải mã AV1 -> giải mã CPU + tải lên) 58,8 -> 49,3 s, GPU so CPU 52,7 dB trung bình (tệ nhất 47,7). Bộ so 0.3 trên Yêu Con ĐẠT (so bản chuẩn 42,95 -> 46,42 dB, VMAF 98,4).
+- **Bộ so 0.3 (`export_fidelity.js`):** bản chuẩn đổi `format=rgb24` thành `format=gbrpf32le` (lut3d/blend chạy float) — giữ rgb24 thì bản chuẩn mắc đúng lỗi 8-bit-trước-LUT của đường CPU và chấm ngược.
+- Report: dòng `render_device` (thiết bị thật + cài đặt), mỗi lượt ffmpeg ghi ` gpu` / ` gpu_fallback`.
+- Test `npm run test:export-gpu` (so GPU với CPU từng khung ≥ 38 dB, 3 chuỗi khung đúng khung khi 3 batch song song, batch lẫn GPU/CPU, lùi khi đồ thị GPU hỏng — env chỉ cho test `CRABBYCUT_EXPORT_GPU_TEST_FAIL=1`, nguồn H.264 10-bit giải mã CPU; keyframe độ mờ; LUT tĩnh + LUT trộn theo keyframe (bản `.1`: phải đi CPU); lớp phủ mép mềm / keyframe cỡ / xoay không kéo batch về CPU). BỎ QUA khi ffmpeg không có bộ lọc CUDA của CrabbyCut.
+
+## Xuất lại dùng bộ nhớ đệm render (2026-10-03, mục 1.13)
+
+Kiểu "Use Previews" của Premiere / "Use render cached images" của Resolve, nhưng không đánh đổi chất lượng: batch hình (và lượt tiếng) của lượt xuất trước chỉ được dùng lại khi KHOÁ trùng, mà khoá phủ mọi thứ ffmpeg thấy khi render batch đó — nên bản ghép ra trùng từng khung với bản render lại từ đầu (test chốt bằng framemd5, H.264 ghép `-c copy` batch cũ + batch mới).
+
+- **Bật/tắt:** Cài đặt › Xuất video › "Dùng lại phần đã render khi xuất lại" (`export.renderCache`, mặc định bật). Backend truyền `CRABBYCUT_RENDER_CACHE_DIR` (+ `CRABBYCUT_RENDER_CACHE_MAX_BYTES`, 20 GB) cho sidecar; không truyền = tắt (sidecar chạy tay/test gọi thẳng sidecar). Thư mục: `<USER_DATA_ROOT>/render_cache` — cùng ổ với `temp_uploads` nên cất batch bằng đổi tên. Test đặt `CRAB_TEMP_DIR` mà không đặt `CRAB_RENDER_CACHE_DIR` thì cache tắt (bench + test phải render thật). Dọn tay: Cài đặt › Bộ nhớ đệm › "Bản render để xuất lại" (từ chối khi đang xuất — bước ghép đang đọc tệp trong cache).
+- **Áp cho:** các batch hình + lượt tiếng của lượt xuất nhiều batch (dự án có lớp phủ, chia theo thời gian hoặc chia để chạy song song). Lượt tiếng cũng được dùng lại: sửa phụ đề/màu không đụng tiếng, mà lượt tiếng chiếm phần lớn thời gian còn lại của một lượt xuất lại (Bin Tom 2,3/5,7 s, phim 300 s 6/10,6 s); đổi âm lượng/nhạc/khử ồn là đổi khoá của nó. Dự án một batch (ngắn trên máy 1 lượt hình, hoặc không có mốc cắt an toàn) và dự án không lớp phủ: không dùng cache.
+- **Khoá** (`RenderCacheKey`, SHA-256 tự viết — `Sha256`, đã kiểm bằng vector chuẩn): định dạng cache + `__DATE__ __TIME__` của bản dựng sidecar (đổi ở mọi lần biên dịch) + vân tay ffmpeg (`-version` + cỡ/mtime exe và mọi DLL cạnh nó) + từng tham số dòng lệnh của CHÍNH lần chạy (bỏ `-benchmark`/`-progress`/`-print_graphs_file` và tệp ra), trong đó:
+  - `-i <tệp>` -> định danh NỘI DUNG (`RenderCacheFileId`, xxHash64 hai hạt giống = 128 bit + cỡ): tệp ≤ 16 MB băm cả tệp; tệp lớn băm cỡ + 5 khúc 1 MB (đầu, 1/4, 1/2, 3/4, cuối) — mã hoá lại video luôn đổi cỡ hoặc `moov`. Mẫu chuỗi khung `…%05d.png` -> định danh từng khung từ 0. Khoá không chứa đường dẫn: temp_input.mp4 dựng lại khi mở dự án, ảnh phụ đề bake lại mỗi lượt xuất với nội dung y hệt.
+  - **Chi phí khoá** (đo trên "Bin Tom"/"Yêu Con"): SHA-256 cho nội dung tệp chỉ ~170 MB/s và khoá tính TUẦN TỰ ngay trước khi khởi chạy từng batch -> lượt đầu mất 6,8–7,3 s chặn việc khởi chạy (chủ yếu là lần mở đầu tiên của hàng nghìn khung PNG vừa ghi — trình quét virus — chứ không phải phép băm). Nay: xxHash64 (~10 GB/s); `RenderCachePrefetch` chạy lượt "gom" của RenderCacheKey (ghi lại đường dẫn thay vì băm) cho mọi job rồi băm song song tối đa 8 luồng (`RenderCacheHashFiles`); định danh nhớ giữa các lượt xuất trong `file_ids.tsv` của thư mục cache theo (đường dẫn, cỡ, mtime) như index của git — tệp ghi lại thì băm lại, mục không dùng 30 ngày thì bỏ. Giới hạn đã biết (như git/make): sửa nội dung mà giữ nguyên cả cỡ lẫn mtime thì không bị phát hiện.
+  - `-/filter_complex <script>` -> chữ của script, trong đó mọi đoạn trong nháy đơn là đường dẫn tới tệp có thật (LUT, mặt nạ, tệp lệnh sendcmd, danh sách ffconcat của Retouch — danh sách thì băm cả từng tệp nó liệt kê) được thay bằng định danh nội dung (`RenderCacheScriptId`). Đọc nhầm một đoạn chỉ làm lỡ cache, không bao giờ cho trùng sai: đoạn không phải tệp giữ nguyên chữ.
+  - bộ mã hoá phần cứng / `-init_hw_device` -> thêm cỡ/mtime driver (`nvcuda.dll`, `nvEncodeAPI64.dll`, `amfrt64.dll`, `libmfxhw64.dll`, `libvpl.dll`): driver mới có thể đổi SPS/PPS, mà ghép `-c copy` giữ SPS/PPS của batch đầu.
+- **Tra** (`RenderCacheLookup`, gọi trong `RunBatchJobs` ngay trước MỖI lần chạy, kể cả lượt chạy lại bằng đồ thị CPU / lùi NVENC -> libx264): khoá theo dòng lệnh của lần chạy đó, nên lùi về libx264 là tra khoá libx264 — không bao giờ ghép batch NVENC cũ với batch libx264 mới. Trùng thì không chạy ffmpeg; danh sách ghép trỏ thẳng tệp trong cache (không chép ra).
+- **Cất** (`RenderCacheStore`, SAU bước ghép vì bước ghép đọc chính các tệp batch): đổi tên batch vừa render thành `<khoá>.mp4|.mov` (qua `.part`), chạm mtime mục vừa dùng lại; ổ còn < 5 GB (`CRABBYCUT_RENDER_CACHE_MIN_FREE_BYTES`) thì không giữ gì; khác ổ thì chép khi còn đủ chỗ. Rồi `RenderCachePrune`: bỏ mục quá 30 ngày, giữ mục mới dùng nhất trong trần, xoá `.part` sót quá một ngày.
+- **Mốc cắt ổn định giữa các lượt** (`PlanOverlayBatches`): mốc cắt mong muốn theo LƯỚI k × target (`NextBatchMark`, batch dài 0,5–1,5 × target) thay cho "đầu batch + target" — một mốc bị đẩy lùi (lớp phủ động vắt qua) không kéo lệch mọi mốc sau. Dự án ngắn chia để chạy song song: độ dài batch làm tròn xuống theo bậc 8/10/12/15/20/25/30/40… s thay cho tổng/số phần — sửa dài/ngắn timeline một chút không đổi mốc của các batch trước chỗ sửa. Sửa làm DỜI nội dung (cắt/chèn clip) thì mọi batch sau chỗ sửa vẫn phải render lại — nội dung của chúng đã dời trên trục thời gian.
+- **Ảnh tĩnh lớp phủ hết đúng mép cuối** (lỗi có sẵn, lộ ra khi mốc cắt đổi — `kStillTailSeconds`, `OverlayEnableEnd`): luồng ảnh tĩnh chạy theo nhịp riêng (PNG 25 khung/s), `trim=duration=D` cho khung ảnh cuối ở start + D − 1/25 và framesync coi lớp phủ HẾT ngay ở mốc đó (eof_action=pass) -> mọi bản xuất mất khung nền trong 1/25 s cuối của mỗi ảnh tĩnh/phụ đề tĩnh (1–2 khung ở 30 khung/s, 2–3 khung ở 60; hai phụ đề nối liền nháy trống). Ở batch, `setpts=…+start/TB` cắt phần lẻ trên timebase 1/25 nên còn sớm thêm một khung so với bản một lượt. Nay luồng ảnh dài dư 0,25 s, `enable` của ảnh tĩnh kết thúc ở end − nửa khung (đối xứng mép đầu): hiện đúng [start, end) như preview/Premiere, ở cả đường CPU và GPU. Chuỗi khung (đã có khung đuôi) và video lớp phủ giữ như cũ. `test:export-parallel` kiểm hai mép của từng ảnh tĩnh (bản cũ trượt ở khung 599).
+- **Lớp phủ động chỉ chặn mốc cắt khi có khung HIỆN ở cả hai phía** (`OverlayStraddles`): mép mở `enable` = start − nửa khung, mép đóng = end (video) / end − nửa khung (ảnh tĩnh) / start + duration − nửa khung chuỗi (chuỗi khung); vắt qua mốc `at` <=> mép mở < at − ¾ khung và mép đóng > at − ¼ khung. Trước đây nới MỘT KHUNG mỗi đầu: phụ đề động bắt đầu sau biên clip một khung (11,73 so với 11,7 s) hay kết thúc trước biên một khung vẫn bị coi là vắt qua — "Yêu Con" không cắt được ở 4/5 biên clip (batch đầu 25,9/37,8 s). Nay 5 batch, **Yêu Con 17,0 -> 14,7 s**; Bin Tom/phim không đổi. `test:export-parallel` kịch bản C/D: biên clip đúng khung đầu / ngay sau khung cuối của chuỗi khung phải cắt được, bản chia batch trùng bản một lượt (luật cũ trượt ở C: chỉ 2 batch).
+- **Tên bộ lọc/tệp lệnh phụ đếm lại theo từng script** (`g_filterAuxSeq` về 0 ở mỗi `WriteFilterScript`, tệp lệnh mang tiền tố tên script): đếm suốt tiến trình thì thêm một lớp phủ có keyframe ở batch 1 làm đổi chữ (`colorchannelmixer@kfopN`, `blend@…lm`) của mọi batch sau.
+- **Số đo** (phát lại payload thật, GTX 1060, zip `.2`, cache cả lượt tiếng): **Yêu Con xuất lại 14,7 -> 3,3 s**; **Bin Tom 9,5 -> 3,5 s**; Bin Tom đổi nội dung một phụ đề (batch 5/6) 6,3 s; phim 4K AV1 cắt 300 s xuất lại ~49 -> 4,7 s. Phần còn lại của một lượt xuất lại: dò nguồn 0,6–1,4 s, khoá 0,2–0,5 s, ghép 0,25–0,9 s, phần server (tải lên/chuẩn hoá ~0,6 s). Lượt đầu đắt thêm ~0,5–1 s (đọc trước khung PNG vừa ghi để băm, chồng lên lượt tiếng). Test.crab chỉ có một batch nên không dùng cache.
+- **Payload gửi sidecar không còn `editingItems`** (`export_timeline.json`, backend): sidecar không đọc trường này (lớp phủ đã chuẩn hoá nằm ở `overlays`), mà item thô còn nguyên ảnh chữ base64 + khung hoạt ảnh — "Bin Tom" 92 MB: backend stringify + ghi 92 MB, sidecar quét cả tệp ~1 s trước mọi phép dò. Bỏ đi: khâu dò nguồn Bin Tom 1,4 -> 0,35 s, xuất thường 9,5 -> 8,0 s, xuất lại khi trùng cache 3,5 -> 2,1 s (Yêu Con 3,3 -> 2,9 s).
+- Timing: `cache_key_ms`, `cache_stored`, mỗi lượt `cache_hit`; report dự án: dòng `render_cache_stored`, lượt ffmpeg dùng lại ghi ` cache`. Test `npm run test:export-render-cache` (lượt đầu cất đủ; ghi lại ảnh nội dung y hệt -> trùng cả 3 batch + lượt tiếng, bản xuất trùng từng khung + từng mẫu; thêm tệp lệnh ở batch 0 + đổi ảnh batch 2 -> chỉ batch 1 + lượt tiếng trùng, bản ghép trùng bản render lại; đổi âm lượng -> hình trùng hết, tiếng render lại đúng; trần dung lượng; ổ thiếu chỗ; tắt khi không truyền thư mục).
+
+## Xuất lại không dựng lại khung vẽ trước — bộ nhớ đệm khung vẽ trước (2026-10-04, mục 25)
+
+Cache render (mục trên) chỉ lo phần server; trước khi gửi lệnh xuất, renderer còn DỰNG LẠI mọi chuỗi khung "vẽ trước" ở mỗi lượt: miếng vá Retouch (Yêu Con 2 khối, 294 khung: 16,5 s) và chuỗi khung chữ/hình/ảnh động (Yêu Con 14 chuỗi 1,9 s; Bin Tom 5,9 s). Nay chuỗi đã dựng với y hệt đầu vào được dùng lại.
+
+- **Ai làm gì:** renderer (`editing-runtime.js`, khối "BỘ NHỚ ĐỆM KHUNG VẼ TRƯỚC") tính KHOÁ, hỏi `POST /api/prebake/lookup` trước khi dựng. Trúng -> chuỗi chỉ mang `seq.cache_key` (+ `source_path`), không dựng, không gửi khung. Trượt -> dựng như cũ, gửi khung KÈM `cache_key` + `cache_meta`; backend (`materializePrebakeSeq` -> `backend/prebake-cache.js`) ghi khung như cũ rồi cất (liên kết cứng/chép vào thư mục tạm, `meta.json` ghi cuối, đổi tên thư mục) và trỏ overlay vào bản trong cache — đường dẫn + mtime của khung đứng yên nên `file_ids.tsv` của cache render trúng, sidecar không băm lại khung, và batch render cũng trúng.
+- **Khoá phía renderer** (`prebakeKey` = SHA-256 của JSON ổn định, khoá sắp xếp): `kind` + **vân tay mã nguồn** (`prebakeFingerprint`: băm index.html + mọi script cùng nguồn của trang, tính NGAY sau khi trang nạp; sửa bất kỳ dòng mã nào là ra khoá mới — không phải nhớ tăng số phiên bản) + `navigator.userAgent` (bản Chromium: bộ mã hoá JPEG/PNG, phép co canvas) + chuỗi GPU WebGL (shader Retouch) + phần riêng của chuỗi:
+  - Retouch lane chính (`retouchMainPrebakeKey`): toàn bộ JSON clip (trừ `is_selected`), mốc khối, `payloadSequence()`, khung nối, cỡ vẽ + chiều cao gốc của lớp, fps, chất lượng JPEG, `faces_id` (định danh bộ landmark do `/api/retouch/track` trả thêm = tên tệp cache khuôn mặt: nguồn + cỡ/mtime + khoảng + tuỳ chọn). Hộp vá / mép mềm / cỡ cất trong `meta.json` nên lượt trúng bỏ qua cả lượt 1 (hộp bao).
+  - Chuỗi chữ / hình / mẫu văn bản (`cachedSeq` trong `exportPayload`): JSON item (trừ PNG tĩnh vừa dựng), mật độ bake, fps, cỡ sequence, mặt chữ KHAI BÁO (@font-face) của các họ có trong item (không lấy trạng thái nạp — đổi giữa hai lượt cùng phiên), mẫu đã giải (`textTemplateResolved`, gồm mẫu người dùng tự lưu).
+  - Ảnh động: như trên + tệp ảnh (`source_path`).
+- **Khoá phía backend** (`entryName`): băm(khoá renderer + danh tính tệp nguồn — đường dẫn, cỡ, mtime, 3 mẩu 64 KB đầu/giữa/cuối — + dòng đầu `ffmpeg -version`, vì khung nguồn của miếng vá do ffmpeg giải mã + co). Chuỗi không đọc tệp (chữ) -> danh tính `-`.
+- **Chuyển cảnh LANE CHÍNH** (`mainTransitionPrebakeKey`, cùng phiên): khung bake SẴN màu nên khoá gồm JSON hai clip + định nghĩa chuyển cảnh + mốc + sequence/cỡ vẽ + lớp Điều chỉnh phủ đoạn chuyển cảnh + **chữ ký nội dung mọi LUT dính tới** (`prebakeLutSignature`: băm dữ liệu cube đã nạp — id LUT không đổi khi nhập lại tệp cùng tên) + mã landmark khi có Retouch; xoá logo thì không cache. Tua khung trả null (quá hạn) -> `status.complete = false`, không cất. Yêu Con + 9 chuyển cảnh 0,5 s: dựng chuyển cảnh 18,4 s mỗi lượt -> 0,06 s khi trúng.
+- **Chuyển cảnh LỚP PHỦ** (`overlayTransitionPrebakeKey`, 2026-10-04 sau bản 1.1.13): khung PNG cỡ sequence giữa hai item liền nhau (chữ / hình / ảnh / video). `prepareExportLayer` bake sẵn chỉnh màu của item và lớp Điều chỉnh tại mép, nên khoá gồm JSON hai item + định nghĩa chuyển cảnh + fps/sequence + lớp Điều chỉnh quanh điểm cắt + chữ ký mọi LUT dính tới (`prebakeLutSignatures` quét mọi đối tượng `lut` có `id`, kể cả trong keyframe — khoá lane chính cũng dùng hàm này) + phông (`prebakeFontSignature`, chung với chuỗi chữ động) + mẫu văn bản đã giải + với media: `asset.path/url/width/height`, cỡ gốc và `mediaAssetFitScale` (khung mép video bốc từ `asset.url`, có thể là bản proxy). Danh tính tệp: `source_path` là **MẢNG** đường dẫn (một mục mỗi media, đúng thứ tự A, B) — backend gộp danh tính từng tệp (`sourceStamp`, tối đa 8; phần tử rỗng/mảng rỗng/tệp ngoài danh sách trắng -> không cache, không được hiểu thành nguồn lane chính). Một lớp không dựng được (thiếu khung mép) -> `status.complete = false`, không cất. Hỏi/cất chung một hàm với lane chính (`cachedTransitionSeq`). Yêu Con + 5 chuyển cảnh lớp phủ (1 cặp ảnh, 4 cặp chữ): dựng 3,19 s -> 0,04 s, cả lượt xuất lại 20,1 -> 3,3 s; cặp video 4K: 4,5 s -> 0,012 s (cả lượt 21,2 -> 3,7 s); sửa chữ một item + độ sáng ảnh một item: chỉ 2 chuyển cảnh + 2 chuỗi chữ động dựng lại, 17 chuỗi trúng.
+- **KHÔNG cache** (dựng như cũ, có chủ đích — đưa đủ đầu vào vào khoá là dễ sót): Retouch bake CẢ KHUNG (mang chuỗi màu/LUT/lớp Điều chỉnh), có xoá logo, đang giữ nút so sánh; khối có khung phải lùi sang tua `<video>` (lệch ~47 dB so với khung ffmpeg) hoặc thiếu khung; ảnh động có chỉnh màu / keyframe màu / LUT / lớp Điều chỉnh phủ lên / Retouch / xoá logo; overlay video có Retouch; chuyển cảnh lớp phủ có media thiếu `asset.path` hoặc `asset.url`.
+- **Cắt batch XUYÊN QUA chuỗi khung "trơn"** (sidecar `SequenceCutFrame`, cùng phiên): trước đây mọi chuỗi khung (`image_seq`) chặn mốc cắt, nên dự án có chuyển cảnh ở mọi biên clip (Magic Fill) thành MỘT batch — không chạy song song, không cache render (Yêu Con + 9 chuyển cảnh: server 17–23 s, xuất lại vẫn ~20 s dù trúng hết cache vẽ trước). Nay chuỗi không có thuộc tính biến thiên nào khác (`OverlayHasTimeVaryingProps`: hoạt ảnh In/Out, keyframe, chuỗi màu LOCALT/sendcmd, lớp Điều chỉnh) được cắt xuyên qua khi mốc cắt rơi ĐÚNG biên khung của chuỗi (k nguyên, 1 ≤ k < số khung thật): batch sau nạp `-start_number k` (`seqStartFrame`), số khung còn lại `frameCount − k` cho phép tính khung đuôi. Trần `frame_count` đọc từ payload 1000 -> 3600 (= backend). Env tắt `CRABBYCUT_EXPORT_SEQCUT=0`. Kết quả: 5 batch, lượt đầu server 14,5 s, **xuất lại 3,2 s**. `test:export-parallel` kịch bản E (cắt ở khung 8 của chuỗi, trùng bản một lượt từng khung + đúng khung từng mức xám) và F (chuỗi có keyframe -> không được cắt ở đó).
+- **Mục biến mất giữa lượt hỏi và lượt xuất** (dọn tay): lượt xuất LỖI có lời giải thích, không rơi về overlay tĩnh (sẽ là bản xuất mất Retouch không báo gì). Dọn tay bị chặn trong 10 phút sau lượt hỏi trúng cho tới khi lượt xuất xong (`prebakeCache.held()` / `release()` ở `releaseExportLock`).
+- **Bật/tắt + dọn:** chung với cache render — Cài đặt › Xuất video › "Dùng lại phần đã render khi xuất lại"; Cài đặt › Bộ nhớ đệm › "Bản render để xuất lại" tính và dọn cả `prebake_cache` (`extraDirs`). Thư mục `<USER_DATA_ROOT>/prebake_cache`, trần 10 GB + 30 ngày (dọn lúc khởi động, cũ nhất trước). Test/bench: `CRAB_TEMP_DIR` mà không đặt `CRAB_PREBAKE_CACHE_DIR` thì TẮT.
+- **Số đo** (Electron thật, Yêu Con, GTX 1060, zip `.2`, có cache bám mặt + cache render): lượt đầu 52,9 s -> **xuất lại 5,0 s** (vẽ trước 33,9 -> 1,5 s: Retouch 0,27 s, chữ động 0,11 s; `editing_json` 25 -> 5,4 MB; server 2,9 s). Sửa "Mịn da" một khối Retouch: 15,0 s (chỉ khối đó dựng lại); sửa chữ một phụ đề: 9,5 s; chỉ chọn block: 4,9 s (trúng cả 16 chuỗi).
+- **Cùng đợt, phần còn lại của một lượt xuất lại** (Yêu Con, mọi thứ trúng cache: 4,9 -> **2,25 s**):
+  - **Kết quả dò GPU cất ngoài temp** (`GpuProbeCacheFile`, env `CRABBYCUT_EXPORT_GPU_PROBE_FILE` = `<USER_DATA_ROOT>/gpu_probe_cache.txt`, backend chỉ đặt khi không chạy test): mở dự án là temp bị dọn nên lượt xuất đầu sau mỗi lần mở dò lại 1,2 s; khoá vẫn đúng vì temp_input.mp4 là liên kết cứng từ cache nối. Dò 1,17 -> 0,36 s.
+  - **Nạp LUT không trùng lượt** (`ensureLutLoadedAsync`, `lutLoadsInFlight`): bước lane chính dựng chuỗi màu của mọi clip SONG SONG, cả 10 clip cùng tải + `registerUserLut` cùng một LUT — mỗi lần đăng ký xoá `cubeCache`, nên clip nào cũng bake lại cube của lớp Điều chỉnh (~96 ms). Bước lane chính 0,92 -> 0,24 s.
+  - `cubeToText` nhớ 6 chuỗi gần nhất theo đối tượng cube (~21 ms/cube 33³); backend `materializeColorLutCube` không kiểm cú pháp lại nội dung đã kiểm (cùng lớp Điều chỉnh đi kèm mọi clip: 2 cube 1 MB × 10) — `prepare` 1,08 -> 0,55 s.
+  - **Nội dung `.cube` gửi MỘT lần** (`exportCubeRef` / `drainExportCubeTexts` ở editing-runtime.js, `setExportCubeTexts` / `resolveExportCubeRef` ở backend): `colorAdjustExportSpec` trả `@cube:cN` thay cho chữ .cube (cube 33³ ~1 MB), nội dung đi một lần trong `editing_json.cube_texts` (exportPayload rút ra ở cuối — spec màu chỉ dựng trong luồng xuất: bước lane chính của performVideoExport rồi exportPayload). Backend parse `editing_json` MỘT lần ở đầu route (trước: hai lần), đặt bảng tham chiếu trước khi chuẩn hoá timeline, giải ở `materializeColorLutCube`; thiếu nội dung -> lượt xuất LỖI (`CUBE_REF_MISSING` không bị `normalizeColorAdjustFields` nuốt như .cube hỏng). Trước đây cùng một lớp Điều chỉnh bị chép vào `color_adjust_layer` của mọi clip: Yêu Con `timeline_json` 20 MB -> 28 KB, `editing_json` 5,4 -> 3,4 MB, tải lên 266 -> 35 ms, xuất lại 2,85 -> **2,25 s**; cache render vẫn trúng 6/6 (tệp .cube trùng từng byte với cách gửi cũ).
+- Timing: `prebake_cache_hits`, `prebake_cache_stores` trong `prebake` của số đo renderer. Test `npm run test:export-prebake-cache` (phía backend: cất, trúng, trùng từng khung, base64, nguồn đổi -> trượt + lỗi rõ, giữ khi dọn, công tắc, dọn theo hạn/trần, mảng nhiều tệp nguồn). Khoá phía renderer kiểm bằng bench: `--eval-before <tệp.js>` chạy JS trong renderer sau khi mở dự án (sửa một chỗ) rồi mới xuất — kịch bản ở `test_temp/pb_bench/`.

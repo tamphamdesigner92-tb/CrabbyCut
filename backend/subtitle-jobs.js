@@ -29,7 +29,8 @@
  *   3. `windowsHide` khi spawn, nếu không mỗi lượt trộn nháy một cửa sổ console đen
  *      trước mặt người dùng.
  * Đường dẫn KHÔNG bao giờ đi vào chuỗi filter (chúng là đối số `-i`), nên dấu \ của
- * Windows không phải escape — đó cũng là lý do giữ nguyên `-filter_complex_script`.
+ * Windows không phải escape — đó cũng là lý do dùng filter script từ file
+ * (`-/filter_complex <file>`; `-filter_complex_script` đã bị xoá khỏi FFmpeg master/9.0).
  *
  * TRỤC THỜI GIAN: bản trộn được dựng theo ĐÚNG trục timeline (mỗi mảnh `adelay` về
  * đúng `timeline_start` của nó), nên mốc ASR trả về DÙNG ĐƯỢC NGAY làm mốc phụ đề —
@@ -313,7 +314,7 @@ async function mixTimelineAudio(job, entries, outputPath) {
   const args = ['-y', '-hide_banner', '-v', 'error', '-progress', 'pipe:2', '-nostats'];
   for (const file of files) args.push('-i', file.path);
   args.push(
-    '-filter_complex_script', filterPath,
+    '-/filter_complex', filterPath,
     '-map', '[out]',
     '-ac', '1',
     '-ar', '16000',

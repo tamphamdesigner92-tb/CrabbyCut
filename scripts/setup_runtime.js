@@ -18,6 +18,7 @@
  * `completed: true` ở bước cuối cùng.
  */
 'use strict';
+const crypto = require('crypto');
 const fs = require('fs');
 const fsp = fs.promises;
 const os = require('os');
@@ -25,6 +26,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const RuntimePaths = require('./runtime_paths.js');
+const { FFMPEG_PIN } = require('./ffmpeg_pin.js');
 const { detectMachine } = require('./detect_machine.js');
 const { downloadFile, humanBytes } = require('./download_file.js');
 const { PYTHON_VERSION, vendorPath } = require('./vendor_assets.js');
@@ -41,9 +43,8 @@ const PROJECT_ROOT = path.resolve(__dirname, '..');
  * `npm run assets:installer`. Phiên bản và tên tệp nằm ở scripts/vendor_assets.js. */
 const PYTHON_EMBED_URL = `https://www.python.org/ftp/python/${PYTHON_VERSION}/python-${PYTHON_VERSION}-embed-amd64.zip`;
 const GET_PIP_URL = 'https://bootstrap.pypa.io/get-pip.py';
-/* Build GPL của BtbN: có `zscale` và `libplacebo` — hai filter mà đường tonemap HDR của
- * backend dựa vào. Bản "essentials" của gyan.dev THIẾU libplacebo, đừng đổi sang đó. */
-const FFMPEG_URL = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip';
+/* FFmpeg: bản GHIM phiên bản + SHA-256, xem scripts/ffmpeg_pin.js (vì sao ghim, vì sao bản
+ * đó). Không còn tải BtbN `latest`: đó chính là nguồn đã làm hỏng export trên máy cài mới. */
 const VC_REDIST_URL = 'https://aka.ms/vs/17/release/vc_redist.x64.exe';
 /* torch bản mặc định trên PyPI cho Windows là bản CUDA (~2,5 GB). Đường ASR trên Windows
  * chạy bằng faster-whisper/ctranslate2 chứ KHÔNG dùng torch — torch chỉ có mặt vì
@@ -133,7 +134,21 @@ function bundledAsset(vendorKey) {
   }
 }
 
-async function downloadCached(url, fileName, stageId, label, vendorKey) {
+function sha256File(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    fs.createReadStream(filePath)
+      .on('data', (chunk) => hash.update(chunk))
+      .on('error', reject)
+      .on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+/* `expectedSha256` (tuỳ chọn): file tải về — kể cả file còn trong cache từ lượt trước — phải
+ * khớp đúng băm này, không thì bị xoá và tải lại. Một file tải đủ byte vẫn có thể là file
+ * khác (CDN trả trang lỗi, bản phát hành bị thay), và cái giá của việc cài nhầm là export
+ * hỏng ở máy người dùng mà không ai biết vì sao. */
+async function downloadCached(url, fileName, stageId, label, vendorKey, expectedSha256 = null) {
   const bundled = bundledAsset(vendorKey);
   if (bundled) {
     log(`Dùng tệp nhúng sẵn trong bộ cài: ${bundled}`);
@@ -144,7 +159,15 @@ async function downloadCached(url, fileName, stageId, label, vendorKey) {
   const dir = RuntimePaths.downloadCacheDir();
   await fsp.mkdir(dir, { recursive: true });
   const dest = path.join(dir, fileName);
-  if (fs.existsSync(dest)) {
+  const matchesHash = async () => {
+    if (!expectedSha256) return true;
+    const actual = await sha256File(dest);
+    if (actual === expectedSha256.toLowerCase()) return true;
+    log(`SHA-256 không khớp cho ${fileName}: ${actual} (cần ${expectedSha256}) — xoá và tải lại.`);
+    await fsp.rm(dest, { force: true }).catch(() => {});
+    return false;
+  };
+  if (fs.existsSync(dest) && await matchesHash()) {
     log(`Dùng lại file đã tải: ${dest}`);
     return dest;
   }
@@ -165,6 +188,7 @@ async function downloadCached(url, fileName, stageId, label, vendorKey) {
   for (let attempt = 1; attempt <= DOWNLOAD_ATTEMPTS; attempt += 1) {
     try {
       await downloadFile(url, dest, onProgress);
+      if (!await matchesHash()) throw new Error(`${label}: file tải về sai SHA-256.`);
       return dest;
     } catch (error) {
       lastError = error;
@@ -484,44 +508,110 @@ function makePipLineReader(ratioFor) {
 }
 
 
-async function stageFfmpeg(machine) {
-  /* Dùng lại ffmpeg của máy khi nó ĐỦ FILTER — tiết kiệm ~180 MB tải về. Phép kiểm "đủ
-   * filter" nằm ở detect_machine.js: chỉ `ffmpeg -version` chạy được là chưa đủ, build
-   * thiếu `zscale` sẽ chết lúc export chứ không chết lúc kiểm. */
-  if (machine.ffmpeg?.usable) {
-    stageProgress('ffmpeg', 1, `Dùng FFmpeg sẵn có trên máy: ${machine.ffmpeg.path}`);
-    return { source: 'system', path: machine.ffmpeg.path, dir: path.dirname(machine.ffmpeg.path) };
-  }
-  if (fs.existsSync(RuntimePaths.ffmpegBinary('ffmpeg'))) {
-    stageProgress('ffmpeg', 1, 'FFmpeg riêng của ứng dụng đã có sẵn.');
-    return { source: 'bundled', path: RuntimePaths.ffmpegBinary('ffmpeg'), dir: RuntimePaths.ffmpegDir() };
-  }
-  if (!IS_WIN) throw new Error('Bộ thiết lập tự động hiện chỉ hỗ trợ Windows.');
+/* Dấu "bản ghim nào đang nằm trong runtime/ffmpeg" — đặt CẠNH thư mục bin, không đặt trong
+ * manifest: manifest được ghi lại từ đầu ở mỗi lượt thiết lập, còn thư mục ffmpeg thì không. */
+function ffmpegPinMarkerPath() {
+  return path.join(path.dirname(RuntimePaths.ffmpegDir()), 'pin.json');
+}
 
-  stageProgress('ffmpeg', 0, 'Máy chưa có FFmpeg phù hợp — đang tải bản riêng cho ứng dụng.');
-  const zip = await downloadCached(FFMPEG_URL, 'ffmpeg-win64-gpl.zip', 'ffmpeg', 'FFmpeg');
+// Dòng đầu của `ffmpeg -version`, hoặc null nếu không chạy được.
+async function readFfmpegVersion(exe) {
+  const lines = [];
+  try {
+    await runStreaming(exe, ['-hide_banner', '-version'], { onLine: (line) => lines.push(line) });
+  } catch (error) {
+    log(`Không chạy được ${exe}: ${error.message}`);
+    return null;
+  }
+  return (lines[0] || '').trim() || null;
+}
+
+async function installedPinnedFfmpeg() {
+  let marker = null;
+  try { marker = JSON.parse(await fsp.readFile(ffmpegPinMarkerPath(), 'utf8')); } catch (_) { return null; }
+  if (marker?.id !== FFMPEG_PIN.id) return null;
+  const exe = RuntimePaths.ffmpegBinary('ffmpeg');
+  if (!fs.existsSync(exe) || !fs.existsSync(RuntimePaths.ffmpegBinary('ffprobe'))) return null;
+  const version = await readFfmpegVersion(exe);
+  return version?.startsWith(FFMPEG_PIN.versionPrefix) ? { version } : null;
+}
+
+async function installPinnedFfmpeg() {
+  if (!IS_WIN) throw new Error('Bộ thiết lập tự động hiện chỉ hỗ trợ Windows.');
+  stageProgress('ffmpeg', 0, `Đang tải FFmpeg bản đã kiểm chứng (${humanBytes(FFMPEG_PIN.sizeBytes)}).`);
+  const zip = await downloadCached(FFMPEG_PIN.url, FFMPEG_PIN.fileName, 'ffmpeg', 'FFmpeg', null, FFMPEG_PIN.sha256);
 
   stageProgress('ffmpeg', 0.8, 'Đang giải nén FFmpeg.');
   const staging = path.join(RuntimePaths.runtimeRoot(), 'ffmpeg-staging');
   await fsp.rm(staging, { recursive: true, force: true });
   await extractZip(zip, staging);
 
-  /* Zip của BtbN bọc mọi thứ trong MỘT thư mục có tên kèm ngày build
-   * (ffmpeg-master-latest-win64-gpl/bin/...). Tên đó đổi theo mỗi bản nên phải đi tìm
-   * `bin/ffmpeg.exe` chứ không ghép đường dẫn cứng. */
+  /* Zip bọc mọi thứ trong MỘT thư mục mang tên bản build (ffmpeg-8.1.1-full_build-shared/
+   * bin/...). Đi tìm `bin/ffmpeg.exe` chứ không ghép đường dẫn cứng. */
   const binDir = await findFfmpegBin(staging);
   if (!binDir) throw new Error('Không tìm thấy ffmpeg.exe trong gói vừa tải.');
+  if (!fs.existsSync(path.join(binDir, 'ffprobe.exe'))) throw new Error('Gói FFmpeg vừa tải thiếu ffprobe.exe.');
+  /* Kiểm gói TRƯỚC khi đụng vào bản đang cài: gói hỏng thì bản cũ vẫn còn nguyên để lùi về. */
+  const version = await readFfmpegVersion(path.join(binDir, 'ffmpeg.exe'));
+  if (!version?.startsWith(FFMPEG_PIN.versionPrefix)) {
+    throw new Error(`Gói FFmpeg vừa tải báo phiên bản lạ: ${version || 'không chạy được'}`);
+  }
 
   const target = RuntimePaths.ffmpegDir();
   await fsp.rm(target, { recursive: true, force: true });
   await fsp.mkdir(target, { recursive: true });
+  // Chép CẢ thư mục bin: bản `-shared` để các DLL (avcodec-62.dll…) nằm cạnh exe.
   for (const name of await fsp.readdir(binDir)) {
     await fsp.copyFile(path.join(binDir, name), path.join(target, name));
   }
   await fsp.rm(staging, { recursive: true, force: true });
+  await fsp.writeFile(ffmpegPinMarkerPath(), JSON.stringify({
+    id: FFMPEG_PIN.id,
+    sha256: FFMPEG_PIN.sha256,
+    version,
+    installed_at: new Date().toISOString(),
+  }, null, 2), 'utf8');
+  return { version };
+}
 
-  stageProgress('ffmpeg', 1, 'Đã cài FFmpeg.');
-  return { source: 'bundled', path: RuntimePaths.ffmpegBinary('ffmpeg'), dir: target };
+async function stageFfmpeg(machine) {
+  /* LUÔN DÙNG BẢN GHIM (scripts/ffmpeg_pin.js), kể cả khi máy đã có ffmpeg "đủ filter".
+   * Trước đây ffmpeg của máy được ưu tiên để khỏi tải ~180 MB, nhưng "đủ filter" không nói
+   * gì về PHIÊN BẢN: một bản BtbN `latest` người dùng tự cài vẫn qua phép kiểm đó rồi làm
+   * hỏng export (mất `-filter_complex_script`, NVENC đòi driver >= 610). ffmpeg của máy giờ
+   * chỉ còn là đường lùi khi không tải được bản ghim. */
+  const bundled = { source: 'bundled', path: RuntimePaths.ffmpegBinary('ffmpeg'), dir: RuntimePaths.ffmpegDir() };
+  const existing = await installedPinnedFfmpeg();
+  if (existing) {
+    stageProgress('ffmpeg', 1, 'FFmpeg (bản đã kiểm chứng) đã có sẵn.');
+    return { ...bundled, pin_id: FFMPEG_PIN.id, version: existing.version };
+  }
+  try {
+    const installed = await installPinnedFfmpeg();
+    stageProgress('ffmpeg', 1, 'Đã cài FFmpeg.');
+    return { ...bundled, pin_id: FFMPEG_PIN.id, version: installed.version };
+  } catch (error) {
+    log(`Không cài được FFmpeg bản ghim: ${error?.stack || error?.message || error}`);
+    /* ĐƯỜNG LÙI, theo đúng thứ tự backend sẽ gọi tới: thư mục ffmpeg của runtime (còn lại từ
+     * lượt cài trước) được backend nối vào ĐẦU PATH, nên nó thắng ffmpeg của máy.
+     * `pin_fallback` để verifyRuntimeQuick() không mở lại cửa sổ này ở mọi lần mở app khi
+     * người dùng đang mất mạng; lần đổi bản ghim sau sẽ thử lại. */
+    if (fs.existsSync(bundled.path)) {
+      stageProgress('ffmpeg', 1, `Không tải được FFmpeg bản mới (${error.message}) — tạm dùng bản đã cài trước đó.`);
+      return { ...bundled, pin_fallback: FFMPEG_PIN.id, version: await readFfmpegVersion(bundled.path) };
+    }
+    if (machine.ffmpeg?.usable) {
+      stageProgress('ffmpeg', 1, `Không tải được FFmpeg (${error.message}) — tạm dùng FFmpeg sẵn có trên máy: ${machine.ffmpeg.path}`);
+      return {
+        source: 'system',
+        path: machine.ffmpeg.path,
+        dir: path.dirname(machine.ffmpeg.path),
+        pin_fallback: FFMPEG_PIN.id,
+        version: machine.ffmpeg.version || null,
+      };
+    }
+    throw error;
+  }
 }
 
 async function findFfmpegBin(root, depth = 0) {
@@ -564,11 +654,44 @@ async function verifyModules(pythonExe, modules) {
   try { return JSON.parse(jsonLine); } catch (_) { return { python: null, modules: {} }; }
 }
 
+/* MỘT LƯỢT EXPORT TÍ HON THẬT, không phải `ffmpeg -version`.
+ * `-version` chạy được trên đúng những bản đã làm hỏng export: bản đã xoá
+ * `-filter_complex_script`, bản NVENC đòi driver mới. Ở đây đi qua đúng những thứ sidecar
+ * dùng — filter script đọc từ file bằng `-/filter_complex` (đường dẫn nằm trong thư mục
+ * runtime, tức là thử luôn cả tên người dùng có dấu), `overlay`, `concat`, encoder — trên
+ * 0,5 giây lavfi, xuất ra `-f null`. */
+async function verifyFfmpegExport(ffmpegExe, videoEncoder) {
+  const scriptPath = path.join(RuntimePaths.runtimeRoot(), 'verify_filter.txt');
+  await fsp.writeFile(scriptPath, [
+    '[0:v]split[m][o];[o]scale=160:90,format=yuva420p[s];',
+    '[m][s]overlay=x=10:y=10:format=yuv420[ov];',
+    '[ov][1:a]concat=n=1:v=1:a=1[cv][ca];',
+    '[cv]format=yuv420p[v];[ca]aresample=48000[a]',
+  ].join('\n'), 'utf8');
+  try {
+    await runStreaming(ffmpegExe, [
+      '-hide_banner', '-v', 'error', '-nostdin',
+      '-f', 'lavfi', '-i', 'testsrc2=s=640x360:r=30:d=0.5',
+      '-f', 'lavfi', '-i', 'sine=f=440:r=48000:d=0.5',
+      '-/filter_complex', scriptPath,
+      '-map', '[v]', '-map', '[a]',
+      '-c:v', videoEncoder, '-c:a', 'aac',
+      '-f', 'null', '-',
+    ]);
+    return true;
+  } catch (error) {
+    log(`Export thử bằng ${videoEncoder} thất bại: ${error.message}`);
+    return false;
+  } finally {
+    await fsp.rm(scriptPath, { force: true }).catch(() => {});
+  }
+}
+
 /* KIỂM PHẦN LÕI — và CHỈ phần lõi.
  * Bước cài đặt không còn kéo thư viện AI nào về nữa, nên kiểm chúng ở đây thì lượt cài nào
  * cũng kết thúc với một danh sách "thiếu" dài dằng dặc — đúng thứ làm người dùng tưởng bộ
- * cài hỏng. Cái cần chứng minh ở đây chỉ là: Python chạy được, và FFmpeg chạy được. */
-async function stageVerify(pythonExe, ffmpeg) {
+ * cài hỏng. Cái cần chứng minh ở đây chỉ là: Python chạy được, và FFmpeg export được. */
+async function stageVerify(pythonExe, ffmpeg, machine) {
   stageProgress('verify', 0.2, 'Đang kiểm tra Python.');
   const report = await verifyModules(pythonExe, ['json', 'zlib', 'ssl']);
   /* `ssl` là module DUY NHẤT trong ba cái trên có thể thiếu thật ở bản nhúng, và thiếu nó
@@ -576,14 +699,17 @@ async function stageVerify(pythonExe, ffmpeg) {
    * bấm Bóc băng. */
   const pythonOk = Object.values(report.modules).every((item) => item.ok);
 
-  stageProgress('verify', 0.6, 'Đang kiểm tra FFmpeg.');
+  stageProgress('verify', 0.6, 'Đang kiểm tra FFmpeg (xuất thử).');
   const ffmpegExe = ffmpeg.source === 'system' ? ffmpeg.path : RuntimePaths.ffmpegBinary('ffmpeg');
-  let ffmpegOk = false;
-  try {
-    await runStreaming(ffmpegExe, ['-hide_banner', '-version']);
-    ffmpegOk = true;
-  } catch (error) {
-    log(`FFmpeg không chạy được: ${error.message}`);
+  // libx264 là encoder lùi của sidecar khi encoder phần cứng hỏng: nó PHẢI chạy.
+  const ffmpegOk = await verifyFfmpegExport(ffmpegExe, 'libx264');
+  /* NVENC chỉ để GHI NHẬN (nhật ký + manifest), không đánh trượt lượt cài: sidecar tự lùi về
+   * CPU khi NVENC lỗi. Nhưng `nvenc_ok: false` trên máy có NVIDIA là dấu hiệu rõ nhất của
+   * ca "driver quá cũ cho bản ffmpeg này" — đúng loại hỏng đã gặp với BtbN `latest`. */
+  let nvencOk = null;
+  if (ffmpegOk && machine?.nvidia?.available) {
+    stageProgress('verify', 0.8, 'Đang thử encoder phần cứng NVIDIA.');
+    nvencOk = await verifyFfmpegExport(ffmpegExe, 'h264_nvenc');
   }
 
   stageProgress('verify', 1, pythonOk && ffmpegOk
@@ -595,6 +721,7 @@ async function stageVerify(pythonExe, ffmpeg) {
     python_ok: pythonOk,
     modules: report.modules,
     ffmpeg_ok: ffmpegOk,
+    nvenc_ok: nvencOk,
   };
 }
 
@@ -770,6 +897,12 @@ async function setupRuntime(options = {}) {
     }
     stageProgress('detect', 1, 'Đã đọc xong cấu hình máy.');
 
+    /* Trạng thái các nhóm thư viện AI của lượt cài TRƯỚC — chỉ tin khi cùng schema. Lượt
+     * thiết lập lại vì đổi bản ffmpeg ghim (verifyRuntimeQuick: `ffmpeg_outdated`) không có
+     * lý do gì bắt người dùng tải lại ~2,5 GB thư viện đang chạy tốt. */
+    const previous = RuntimePaths.readManifest();
+    const priorFeatures = previous?.schema === RuntimePaths.RUNTIME_SCHEMA ? (previous.features || null) : null;
+
     /* Manifest được ghi với `completed: false` NGAY TỪ ĐẦU. Nếu máy tắt giữa chừng, lần mở
      * app sau `verifyRuntimeQuick()` thấy `completed !== true` và mở lại cửa sổ thiết lập —
      * thay vì chạy tiếp trên một môi trường mới cài được một nửa. */
@@ -778,13 +911,15 @@ async function setupRuntime(options = {}) {
       completed: false,
       started_at: new Date().toISOString(),
       machine,
+      ...(priorFeatures ? { features: priorFeatures } : {}),
     });
 
     const vcredist = await stageVcRedist(machine);
     const python = await stagePython();
     await stagePip(python.path);
     const ffmpeg = await stageFfmpeg(machine);
-    const verify = await stageVerify(python.path, ffmpeg);
+    log(`FFmpeg dùng: ${ffmpeg.source} | ${ffmpeg.version || '?'}${ffmpeg.pin_fallback ? ' | ĐƯỜNG LÙI (chưa có bản ghim)' : ''}`);
+    const verify = await stageVerify(python.path, ffmpeg, machine);
 
     if (!options.keepDownloads) {
       /* Cache TẢI FILE (zip Python, zip ffmpeg) không còn dùng tới. CỐ Ý KHÔNG đụng tới
@@ -795,10 +930,16 @@ async function setupRuntime(options = {}) {
 
     /* Khung `features` được ghi sẵn với `installed: false` cho từng nhóm. Có khung rỗng thì
      * backend đọc trạng thái bằng một phép tra thẳng, không phải phân biệt "chưa cài" với
-     * "manifest đời cũ chưa có trường này". */
+     * "manifest đời cũ chưa có trường này".
+     * Nhóm ĐÃ CÀI ở lượt trước được giữ nguyên, nhưng chỉ khi Python cũng là bản cũ: Python
+     * mới giải nén thì site-packages trống, tin trạng thái cũ là chạy thẳng vào
+     * "No module named". */
     const features = {};
     for (const group of onDemandGroups()) {
-      features[group.id] = { installed: false, label: group.label, trigger: group.trigger || group.label };
+      const prior = python.reused ? priorFeatures?.[group.id] : null;
+      features[group.id] = prior?.installed
+        ? prior
+        : { installed: false, label: group.label, trigger: group.trigger || group.label };
     }
 
     const manifest = {
@@ -854,7 +995,9 @@ if (require.main === module) {
   setEmitter((event) => process.stdout.write(`${JSON.stringify(event)}\n`));
   setupRuntime({ keepDownloads: process.argv.includes('--keep-downloads') })
     .then((manifest) => {
-      const complete = manifest.verify.broken.length === 0 && manifest.verify.ffmpeg_ok;
+      // Cùng tiêu chí với sự kiện `done` của setupRuntime(). (Bản cũ đọc `verify.broken` —
+      // trường không còn tồn tại — nên chạy tay luôn thoát mã 1 dù cài thành công.)
+      const complete = manifest.verify.python_ok && manifest.verify.ffmpeg_ok;
       process.exit(complete ? 0 : 2);
     })
     .catch(() => process.exit(1));

@@ -130,11 +130,12 @@ const mediaItem = (assetId) => ({
     assert.strictEqual(s.style.height, 360, 'shape phải gấp đôi chiều cao');
     assert.strictEqual(s.style.stroke_width, 4, 'nét shape phải gấp đôi');
 
-    /* Ảnh/video: kích thước gốc là số pixel của CHÍNH TỆP, ta không có số đo nào để phóng
-       -> phải chỉnh transform.scale. */
-    assert.strictEqual(mKnown.transform.scale, 200, 'media biết kích thước phải tăng scale');
-    assert.deepStrictEqual(mKnown.keyframes.scale.map((k) => k.v), [200, 240],
-        'keyframe scale của media cũng phải quy đổi');
+    /* Ảnh/video: mốc "scale 100%" là VỪA KHUNG (mediaAssetFitScale, từ 2026-09-30 — trước đó là
+       số pixel của chính tệp nên phải nhân scale theo k). Cỡ trên canvas tự đi theo khổ mới như
+       block lane chính -> KHÔNG chạm scale, chạm vào là phóng hai lần. */
+    assert.strictEqual(mKnown.transform.scale, 100, 'media biết kích thước: scale giữ nguyên (mốc vừa khung tự theo khổ mới)');
+    assert.deepStrictEqual(mKnown.keyframes.scale.map((k) => k.v), [100, 120],
+        'keyframe scale của media cũng giữ nguyên');
     /* Asset KHÔNG biết kích thước thì itemBaseSize đã lấy theo Sequence (width × 0.45) nên
        nó tự lớn theo rồi — chạm vào là phóng HAI lần. */
     assert.strictEqual(mUnknown.transform.scale, 100,

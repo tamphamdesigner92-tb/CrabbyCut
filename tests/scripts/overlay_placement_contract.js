@@ -39,7 +39,7 @@ function run(command, args, label) {
 // Đọc 1 khung ra mảng RGB để dò màu tại toạ độ cụ thể.
 function readFrame(videoPath, frameIndex) {
   const r = spawnSync('ffmpeg', ['-v', 'error', '-i', videoPath,
-    '-vf', `select=eq(n\\,${frameIndex})`, '-vsync', '0', '-frames:v', '1',
+    '-vf', `select=eq(n\\,${frameIndex})`, '-fps_mode', 'passthrough', '-frames:v', '1',
     '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'],
   { cwd: PROJECT_ROOT, encoding: 'buffer', maxBuffer: 1 << 26 });
   assert.strictEqual(r.status, 0, r.stderr?.toString('utf8'));
