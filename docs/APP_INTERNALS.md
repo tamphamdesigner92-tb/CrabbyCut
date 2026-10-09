@@ -9984,13 +9984,45 @@ cú kéo = một undo.
 Test: `npm run test:logo-removal` (mô hình, khớp FFmpeg, nhận diện, backend, sidecar end-to-end cả
 lane chính lẫn overlay).
 
-### Chế độ AI — "AI vẽ lại nền (MI-GAN)" (2026-09-29)
+### Chế độ AI — "AI vẽ lại nền (LaMa)" (2026-09-29, đổi mô hình + lan truyền 2026-09-30)
 
-`mode: 'ai'`: mô hình inpainting **MI-GAN** (Picsart, MIT; ONNX "pipeline v2", 28 MB, ghim theo commit
-+ SHA-256 ở `backend/logo-ai.js` → `MODEL`) VẼ LẠI nền phía sau logo. Đo trên máy dev (CPU,
-onnxruntime 1.29): 0,27 s/khung/vùng; LaMa chất lượng tương đương trên logo nhưng 1,07 s và 208 MB.
-Model tải ở lần đầu vào `%LOCALAPPDATA%\CrabbyCut\models\logo_ai` (có thanh tiến trình ở thanh trạng
-thái), nhóm Python `logo_ai` = onnxruntime + opencv + numpy.
+`mode: 'ai'`: **LaMa** (Samsung AI big-lama, Apache-2.0; ONNX fp32 512×512 của Carve/LaMa-ONNX, 208 MB,
+ghim theo commit + SHA-256 ở `backend/logo-ai.js` → `MODEL`) VẼ LẠI nền phía sau vùng. Thay MI-GAN vì
+người dùng thấy MI-GAN còn TỆ HƠN delogo: nó vẽ lại TỪNG khung độc lập nên vùng xoá "sôi"/nháy, và nhoè ở
+vùng lớn. Đo trên M1 Pro: LaMa 2,0 s/lượt trên CPU (8 luồng lõi hiệu năng — `perf_threads`); **CoreML bị
+loại** (10,7 s/lượt và làm tiến trình văng lúc thoát; cũng là lý do lượt MI-GAN cũ chậm 1,16 s/khung).
+Model tải ở lần đầu vào `<appData>/models/logo_ai` (thanh tiến trình ở thanh trạng thái), nhóm Python
+`logo_ai` = onnxruntime + opencv-contrib + numpy. `LOGO_AI_VERSION` = 2 → mọi cache MI-GAN cũ tự hết hiệu lực.
+
+**LAN TRUYỀN TRƯỚC, BỊA SAU** (`process_video` trong `asr/logo_inpaint_sidecar.py`) — LaMa 2 s/lượt thì
+không chạy từng khung được, và chạy từng khung chính là nguồn gốc của nháy. Mỗi khung, mỗi NHÓM vùng
+(vùng chạm nhau gộp lại; mỗi nhóm có tấm nền và độ lệch màu RIÊNG — dùng chung thì logo nhỏ bị nhuộm theo
+vành của vùng lớn, đã gặp):
+1. **Nền thật từ khung lân cận** (±20 khung, dừng ở chuyển cảnh): căn bằng chuyển động CỤC BỘ quanh vùng
+   (`local_motion`: điểm đặc trưng cách vùng ≥ nửa cửa sổ LK, theo dõi xuôi + ngược, CHỈ DỜI — xem bẫy
+   bên dưới), tinh chỉnh ±2 px trên vành, bỏ nguồn lệch ở vành (> `ALIGN_MAD`). Tham lam theo độ phủ,
+   bỏ dải < 20%. **Tất cả hoặc không:** nền thật phủ < 85% vùng thì BỎ HẲN.
+2. **Tấm nền** (plate) của nhóm: kết quả LaMa ở khung khoá, đi theo chuyển động, bù màu theo vành. Chỉ
+   dùng khi KIỂM được (vành rơi vào phần thật của tấm, lệch ≤ `STALE_MAD`, độ sáng lệch ≤ 40); không thì
+   "cũ" → vẽ lại, không dày hơn mỗi `MIN_REFRESH` = 3 khung. Cảnh tĩnh: một lượt LaMa cho cả đoạn, các
+   khung sau trùng từng byte → dùng lại file miếng vá.
+3. Phần còn lại: mẩu nhỏ → Telea; lớn → LaMa trên khung VUÔNG (~2,2 lần cạnh, đệm phản chiếu chứ không
+   co giãn lệch tỉ lệ), bù màu dự đoán THÔ của mô hình theo vành.
+Bù màu = trường lệch MƯỢT (tích chập chuẩn hoá từ vành, `offset_field`), không phải một hằng số — hằng
+số lộ mép chữ nhật trên mảng chuyển sắc (quầng đèn). Không kẹp biên độ: nguồn test đổi màu mỗi khung
+tới ~200 vẫn phải khớp.
+
+Bẫy đã gặp khi dựng (đừng quay lại):
+- Similarity (xoay + phóng) khớp trên ít điểm dồn cục "bịa" xoay 1,8° + phóng 1,2% → lệch 30 px ở chỗ lỗ;
+  xích qua 20 khung thì trôi tới phóng 10% + xoay 9°. Cả cục bộ lẫn toàn cục nay CHỈ DỜI (trung vị).
+- Điểm sát vật thể có cửa sổ LK trùm lên vật → "chuyển động nền" = đúng vận tốc của vật.
+- Ghép nhiều dải/mảng từ nhiều khung → vệt sọc; và LaMa vẽ tiếp phần thiếu lại NỐI đúng các mép mảng
+  thành một ô vuông nhạt → quy tắc "tất cả hoặc không".
+- Tấm nền mà vành cũng là phần bịa (vật đã đi chỗ khác) → dán không kiểm được → khối lệch sáng.
+Đo trên video của người dùng (1080×1920, 4 s, logo ✦ + vùng lớn 570×250): sạch hơn MI-GAN rõ (hết vệt xám
+của huy hiệu); dao động khung-khung TRONG vùng lớn 4,4–4,8 so với 7,9 của MI-GAN (thấp hơn chuyển động
+thật của cảnh quanh vùng). Tốc độ phụ thuộc số lần vẽ lại: cảnh tĩnh vài giây, máy quay trôi + thị sai
+(video đó) ~30 lượt LaMa ≈ 2 phút.
 
 **Là một LƯỢT XỬ LÝ TRƯỚC, không phải công thức pixel:** `asr/logo_inpaint_sidecar.py` đọc TỪNG khung
 thật của đoạn nguồn (`-fps_mode passthrough`, PTS thật từ `showinfo`, crop sẵn trong ffmpeg), vẽ lại
@@ -10026,7 +10058,53 @@ cả hai) → overlay `eof_action=pass`. Hai cái bẫy đã gặp:
 Test: `npm run test:logo-ai` — backend với bộ chạy giả; sidecar Python `CRAB_LOGO_AI_FAKE=1` (lấp bằng
 màu TB của khung, không cần model) trên nguồn ĐỔI MÀU MỖI KHUNG → dán lệch một khung là lộ ngay (có ca
 đối chứng cố tình lệch 1 khung phải đo ra > 30/255); CFR + VFR, 1x + 1.5x, lane chính + overlay; có model
-thì chạy thêm MI-GAN thật trên một ảnh.
+thì chạy thêm LaMa thật trên một ảnh; VẬT THỂ: hộp trắng chạy 3 px/khung trên nguồn đổi màu mỗi khung,
+một mốc → bám lệch ≤ 2,5 px, xuất kèm delogo cho logo cố định trên cùng block, lệch màu vá/nền ≤ 2,8.
+
+### Xoá vật thể chuyển động — subtab "Xoá vật thể" (2026-09-30)
+
+Subtab "Xoá logo" đổi tên **"Xoá vật thể"**: phần "Logo / watermark cố định" giữ nguyên, thêm phần
+**"Vật thể chuyển động"**. Dữ liệu: `logo_removal.objects = [{ keys: [{ t, x, y, w, h }] }]` (≤ 4 vật,
+≤ 64 mốc) — `t` là giây NGUỒN của block (lane chính: giây file nối; overlay: giây asset — CÙNG trục với
+`sourceTime` của đường vẽ và `start/end` của lượt AI), khung theo tỉ lệ vùng ảnh như vùng logo. Mốc
+cách nhau < `KEY_EPS` (20 ms) là cùng một mốc. Vật thể LUÔN đi AI (`LogoRemoval.needsAi`); vùng cố định
+vẫn xoá theo "Cách xoá" của block — hai loại cùng có được trên một block.
+
+- **UI:** "Chọn vật thể" (dừng phát, kéo khung ở khung đang xem → vật mới + tự chạy AI). Mỗi dòng vật:
+  chọn (tay cầm trên preview — kéo = ghi đè/thêm mốc ở giây hiện tại), ✎ vẽ lại ở khung đang xem (thêm
+  mốc sửa chỗ bám lệch), ✕ xoá. Khung vật màu xanh; nét liền = có mốc ở khung này, nét đứt = khung bám/
+  nội suy. Đang phát thì không có tay cầm vật (kéo lúc khung chạy là đặt mốc vào khung ngẫu nhiên).
+  Panel báo số khung mất dấu từng vật (`rects[k].lost`).
+- **Bám** (lượt 1 của sidecar, `track_objects`): đọc cả khung thu về 640 px (giữ JPEG trong RAM), OpenCV
+  CSRT xuôi từ mỗi mốc tới mốc sau và ngược tới mốc trước, giữa hai mốc trộn tuyến tính (mốc gần tin
+  hơn). Khoảng bám nới ra phủ MỌI mốc (block bị cắt ngắn sau khi vẽ thì mốc có thể nằm ngoài đoạn), rồi
+  tra theo THỜI GIAN cho từng khung của lượt 2. Vùng xoá = hộp bám nới 15% (`OBJECT_MARGIN`; CSRT trễ
+  sau vật chạy, đo tới 10 px với vật 170 px) — preview dùng CÙNG lề (`LOGO_OBJECT_MARGIN`). Lề ngoài là
+  nền thật nên kết quả được hoà dần từ ảnh gốc trong 1/3 lề đó (hết viền chữ nhật).
+- **Miếng vá vật thể** cỡ HỘP BAO cả quãng vật đi (+ viền mềm), ngoài vùng của khung đó alpha 0 (RGB 0 để
+  PNG nén gọn) → vị trí dán CỐ ĐỊNH, sidecar xuất và preview không phải biết hộp đổi mỗi khung. Index v2:
+  `rects[k].kind` ('logo' | 'object'), vật có `track` (vùng xoá từng khung), `core` (hộp bám, preview vẽ
+  khung này), `lost`. Vùng cố định trước, vật thể sau → tối đa 8 miếng vá (`MAX_PATCHES`, `r0..r7`).
+- **Preview:** chưa có miếng vá thì delogo tạm trên vùng xoá của vật (hộp bám nếu lượt AI đã xong, không
+  thì nội suy giữa các mốc — `LogoRemoval.objectBoxAt`).
+- **Xuất:** `logo_removal_px = { mode, rects, key?, run?, objects? }`. Backend: chế độ 'ai' + lượt dùng được
+  → chỉ field AI; chế độ công thức + lượt của vật thể → CẢ `logo_mode/logo_rects` LẪN `logo_ai_*`. Sidecar
+  C++ nay chạy công thức TRƯỚC rồi mới dán miếng vá (trước đây là if/else). Vật thể không có đường lùi
+  công thức — lượt AI hỏng thì bản xuất bỏ qua vật thể và báo ra.
+
+### Preview treo khi bật Xoá logo (2026-09-30)
+
+Triệu chứng: bật Xoá logo (nhất là 2 vùng / sau khi "Vẽ vùng") rồi bấm phát thì thỉnh thoảng preview đứng,
+bấm LQ/HQ (nạp lại video) mới chạy. Đo trong app (nguồn 1080×1920, 2 vùng, HQ): `syncSpriteTexture`
+chạy ~60 lượt/giây × 16 ms = **95% luồng chính** — vòng phát và sự kiện của `<video>` chết đói. Ba nguyên
+nhân cộng dồn: (1) ticker PIXI (120 Hz) VÀ vòng rAF overlay cùng dựng lại canvas fx mỗi nhịp, trong khi
+video chỉ ra 24 khung/giây; (2) mỗi vùng một `getImageData` — đọc ngược GPU buộc đồng bộ, ~4–6 ms CỐ
+ĐỊNH mỗi lần; (3) delogo bằng vòng JS ~6 ms cho vùng 554×270. Sửa: `syncSpriteTexture` lúc phát chỉ dựng
+lại khi `previewFrameClock.seq` đổi (khung video mới); `logoRemovedDrawable` nhớ theo khung
+(`presentedFrameStamp` — rVFC của chính thẻ video); delogo chạy trên **GPU** (`logoGpuDelogo`, WebGL2,
+một lượt vẽ mỗi vùng qua 2 framebuffer để vùng sau thấy kết quả vùng trước; lệch CPU tối đa 1/255 ở 3/6,2
+triệu giá trị); làm mờ/khảm vẫn CPU nhưng MỘT lượt đọc cho mọi vùng; `delogoRgba` tính trước mẫu
+cạnh trên/dưới (vẫn khớp từng pixel với FFmpeg). Sau sửa: 7 ms/giây luồng chính ở HQ, UI 120 fps.
 
 ## "Scale 100%" của media overlay = vừa khung, như lane chính; sóng âm có tầng riêng (2026-09-30)
 

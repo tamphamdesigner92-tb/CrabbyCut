@@ -235,7 +235,16 @@ async function main() {
     // (5) Trong lúc lượt này đang chạy, lượt THỨ HAI phải bị TỪ CHỐI (409) — nếu không, hai
     // tiến trình cùng ghi final_cut.mp4 và ra file MP4 lỗi.
     const scalePromise = fetch(`${baseUrl}/api/export-video`, { method: 'POST', body: form3 });
-    await new Promise((resolve) => setTimeout(resolve, 700));
+    /* Chờ backend THẬT SỰ nhận lượt đầu (export_in_flight), không chờ cứng 700 ms: runner CI
+     * Windows tải ~(13 × frameCount) khung lên chậm hơn thế, lượt hai tới trước khi lượt đầu kịp
+     * bắt đầu -> 200 thay vì 409 (đỏ oan 2026-10-05). Lượt đầu xong trước khi kịp thấy cờ cũng đỏ —
+     * đúng ý: khi đó phép kiểm không còn đo được gì. */
+    for (let waited = 0; ; waited += 50) {
+      const st = await (await fetch(`${baseUrl}/api/status`)).json();
+      if (st.export_in_flight) break;
+      assert.ok(waited < 60000, 'lượt xuất đầu không bắt đầu sau 60 s');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     const form4 = new FormData();
     form4.append('timeline_json', JSON.stringify(scaleTimeline));
     form4.append('export_settings', JSON.stringify(settings));

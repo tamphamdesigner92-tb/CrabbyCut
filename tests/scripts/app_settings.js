@@ -67,9 +67,15 @@ const json = (v) => JSON.stringify(v);
   const wanted = [...c.sfxGroups.flatMap((g) => g.files), ...c.musicFiles];
   // auto_sfx.txt liệt kê 17 file SFXs (9 nhóm, nhóm 8-9 thêm ở cài đặt bản 2) + 2 file nhạc nền.
   assert.strictEqual(wanted.length, 19, 'DEFAULTS phải liệt kê đúng số file của auto_sfx.txt');
-  wanted.forEach((rel) => {
-    assert.ok(onDisk.has(rel.toLowerCase()), `thiếu file trong library/: ${rel}`);
-  });
+  /* Tài nguyên trong library/ KHÔNG nằm trong git (.gitignore, library/README.md): bản clone sạch
+   * (CI, máy mới) chỉ có .gitkeep -> không có gì để so, bỏ qua thay vì đỏ oan. Có thư viện thì kiểm đủ. */
+  if (![...onDisk].some((name) => !name.endsWith('/.gitkeep'))) {
+    console.log('  --  library/ chưa có tài nguyên (bản clone sạch) -> bỏ qua kiểm file của auto_sfx');
+  } else {
+    wanted.forEach((rel) => {
+      assert.ok(onDisk.has(rel.toLowerCase()), `thiếu file trong library/: ${rel}`);
+    });
+  }
 }
 
 /* ---------- lọc id engine không biết, bỏ nhóm rỗng, loại trùng ---------- */

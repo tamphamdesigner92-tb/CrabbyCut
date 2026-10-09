@@ -16,6 +16,12 @@ const Module = require('module');
 const PROJECT_ROOT = path.join(__dirname, '..', '..');
 const UPDATER_PATH = path.join(PROJECT_ROOT, 'electron', 'updater.js');
 
+/* NGÔN NGỮ CỐ ĐỊNH, KHÔNG LẤY CỦA MÁY. Các bài dưới so tiêu đề hộp thoại tiếng Việt, mà
+ * electron/i18n-main.js chọn ngôn ngữ theo settings/app_settings.json (máy dev có, máy sạch/CI
+ * không) rồi tới ngôn ngữ hệ thống (runner CI là tiếng Anh) -> đỏ oan ở mọi máy chưa từng chạy app.
+ * Trỏ thư mục cài đặt vào chỗ trống + app giả báo hệ thống tiếng Việt. */
+process.env.CRAB_USER_DATA_DIR = path.join(require('os').tmpdir(), `crab_updater_guards_${process.pid}`);
+
 /* ---- Electron giả ---------------------------------------------------------
  * Ghi lại mọi hộp thoại đã hiện và mọi lời gọi quitAndInstall, để bài test khẳng định
  * được "đã hỏi trước khi làm". */
@@ -28,6 +34,8 @@ function makeFakeElectron({ isPackaged = true, answers = [] } = {}) {
       app: {
         isPackaged,
         getVersion: () => '1.1.9',
+        getPreferredSystemLanguages: () => ['vi-VN'],
+        getLocale: () => 'vi',
       },
       dialog: {
         showMessageBox: async (_win, options) => {

@@ -1,0 +1,5 @@
+{
+  "_doc": "Test ĐỎ vì MÔI TRƯỜNG của một nền tảng, không phải vì mã. scripts/run_tests.js báo riêng các mục này và không làm lệnh thoát lỗi; mục nào đã XANH thì lệnh báo để xoá. Mỗi mục phải ghi lý do + việc cần làm để gỡ. Xem docs/DONG_BO_WIN_MAC.md mục 5.",
+  "darwin": {},
+  "win32": {}
+}

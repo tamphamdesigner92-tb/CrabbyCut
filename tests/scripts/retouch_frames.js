@@ -26,7 +26,7 @@ const TEST_DIR = path.join(ROOT, 'test_temp', 'retouch_frames');
 const W = 64;
 const H = 48;
 const FPS = 25;
-const LEVEL_STEP = 7;   // khung n có mức xám Y = 16 + (n·7 mod 200)
+const LEVEL_STEP = 7;   // khung n có mức xám Y = 16 + (n·7 mod 200), Cb = 91 + n (xem makeSource)
 
 function testSelector() {
   const out = [];
@@ -55,7 +55,7 @@ function mustRun(cmd, args, what) {
 function makeSource(file, videoDelay) {
   const args = ['-y', '-v', 'error'];
   if (videoDelay > 0) args.push('-itsoffset', String(videoDelay));
-  args.push('-f', 'lavfi', '-i', `nullsrc=s=${W}x${H}:r=${FPS}:d=3,geq=lum='16+mod(N*${LEVEL_STEP},200)':cb=128:cr=128`,
+  args.push('-f', 'lavfi', '-i', `nullsrc=s=${W}x${H}:r=${FPS}:d=3,geq=lum='16+mod(N*${LEVEL_STEP},200)':cb='91+N':cr=128`,
     '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3.2',
     '-c:v', 'libx264', '-qp', '0', '-pix_fmt', 'yuv420p', '-g', '25',
     '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv',
@@ -80,14 +80,26 @@ function grayTable(file) {
   assert.strictEqual(r.status, 0, 'giải mã bảng tra');
   const fb = W * H * 4;
   const out = [];
-  for (let k = 0; k * fb < r.stdout.length; k++) out.push(r.stdout[k * fb + ((H / 2) * W + W / 2) * 4 + 1]);
+  for (let k = 0; k * fb < r.stdout.length; k++) out.push(pixelAt(r.stdout, k));
   return out;
 }
 
-function frameIndexOfGray(table, g) {
+/* Bộ RGB ở điểm giữa khung thứ k của một khối RGBA. CHỈ mức xám thì không định danh được khung:
+ * 16 + (n·7 mod 200) quay vòng sau ~29 khung, khung 14 (114) và khung 71 (113) chỉ cách nhau 1 mức —
+ * ffmpeg 8.1 làm tròn khác 8.1.1 một đơn vị là tra nhầm khung (đỏ trên Mac, xanh trên Windows). Cb
+ * tăng đều theo n nên bộ RGB của mọi khung trong 3 s đều khác hẳn nhau. */
+function pixelAt(buf, k) {
+  const o = k * W * H * 4 + ((H / 2) * W + W / 2) * 4;
+  return [buf[o], buf[o + 1], buf[o + 2]];
+}
+
+function frameIndexOfGray(table, rgb) {
   let best = -1;
   let dist = Infinity;
-  table.forEach((v, n) => { if (Math.abs(v - g) < dist) { dist = Math.abs(v - g); best = n; } });
+  table.forEach((v, n) => {
+    const d = Math.max(Math.abs(v[0] - rgb[0]), Math.abs(v[1] - rgb[1]), Math.abs(v[2] - rgb[2]));
+    if (d < dist) { dist = d; best = n; }
+  });
   return dist <= 2 ? best : -1;
 }
 
@@ -138,7 +150,7 @@ async function testEndpoint() {
       assert.strictEqual(Number(r.headers['x-frame-height']), H);
       assert.strictEqual(r.body.length, times.length * W * H * 4, `${label}: số byte`);
       const table = tables.get(body.source_path || app.locals.main);
-      const got = times.map((_, k) => frameIndexOfGray(table, r.body[k * W * H * 4 + ((H / 2) * W + W / 2) * 4 + 1]));
+      const got = times.map((_, k) => frameIndexOfGray(table, pixelAt(r.body, k)));
       assert.deepStrictEqual(got, times.map(expectIndex), `${label}: khung theo mốc ${JSON.stringify(times)}`);
       console.log(`  ok  ${label}: khung ${got.join(',')}`);
     };

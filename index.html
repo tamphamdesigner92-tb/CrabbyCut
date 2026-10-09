@@ -5794,7 +5794,7 @@
             text: { label: _t('Văn bản'), subs: { basic: _t('Cơ bản'), template: _t('Mẫu'), effect: _t('Hiệu ứng'), transform: _t('Biến đổi') } },
             anim: { label: _t('Hiệu ứng động'), subs: { in: _t('Vào'), out: _t('Ra'), combo: _t('Kết hợp') } },
             shape: { label: _t('Hình dạng'), subs: { basic: _t('Cơ bản'), transform: _t('Biến đổi') } },
-            retouch: { label: _t('Retouch'), subs: { basic: _t('Làm đẹp'), logo: _t('Xoá logo') } },
+            retouch: { label: _t('Retouch'), subs: { basic: _t('Làm đẹp'), logo: _t('Xoá vật thể') } },
             adjust: {
                 label: _t('Điều chỉnh'),
                 subs: {
@@ -6376,6 +6376,12 @@
                 this.fxSourceH = 0;
                 this.spatialActive = false;
                 this.fxPlayedLast = false;
+                // Khung video (previewFrameClock.seq) + clip + cỡ của lượt dựng texture fx gần
+                // nhất lúc PHÁT — xem đầu nhánh useSpatialPath của syncSpriteTexture.
+                this.fxFrameSeq = -1;
+                this.fxFrameClip = null;
+                this.fxFrameW = 0;
+                this.fxFrameH = 0;
             }
 
             init() {
@@ -6410,6 +6416,7 @@
                     // Lúc DỪNG thì không dựng lại mỗi khung (tốn CPU mà hình không đổi),
                     // nhưng phải chạy ĐÚNG MỘT lượt nữa ngay sau khi dừng: lượt đó vẽ ở
                     // lưới đầy đủ 256 thay cho lưới 128 của lúc phát.
+                    // (Lúc phát, syncSpriteTexture tự bỏ qua nhịp không có khung video mới.)
                     const playing = !this.videoEl.paused && !this.videoEl.ended;
                     if (this.spatialActive && (playing || this.fxPlayedLast)) {
                         this.syncSpriteTexture(...this.spriteTextureArgs());
@@ -6744,6 +6751,24 @@
 	                    && (rtOn || layerAdjs.length > 0
 	                        || (!!clipAdj && !ColorAdjust.isIdentity(clipAdj) && ColorAdjust.needsMultiPass(clipAdj)));
 	                if (useSpatialPath) {
+	                    /* LÚC PHÁT: MỖI KHUNG VIDEO MỘT LƯỢT. Hàm này bị gọi ở mọi nhịp ticker
+	                     * (theo màn hình, 120 Hz) VÀ mọi nhịp vòng rAF overlay, trong khi video
+	                     * chỉ ra 24–30 khung/giây. Mỗi lượt là dựng lại canvas fx + nạp lại
+	                     * NGUYÊN khung lên GPU. Đo trên nguồn 1080×1920 có Xoá logo 2 vùng: 16 ms
+	                     * × ~60 lượt/giây = 95% luồng chính -> vòng phát chết đói, preview "treo"
+	                     * (bấm LQ/HQ nạp lại video mới gỡ ra). Chưa có khung mới (cùng
+	                     * previewFrameClock.seq, cùng clip, cùng cỡ) thì texture đang gắn vẫn đúng.
+	                     * Lúc DỪNG không chặn: tua/sửa thông số phải thấy ngay. */
+	                    const playingNow = !this.videoEl.paused && !this.videoEl.ended;
+	                    if (playingNow && previewFrameClock.supported && this.spatialActive
+	                        && this.fxFrameSeq === previewFrameClock.seq && this.fxFrameClip === activeClip
+	                        && this.fxFrameW === textureW && this.fxFrameH === textureH) {
+	                        return;
+	                    }
+	                    this.fxFrameSeq = playingNow ? previewFrameClock.seq : -1;
+	                    this.fxFrameClip = activeClip;
+	                    this.fxFrameW = textureW;
+	                    this.fxFrameH = textureH;
 	                    let base = this.videoEl;
 	                    if (rtOn) {
 	                        // Mốc thời gian là giây NGUỒN của clip — đúng trục mà landmark

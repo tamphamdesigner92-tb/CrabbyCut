@@ -116,6 +116,8 @@
     "test:media-scale-fit": "node tests/scripts/media_scale_fit.js",
     "test:export-all": "npm run test:export && npm run test:export-many-overlays && npm run test:export-color && npm run test:export-long-subtitles && npm run test:sequence-fps && npm run test:seam && npm run test:frame-grid && npm run test:overlay-placement && npm run test:video-mask && npm run test:video-anim && npm run test:position-keyframe && npm run test:color-adjust && npm run test:adjust-layer && npm run test:clip-speed && npm run test:mixed-orientation && npm run test:retouch-export && npm run test:transition-frames && npm run test:main-lane-concat && npm run test:unicode-path && npm run test:export-concat-video-overlay && npm run test:auto-subtitle && npm run test:export-hdr-asset-usage && npm run test:export-batch-seek && npm run test:export-yuv-composite && npm run test:export-fast-path && npm run test:export-color-after-scale && npm run test:export-bitrate-modes && npm run test:export-precrop && npm run test:export-alpha-filters && npm run test:export-batch-time-varying && npm run test:export-output-path && npm run test:export-resolution && npm run test:export-source-ranges && npm run test:export-seq-tail && npm run test:export-parallel && npm run test:export-render-cache && npm run test:export-prebake-cache && npm run test:export-gpu && npm run test:media-scale-fit",
     "bench:export": "node tests/scripts/bench_export.js",
+    "test:all": "node scripts/run_tests.js",
+    "ffmpeg:install": "node scripts/install_ffmpeg.js",
     "test:sequence-fps": "node tests/scripts/export_sequence_fps.js",
     "test:preview-frame-sync": "node tests/scripts/preview_frame_sync.js",
     "test:seam": "node tests/scripts/seam_frame_accuracy.js",

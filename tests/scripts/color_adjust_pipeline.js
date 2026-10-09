@@ -1476,7 +1476,10 @@ function testEffectsKeyframeSidecar(workDir) {
     // 1.04 vs 1.72 ở nguồn), so kiểu đó là đang đo cái encode chứ không đo filter.
     const plainOut = runSidecar('nofx', [], '');
     const plainSharp = sharpnessAt(plainOut, 0);
-    assert.ok(Math.abs(bs[0].v - plainSharp) < 0.02,
+    /* Ngưỡng 0,05: phép kiểm bắt lỗi THÔ (sizeX=1 lệch 201/255; mờ thật kéo độ gắt 1,67 -> ~1,0).
+     * Runner Windows x64 (CI 2026-10-05, encoder CPU) đo 1,67 vs 1,69 — hai đường xuất làm tròn
+     * khác nhau một chút trên x86 — nên ngưỡng cũ 0,02 đỏ oan; Mac đo 1,67 vs 1,67. */
+    assert.ok(Math.abs(bs[0].v - plainSharp) < 0.05,
         `mốc mờ=0 phải là identity (planes=0): ${bs[0].v} vs không filter ${plainSharp}`);
 
     // ---- VIỀN MỜ DẦN: -80 (sáng viền) -> +80 (tối viền), ĐI QUA 0 nên phải đủ 2 chiều ----

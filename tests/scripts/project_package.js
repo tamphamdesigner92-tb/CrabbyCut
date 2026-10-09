@@ -27,6 +27,20 @@ const SRC_A = path.join(TEST_DIR, 'Cam A');
 const SRC_B = path.join(TEST_DIR, 'Cam B');
 const DEST = path.join(TEST_DIR, 'dest');
 
+/* Chép cả thư mục bằng readdir + copyFileSync, KHÔNG dùng fs.cpSync: Node 22 viết lại cpSync bằng
+ * C++ (std::filesystem), và trên runner Windows lệnh chép thư mục "Yêu Con 1" (tên có dấu) làm
+ * Node chết native 0xC0000409 không in một chữ (CI 2026-10-05) — các test chép thư mục tên ASCII
+ * bằng cpSync vẫn xanh. App không dùng cpSync (electron/project-package.js chép từng tệp). */
+function copyDir(src, dest) {
+    fs.mkdirSync(dest, { recursive: true });
+    for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+        const from = path.join(src, entry.name);
+        const to = path.join(dest, entry.name);
+        if (entry.isDirectory()) copyDir(from, to);
+        else fs.copyFileSync(from, to);
+    }
+}
+
 function writeFake(dir, name, byte) {
     fs.mkdirSync(dir, { recursive: true });
     const full = path.join(dir, name);
@@ -144,7 +158,7 @@ function main() {
 
     // --- chiều mở: giải tương đối -> tuyệt đối theo thư mục chứa .crab ---
     const moved = path.join(TEST_DIR, 'moved');   // gói bị copy sang chỗ khác
-    fs.cpSync(result.projectDir, moved, { recursive: true });
+    copyDir(result.projectDir, moved);
     const movedCrab = path.join(moved, 'Yêu Con 1.crab');
     const resolved = JSON.parse(resolvePayloadPaths(result.payloadJson, movedCrab));
     assert.strictEqual(resolved.media.sources[0].path, path.join(moved, packedSources[0].split('/').join(path.sep)),
@@ -307,7 +321,7 @@ function main() {
 
         // Mang cả thư mục gói sang chỗ khác -> proxy vẫn được tìm đúng.
         const movedDir = path.join(TEST_DIR, 'proxy-da-chuyen');
-        fs.cpSync(res.projectDir, movedDir, { recursive: true });
+        copyDir(res.projectDir, movedDir);
         const movedOpened = JSON.parse(resolvePayloadPaths(res.payloadJson, path.join(movedDir, 'Co Proxy.crab')));
         assert.strictEqual(movedOpened.media.preview_proxy.path, path.join(movedDir, 'Co Proxy.proxy.mp4'),
             'chép gói đi chỗ khác thì proxy phải trỏ vào chính chỗ đó');
