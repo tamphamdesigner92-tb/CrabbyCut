@@ -72,4 +72,4 @@ Bản sửa đạt khi một máy sạch, không đăng nhập HuggingFace, bấ
 - [x] Đóng gói bản 1.1.16 bằng `dist:win` (09/10/2026): `dist/CrabbyCut-Setup-1.1.16.exe` 165.676.573 byte, after-pack check ok. Bản này gồm cả sửa zoom timeline ở Match Script.
 - [ ] Cài thử trên một máy người dùng đã gặp lỗi
 - [x] Commit (local `main`: `00925dc` sửa tải, `231a709` sửa zoom, `3fa4cec` nâng 1.1.16)
-- [ ] Push + phát hành GitHub Release v1.1.16 (tác giả đã cho phép 09/10/2026) — đóng gói lại sau khi thêm mirror riêng
+- [x] Push + phát hành GitHub Release v1.1.16 (09/10/2026): tag `v1.1.16` → `153f96b`, [Release](https://github.com/tamphamdesigner92-tb/CrabbyCut/releases/tag/v1.1.16) là bản Latest, kèm `CrabbyCut-Setup-1.1.16.exe` (165.676.494 byte, SHA-256 `b785cb298a42c89e93350b099dce6fb3e163d1d3cb6e6810936720123e3d4937`), `.blockmap`, `latest.yml`. Đóng gói lại sau khi thêm mirror riêng. Tác giả đã kiểm bản phát hành: chạy tốt.
