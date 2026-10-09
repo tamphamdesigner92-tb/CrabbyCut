@@ -697,6 +697,12 @@
         .btn + .step-action-grid {
             margin-top: 8px;
         }
+        /* Cùng lý do cho hai nút xếp chồng liền nhau trong panel (step1: "Bóc băng lại" và
+           "So khớp theo kịch bản"). Chỉ con TRỰC TIẾP của panel: nút trong .step-action-grid
+           đã có `gap` của lưới, cộng margin nữa là hở gấp đôi. */
+        .step-panel > .btn-block + .btn-block {
+            margin-top: 8px;
+        }
         .step-action-grid button {
             width: 100%;
             margin-bottom: 0 !important;
@@ -4122,7 +4128,7 @@
 	                    - Kéo 2 đầu thanh clip dưới timeline để cắt tỉa.<br>
 	                    - Bấm vào khoảng trống trong đoạn văn để chọn vùng.
 	                </div>
-		                <button id="btnPreviewCuts" class="btn btn-primary btn-block" style="margin-bottom: var(--sp-5);"><svg class="btn-ico"><use href="#ic-film"/></svg>Xem trước (Preview Cuts)</button>
+		                <button id="btnPreviewCuts" class="btn btn-primary btn-block"><svg class="btn-ico"><use href="#ic-film"/></svg>Xem trước (Preview Cuts)</button>
 		                <div class="step-action-grid">
 	                    <button id="btnApplyAndReorder" class="btn btn-success btn-block"><svg class="btn-ico"><use href="#ic-check"/></svg>Chốt &amp; Sắp xếp</button>
 	                    <button id="btnBackToReview" class="btn btn-secondary btn-block"><svg class="btn-ico"><use href="#ic-arrow-left"/></svg>Sửa kịch bản</button>
