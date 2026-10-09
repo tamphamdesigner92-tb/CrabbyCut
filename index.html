@@ -691,6 +691,11 @@
             grid-template-columns: repeat(2, minmax(0, 1fr));
             gap: 8px;
         }
+        /* Nút đứng ngay trên lưới cần khoảng hở: margin-bottom 8px của rule :where() ở trên
+           có specificity 0 nên bị `.btn { margin: 0 }` đè mất -> "Mở Editing" dính sát lưới. */
+        .btn + .step-action-grid {
+            margin-top: 8px;
+        }
         .step-action-grid button {
             width: 100%;
             margin-bottom: 0 !important;
@@ -13966,11 +13971,11 @@
 
     // Cắt một item timeline tại nhiều mốc. Đi qua buildSplitTimelineItems để dùng đúng
     // luật chia từ theo ĐIỂM GIỮA và giữ nguyên transform/màu như dao cắt tay.
-    function splitTimelineItemAtBoundaries(item, cutTimes) {
+    function splitTimelineItemAtBoundaries(item, cutTimes, options = {}) {
         let pieces = [item];
         for (const cutTime of cutTimes.slice().sort((a, b) => a - b)) {
             const last = pieces[pieces.length - 1];
-            const split = buildSplitTimelineItems(last, cutTime);
+            const split = buildSplitTimelineItems(last, cutTime, options);
             if (!split) continue;   // mảnh quá ngắn: bỏ mốc này, mảnh trước gánh luôn
             pieces.splice(pieces.length - 1, 1, split[0], split[1]);
         }
@@ -15733,8 +15738,19 @@
                      * Trước 2026-09-16 đường này KHÔNG kiểm gì cả — clip lệch nằm im trong
                      * .crab, preview phiên đầu vẫn đúng (file nối liền mạch) nên không ai
                      * thấy, tới lần MỞ LẠI mới bị phát hiện và lúc đó bị gọt cụt.
-                     * Nắn ở đây thì mốc vào .crab đã đúng ngay từ đầu. */
+                     * Nắn ở đây thì mốc vào .crab đã đúng ngay từ đầu.
+                     *
+                     * Block VẮT THẬT SỰ qua ranh giới (câu đọc liền hơi nhưng camera đã sang
+                     * file mới) thì CẮT ĐÔI tại ranh giới trước, rồi mới kẹp. Chỉ kẹp thôi là
+                     * gọt mất cả nửa block — lỗi "Yêu Con 1 - Test Final" 2026-10-09: câu đã
+                     * chọn ở Match Script biến mất ở Timeline. Xem MainLane.segmentCutTimes. */
                     if (mainConcatSegments.length) {
+                        latestTimeline = latestTimeline.flatMap((item) => {
+                            const cuts = window.MainLane.segmentCutTimes(mainConcatSegments, item.start, item.end);
+                            return cuts.length
+                                ? splitTimelineItemAtBoundaries(item, cuts, { allowEmptyText: true })
+                                : [item];
+                        });
                         const aligned = window.MainLane.clampRowsToSegments(latestTimeline, mainConcatSegments);
                         if (aligned.fixed > 0) {
                             latestTimeline = aligned.rows;

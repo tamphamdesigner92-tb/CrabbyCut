@@ -324,6 +324,36 @@
         return best;
     }
 
+    /* Các mốc RANH GIỚI NGUỒN cần cắt để một khoảng [start, end) VẮT QUA nhiều video nguồn
+     * thành từng mảnh nằm gọn trong một video — thay vì kẹp về một video và vứt phần còn lại.
+     *
+     * VÌ SAO (mất câu thật, dự án "Yêu Con 1 - Test Final", người dùng báo 2026-10-09): bước
+     * khớp kịch bản gộp các câu đọc liền một hơi thành một block 38,27–50,89s, nhưng ranh
+     * giới giữa hai video nguồn nằm ở 44,175s. clampRowsToSegments coi block là của video
+     * đầu và gọt về 44,16s -> câu "Đó là lý do nhiều ba mẹ thấy con..." đã chọn ở Match
+     * Script biến mất khỏi Timeline. Nội dung đó LÀ lời nói thật, chỉ nằm ở video kế tiếp.
+     *
+     * Mảnh "thò đuôi" không đáng kể (cùng ngưỡng với segmentForRange) KHÔNG được tách riêng:
+     * đó là sai số của mốc phiên âm, tách ra chỉ sinh mảnh vụn — để clampRowsToSegments gọt
+     * như cũ. Trả mảng mốc tăng dần, rỗng nếu không cần cắt. */
+    function segmentCutTimes(segments, sourceStart, sourceEnd) {
+        const list = Array.isArray(segments) ? segments : [];
+        const start = num(sourceStart, 0);
+        const end = num(sourceEnd, start);
+        const span = end - start;
+        if (!list.length || !(span > EPS)) return [];
+        const pieces = [];
+        for (const seg of list) {
+            const pieceStart = Math.max(start, num(seg?.start, 0));
+            const pieceEnd = Math.min(end, num(seg?.end, 0));
+            const len = pieceEnd - pieceStart;
+            if (!(len > EPS)) continue;
+            const negligible = len < span * STRADDLE_TAIL_RATIO && len < STRADDLE_TAIL_SEC;
+            if (!negligible) pieces.push(pieceStart);
+        }
+        return pieces.slice(1).filter((t) => t > start + EPS && t < end - EPS);
+    }
+
     /* Hai biên trim của clip đang đứng ở `sourceTime`.
      * KHÔNG có bảng đoạn (dự án cũ, hoặc bộ đệm bị dọn giữa chừng) -> trả [0, fallbackEnd],
      * tức đúng hành vi trước đây: thà rộng còn hơn chặn nhầm một clip hợp lệ. */
@@ -402,6 +432,7 @@
         concatSourcesFromRows,
         segmentAt,
         segmentForRange,
+        segmentCutTimes,
         sourceLimitsFor,
         clampRowsToSegments,
         evenSize,
