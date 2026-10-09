@@ -54,6 +54,10 @@
 
     // Trần bề rộng bộ đệm dải sóng, tính bằng điểm ảnh thiết bị (xem paintViewportBuffered).
     const STRIP_MAX_DEVICE_PX = 8192;
+    // Dựng lại đệm trong vòng chừng này sau lượt trước = hình học đang đổi liên tục (zoom,
+    // kéo) -> chỉ dựng dải hẹp: khung nhìn + mỗi bên một phần khung nhìn.
+    const STRIP_BURST_MS = 120;
+    const STRIP_BURST_MARGIN = 0.25;
 
     const store = new Map();     // key -> entry
     const listeners = new Set();
@@ -372,32 +376,44 @@
         const colWidth = rect.w / cols.count;
         // Zoom cao (mỗi cột ≥3px) -> chừa 1px khe cho ra dáng "thanh" như CapCut.
         const barWidth = Math.max(0.6, colWidth - (colWidth >= 3 ? 1 : 0));
+        /* MỖI THANH MỘT fillRect, mép trái/phải ghim vào LƯỚI ĐIỂM ẢNH THIẾT BỊ (o.grid do
+         * paintViewport truyền: x_thiết_bị = (x + offset) * scale).
+         *
+         * Trước đây mọi thanh được gom vào MỘT path bằng ctx.rect() rồi fill() một lần. Với
+         * Skia trên GPU, path vài nghìn contour là đường raster chậm nhất: trace lúc kéo thanh
+         * zoom ở Match Script (đệm dải sóng 8192 px dựng lại MỖI nấc zoom) cho
+         * RasterDecoderImpl::DoRasterCHROMIUM 1,85 s / 4,8 s, lệnh dài nhất 63 ms — GPU nghẹt
+         * nên khung hình 100-460 ms. fillRect thẳng hàng điểm ảnh thì Skia gom thành một
+         * lệnh vẽ hình chữ nhật hàng loạt, rẻ hơn nhiều lần.
+         * Ghim lưới là BẮT BUỘC chứ không phải trang trí: màu sóng có alpha, hai thanh kề nhau
+         * chung một mép LẺ điểm ảnh thì phần khử răng cưa của cả hai chồng lên nhau -> vạch
+         * sáng/tối giữa các cột (path cũ không bị vì fill một lần cả khối). Mép nguyên điểm
+         * ảnh thì các thanh khít nhau, không chồng, hình y như fill cả khối. */
+        const grid = o.grid && o.grid.scale > 0 ? o.grid : null;
+        const snap = grid
+            ? (x) => Math.round((x + grid.offset) * grid.scale) / grid.scale - grid.offset
+            : (x) => x;
+        const minWidth = grid ? 1 / grid.scale : 0;
+        const drawBars = (offset, minHalf, color) => {
+            ctx.fillStyle = color;
+            for (let i = 0; i < cols.count; i += 1) {
+                const value = cols.values[i * 2 + offset] * gain;
+                if (value <= 0) continue;
+                const h = Math.max(minHalf, Math.min(1, value) * half);
+                const x = rect.x + i * colWidth;
+                const left = snap(x);
+                const width = Math.max(minWidth, snap(x + barWidth) - left);
+                ctx.fillRect(left, centerY - h, width, h * 2);
+            }
+        };
         ctx.save();
         if (o.alpha != null) ctx.globalAlpha = o.alpha;
         if (o.baselineColor) {
             ctx.fillStyle = o.baselineColor;
             ctx.fillRect(rect.x, centerY - 0.5, rect.w, 1);
         }
-        ctx.beginPath();
-        for (let i = 0; i < cols.count; i += 1) {
-            const value = cols.values[i * 2] * gain;
-            if (value <= 0) continue;
-            const h = Math.max(0.75, Math.min(1, value) * half);
-            ctx.rect(rect.x + i * colWidth, centerY - h, barWidth, h * 2);
-        }
-        ctx.fillStyle = o.peakColor || DEFAULT_PEAK_COLOR;
-        ctx.fill();
-        if (o.rmsColor !== 'none') {
-            ctx.beginPath();
-            for (let i = 0; i < cols.count; i += 1) {
-                const value = cols.values[i * 2 + 1] * gain;
-                if (value <= 0) continue;
-                const h = Math.max(0.5, Math.min(1, value) * half);
-                ctx.rect(rect.x + i * colWidth, centerY - h, barWidth, h * 2);
-            }
-            ctx.fillStyle = o.rmsColor || DEFAULT_RMS_COLOR;
-            ctx.fill();
-        }
+        drawBars(0, 0.75, o.peakColor || DEFAULT_PEAK_COLOR);
+        if (o.rmsColor !== 'none') drawBars(1, 0.5, o.rmsColor || DEFAULT_RMS_COLOR);
         ctx.restore();
     }
 
@@ -488,6 +504,8 @@
                 peakColor: target.peakColor,
                 rmsColor: target.rmsColor,
                 baselineColor,
+                // ctx đang ở toạ độ NỘI DUNG: setTransform(dpr) rồi translate(-scrollLeft).
+                grid: { scale: dpr, offset: -scrollLeft },
             });
             stats.drawn += 1;
         }
@@ -499,7 +517,7 @@
      *
      * `paintViewport` là canvas ẢO HOÁ: vẽ đúng phần đang thấy rồi dời canvas bằng
      * `style.left`. Lúc PHÁT, timeline cuộn bám playhead MỖI KHUNG, và listener 'scroll'
-     * gọi vẽ lại -> TÔ LẠI CẢ DẢI SÓNG MỖI KHUNG. `drawColumns` dựng một ctx.rect() cho
+     * gọi vẽ lại -> TÔ LẠI CẢ DẢI SÓNG MỖI KHUNG. `drawColumns` vẽ một hình chữ nhật cho
      * MỖI CỘT, hai lượt (peak + RMS): khung nhìn 2000px ở dpr 1,5 là ~6000 hình chữ nhật
      * mỗi khung.
      *
@@ -588,19 +606,30 @@
         if (!covers) {
             const stripCanvas = (strip && strip.canvas) || makeStripCanvas(view);
             if (!stripCanvas || !stripCanvas.getContext) return direct();
+            /* HÌNH HỌC ĐỔI LIÊN TỤC (kéo thanh zoom, chụm trackpad, kéo block): chữ ký đổi
+             * ngay sau lượt dựng trước -> đệm rộng vô ích vì lượt sau lại vứt nó đi. Lúc đó
+             * chỉ dựng dải HẸP quanh khung nhìn (rẻ hơn ~5 lần với đệm 8192 px). Dừng tay
+             * thì lượt dựng kế tiếp (cuộn ra ngoài dải hẹp) không còn trong cụm -> rộng lại.
+             * Đo ở Match Script, kéo thanh zoom: dựng đủ 8192 px mỗi nấc thì luồng chính mất
+             * ~10 ms/khung chỉ để ghi lệnh vẽ. */
+            const builtAt = now();
+            const burst = !!strip && strip.sig !== sig && builtAt - (strip.builtAt || 0) < STRIP_BURST_MS;
+            const buildCss = burst
+                ? Math.min(widthCss, Math.ceil(viewWidth * (1 + 2 * STRIP_BURST_MARGIN)))
+                : widthCss;
             // Đặt dải sao cho phần đang cần nằm GIỮA -> cuộn tiếp cả hai chiều đều còn dư.
             const middle = scrollLeft + viewWidth / 2;
-            const startCss = Math.max(0, Math.min(Math.max(0, contentCss - widthCss), middle - widthCss / 2));
+            const startCss = Math.max(0, Math.min(Math.max(0, contentCss - buildCss), middle - buildCss / 2));
             const stats = paintViewport({
                 canvas: stripCanvas,
                 scrollLeft: startCss,
                 scrollTop,
-                viewWidth: widthCss,
+                viewWidth: buildCss,
                 viewHeight,
                 dpr,
                 baselineColor: view.baselineColor,
             }, list);
-            strip = { canvas: stripCanvas, sig, startCss, widthCss, heightCss: viewHeight, stats };
+            strip = { canvas: stripCanvas, sig, startCss, widthCss: buildCss, heightCss: viewHeight, stats, builtAt, burst };
             strips.set(bufferKey, strip);
         }
 
@@ -620,7 +649,7 @@
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.clearRect(0, 0, bw, bh);
         ctx.drawImage(strip.canvas, Math.round((scrollLeft - strip.startCss) * dpr), 0, bw, bh, 0, 0, bw, bh);
-        return { ...strip.stats, mode: 'blit', rebuilt: !covers };
+        return { ...strip.stats, mode: 'blit', rebuilt: !covers, narrow: !!strip.burst };
     }
 
     // Thông tin gỡ lỗi/kiểm thử (không dùng trong luồng vẽ).

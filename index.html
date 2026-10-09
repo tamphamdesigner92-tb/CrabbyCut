@@ -34,7 +34,7 @@
     <!-- Số phiên bản (Trang chủ, thanh trạng thái, Cài đặt → Về CrabbyCut) — nạp TRƯỚC settings-panel.js. -->
     <script src="/static/js/app-info.js?v=appinfo-p1"></script>
     <script src="/static/js/settings-panel.js?v=settings-p5"></script>
-    <script src="/static/js/audio-waveform.js?v=waveform-strip-p4"></script>
+    <script src="/static/js/audio-waveform.js?v=waveform-strip-p5-grid"></script>
     <script src="/static/js/audio-denoise.js?v=denoise-p1"></script>
     <script src="/static/js/clip-speed.js?v=speed-p2"></script>
     <script src="/static/js/color-adjust.js?v=coloradjust-p14"></script>
@@ -11048,12 +11048,18 @@
     });
     syncZoomReadout();
 
+    /* Bề rộng #timelineTrack theo zoomScale hiện tại. Tách riêng để đường zoom bằng bánh xe
+       đặt được bề rộng NGAY trước khi gán scrollLeft — updateTimelineLayout chỉ đánh dấu bẩn
+       (perf-runtime) và tới khung sau mới chạy, xem handler 'wheel' bên dưới. */
+    function applyTimelineTrackWidth() {
+        const trackContainer = document.getElementById('timelineTrack');
+        trackContainer.style.width = `${Math.max(1, (getTimelineDuration() * zoomScale) + (getTimelineSidePaddingPx() * 2))}px`;
+        return trackContainer;
+    }
+
     function updateTimelineLayout() {
         if (videoDuration === 0) return;
-        const trackContainer = document.getElementById('timelineTrack');
-        const timelineDuration = getTimelineDuration();
-        const sidePadding = getTimelineSidePaddingPx();
-        trackContainer.style.width = `${Math.max(1, (timelineDuration * zoomScale) + (sidePadding * 2))}px`;
+        const trackContainer = applyTimelineTrackWidth();
         // Thời lượng hay bề rộng khung nhìn đổi thì mức vừa khung đổi -> thanh zoom phải dời.
         syncZoomReadout();
 
@@ -11421,10 +11427,23 @@
 
                     updateTimelineLayout();
 
+                    /* ZOOM KHÔNG ĐƯỢC TUA VIDEO. Trước đây mỗi nấc zoom ở Match Script tua
+                       video một lần (đo: 28-32 lần tua / 120 nấc chụm trackpad, playhead trôi
+                       34,2 s -> 27,6 s) — bộ giải mã bị xả liên tục nên preview giật. Ba chỗ:
+                        1. updateTimelineLayout ở trên chỉ đánh dấu bẩn, bề rộng track tới
+                           khung SAU mới đổi -> scrollLeft gán vào đây bị trình duyệt kẹp theo
+                           bề rộng CŨ. Đặt bề rộng ngay bây giờ.
+                        2. Không ghi lastProgrammaticScrollLeft -> chốt chặn THEO VỊ TRÍ của
+                           handler 'scroll' bị tắt, chỉ còn cờ thời gian.
+                        3. Cờ thời gian thì bị timer của lượt scrollTimelineToCurrentTime khung
+                           trước (perf-runtime) xoá sớm. Đã chuyển timer đó về
+                           releaseProgrammaticScroll — một cờ, một timer. */
+                    applyTimelineTrackWidth();
                     isProgrammaticScroll = true;
                     // Kẹp: thu nhỏ zoom làm bề rộng nội dung co lại, vị trí cuộn cũ có thể
                     // đã nằm ngoài trần mới.
                     timelineOuter.scrollLeft = clampTimelineScrollLeft(timelineTimeToPx(centerTime) - (timelineOuter.clientWidth / 2));
+                    lastProgrammaticScrollLeft = timelineOuter.scrollLeft;
                     releaseProgrammaticScroll(80);
                     scheduleTimelinePointerSync();   // zoom đổi -> khung dưới con trỏ đổi
                     wheelTicking = false;
@@ -11480,6 +11499,7 @@
         // dùng cuộn tay rồi snap + tua video theo tâm khung nhìn ngay giữa lúc đang trim.
         isProgrammaticScroll = true;
         timelineOuter.scrollLeft = next;
+        lastProgrammaticScrollLeft = timelineOuter.scrollLeft;
         releaseProgrammaticScroll(60);
     };
 

@@ -8848,6 +8848,51 @@ Kéo zoom vẫn còn long task ~70–100 ms ở mức zoom thấp (~200 block tr
 cùng lúc → style + layout + paint). Hướng tiếp nếu cần: trong lúc đang kéo thì scaleX bằng
 transform rồi mới dựng thật khi thả.
 
+### Zoom timeline ở Match Script giật lại (2026-10-09)
+
+Người dùng báo zoom in/out ở Match Script giật trở lại sau bản sửa 27/09. Bản sửa đó nhắm vào
+Editing (nhiều block); ở Match Script dự án thật chỉ có 13–14 block nên số block không phải
+nguyên nhân. Đo trong Electron thật (CDP, dự án DJI 1728×3072@59,94, 84 s) ra **hai lỗi độc
+lập**, cả hai đều không hiện trong đồng hồ JS/long task:
+
+**1. Mỗi nấc zoom tua video.** Chụm trackpad 120 nấc → 28–32 lần gán `video.currentTime`,
+playhead trôi 34,2 s → 27,6 s sau 3 lượt; mỗi lần tua xả bộ giải mã nguồn 4K. Ngăn xếp: handler
+'scroll' (index.html) tưởng lượt cuộn của CHÍNH đường zoom bánh xe là người dùng kéo. Ba chỗ
+cùng góp:
+- đường zoom gọi `updateTimelineLayout()` — với `perf_scheduler` đó chỉ là `markDirty`, bề rộng
+  `#timelineTrack` tới khung SAU mới đổi — rồi gán `scrollLeft` ngay, nên bị trình duyệt kẹp
+  theo bề rộng cũ. Nay gọi `applyTimelineTrackWidth()` trước khi gán;
+- đường zoom không ghi `lastProgrammaticScrollLeft` → chốt chặn theo VỊ TRÍ bị tắt. Nay ghi
+  (kèm `pinTimelineTimeToViewportX`, cùng bệnh);
+- `scrollTimelineToCurrentTime`/`scrollToPlayhead` bản perf-runtime xoá `isProgrammaticScroll`
+  bằng timer RIÊNG (`timelineScrollStopTimer`, vốn là timer tắt `isUserScrollingTimeline` của
+  handler 'scroll'). Timer 50 ms của lượt khung trước xoá luôn cờ mà đường zoom vừa bật. Nay cả
+  hai đi qua `releaseProgrammaticScroll` — một cờ, một timer.
+
+**2. GPU nghẹt khi kéo thanh zoom.** Trace `devtools.timeline`: `RasterDecoderImpl::DoRasterCHROMIUM`
+1,85 s / 4,8 s, lệnh dài nhất 63 ms; luồng chính gần như rảnh, 0 long task — khung hình
+100–460 ms. Tắt riêng sóng âm thì GPU còn 0,52 s. Nguyên do: chữ ký đệm dải sóng
+(`paintViewportBuffered`) đổi mỗi nấc zoom → dựng lại cả dải 8192 px, và `drawColumns` gom mọi
+thanh vào MỘT path (`ctx.rect` × nghìn, `fill()` một lần) — với Skia GPU, path nghìn contour là
+đường raster chậm nhất. Sửa (audio-waveform.js):
+- mỗi thanh một `fillRect`, mép trái/phải ghim lưới điểm ảnh thiết bị (`opts.grid` do
+  `paintViewport` truyền). Ghim lưới là bắt buộc: màu sóng có alpha, mép lẻ điểm ảnh thì hai
+  thanh kề nhau chồng phần khử răng cưa → vạch sọc;
+- đang zoom/kéo liên tục (dựng lại < 120 ms sau lượt trước, chữ ký khác) thì chỉ dựng dải HẸP
+  = khung nhìn + ¼ khung mỗi bên; lượt dựng sau khi dừng tay lại rộng như cũ.
+
+| Match Script, 3 lượt mỗi kiểu | Trước | Sau |
+| --- | --- | --- |
+| Kéo thanh zoom | khung p50 16,7–100 ms, p95 33–383, max 467 | p95 16,8, max 17,1, 0 khung > 33 ms |
+| GPU raster lúc kéo thanh (4,8 s) | 1,85 s, lệnh dài nhất 63 ms | 0,37 s, dài nhất 5,2 ms |
+| Chụm trackpad 120 nấc | 28–32 lần tua, p95 33,3 ms | 0 lần tua, p95 16,8 ms |
+| Alt + bánh xe 40 nấc | 0–2 lần tua, max 50 ms | 0 lần tua, max 17,1 ms |
+| Nút −/+ 8 lần | max 83 ms | max 16,8 ms |
+
+Test: `audio_waveform_columns.js` thêm (9b) thanh thẳng lưới + không chồng mép ở dpr 1,5,
+scrollLeft lẻ; và cụm zoom dựng dải hẹp / dừng tay dựng lại rộng (đồng hồ giả). Đột biến bỏ
+ghim lưới hoặc bỏ dải hẹp đều làm test đổ.
+
 ## Auto Subtitle đa ngôn ngữ — menu ngôn ngữ, font CJK, đồng bộ phụ đề (2026-09-14)
 
 Ba việc thêm vào Auto Subtitle, theo yêu cầu người dùng. Đọc mục trên trước.
