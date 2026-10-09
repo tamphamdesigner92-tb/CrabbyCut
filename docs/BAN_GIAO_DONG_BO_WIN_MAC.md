@@ -54,10 +54,9 @@ Mac dev đã cài; ffmpeg Homebrew còn trên máy nhưng CrabbyCut không gọi
 
 ## 4. Việc tiếp theo
 
-1. **Xem CI của PR #2** (job `macos-14` và `windows-2022`). Job Windows là lần đầu các nhánh
-   `#ifdef` mới của `core_process.cpp` qua MSVC — đỏ ở bước build thì sửa ở đó trước.
-2. **Gộp PR #2** khi CI xanh (cả hai job). Không đẩy thẳng lên `main`; nên bật branch protection
-   cho `main` (Settings › Branches, bắt buộc hai job CI).
+1. ~~**Xem CI của PR #2**~~ — **XONG**: cả `macos-14` và `windows-2022` xanh trên head `f812d1a`.
+2. ~~**Gộp PR #2**~~ — **XONG 2026-10-09**, merge commit `10179f7` (app 1.1.16). Còn lại: nên bật
+   branch protection cho `main` (Settings › Branches, bắt buộc hai job CI) — chưa làm.
 3. **Trên máy Windows**, sau khi gộp:
    ```bash
    git switch main
@@ -69,8 +68,8 @@ Mac dev đã cài; ffmpeg Homebrew còn trên máy nhưng CrabbyCut không gọi
    `ffmpeg:install` báo "Đã có" nếu bộ cài đã đặt đúng bản ghim. Nếu `git status` báo nhiều tệp đổi
    mà `git diff` trống (máy bật `core.autocrlf=true`): `git add --renormalize .` một lần.
    Kết quả test:all trên Windows ghi vào §6 của file này.
-4. Nhánh cũ `mac/export-wip-20261004` (chỉ có trên máy Mac, chưa đẩy) đã bị thay thế bởi cách làm
-   của `main` — **không gộp**; xoá khi chắc không cần.
+4. ~~Nhánh cũ `mac/export-wip-20261004`~~ — **ĐÃ XOÁ 2026-10-09** (không gộp; commit WIP `76efd66`,
+   lấy lại trong hạn reflog: `git branch mac/export-wip-20261004 76efd66`).
 
 ---
 
