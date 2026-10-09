@@ -42,6 +42,10 @@ const { pinFor } = require('./ffmpeg_pin.js');
  * có MỘT phần cần Python (test:backend gọi /api/filter) thì không nằm ở đây: nó đọc
  * CRABBYCUT_TEST_SKIP_PYTHON=1 và bỏ đúng phần đó. */
 const PYTHON_ENV_TESTS = new Set(['test:asr-engine']);
+/* Ngược lại: test đi qua scripts/run_python.js nhưng CHỈ cần thư viện chuẩn của Python (không
+ * torch/whisper/numpy) — --skip-python vẫn chạy, để CI macOS + Windows kiểm được chúng bằng
+ * python của máy chạy. test:tts-model-store giả lập huggingface_hub bằng module tự viết. */
+const PYTHON_STDLIB_TESTS = new Set(['test:tts-model-store']);
 
 function parseArgs(argv) {
   const opts = { skipPython: false, only: null, timeoutS: 900, build: false };
@@ -123,7 +127,8 @@ function main() {
   for (const name of testList(opts)) {
     const args = commandOf(name);
     if (!args) { results.push({ name, status: 'BỎ', note: 'không phải lệnh node' }); continue; }
-    if (opts.skipPython && (PYTHON_ENV_TESTS.has(name) || args[0].replace(/\\/g, '/').endsWith('scripts/run_python.js'))) {
+    if (opts.skipPython && !PYTHON_STDLIB_TESTS.has(name)
+        && (PYTHON_ENV_TESTS.has(name) || args[0].replace(/\\/g, '/').endsWith('scripts/run_python.js'))) {
       results.push({ name, status: 'BỎ', note: '--skip-python' });
       continue;
     }
