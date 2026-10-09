@@ -107,9 +107,10 @@
   "5 · Element → nhóm SFXs": "5 · Element → SFXs 分组",
   "50 fps": "50 fps",
   "59.94 fps": "59.94 fps",
-  "6 · Bảng luật ghép": "6 · 匹配规则",
+  "6 · Mẫu văn bản → nhóm SFXs": "6 · 文字模板 → SFXs 分组",
+  "7 · Bảng luật ghép": "7 · 匹配规则",
   "60 fps": "60 fps",
-  "7 · Số liệu": "7 · 参数",
+  "8 · Số liệu": "8 · 参数",
   "9:16 — Dọc": "9:16 — 竖屏",
   "Alt + kéo block": "Alt + 拖动区块",
   "Alt + lăn chuột": "Alt + 滚轮",
@@ -1713,5 +1714,13 @@
   "Y": "Y",
   "한국어 — Hàn": "한국어 — 韩语",
   "中文 — Trung (giản thể)": "中文（简体）",
-  "日本語 — Nhật": "日本語 — 日语"
+  "日本語 — Nhật": "日本語 — 日语",
+  "Mỗi block mẫu văn bản được một tiếng, bắt đầu đúng lúc mẫu xuất hiện (đầu block) — không vang trước chữ, \"Đặt sớm hơn mốc\" không áp cho mẫu. Mẫu có hình [Icon] trùng một dòng ở mục 5 (ví dụ Tuỳ chỉnh chọn [Icon] True/Wrong) thì dùng nhóm của dòng Element đó.": "每个文字模板片段配一个音效，在模板出现时（片段开头）开始播放——不会早于文字出现；“提前于标记点”不适用于模板。模板图片若是第 5 项中列出的 [Icon]（例如“自定义”选用 [Icon] True/Wrong），则使用该 Element 行的分组。",
+  "Nhóm 3 — Kéo giãn / Phóng trượt": "第 3 组 — 拉伸 / 缩放滑动",
+  "Nhóm 4 — Phóng / Xoay đập": "第 4 组 — 放大 / 旋转冲击",
+  "Nhóm 5 — Chớp sáng": "第 5 组 — 闪光",
+  "Nhóm 6 — Vỡ hạt / Bokeh": "第 6 组 — 像素化 / 散景",
+  "Nhóm 7 — Mờ dần / Hoà tan": "第 7 组 — 淡化 / 溶解",
+  "Nhóm 8 — Chớp sáng": "第 8 组 — 闪光",
+  "Nhóm 9 — Lấp lánh": "第 9 组 — 闪烁"
 }

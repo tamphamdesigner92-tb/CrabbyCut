@@ -245,6 +245,26 @@
         </div>`;
     }
 
+    // Mẫu văn bản của engine: [{ value: id, label: tên hiện trên thẻ }].
+    function templateOptions() {
+        const list = window.TextTemplates && Array.isArray(TextTemplates.TEMPLATES) ? TextTemplates.TEMPLATES : [];
+        return list.map((t) => ({ value: t.id, label: t.name || t.id }));
+    }
+
+    function templateRowHtml(rule, index) {
+        // Mẫu đã có dòng khác thì không cho chọn trùng (mỗi mẫu một dòng, xem normalizeAutoSfx).
+        const taken = new Set(cfg().templateRules.filter((_, i) => i !== index).map((r) => r.templateId));
+        const tpls = templateOptions().filter((o) => !taken.has(o.value));
+        const sfxOpts = cfg().sfxGroups.map((g) => ({ value: g.id, label: g.name }));
+        return `
+        <div class="set-rule set-rule-1line">
+            ${selectHtml(`data-set-act="tpl-id" data-index="${index}"`, tpls, rule.templateId)}
+            <span class="set-arrow">→</span>
+            ${selectHtml(`data-set-act="tpl-sfx" data-index="${index}"`, sfxOpts, rule.sfxGroup)}
+            <button type="button" class="set-x" data-set-act="del-template" data-index="${index}" title="${_t('Xoá dòng')}">×</button>
+        </div>`;
+    }
+
     // `act` mặc định là 'level' (mục Auto Sound Effects, ghi vào autoSfx.levels[key]); các mục
     // khác truyền act riêng để CHANGES định tuyến thẳng tới nhánh của chúng.
     function numberRowHtml(label, key, value, min, max, step, unit, act) {
@@ -293,12 +313,18 @@
             <button type="button" class="set-btn" data-set-act="add-element">${_t('+ Thêm dòng')}</button>
         </section>
 
-        <section class="set-sec"><h4>${_t('6 · Bảng luật ghép')}</h4>
+        <section class="set-sec"><h4>${_t('6 · Mẫu văn bản → nhóm SFXs')}</h4>
+            ${c.templateRules.map((r, i) => templateRowHtml(r, i)).join('') || `<span class="set-empty">${_t('Chưa có dòng nào')}</span>`}
+            <button type="button" class="set-btn" data-set-act="add-template"${c.templateRules.length < templateOptions().length ? '' : ' disabled'}>${_t('+ Thêm dòng')}</button>
+            <p class="set-note">${_t('Mỗi block mẫu văn bản được một tiếng, bắt đầu đúng lúc mẫu xuất hiện (đầu block) — không vang trước chữ, "Đặt sớm hơn mốc" không áp cho mẫu. Mẫu có hình [Icon] trùng một dòng ở mục 5 (ví dụ Tuỳ chỉnh chọn [Icon] True/Wrong) thì dùng nhóm của dòng Element đó.')}</p>
+        </section>
+
+        <section class="set-sec"><h4>${_t('7 · Bảng luật ghép')}</h4>
             ${c.rules.map((r, i) => ruleRowHtml(r, i)).join('') || `<span class="set-empty">${_t('Chưa có luật nào — Auto Sound Effects sẽ không điền gì')}</span>`}
             <button type="button" class="set-btn" data-set-act="add-rule">${_t('+ Thêm luật')}</button>
         </section>
 
-        <section class="set-sec"><h4>${_t('7 · Số liệu')}</h4>
+        <section class="set-sec"><h4>${_t('8 · Số liệu')}</h4>
             <div class="set-nums">
                 ${numberRowHtml(_t('Âm lượng SFX'), 'sfxDb', c.levels.sfxDb, -60, 20, 0.5, 'dB')}
                 ${numberRowHtml(_t('Âm lượng nhạc nền'), 'musicDb', c.levels.musicDb, -60, 20, 0.5, 'dB')}
@@ -642,6 +668,7 @@
             cfg().sfxGroups = cfg().sfxGroups.filter((g) => g.id !== id);
             cfg().rules = cfg().rules.filter((r) => r.sfxGroup !== id && r.threshold?.elseSfxGroup !== id);
             cfg().elementRules = cfg().elementRules.filter((r) => r.sfxGroup !== id);
+            cfg().templateRules = cfg().templateRules.filter((r) => r.sfxGroup !== id);
         },
         'add-rule': () => {
             const anim = cfg().animGroups[0];
@@ -657,6 +684,14 @@
             cfg().elementRules.push({ assetName: baseName(files[0]), sfxGroup: sfx.id });
         },
         'del-element': (el) => { cfg().elementRules.splice(Number(el.dataset.index), 1); },
+        'add-template': () => {
+            const taken = new Set(cfg().templateRules.map((r) => r.templateId));
+            const free = templateOptions().find((o) => !taken.has(o.value));
+            const sfx = cfg().sfxGroups[0];
+            if (!free || !sfx) return;
+            cfg().templateRules.push({ templateId: free.value, sfxGroup: sfx.id });
+        },
+        'del-template': (el) => { cfg().templateRules.splice(Number(el.dataset.index), 1); },
         'preview-file': (el) => { playPreview(el.dataset.file); return false; },
 
         /* ---- Phím tắt ---- */
@@ -747,6 +782,8 @@
         },
         'el-name': (el) => { cfg().elementRules[Number(el.dataset.index)].assetName = el.value; return true; },
         'el-sfx': (el) => { cfg().elementRules[Number(el.dataset.index)].sfxGroup = el.value; return false; },
+        'tpl-id': (el) => { cfg().templateRules[Number(el.dataset.index)].templateId = el.value; return true; },
+        'tpl-sfx': (el) => { cfg().templateRules[Number(el.dataset.index)].sfxGroup = el.value; return false; },
         'level': (el) => { cfg().levels[el.dataset.key] = Number(el.value); return false; },
 
         /* ---- Chung / Auto save / Xem trước ---- */

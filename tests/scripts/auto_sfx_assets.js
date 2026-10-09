@@ -44,7 +44,10 @@ const FIRST = () => 0;   // random giả lập: luôn lấy ứng viên đầu (
   ['circleopen', 'circleclose', 'radial', 'swirl'].forEach((id) => {
     assert.strictEqual(A.sfxGroupForTransition(CFG, id), 'g2', `${id} -> nhóm 2`);
   });
-  ['fade', 'fadeblack', 'fadewhite', 'dissolve', 'pixelize', 'zoomin', ''].forEach((id) => {
+  // Từ cài đặt bản 2 mọi chuyển cảnh đều có tiếng (người dùng yêu cầu 2026-10-09).
+  ['fade', 'fadeblack', 'dissolve'].forEach((id) => assert.strictEqual(A.sfxGroupForTransition(CFG, id), 'g2', `${id} -> whoosh dài`));
+  ['fadewhite', 'flashrotate'].forEach((id) => assert.strictEqual(A.sfxGroupForTransition(CFG, id), 'gflash', `${id} -> chớp sáng`));
+  ['', 'khong_ton_tai'].forEach((id) => {
     assert.strictEqual(A.sfxGroupForTransition(CFG, id), null, `${id} phải không ra nhóm nào`);
   });
 }
@@ -56,6 +59,43 @@ const FIRST = () => 0;   // random giả lập: luôn lấy ứng viên đầu (
   assert.strictEqual(A.sfxGroupForElementName(CFG, '[icon] true.PNG'), 'g4', 'khớp không phân biệt hoa thường');
   assert.strictEqual(A.sfxGroupForElementName(CFG, '[Icon] Wellmune.png'), null);
   assert.strictEqual(A.sfxGroupForElementName(CFG, ''), null);
+}
+
+/* ---------- MẪU VĂN BẢN: tra theo ý nghĩa mẫu + mốc vào cảnh xong ---------- */
+{
+  const TT = require(path.join(ROOT, 'static', 'js', 'text-templates.js'));
+  assert.strictEqual(A.sfxGroupForTemplate(CFG, 'approved'), 'g4', 'Đã duyệt = trả lời đúng');
+  assert.strictEqual(A.sfxGroupForTemplate(CFG, 'correct-1'), 'g4');
+  assert.strictEqual(A.sfxGroupForTemplate(CFG, 'incorrect'), 'g5', 'Sai = trả lời sai');
+  assert.strictEqual(A.sfxGroupForTemplate(CFG, 'incorrect-2'), 'g5');
+  assert.strictEqual(A.sfxGroupForTemplate(CFG, 'quote'), 'g1', 'chữ trượt vào -> whoosh nhanh');
+  assert.strictEqual(A.sfxGroupForTemplate(CFG, 'zoom-title'), 'g3', 'phóng vào -> Pop');
+  assert.strictEqual(A.sfxGroupForTemplate(CFG, 'khong_co'), null);
+  assert.strictEqual(A.sfxGroupForTemplate(CFG, ''), null);
+  // Mọi mẫu của engine đều có tiếng mặc định — thêm mẫu mới mà quên bảng là test đỏ.
+  TT.TEMPLATES.forEach((t) => assert.ok(A.sfxGroupForTemplate(CFG, t.id), `mẫu ${t.id} chưa có nhóm SFXs mặc định`));
+
+  // Mẫu Custom chọn icon Đúng/Sai -> tiếng Đúng/Sai (luật Element đè luật theo mẫu).
+  assert.strictEqual(A.sfxGroupForTemplateBlock(CFG, 'custom', ['[Icon] True.png']), 'g4');
+  assert.strictEqual(A.sfxGroupForTemplateBlock(CFG, 'custom', ['[icon] wrong.PNG']), 'g5');
+  assert.strictEqual(A.sfxGroupForTemplateBlock(CFG, 'custom', ['[Icon] DHA.png']), 'g3', 'icon thường -> theo mẫu');
+  assert.strictEqual(A.sfxGroupForTemplateBlock(CFG, 'custom', [undefined, '']), 'g3');
+  assert.strictEqual(A.sfxGroupForTemplateBlock(CFG, 'quote', null), 'g1');
+
+  // Tiếng của mẫu KHÔNG được vang trước chữ: sàn notBefore kéo đầu tiếng về đúng đầu block.
+  const tplPlace = A.placeSfx({ atTime: 10, blockStart: 10, lead: 0, notBefore: 10, peakOffset: 0.17, assetDuration: 0.84, timelineLimit: 60, align: 'peak', fit: 'full' });
+  assert.deepStrictEqual(tplPlace, { start: 10, duration: 0.84 });
+  const freePlace = A.placeSfx({ atTime: 10, lead: 0.3, peakOffset: 0.17, assetDuration: 0.84, timelineLimit: 60, align: 'peak', fit: 'full' });
+  assert.ok(Math.abs(freePlace.start - 9.53) < 1e-9, 'không có sàn -> hành vi cũ (đẩy sớm theo lead + đỉnh sóng)');
+
+  // Mọi chuyển cảnh của engine đều có tiếng mặc định — thêm chuyển cảnh mới mà quên nhóm là test đỏ.
+  const TR = require(path.join(ROOT, 'static', 'js', 'transitions.js'));
+  TR.TRANSITION_OPTIONS.forEach((o) => assert.ok(A.sfxGroupForTransition(CFG, o.id), `chuyển cảnh ${o.id} chưa có nhóm SFXs`));
+  assert.strictEqual(A.sfxGroupForTransition(CFG, 'flashrotate'), 'gflash');
+  assert.strictEqual(A.sfxGroupForTransition(CFG, 'pixelize'), 'gsparkle');
+  assert.strictEqual(A.sfxGroupForTransition(CFG, 'zoomin'), 'g2');
+  assert.strictEqual(A.sfxGroupForTransition(CFG, 'stretchleft'), 'g1');
+
 }
 
 /* ---------- ENGINE ĐỌC CẤU HÌNH, KHÔNG DÙNG BẢNG CỨNG ----------
@@ -74,6 +114,7 @@ const FIRST = () => 0;   // random giả lập: luôn lấy ứng viên đầu (
         { source: { kind: 'transition', group: 'tmoi' }, sfxGroup: 'sB' },
       ],
       elementRules: [{ assetName: '[Icon] Wellmune.png', sfxGroup: 'sB' }],
+      templateRules: [{ templateId: 'approved', sfxGroup: 'sA' }],
     },
   }).autoSfx;
 
@@ -84,6 +125,8 @@ const FIRST = () => 0;   // random giả lập: luôn lấy ứng viên đầu (
   assert.strictEqual(A.sfxGroupForTransition(custom, 'wipeleft'), null);
   assert.strictEqual(A.sfxGroupForElementName(custom, '[Icon] Wellmune.png'), 'sB');
   assert.strictEqual(A.sfxGroupForElementName(custom, '[Icon] True.png'), null, 'dòng Element bị bỏ -> hết tiếng');
+  assert.strictEqual(A.sfxGroupForTemplate(custom, 'approved'), 'sA', 'bảng mẫu văn bản sửa được');
+  assert.strictEqual(A.sfxGroupForTemplate(custom, 'quote'), null, 'mẫu không có dòng -> không tiếng');
   assert.deepStrictEqual(A.sfxGroupConfig(custom, 'sB'), { id: 'sB', name: 'B', align: 'start', fit: 'toEffect' });
 }
 

@@ -22,18 +22,18 @@
     <script src="/static/js/main-lane.js"></script>
     <script src="/static/js/magic-fill-assets.js?v=mfa-nofilltrans-p3"></script>
     <script src="/static/js/text-animations.js?v=volkf-p1"></script>
-    <script src="/static/js/text-templates.js?v=texttpl-p1"></script>
+    <script src="/static/js/text-templates.js?v=texttpl-p2"></script>
     <script src="/static/js/transitions.js?v=transition-measured-p27"></script>
     <!-- app-settings.js đọc EFFECT_OPTIONS/TRANSITION_OPTIONS lúc normalize() -> phải nạp
          SAU text-animations.js và transitions.js. auto-sfx-assets.js tra bảng luật lấy từ
          app-settings.js; settings-panel.js dựng UI cho chính bảng đó. -->
     <!-- shortcuts.js phải nạp TRƯỚC app-settings.js: normalize() gọi Shortcuts để lọc keymap. -->
     <script src="/static/js/shortcuts.js?v=keys-p1"></script>
-    <script src="/static/js/app-settings.js?v=settings-p2"></script>
-    <script src="/static/js/auto-sfx-assets.js?v=ase-p1"></script>
+    <script src="/static/js/app-settings.js?v=settings-p3"></script>
+    <script src="/static/js/auto-sfx-assets.js?v=ase-p3"></script>
     <!-- Số phiên bản (Trang chủ, thanh trạng thái, Cài đặt → Về CrabbyCut) — nạp TRƯỚC settings-panel.js. -->
     <script src="/static/js/app-info.js?v=appinfo-p1"></script>
-    <script src="/static/js/settings-panel.js?v=settings-p3"></script>
+    <script src="/static/js/settings-panel.js?v=settings-p5"></script>
     <script src="/static/js/audio-waveform.js?v=waveform-strip-p4"></script>
     <script src="/static/js/audio-denoise.js?v=denoise-p1"></script>
     <script src="/static/js/clip-speed.js?v=speed-p2"></script>
@@ -16036,7 +16036,7 @@
         performVideoExport();
     });
 </script>
-<script src="/static/js/editing-runtime.js?v=lumen-p5-lsub"></script>
+<script src="/static/js/editing-runtime.js?v=lumen-p5-lsub-asetpl2"></script>
 <script src="/static/js/perf-runtime.js"></script>
 <!-- Dụng cụ đo hiệu năng (Giai đoạn 0). Nạp SAU perf-runtime.js vì nó bọc chính những
      hàm toàn cục mà perf-runtime gán đè; nạp trước là bọc phải bản cũ. Lúc tắt nó chỉ

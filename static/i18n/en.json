@@ -233,9 +233,10 @@
   "5 · Element → nhóm SFXs": "5 · Element → SFXs group",
   "50 fps": "50 fps",
   "59.94 fps": "59.94 fps",
-  "6 · Bảng luật ghép": "6 · Matching rules",
+  "6 · Mẫu văn bản → nhóm SFXs": "6 · Text template → SFXs group",
+  "7 · Bảng luật ghép": "7 · Matching rules",
   "60 fps": "60 fps",
-  "7 · Số liệu": "7 · Values",
+  "8 · Số liệu": "8 · Values",
   "9:16 — Dọc": "9:16 — Portrait",
   "Alt + kéo block": "Alt + drag block",
   "Alt + lăn chuột": "Alt + scroll wheel",
@@ -1992,5 +1993,13 @@
   "Y": "Y",
   "한국어 — Hàn": "한국어 — Korean",
   "中文 — Trung (giản thể)": "中文 — Chinese (Simplified)",
-  "日本語 — Nhật": "日本語 — Japanese"
+  "日本語 — Nhật": "日本語 — Japanese",
+  "Mỗi block mẫu văn bản được một tiếng, bắt đầu đúng lúc mẫu xuất hiện (đầu block) — không vang trước chữ, \"Đặt sớm hơn mốc\" không áp cho mẫu. Mẫu có hình [Icon] trùng một dòng ở mục 5 (ví dụ Tuỳ chỉnh chọn [Icon] True/Wrong) thì dùng nhóm của dòng Element đó.": "Each text template block gets one sound, starting exactly when the template appears (start of the block) — never before the text; \"Place ahead of marker\" does not apply to templates. A template whose image is an [Icon] listed in section 5 (e.g. Custom with [Icon] True/Wrong) uses that Element row's group.",
+  "Nhóm 3 — Kéo giãn / Phóng trượt": "Group 3 — Stretch / Zoom slide",
+  "Nhóm 4 — Phóng / Xoay đập": "Group 4 — Zoom / Spin slam",
+  "Nhóm 5 — Chớp sáng": "Group 5 — Flash",
+  "Nhóm 6 — Vỡ hạt / Bokeh": "Group 6 — Pixelize / Bokeh",
+  "Nhóm 7 — Mờ dần / Hoà tan": "Group 7 — Fade / Dissolve",
+  "Nhóm 8 — Chớp sáng": "Group 8 — Flash",
+  "Nhóm 9 — Lấp lánh": "Group 9 — Sparkle"
 }

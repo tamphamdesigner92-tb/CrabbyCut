@@ -65,8 +65,8 @@ const json = (v) => JSON.stringify(v);
   });
   const c = AppSettings.defaults().autoSfx;
   const wanted = [...c.sfxGroups.flatMap((g) => g.files), ...c.musicFiles];
-  // auto_sfx.txt liệt kê 15 file SFXs (7 nhóm) + 2 file nhạc nền.
-  assert.strictEqual(wanted.length, 17, 'DEFAULTS phải liệt kê đúng số file của auto_sfx.txt');
+  // auto_sfx.txt liệt kê 17 file SFXs (9 nhóm, nhóm 8-9 thêm ở cài đặt bản 2) + 2 file nhạc nền.
+  assert.strictEqual(wanted.length, 19, 'DEFAULTS phải liệt kê đúng số file của auto_sfx.txt');
   wanted.forEach((rel) => {
     assert.ok(onDisk.has(rel.toLowerCase()), `thiếu file trong library/: ${rel}`);
   });
@@ -100,8 +100,15 @@ const json = (v) => JSON.stringify(v);
         { source: { kind: 'anim', group: 'a1' }, sfxGroup: 'g3' },   // trùng nguồn -> bỏ
       ],
       elementRules: [{ assetName: '[Icon] True.png', sfxGroup: 'khong_co' }],
+      templateRules: [
+        { templateId: 'approved', sfxGroup: 'khong_co' },   // nhóm ma -> bỏ
+        { templateId: 'mau_da_go', sfxGroup: 'g3' },        // mẫu không còn trong engine -> bỏ
+        { templateId: 'quote', sfxGroup: 'g1' },
+        { templateId: 'quote', sfxGroup: 'g3' },            // trùng mẫu -> bỏ
+      ],
     },
   }).autoSfx;
+  assert.deepStrictEqual(out.templateRules, [{ templateId: 'quote', sfxGroup: 'g1' }], 'dòng mẫu văn bản hỏng/trùng phải bị bỏ');
   assert.strictEqual(out.rules.length, 1, 'chỉ luật thứ 3 hợp lệ về nguồn+đích');
   assert.strictEqual(out.rules[0].threshold, null, 'ngưỡng trỏ nhóm không tồn tại phải bị bỏ, luật vẫn sống');
   assert.strictEqual(out.elementRules.length, 0, 'dòng Element trỏ nhóm ma phải bị bỏ');
@@ -110,6 +117,41 @@ const json = (v) => JSON.stringify(v);
 /* ---------- phân biệt "chưa có khoá" với "mảng rỗng cố ý" ---------- */
 {
   assert.ok(AppSettings.normalize({ autoSfx: {} }).autoSfx.rules.length > 0, 'thiếu khoá rules -> lấy mặc định');
+  // Cài đặt lưu từ trước khi có bảng mẫu văn bản -> nhận bảng mặc định, không mất tiếng.
+  assert.ok(AppSettings.normalize({ autoSfx: {} }).autoSfx.templateRules.length > 0, 'thiếu khoá templateRules -> lấy mặc định');
+}
+
+/* ---------- nâng cấp cài đặt bản 1 -> 2: CỘNG nhóm chuyển cảnh mới, không sửa gì cũ ---------- */
+{
+  const D = AppSettings.defaults().autoSfx;
+  const v1 = {
+    version: 1,
+    autoSfx: {
+      ...D,
+      // Người dùng bản 1 đã tự xếp 'fade' vào nhóm của mình và đặt sẵn một nhóm id 'tflash'.
+      transGroups: [
+        { id: 't1', name: 'T1', transitions: ['slideleft', 'fade'] },
+        { id: 'tflash', name: 'Của tôi', transitions: ['pixelize'] },
+      ],
+      sfxGroups: D.sfxGroups.filter((g) => !['gflash', 'gsparkle'].includes(g.id)),
+      rules: [{ source: { kind: 'transition', group: 't1' }, sfxGroup: 'g3', threshold: null }],
+    },
+  };
+  const up = AppSettings.normalize(v1);
+  assert.strictEqual(up.version, AppSettings.SCHEMA_VERSION);
+  const byId = Object.fromEntries(up.autoSfx.transGroups.map((g) => [g.id, g.transitions]));
+  assert.deepStrictEqual(byId.t1, ['slideleft', 'fade'], 'nhóm của người dùng giữ nguyên');
+  assert.deepStrictEqual(byId.tflash, ['pixelize'], 'trùng id -> giữ bản của người dùng, không đè');
+  assert.deepStrictEqual(byId.tfade, ['fadeblack', 'dissolve'], 'fade đã có nhóm -> không kéo sang nhóm mặc định');
+  assert.deepStrictEqual(byId.tzoom, ['zoomin', 'echoshift', 'spinslam']);
+  assert.ok(up.autoSfx.sfxGroups.some((g) => g.id === 'gsparkle'), 'nhóm SFXs mới được thêm');
+  assert.strictEqual(up.autoSfx.rules.find((r) => r.source.group === 't1').sfxGroup, 'g3', 'luật cũ giữ nguyên');
+  assert.ok(up.autoSfx.rules.some((r) => r.source.group === 'tzoom'), 'luật cho nhóm mới được thêm');
+  // Đã ở bản 2 thì KHÔNG cộng lại (người dùng xoá nhóm mới là tôn trọng).
+  const removed = AppSettings.normalize({ ...up, autoSfx: { ...up.autoSfx, transGroups: up.autoSfx.transGroups.filter((g) => g.id !== 'tzoom') } });
+  assert.ok(!removed.autoSfx.transGroups.some((g) => g.id === 'tzoom'), 'bản 2: nhóm bị xoá không tự mọc lại');
+  assert.deepStrictEqual(AppSettings.normalize(up), up, 'idempotent sau nâng cấp');
+  assert.deepStrictEqual(AppSettings.normalize({ autoSfx: { templateRules: [] } }).autoSfx.templateRules, [], 'mảng rỗng cố ý được tôn trọng');
   assert.strictEqual(AppSettings.normalize({ autoSfx: { rules: [] } }).autoSfx.rules.length, 0, 'rules: [] là lựa chọn cố ý, phải tôn trọng');
   assert.strictEqual(AppSettings.normalize({ autoSfx: { musicFiles: [] } }).autoSfx.musicFiles.length, 0, 'musicFiles: [] phải được tôn trọng');
 }
