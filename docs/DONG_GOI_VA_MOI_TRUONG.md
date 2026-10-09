@@ -209,6 +209,21 @@ npm run setup:runtime      # dựng môi trường, in NDJSON tiến độ
 npx electron-builder --win --config.directories.output=<thư mục ngoài dự án>
 ```
 
+**`static/vendor/` KHÔNG nằm trong git** (`.gitignore` có `vendor/`): `pixi.min.js` (vẽ
+timeline) và `mammoth.browser.min.js` được `npm run prepare:vendor` chép ra từ
+`node_modules` lúc `postinstall`. Dựng từ git worktree sạch mà LIÊN KẾT `node_modules` sang
+(không `npm install`) thì hai tệp này không có — bản v1.1.14 đã phát hành như vậy: app mở lên
+Trang chủ trống, mọi nút chết. Nay:
+
+- `npm run dist` / `npm run dist:win` tự chạy `prepare:vendor` trước;
+- hook `afterPack` (`scripts/after_pack_check.js`) DỪNG build nếu bản đóng gói thiếu tệp
+  `static/vendor/*` mà `index.html` nạp, hoặc thiếu `core_c.node` / `core_process` —
+  chặn cả khi gọi thẳng `npx electron-builder` như lệnh trên. Test: `npm run test:after-pack`.
+
+Bản đã phát hành mà hỏng thì **không thay tệp cùng số phiên bản**: máy đã cập nhật lên bản
+hỏng sẽ không bao giờ nhận lại (updater không cài lại cùng số). Phải nâng số và phát hành
+bản mới — updater hỏi bằng hộp thoại của tiến trình chính nên vẫn chạy được trên bản hỏng.
+
 ## 10. Những gì bộ cài **không** bảo đảm
 
 - **Cần mạng.** Bước thiết lập tải hơn 1 GB từ python.org, PyPI, GitHub và
