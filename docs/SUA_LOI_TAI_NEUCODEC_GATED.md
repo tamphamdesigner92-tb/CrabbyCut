@@ -58,7 +58,9 @@ Không cần sửa `tts/server.py` hay `backend/tts-service.js`: hai file này c
 Bản sửa đạt khi một máy sạch, không đăng nhập HuggingFace, bấm "Tạo lồng tiếng" là tự tải đủ 312 MB và ra được giọng.
 
 - [x] Đã tải `model.onnx` gốc và ghi lại SHA256 — `3ddd9e56396e6029e0e948ac0255c89c803f981f23dcf4c154f50820bd74a6b3` (09/10/2026)
-- [ ] Đã tạo repo mirror công khai, có LICENSE và README ghi nguồn — **chờ tác giả quyết** (đăng công khai dưới tài khoản của tác giả). Trong lúc chờ, `mirrors` chỉ có bản mirror bên thứ ba `aoiandroid/…-mirror`, đã đối chiếu hash.
+- [x] Đã tạo repo mirror công khai [`TamPham92/neucodec-onnx-decoder-int8`](https://huggingface.co/TamPham92/neucodec-onnx-decoder-int8) (09/10/2026, tác giả chọn phương án A): Public, không gated, `model.onnx` + `meta.yaml` từ repo gốc, LICENSE Apache-2.0, README ghi nguồn Neuphonic + SHA256. Hash LFS trên repo = `3ddd9e56…a6b3`. `mirrors` = [mirror này, `aoiandroid/…-mirror` dự phòng], repo gốc sau cùng.
+- [x] Mirror riêng tải được KHÔNG cần token: 312 MB trong 23,9 s, `.crab-model.json` ghi `repo` = `TamPham92/neucodec-onnx-decoder-int8`
+- Lưu ý vận hành: tạo repo cần token HuggingFace quyền **Write**; token đọc ("API key 2") bị 403. Đăng nhập lại trên Windows: `hf auth login --force --token <token>` (ô nhập ẩn của `hf auth login` không nhận dán trong terminal tích hợp).
 - [x] Mirror bên thứ ba tải được KHÔNG cần token (thử thật, `token=False`, 312 MB trong 27 s)
 - [x] Đã sửa `model_store.py`: danh sách nguồn, kiểm SHA256, câu báo lỗi mới. Thay cho biến môi trường `HF_HUB_DISABLE_IMPLICIT_TOKEN` (hub chỉ đọc lúc import), mirror được gọi với `token=False` theo từng lượt.
 - [x] Test không cần mạng: `npm run test:tts-model-store` (hub giả: 404, 401, sai hash, model có sẵn, mất mạng)
@@ -70,4 +72,4 @@ Bản sửa đạt khi một máy sạch, không đăng nhập HuggingFace, bấ
 - [x] Đóng gói bản 1.1.16 bằng `dist:win` (09/10/2026): `dist/CrabbyCut-Setup-1.1.16.exe` 165.676.573 byte, after-pack check ok. Bản này gồm cả sửa zoom timeline ở Match Script.
 - [ ] Cài thử trên một máy người dùng đã gặp lỗi
 - [x] Commit (local `main`: `00925dc` sửa tải, `231a709` sửa zoom, `3fa4cec` nâng 1.1.16)
-- [ ] Push + phát hành GitHub Release v1.1.16 — **chờ tác giả cho phép** (cùng câu hỏi mirror riêng ở trên; nếu tạo mirror riêng thì thêm nó vào ĐẦU `mirrors` rồi đóng gói lại)
+- [ ] Push + phát hành GitHub Release v1.1.16 (tác giả đã cho phép 09/10/2026) — đóng gói lại sau khi thêm mirror riêng

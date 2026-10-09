@@ -76,11 +76,15 @@ MODELS: Dict[str, dict] = {
         # chỉ còn là đường cuối (cho máy có token đã được duyệt). Xem docs/SUA_LOI_TAI_NEUCODEC_GATED.md.
         "repo": "neuphonic/neucodec-onnx-decoder-int8",
         "mirrors": [
+            # Bản sao nguyên vẹn do tác giả CrabbyCut giữ (công khai, không khoá, có LICENSE +
+            # README ghi nguồn Neuphonic) — tạo 09/10/2026 từ file tải ở repo gốc.
+            "TamPham92/neucodec-onnx-decoder-int8",
+            # Dự phòng: bản sao của người khác, cùng hash — có thể bị sửa/xoá bất cứ lúc nào.
             "aoiandroid/neuphonic-neucodec-onnx-decoder-int8-mirror",
         ],
         # Hash LFS mà chính repo gốc công bố (HfApi.model_info(files_metadata=True)), đã đối
-        # chiếu với bản tải từ repo gốc 09/10/2026. Mirror do người khác giữ -> hash là thứ
-        # bảo đảm file không bị tráo.
+        # chiếu với bản tải từ repo gốc 09/10/2026. Mirror nằm ngoài tầm kiểm soát của repo
+        # gốc -> hash là thứ bảo đảm file không bị tráo.
         "sha256": {"model.onnx": "3ddd9e56396e6029e0e948ac0255c89c803f981f23dcf4c154f50820bd74a6b3"},
         "files": ["model.onnx"],
         "aihub": "neucodec-onnx",
