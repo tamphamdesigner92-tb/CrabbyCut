@@ -22,8 +22,8 @@ Bấm "Tạo lồng tiếng" với engine VieNeu-TTS báo lỗi 401 vì repo `ne
 
 - Repo này không bị khoá, giấy phép Apache-2.0, `model.onnx` cũng nặng đúng 312.292.102 byte.
 - SHA256 của file trong mirror: `3ddd9e56396e6029e0e948ac0255c89c803f981f23dcf4c154f50820bd74a6b3`.
-- Repo gốc giấu mã hash nên chưa kiểm được nội dung có giống hệt không. Người đăng có thể sửa hoặc xoá repo bất cứ lúc nào.
-- Chỉ dùng mirror này sau khi đã tải file gốc và so khớp SHA256 (bước 1 ở phần dưới).
+- ~~Repo gốc giấu mã hash~~ — **đính chính 09/10/2026:** repo gốc vẫn công bố hash LFS cho người chưa đăng nhập qua `HfApi().model_info(repo, files_metadata=True)`: `3ddd9e56…a6b3`, **trùng** với mirror. Đã tải `model.onnx` từ chính repo gốc (tài khoản `TamPham92` đã được duyệt) và `sha256sum` ra đúng giá trị đó.
+- Người đăng mirror có thể sửa hoặc xoá repo bất cứ lúc nào — app kiểm SHA256 sau khi tải nên file bị tráo sẽ bị từ chối, và repo mất thì app thử nguồn kế.
 
 ## Các bước thực hiện
 
@@ -57,13 +57,15 @@ Không cần sửa `tts/server.py` hay `backend/tts-service.js`: hai file này c
 
 Bản sửa đạt khi một máy sạch, không đăng nhập HuggingFace, bấm "Tạo lồng tiếng" là tự tải đủ 312 MB và ra được giọng.
 
-- [ ] Đã tải `model.onnx` gốc và ghi lại SHA256
-- [ ] Đã tạo repo mirror công khai, có LICENSE và README ghi nguồn
-- [ ] Mở link `https://huggingface.co/<mirror>/resolve/main/model.onnx` bằng trình duyệt ẩn danh, tải được, không bị 401
-- [ ] Đã sửa `model_store.py`: danh sách nguồn, kiểm SHA256, câu báo lỗi mới
-- [ ] Xoá thư mục `%LOCALAPPDATA%\CrabbyCut\tts_models\neucodec-onnx`, chạy `hf auth logout`, rồi tạo lồng tiếng VieNeu: thanh tiến trình chạy tới 100% và ra âm thanh
-- [ ] Tạm sửa `sha256` thành giá trị sai: app phải từ chối file và báo lỗi, không dùng file sai
-- [ ] Tạm đổi tên mirror thành repo không tồn tại: app phải thử sang repo gốc và hiện câu báo lỗi mới, không còn câu "`hf auth login`"
-- [ ] Những máy đã có model từ trước (có `.crab-model.json`) vẫn dùng được ngay, không tải lại
+- [x] Đã tải `model.onnx` gốc và ghi lại SHA256 — `3ddd9e56396e6029e0e948ac0255c89c803f981f23dcf4c154f50820bd74a6b3` (09/10/2026)
+- [ ] Đã tạo repo mirror công khai, có LICENSE và README ghi nguồn — **chờ tác giả quyết** (đăng công khai dưới tài khoản của tác giả). Trong lúc chờ, `mirrors` chỉ có bản mirror bên thứ ba `aoiandroid/…-mirror`, đã đối chiếu hash.
+- [x] Mirror bên thứ ba tải được KHÔNG cần token (thử thật, `token=False`, 312 MB trong 27 s)
+- [x] Đã sửa `model_store.py`: danh sách nguồn, kiểm SHA256, câu báo lỗi mới. Thay cho biến môi trường `HF_HUB_DISABLE_IMPLICIT_TOKEN` (hub chỉ đọc lúc import), mirror được gọi với `token=False` theo từng lượt.
+- [x] Test không cần mạng: `npm run test:tts-model-store` (hub giả: 404, 401, sai hash, model có sẵn, mất mạng)
+- [x] Thử thật trên máy không token (`HF_HUB_DISABLE_IMPLICIT_TOKEN=1`, `HF_TOKEN_PATH` trống, thư mục model riêng): tải từ mirror → `.crab-model.json` ghi `repo` = mirror
+- [ ] Tạo lồng tiếng VieNeu ra âm thanh trên máy sạch (chưa chạy trọn đường lồng tiếng — mới thử phần tải)
+- [x] Tạm sửa `sha256` thành giá trị sai: file bị xoá, thử sang repo gốc, báo lỗi "Không tải được NeuCodec decoder từ mọi nguồn…", không để lại `model.onnx`
+- [x] Tạm đổi tên mirror thành repo không tồn tại: thử sang repo gốc (401 khi không token) và hiện câu báo lỗi mới, không còn "`hf auth login`"
+- [x] Những máy đã có model từ trước (có `.crab-model.json`) vẫn dùng được ngay, không tải lại (0,0 s, không gọi mạng)
 - [ ] Đóng gói bản 1.1.16 bằng `dist:win`, cài thử trên một máy người dùng đã gặp lỗi
 - [ ] Commit và phát hành
