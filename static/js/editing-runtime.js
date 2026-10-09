@@ -25867,6 +25867,7 @@
      *   1. Điểm KẾT THÚC hiệu ứng VÀO của mỗi block (lane chính + overlay)
      *   2. Điểm nối 2 block có hiệu ứng chuyển cảnh
      *   3. Block Element [Icon] True/Wrong — luật riêng, ĐÈ luật hiệu ứng động
+     *   4. Block MẪU VĂN BẢN — tra theo id mẫu (cfg.templateRules), một tiếng / block
      * Block không có hiệu ứng vào / mối nối không có chuyển cảnh thì BỎ QUA (auto_sfx.txt).
      *
      * Luật ghép nằm ở CÀI ĐẶT (AppSettings.get().autoSfx), tra bằng AutoSfxAssets — sửa
@@ -26057,6 +26058,31 @@
         });
 
         editingItems.forEach((item) => {
+            /* MẪU VĂN BẢN: không có hiệu ứng In tên gọi được như textbox (mỗi lớp một
+               đường keyframe riêng, xem itemSupportsAnimation) -> MỘT tiếng cho cả block,
+               tiếng BẮT ĐẦU đúng lúc mẫu XUẤT HIỆN (đầu block) — không đợi hoạt ảnh vào
+               xong, nhưng cũng KHÔNG vang trước chữ: lead = 0 và sàn `notBefore` = đầu
+               block (canh đỉnh sóng thuần thì phần đầu file rơi trước hình, xem placeSfx).
+               Nhóm: hình của mẫu (Custom chọn [Icon] True/Wrong) theo luật Element trước —
+               cùng lý do luật Element ĐÈ hiệu ứng động: icon Đúng/Sai phải ra tiếng Đúng/Sai
+               — không có thì tra theo id mẫu. */
+            if (itemIsTextTemplate(item)) {
+                const artNames = templateEditableLayers(item)
+                    .filter((layer) => layer.kind === 'image')
+                    .map((layer) => templateLayerArt(item, layer.key)?.name);
+                const group = A.sfxGroupForTemplateBlock(cfg, item.template.id, artNames);
+                if (!group) return;
+                const blockStart = Number(item.timeline_start) || 0;
+                cues.push({
+                    atTime: blockStart,
+                    blockStart,
+                    lead: 0,
+                    notBefore: blockStart,
+                    group,
+                    effectDuration: Math.max(0.05, Number(item.duration) || 0),
+                });
+                return;
+            }
             if (!itemSupportsAnimation(item)) return;
             const asset = findAsset(item.asset_id);
             // Luật Element ĐÈ luật hiệu ứng động: một icon Đúng/Sai chỉ nên có MỘT tiếng.
@@ -26168,6 +26194,7 @@
                 assetDuration: Number(asset.duration) || 0,
                 effectDuration: cue.effectDuration,
                 timelineLimit: total,
+                notBefore: cue.notBefore,
                 align: groupCfg.align,
                 fit: groupCfg.fit,
             });

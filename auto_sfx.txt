@@ -70,19 +70,37 @@ Nhóm 6:
 Nhóm 7:
     [SFXs] Turn-Card.mp3
 
+Nhóm 8:
+    [SFXs] Camera-Flash-.mp3
+
+Nhóm 9:
+    [SFXs] Magic-Reveal.mp3
+
 
 # Quy tắc ghép SFXs vào các hiệu ứng chuyển động, hiệu ứng chuyển tiếp:
 - Với các hiệu ứng chuyển tiếp nhóm 1, sử dụng SFXs nhóm 1.
 - Với các hiệu ứng chuyển tiếp nhóm 2, sử dụng SFXs nhóm 2.
+- Các hiệu ứng chuyển tiếp còn lại (thêm từ cài đặt bản 2):
+    Kéo giãn trái, Phóng trượt: SFXs nhóm 1.
+    Phóng to, Phóng chồng bóng, Xoay đập: SFXs nhóm 2.
+    Chớp sáng xoay, Mờ qua trắng: SFXs nhóm 8 ([SFXs] Camera-Flash-.mp3).
+    Vỡ hạt, Bokeh đung đưa: SFXs nhóm 9 ([SFXs] Magic-Reveal.mp3).
+    Mờ dần, Mờ qua đen, Hoà tan: SFXs nhóm 2.
 - Với các hiệu ứng động nhóm 1, nếu độ dài hiệu ứng =< 0.8s thì dùng SFXs nhóm 1, nếu > 0.8s thì dùng SFXs nhóm 2.
 - Với các hiệu ứng động nhóm 2, sử dụng SFXs nhóm 3.
 - Với các hiệu ứng động nhóm 3, sử dụng SFXs nhóm 7.
 - Với các hiệu ứng động nhóm 4, sử dụng SFXs nhóm 6.
 - Với các Elements [Icon] True.png, sử dụng SFXs nhóm 4.
 - Với các Elements [Icon] Wrong.png, sử dụng SFXs nhóm 5.
+- Với các Mẫu văn bản (text template), mỗi block được 1 SFXs, chọn nhóm theo ý nghĩa của mẫu (sửa ở Cài đặt > Auto Sound Effects > Mẫu văn bản):
+    Đã duyệt, Chính xác 1: SFXs nhóm 4.
+    Sai, Sai 2: SFXs nhóm 5.
+    Trích dẫn: SFXs nhóm 1.
+    Các mẫu còn lại (phóng/nảy vào): SFXs nhóm 3.
+    Riêng mẫu có hình [Icon] True.png / [Icon] Wrong.png (ví dụ mẫu Tuỳ chỉnh): theo luật Elements, tức SFXs nhóm 4 / nhóm 5.
 
 # Vị trí đặt các SFXs được xác định bằng cách:
-- Điểm cao nhất trong sóng âm của SFXs (ngoại trừ SFXs nhóm 6) đặt vào đúng vị trí kết thúc của hiệu ứng chuyển động (vào) của mỗi block, điểm chuyển tiếp của 2 block có hiệu ứng chuyển tiếp tương ứng, điểm kết thúc của hiệu ứng động của [Icon] True/ Wrong.
+- Điểm cao nhất trong sóng âm của SFXs (ngoại trừ SFXs nhóm 6) đặt vào đúng vị trí kết thúc của hiệu ứng chuyển động (vào) của mỗi block, điểm chuyển tiếp của 2 block có hiệu ứng chuyển tiếp tương ứng, điểm kết thúc của hiệu ứng động của [Icon] True/ Wrong. Với Mẫu văn bản: đầu block SFXs trùng đúng thời điểm mẫu xuất hiện (đầu block) — tiếng không được đi trước hình.
 - Với các block không có chứa hiệu ứng động, giữa 2 block không có hiệu ứng chuyển tiếp thì bỏ qua, không thêm SFXs vào vị trí tương ứng.
 - Nhóm SFXs có nhiều hơn 1 [SFXs] thì lựa chọn ngẫu nhiên.
 - Đối với SFXs nhóm 6, vị trí bắt đầu của block SFXs trùng với vị trí bắt đầu của block có chứa hiệu ứng chuyển động Đánh máy. Độ dài của SFXs sẽ được cắt theo độ dài của hiệu ứng đánh máy.

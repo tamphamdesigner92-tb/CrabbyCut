@@ -237,9 +237,10 @@
   "5 · Element → nhóm SFXs": "5 · Element → SFXs group",
   "50 fps": "50 fps",
   "59.94 fps": "59.94 fps",
-  "6 · Bảng luật ghép": "6 · Matching rules",
+  "6 · Mẫu văn bản → nhóm SFXs": "6 · Text template → SFXs group",
+  "7 · Bảng luật ghép": "7 · Matching rules",
   "60 fps": "60 fps",
-  "7 · Số liệu": "7 · Values",
+  "8 · Số liệu": "8 · Values",
   "9:16 — Dọc": "9:16 — Portrait",
   "AI (MI-GAN) vẽ lại phần nền phía sau logo thay vì làm nhoè. Chạy nền trên máy của bạn; lần đầu tải mô hình ~28 MB. Mỗi giây video mất vài giây xử lý, cảnh đứng yên nhanh hơn nhiều.": "AI (MI-GAN) repaints the background behind the logo instead of smearing it. It runs in the background on your computer; the first run downloads a ~28 MB model. Each second of video takes a few seconds to process — static shots are much faster.",
   "AI vẽ lại nền (MI-GAN)": "AI background rebuild (MI-GAN)",
@@ -2137,5 +2138,13 @@
     "other": "Objects removed with AI ({n} frames)."
   },
   "Đã xoá vật thể bằng AI.": "Objects removed with AI.",
-  "Đã đặt mốc cho vật thể ở khung này. Bấm \"Xử lý bằng AI\" để bám và xoá lại.": "Keyframe set for the object at this frame. Click \"Process with AI\" to track and remove again."
+  "Đã đặt mốc cho vật thể ở khung này. Bấm \"Xử lý bằng AI\" để bám và xoá lại.": "Keyframe set for the object at this frame. Click \"Process with AI\" to track and remove again.",
+  "Mỗi block mẫu văn bản được một tiếng, bắt đầu đúng lúc mẫu xuất hiện (đầu block) — không vang trước chữ, \"Đặt sớm hơn mốc\" không áp cho mẫu. Mẫu có hình [Icon] trùng một dòng ở mục 5 (ví dụ Tuỳ chỉnh chọn [Icon] True/Wrong) thì dùng nhóm của dòng Element đó.": "Each text template block gets one sound, starting exactly when the template appears (start of the block) — never before the text; \"Place ahead of marker\" does not apply to templates. A template whose image is an [Icon] listed in section 5 (e.g. Custom with [Icon] True/Wrong) uses that Element row's group.",
+  "Nhóm 3 — Kéo giãn / Phóng trượt": "Group 3 — Stretch / Zoom slide",
+  "Nhóm 4 — Phóng / Xoay đập": "Group 4 — Zoom / Spin slam",
+  "Nhóm 5 — Chớp sáng": "Group 5 — Flash",
+  "Nhóm 6 — Vỡ hạt / Bokeh": "Group 6 — Pixelize / Bokeh",
+  "Nhóm 7 — Mờ dần / Hoà tan": "Group 7 — Fade / Dissolve",
+  "Nhóm 8 — Chớp sáng": "Group 8 — Flash",
+  "Nhóm 9 — Lấp lánh": "Group 9 — Sparkle"
 }

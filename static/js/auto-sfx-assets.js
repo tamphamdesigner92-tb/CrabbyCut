@@ -104,6 +104,27 @@
         return rule ? rule.sfxGroup : null;
     }
 
+    /** Nhóm SFXs cho một MẪU VĂN BẢN theo id mẫu (TextTemplates), ví dụ "approved".
+     * Mẫu không có hiệu ứng In/Out đặt tên như textbox (mỗi lớp một đường keyframe riêng)
+     * nên không tra qua bảng hiệu ứng động được — tra theo ý nghĩa của chính mẫu. */
+    function sfxGroupForTemplate(cfg, templateId) {
+        const key = String(templateId == null ? '' : templateId).trim();
+        if (!key) return null;
+        const rule = (cfg && Array.isArray(cfg.templateRules) ? cfg.templateRules : [])
+            .find((r) => r && r.templateId === key);
+        return rule ? rule.sfxGroup : null;
+    }
+
+    /** Nhóm SFXs cho MỘT BLOCK mẫu văn bản: hình của mẫu (`artNames`, ví dụ mẫu Custom chọn
+     * "[Icon] True.png") khớp luật Element thì dùng nhóm Element — icon Đúng/Sai phải ra tiếng
+     * Đúng/Sai, y như luật Element đè luật hiệu ứng động. Không khớp thì tra theo id mẫu. */
+    function sfxGroupForTemplateBlock(cfg, templateId, artNames) {
+        const fromArt = (Array.isArray(artNames) ? artNames : [])
+            .map((name) => sfxGroupForElementName(cfg, name))
+            .find(Boolean);
+        return fromArt || sfxGroupForTemplate(cfg, templateId);
+    }
+
     /**
      * Đối chiếu danh sách file của một nhóm với thư viện THẬT.
      * `libraryRelPaths` = mảng rel_path lấy từ GET /api/library/all.
@@ -167,6 +188,10 @@
      *                   hiệu ứng bắt đầu — ví dụ tiếng gõ phím của hiệu ứng Đánh máy.
      *   fit 'toEffect'— cắt độ dài theo đúng độ dài hiệu ứng.
      * `timelineLimit` là tổng độ dài lane main: mọi SFX không được vượt quá (auto_sfx.txt).
+     * `notBefore`   — SÀN cho mốc bắt đầu: tiếng không được vang TRƯỚC lúc hình hiện. Dùng
+     *                 cho mẫu văn bản (người dùng báo 2026-10-09: canh đỉnh sóng đúng đầu
+     *                 block thì phần đầu tiếng — và cả `lead` — rơi trước chữ). Bị đẩy lên
+     *                 sàn thì đỉnh sóng trễ hơn mốc đúng bằng chừng đó; độ dài GIỮ NGUYÊN.
      */
     function placeSfx(opts) {
         const o = opts || {};
@@ -181,7 +206,9 @@
         // Không truyền blockStart (mốc chuyển cảnh — không thuộc block nào) thì rơi về atTime.
         const blockStart = Math.max(0, Number(o.blockStart != null ? o.blockStart : atTime) || 0);
 
-        const start = align === 'start' ? blockStart : Math.max(0, atTime - lead - peakOffset);
+        const rawStart = align === 'start' ? blockStart : Math.max(0, atTime - lead - peakOffset);
+        const floor = Number(o.notBefore);
+        const start = Number.isFinite(floor) ? Math.max(rawStart, floor) : rawStart;
         let duration = assetDuration;
         if (o.fit === 'toEffect') {
             const effect = Math.max(0, Number(o.effectDuration) || 0);
@@ -224,6 +251,8 @@
         sfxGroupForAnimation,
         sfxGroupForTransition,
         sfxGroupForElementName,
+        sfxGroupForTemplate,
+        sfxGroupForTemplateBlock,
         sfxGroupConfig,
         resolveGroupFiles,
         resolveRelPaths,

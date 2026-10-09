@@ -22,18 +22,18 @@
     <script src="/static/js/main-lane.js"></script>
     <script src="/static/js/magic-fill-assets.js?v=mfa-nofilltrans-p3"></script>
     <script src="/static/js/text-animations.js?v=volkf-p1"></script>
-    <script src="/static/js/text-templates.js?v=texttpl-p1"></script>
+    <script src="/static/js/text-templates.js?v=texttpl-p2"></script>
     <script src="/static/js/transitions.js?v=transition-measured-p27"></script>
     <!-- app-settings.js đọc EFFECT_OPTIONS/TRANSITION_OPTIONS lúc normalize() -> phải nạp
          SAU text-animations.js và transitions.js. auto-sfx-assets.js tra bảng luật lấy từ
          app-settings.js; settings-panel.js dựng UI cho chính bảng đó. -->
     <!-- shortcuts.js phải nạp TRƯỚC app-settings.js: normalize() gọi Shortcuts để lọc keymap. -->
     <script src="/static/js/shortcuts.js?v=keys-p1"></script>
-    <script src="/static/js/app-settings.js?v=settings-p2"></script>
-    <script src="/static/js/auto-sfx-assets.js?v=ase-p1"></script>
+    <script src="/static/js/app-settings.js?v=settings-p3"></script>
+    <script src="/static/js/auto-sfx-assets.js?v=ase-p3"></script>
     <!-- Số phiên bản (Trang chủ, thanh trạng thái, Cài đặt → Về CrabbyCut) — nạp TRƯỚC settings-panel.js. -->
     <script src="/static/js/app-info.js?v=appinfo-p1"></script>
-    <script src="/static/js/settings-panel.js?v=settings-p3"></script>
+    <script src="/static/js/settings-panel.js?v=settings-p5"></script>
     <script src="/static/js/audio-waveform.js?v=waveform-strip-p4"></script>
     <script src="/static/js/audio-denoise.js?v=denoise-p1"></script>
     <script src="/static/js/clip-speed.js?v=speed-p2"></script>
@@ -691,6 +691,17 @@
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
             gap: 8px;
+        }
+        /* Nút đứng ngay trên lưới cần khoảng hở: margin-bottom 8px của rule :where() ở trên
+           có specificity 0 nên bị `.btn { margin: 0 }` đè mất -> "Mở Editing" dính sát lưới. */
+        .btn + .step-action-grid {
+            margin-top: 8px;
+        }
+        /* Cùng lý do cho hai nút xếp chồng liền nhau trong panel (step1: "Bóc băng lại" và
+           "So khớp theo kịch bản"). Chỉ con TRỰC TIẾP của panel: nút trong .step-action-grid
+           đã có `gap` của lưới, cộng margin nữa là hở gấp đôi. */
+        .step-panel > .btn-block + .btn-block {
+            margin-top: 8px;
         }
         .step-action-grid button {
             width: 100%;
@@ -4117,7 +4128,7 @@
 	                    - Kéo 2 đầu thanh clip dưới timeline để cắt tỉa.<br>
 	                    - Bấm vào khoảng trống trong đoạn văn để chọn vùng.
 	                </div>
-		                <button id="btnPreviewCuts" class="btn btn-primary btn-block" style="margin-bottom: var(--sp-5);"><svg class="btn-ico"><use href="#ic-film"/></svg>Xem trước (Preview Cuts)</button>
+		                <button id="btnPreviewCuts" class="btn btn-primary btn-block"><svg class="btn-ico"><use href="#ic-film"/></svg>Xem trước (Preview Cuts)</button>
 		                <div class="step-action-grid">
 	                    <button id="btnApplyAndReorder" class="btn btn-success btn-block"><svg class="btn-ico"><use href="#ic-check"/></svg>Chốt &amp; Sắp xếp</button>
 	                    <button id="btnBackToReview" class="btn btn-secondary btn-block"><svg class="btn-ico"><use href="#ic-arrow-left"/></svg>Sửa kịch bản</button>
@@ -14170,11 +14181,11 @@
 
     // Cắt một item timeline tại nhiều mốc. Đi qua buildSplitTimelineItems để dùng đúng
     // luật chia từ theo ĐIỂM GIỮA và giữ nguyên transform/màu như dao cắt tay.
-    function splitTimelineItemAtBoundaries(item, cutTimes) {
+    function splitTimelineItemAtBoundaries(item, cutTimes, options = {}) {
         let pieces = [item];
         for (const cutTime of cutTimes.slice().sort((a, b) => a - b)) {
             const last = pieces[pieces.length - 1];
-            const split = buildSplitTimelineItems(last, cutTime);
+            const split = buildSplitTimelineItems(last, cutTime, options);
             if (!split) continue;   // mảnh quá ngắn: bỏ mốc này, mảnh trước gánh luôn
             pieces.splice(pieces.length - 1, 1, split[0], split[1]);
         }
@@ -15937,8 +15948,19 @@
                      * Trước 2026-09-16 đường này KHÔNG kiểm gì cả — clip lệch nằm im trong
                      * .crab, preview phiên đầu vẫn đúng (file nối liền mạch) nên không ai
                      * thấy, tới lần MỞ LẠI mới bị phát hiện và lúc đó bị gọt cụt.
-                     * Nắn ở đây thì mốc vào .crab đã đúng ngay từ đầu. */
+                     * Nắn ở đây thì mốc vào .crab đã đúng ngay từ đầu.
+                     *
+                     * Block VẮT THẬT SỰ qua ranh giới (câu đọc liền hơi nhưng camera đã sang
+                     * file mới) thì CẮT ĐÔI tại ranh giới trước, rồi mới kẹp. Chỉ kẹp thôi là
+                     * gọt mất cả nửa block — lỗi "Yêu Con 1 - Test Final" 2026-10-09: câu đã
+                     * chọn ở Match Script biến mất ở Timeline. Xem MainLane.segmentCutTimes. */
                     if (mainConcatSegments.length) {
+                        latestTimeline = latestTimeline.flatMap((item) => {
+                            const cuts = window.MainLane.segmentCutTimes(mainConcatSegments, item.start, item.end);
+                            return cuts.length
+                                ? splitTimelineItemAtBoundaries(item, cuts, { allowEmptyText: true })
+                                : [item];
+                        });
                         const aligned = window.MainLane.clampRowsToSegments(latestTimeline, mainConcatSegments);
                         if (aligned.fixed > 0) {
                             latestTimeline = aligned.rows;
@@ -16407,7 +16429,7 @@
     });
     syncExportBitrateUi();
 </script>
-<script src="/static/js/editing-runtime.js?v=lumen-p5-lsub"></script>
+<script src="/static/js/editing-runtime.js?v=lumen-p5-lsub-asetpl2"></script>
 <script src="/static/js/perf-runtime.js"></script>
 <!-- Dụng cụ đo hiệu năng (Giai đoạn 0). Nạp SAU perf-runtime.js vì nó bọc chính những
      hàm toàn cục mà perf-runtime gán đè; nạp trước là bọc phải bản cũ. Lúc tắt nó chỉ

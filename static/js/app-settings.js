@@ -28,7 +28,9 @@
     const _t = (typeof globalThis !== 'undefined' && globalThis._t)
         || ((k, p) => (p ? String(k).replace(/\{(\w+)\}/g, (m, n) => (n in p ? p[n] : m)) : k));
 
-    const SCHEMA_VERSION = 1;
+    /* 2: thêm nhóm chuyển cảnh + SFXs cho các chuyển cảnh trước đó chưa có tiếng (xem
+       upgradeAutoSfxV2). Cài đặt đã lưu ở bản 1 được NÂNG CẤP CỘNG THÊM khi đọc. */
+    const SCHEMA_VERSION = 2;
 
     // Khoảng hợp lệ của các con số trong mục "Số liệu" của bảng Cài đặt.
     const LIMITS = {
@@ -65,6 +67,14 @@
         transGroups: [
             { id: 't1', name: _t('Nhóm 1 — Trượt / Quét'), transitions: ['slideup', 'slidedown', 'slideleft', 'slideright', 'wipeleft', 'wiperight'] },
             { id: 't2', name: _t('Nhóm 2 — Vòng tròn / Toả / Xoắn'), transitions: ['circleopen', 'circleclose', 'radial', 'swirl'] },
+            /* Từ bản 2: các chuyển cảnh còn lại. Id CHỮ (không phải t3, t4…) vì bảng Cài đặt
+               sinh id nhóm mới theo dạng t<n> — người dùng có thể đã tạo sẵn t3 của riêng họ,
+               trùng id là upgradeAutoSfxV2 bỏ qua nhóm mặc định. */
+            { id: 'tstretch', name: _t('Nhóm 3 — Kéo giãn / Phóng trượt'), transitions: ['stretchleft', 'zoomslide'] },
+            { id: 'tzoom', name: _t('Nhóm 4 — Phóng / Xoay đập'), transitions: ['zoomin', 'echoshift', 'spinslam'] },
+            { id: 'tflash', name: _t('Nhóm 5 — Chớp sáng'), transitions: ['flashrotate', 'fadewhite'] },
+            { id: 'tsparkle', name: _t('Nhóm 6 — Vỡ hạt / Bokeh'), transitions: ['pixelize', 'bokehswing'] },
+            { id: 'tfade', name: _t('Nhóm 7 — Mờ dần / Hoà tan'), transitions: ['fade', 'fadeblack', 'dissolve'] },
         ],
         // Thứ tự khoá ở đây khớp thứ tự normalizeAutoSfx() dựng ra, để file trên đĩa và
         // bản chuẩn hoá giống nhau tới từng ký tự (dễ so sánh khi gỡ lỗi).
@@ -106,11 +116,39 @@
                 files: ['SFXs/[SFXs] Turn-Card.mp3'],
                 align: 'peak', fit: 'full',
             },
+            // Từ bản 2. Camera-Flash: một cú "tách" ngắn (đỉnh 0.13s) — khớp cú chớp trắng.
+            {
+                id: 'gflash', name: _t('Nhóm 8 — Chớp sáng'),
+                files: ['SFXs/[SFXs] Camera-Flash-.mp3'],
+                align: 'peak', fit: 'full',
+            },
+            // Magic-Reveal: tiếng lấp lánh (đỉnh 0.05s) — khớp hạt vỡ / đốm bokeh.
+            {
+                id: 'gsparkle', name: _t('Nhóm 9 — Lấp lánh'),
+                files: ['SFXs/[SFXs] Magic-Reveal.mp3'],
+                align: 'peak', fit: 'full',
+            },
         ],
         musicFiles: ['Music/[Mus] Coconut-Groove.mp3', 'Music/[Mus] Playful-Beauty-Lifestyle-House.mp3'],
         elementRules: [
             { assetName: '[Icon] True.png', sfxGroup: 'g4' },
             { assetName: '[Icon] Wrong.png', sfxGroup: 'g5' },
+        ],
+        // Mẫu văn bản -> nhóm SFXs, theo Ý NGHĨA của mẫu (đúng/sai như [Icon] True/Wrong),
+        // còn lại theo chuyển động chính: phóng/nảy vào -> Pop, trượt vào -> whoosh nhanh.
+        // Id khớp TextTemplates.TEMPLATES. Mẫu không có dòng nào thì không được thêm tiếng.
+        templateRules: [
+            { templateId: 'approved', sfxGroup: 'g4' },
+            { templateId: 'correct-1', sfxGroup: 'g4' },
+            { templateId: 'incorrect', sfxGroup: 'g5' },
+            { templateId: 'incorrect-2', sfxGroup: 'g5' },
+            { templateId: 'quote', sfxGroup: 'g1' },
+            { templateId: 'folgen-sie', sfxGroup: 'g3' },
+            { templateId: 'zoom-title', sfxGroup: 'g3' },
+            { templateId: 'mood-matcha', sfxGroup: 'g3' },
+            { templateId: 'custom', sfxGroup: 'g3' },
+            { templateId: 'vlog-tag', sfxGroup: 'g3' },
+            { templateId: 'welcome', sfxGroup: 'g3' },
         ],
         rules: [
             // Nhóm hiệu ứng động 1: hiệu ứng NGẮN đi với whoosh nhanh, hiệu ứng DÀI đi với
@@ -121,6 +159,11 @@
             { source: { kind: 'anim', group: 'a4' }, sfxGroup: 'g6', threshold: null },
             { source: { kind: 'transition', group: 't1' }, sfxGroup: 'g1', threshold: null },
             { source: { kind: 'transition', group: 't2' }, sfxGroup: 'g2', threshold: null },
+            { source: { kind: 'transition', group: 'tstretch' }, sfxGroup: 'g1', threshold: null },
+            { source: { kind: 'transition', group: 'tzoom' }, sfxGroup: 'g2', threshold: null },
+            { source: { kind: 'transition', group: 'tflash' }, sfxGroup: 'gflash', threshold: null },
+            { source: { kind: 'transition', group: 'tsparkle' }, sfxGroup: 'gsparkle', threshold: null },
+            { source: { kind: 'transition', group: 'tfade' }, sfxGroup: 'g2', threshold: null },
         ],
         // animLeadSec: đẩy tiếng của HIỆU ỨNG ĐỘNG và [Icon] sớm hơn mốc một chút. Tai người
         // nghe thấy tiếng trước khi hình chốt lại thì thấy "ăn khớp" hơn là trùng khít; điểm
@@ -193,6 +236,15 @@
         if (!Array.isArray(list) || !list.length) return null;
         // 'none' không phải hiệu ứng thật, không được phép nằm trong nhóm.
         return new Set(list.map((o) => o.value).filter((v) => v && v !== 'none'));
+    }
+
+    // Id mẫu văn bản THẬT của engine; null nếu không nạp được (test độc lập) -> giữ nguyên.
+    function engineTemplateIds() {
+        const g = typeof globalThis !== 'undefined' ? globalThis : {};
+        const TT = g.TextTemplates || tryRequire('./text-templates.js');
+        const list = TT && TT.TEMPLATES;
+        if (!Array.isArray(list) || !list.length) return null;
+        return new Set(list.map((t) => t && t.id).filter(Boolean));
     }
 
     function engineShortcuts() {
@@ -289,6 +341,7 @@
         // (người dùng CỐ Ý xoá hết -> tôn trọng, ASE sẽ không điền gì).
         const rulesSrc = Array.isArray(src.rules) ? src.rules : DEFAULT_AUTO_SFX.rules;
         const elementSrc = Array.isArray(src.elementRules) ? src.elementRules : DEFAULT_AUTO_SFX.elementRules;
+        const templateSrc = Array.isArray(src.templateRules) ? src.templateRules : DEFAULT_AUTO_SFX.templateRules;
         const musicSrc = Array.isArray(src.musicFiles) ? src.musicFiles : DEFAULT_AUTO_SFX.musicFiles;
 
         // Luật trỏ tới nhóm đã bị xoá thì tự rụng theo — nếu không, ASE sẽ tra ra nhóm ma.
@@ -330,6 +383,21 @@
             return out;
         }, []);
 
+        // Mẫu đã bị gỡ khỏi engine thì dòng của nó tự rụng; mỗi mẫu chỉ một dòng.
+        const templateIds = engineTemplateIds();
+        const templateSeen = new Set();
+        const templateRules = templateSrc.reduce((out, rule) => {
+            if (!rule || typeof rule !== 'object') return out;
+            const templateId = cleanText(rule.templateId, '');
+            const sfxGroup = cleanText(rule.sfxGroup, '');
+            if (!templateId || !sfxIds.has(sfxGroup)) return out;
+            if (templateIds && !templateIds.has(templateId)) return out;
+            if (templateSeen.has(templateId)) return out;
+            templateSeen.add(templateId);
+            out.push({ templateId, sfxGroup });
+            return out;
+        }, []);
+
         const levelsSrc = src.levels && typeof src.levels === 'object' ? src.levels : {};
         const D = DEFAULT_AUTO_SFX.levels;
         const levels = {
@@ -340,7 +408,7 @@
             animLeadSec: clampNumber(levelsSrc.animLeadSec, LIMITS.leadSec.min, LIMITS.leadSec.max, D.animLeadSec),
         };
 
-        return { animGroups, transGroups, sfxGroups, musicFiles: normalizeRelPathList(musicSrc), elementRules, rules, levels };
+        return { animGroups, transGroups, sfxGroups, musicFiles: normalizeRelPathList(musicSrc), elementRules, templateRules, rules, levels };
     }
 
     /* Keymap: chỉ giữ phần khác mặc định, bỏ id lệnh không còn tồn tại và tổ hợp rác.
@@ -462,11 +530,57 @@
      * Chuẩn hoá TOÀN BỘ object cài đặt. Đầu vào rỗng/hỏng/thiếu khoá đều ra một object
      * hợp lệ. Idempotent: normalize(normalize(x)) sâu-bằng normalize(x).
      */
+    /* NÂNG CẤP CỘNG THÊM 1 -> 2: bản 1 không có nhóm nào cho 12 chuyển cảnh (Mờ dần, Phóng
+     * to, Vỡ hạt…) nên ASE im lặng ở đó. Cài đặt đã lưu mang sẵn transGroups/sfxGroups/rules
+     * của riêng người dùng, nên mặc định mới KHÔNG tự tới tay họ — phải cộng vào đây.
+     * CHỈ cộng, không sửa gì đã có: nhóm/luật trùng id thì giữ bản của người dùng, chuyển
+     * cảnh người dùng đã tự xếp vào nhóm nào đó thì không bị kéo sang nhóm mặc định. */
+    function upgradeAutoSfxV2(autoSfx) {
+        if (!autoSfx || typeof autoSfx !== 'object') return autoSfx;
+        const out = { ...autoSfx };
+        const D = DEFAULT_AUTO_SFX;
+        const NEW_TRANS = ['tstretch', 'tzoom', 'tflash', 'tsparkle', 'tfade'];
+        const NEW_SFX = ['gflash', 'gsparkle'];
+        const added = new Set();   // nhóm chuyển cảnh mà lượt nâng cấp này THỰC SỰ thêm vào
+        if (Array.isArray(out.transGroups)) {
+            const groups = out.transGroups.slice();
+            const taken = new Set(groups.flatMap((g) => (g && Array.isArray(g.transitions) ? g.transitions : [])));
+            NEW_TRANS.forEach((id) => {
+                if (groups.some((g) => g && g.id === id)) return;
+                const def = D.transGroups.find((g) => g.id === id);
+                const transitions = def.transitions.filter((t) => !taken.has(t));
+                if (!transitions.length) return;
+                groups.push({ ...deepClone(def), transitions });
+                added.add(id);
+            });
+            out.transGroups = groups;
+        }
+        if (Array.isArray(out.sfxGroups) && added.size) {
+            const groups = out.sfxGroups.slice();
+            NEW_SFX.forEach((id) => {
+                if (!groups.some((g) => g && g.id === id)) groups.push(deepClone(D.sfxGroups.find((g) => g.id === id)));
+            });
+            out.sfxGroups = groups;
+        }
+        if (Array.isArray(out.rules)) {
+            const rules = out.rules.slice();
+            // Chỉ luật của nhóm VỪA thêm: nhóm trùng id là của người dùng, luật của nó cũng vậy.
+            D.rules.filter((r) => r.source.kind === 'transition' && added.has(r.source.group)).forEach((rule) => {
+                if (!rules.some((r) => r && r.source && r.source.kind === 'transition' && r.source.group === rule.source.group)) {
+                    rules.push(deepClone(rule));
+                }
+            });
+            out.rules = rules;
+        }
+        return out;
+    }
+
     function normalize(raw) {
         const src = raw && typeof raw === 'object' ? raw : {};
+        const fromVersion = Number(src.version) || 0;
         return {
             version: SCHEMA_VERSION,
-            autoSfx: normalizeAutoSfx(src.autoSfx),
+            autoSfx: normalizeAutoSfx(fromVersion < 2 ? upgradeAutoSfxV2(src.autoSfx) : src.autoSfx),
             shortcuts: normalizeShortcuts(src.shortcuts),
             autoSave: normalizeAutoSave(src.autoSave),
             general: normalizeGeneral(src.general),

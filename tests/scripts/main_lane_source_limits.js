@@ -114,6 +114,26 @@ function main() {
     assert.ok(real.rows[0].end - real.rows[0].start > 6.7);
     assert.ok(real.rows[1].end - real.rows[1].start > 2.3);
 
+    /* --- 7d: CA THẬT "Yêu Con 1 - Test Final" (người dùng báo 2026-10-09). Block gộp
+     * 38,27–50,89s chứa câu "Đó là lý do…" vắt qua ranh giới 44,177s. Chỉ kẹp là gọt về
+     * 44,177 -> mất 6,7s câu đã chọn. Phải CẮT tại ranh giới để giữ cả hai nửa. */
+    const { segmentCutTimes } = MainLane;
+    assert.deepStrictEqual(segmentCutTimes(REAL, 38.27, 50.89), [44.177],
+        'block vắt thật sự qua ranh giới phải được cắt đúng tại ranh giới');
+    // Hai nửa sau khi cắt nằm gọn trong video của nó -> kẹp không gọt gì nữa.
+    const halves = clampRowsToSegments([
+        { start: 38.27, end: 44.177 }, { start: 44.177, end: 50.89 },
+    ], REAL);
+    assert.strictEqual(halves.fixed, 0);
+    assert.strictEqual(halves.rows.length, 2);
+    // Mẩu thò đuôi không đáng kể (0,086s / 6,8s) KHÔNG cắt riêng — để kẹp nắn như 7c.
+    assert.deepStrictEqual(segmentCutTimes(REAL, 44.094, 50.890), []);
+    assert.deepStrictEqual(segmentCutTimes(REAL, 57.383, 59.816), []);
+    // Nằm gọn trong một video -> không cắt; vắt qua ba video -> hai mốc.
+    assert.deepStrictEqual(segmentCutTimes(REAL, 45, 50), []);
+    assert.deepStrictEqual(segmentCutTimes(REAL, 40, 55), [44.177, 51.351]);
+    assert.deepStrictEqual(segmentCutTimes([], 40, 55), []);
+
     // --- 8: không có bảng đoạn -> trả nguyên lane chính, không đoán mò ---
     assert.deepStrictEqual(clampRowsToSegments(broken, []), { rows: broken, fixed: 0 });
 
