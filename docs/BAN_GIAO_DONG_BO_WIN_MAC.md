@@ -57,7 +57,7 @@ Mac dev đã cài; ffmpeg Homebrew còn trên máy nhưng CrabbyCut không gọi
 1. ~~**Xem CI của PR #2**~~ — **XONG**: cả `macos-14` và `windows-2022` xanh trên head `f812d1a`.
 2. ~~**Gộp PR #2**~~ — **XONG 2026-10-09**, merge commit `10179f7` (app 1.1.16). Còn lại: nên bật
    branch protection cho `main` (Settings › Branches, bắt buộc hai job CI) — chưa làm.
-3. **Trên máy Windows**, sau khi gộp:
+3. ~~**Trên máy Windows**, sau khi gộp~~ — **XONG 2026-10-10**: 109/109 xanh (§6). Các bước đã chạy:
    ```bash
    git switch main
    git pull --rebase origin main
@@ -104,4 +104,4 @@ Windows (khung 8 khác nhau), hai lượt khác xanh, Mac 8/8 lần xanh — ch�
 | 2026-10-04 | Mac M1 Pro | Homebrew 8.1 | `main` không biên dịch được; 24 đỏ |
 | 2026-10-05 | Mac M1 Pro | Homebrew 8.1 | 101/104 xanh, 3 lỗ hổng |
 | 2026-10-05 | Mac M1 Pro | ghim `n8.1.1-crabbycut.2` | 102/104 xanh, 2 lỗ hổng; sau khi đổi ngưỡng (§5): **104/104** |
-| | Windows | ghim `n8.1.1-crabbycut.2` | *chưa chạy* |
+| 2026-10-10 | Windows 10 x64 (GTX 1060) | ghim `n8.1.1-crabbycut.2` (`ffmpeg:install`: "Đã có bản ghim") | `main` `61d246e` (app 1.1.16), `build:native` xanh: **109/109 xanh**, 0 đỏ, 0 lỗ hổng, 0 bỏ qua (gồm `export-gpu` trên CUDA/NVENC) |
