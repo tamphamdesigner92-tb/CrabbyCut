@@ -924,7 +924,13 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
 > - Fixture "Bin Tom" (20 clip, 19 lớp phủ, 1838 khung): `main` nguyên trạng trên Mac 30,0 s; + song song
 >   POSIX + `-realtime 0` -> **10,2 s** (sàn của encoder ~9,5 s).
 > - M.4: VideoToolbox giải mã HEVC 10-bit nhanh hơn CPU (4,95 s so với 8,4 s, CPU 48 -> 5,5 giây-CPU) nhưng
->   H.264 đã chuẩn hoá thì CHẬM hơn (21,3 so với 6,0 s) — chưa gắn vào `main`.
+>   H.264 đã chuẩn hoá thì CHẬM hơn (21,3 so với 6,0 s). **XONG 2026-10-09 trên `main`**
+>   (`SourceHwDecodeArgs`): `-hwaccel videotoolbox` cho nguồn chính HEVC hoặc > 8-bit, chỉ macOS, chỉ đồ thị
+>   CPU; H.264 8-bit giữ CPU; `CRABBYCUT_EXPORT_HWDEC=0` tắt. Fixture `rotated` (HEVC Main10 xoay 90°, 773 khung
+>   ra): cả lượt 5,53 -> 4,97 s, **36 -> 14,5 giây-CPU**; bản xuất trùng từng điểm ảnh với giải mã CPU. Thời
+>   gian lợi ít vì lượt này nghẽn ở encoder — phần CPU rảnh ra có ích nhất khi xuất song song (1.8). Bin Tom
+>   (H.264) không đổi (10,2 s). Test `test:export-hw-decode`. Chưa làm: ProRes (media engine M1 Pro/Max) và
+>   video lớp phủ HEVC — chưa có số đo.
 > - M.1 (bản ffmpeg ghim cho Mac): **XONG 2026-10-05** — `n8.1.1-crabbycut.2` macOS arm64, cùng nguồn với bản
 >   Windows (`build-macos.sh` của ffmpeg-for-CrabbyCut, Release `n8.1.1-crabbycut.2-macos`), `npm run ffmpeg:install`.
 >   Với bản ghim: 102/104 xanh; `test:export-hdr-asset-usage` hết đỏ; 2 test còn lại đỏ vì làm tròn SIMD x86 ≠ ARM

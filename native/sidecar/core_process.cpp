@@ -1161,6 +1161,7 @@ struct ExportSettings {
   int sourceChromaH = 128;   // vị trí mẫu màu, đơn vị 1/256 điểm ảnh luma (như scale in_h_chr_pos)
   int sourceChromaV = 128;
   std::string sourcePixFmt;   // pix_fmt luồng hình nguồn (đồ thị GPU: định dạng tải lên, GpuUploadFormat)
+  std::string sourceCodec;    // codec_name luồng hình nguồn (giải mã VideoToolbox, SourceHwDecodeArgs)
   /* CỠ BẢN XUẤT KHÁC CỠ SEQUENCE (mục 1.12, ô "Độ phân giải" của hộp thoại xuất). Đồ thị vẫn
    * dựng ở cỡ sequence (`width`/`height`); đuôi đồ thị co phần hình về content* rồi đệm đen cho
    * đủ output* (content = output thì không đệm). Backend tính các số này (exportOutputFrame);
@@ -2091,16 +2092,15 @@ void ChromaLocationPos(const std::string& loc, int& h, int& v) {
 
 void ProbeMainSourceForFastPath(const std::string& source, ExportSettings& settings) {
   settings.fastPathSource = false;
-  if (!MainLaneFastPathEnabled()) return;
   const std::string text = CommandOutput({
     "ffprobe", "-v", "error",
     "-select_streams", "v:0",
-    "-show_entries", "stream=width,height,pix_fmt,color_space,chroma_location"
+    "-show_entries", "stream=codec_name,width,height,pix_fmt,color_space,chroma_location"
                      ":stream_tags=rotate:stream_side_data=rotation",
     "-of", "default=nw=1",
     source,
   });
-  std::string pixFmt, space, chromaLoc;
+  std::string codec, pixFmt, space, chromaLoc;
   long width = 0, height = 0;
   bool rotated = false;
   std::istringstream lines(text);
@@ -2111,7 +2111,8 @@ void ProbeMainSourceForFastPath(const std::string& source, ExportSettings& setti
     if (eq == std::string::npos) continue;
     const std::string key = line.substr(0, eq);
     const std::string value = line.substr(eq + 1);
-    if (key == "pix_fmt") pixFmt = value;
+    if (key == "codec_name") codec = value;
+    else if (key == "pix_fmt") pixFmt = value;
     else if (key == "color_space") space = value;
     else if (key == "chroma_location") chromaLoc = value;
     else if (key == "width") { try { width = std::stol(value); } catch (...) { width = 0; } }
@@ -2129,6 +2130,8 @@ void ProbeMainSourceForFastPath(const std::string& source, ExportSettings& setti
   settings.sourceWidth = width > 0 ? static_cast<int>(width) : 0;
   settings.sourceHeight = height > 0 ? static_cast<int>(height) : 0;
   settings.sourcePixFmt = pixFmt;
+  settings.sourceCodec = codec;
+  if (!MainLaneFastPathEnabled()) return;
   if (!yuv || !bt709 || rotated || width <= 0 || height <= 0) return;
   ChromaLocationPos(chromaLoc, settings.sourceChromaH, settings.sourceChromaV);
   settings.fastPathSource = true;
@@ -5554,6 +5557,38 @@ void AppendNvdecInputArgs(std::vector<std::string>& cmd) {
   cmd.insert(cmd.end(), {"-hwaccel", "cuda", "-hwaccel_device", "cu", "-hwaccel_output_format", "cuda"});
 }
 
+/* GIẢI MÃ VIDEOTOOLBOX CHO NGUỒN CHÍNH (mục M.4) — chỉ macOS, chỉ đồ thị CPU.
+ *
+ * ĐO trên M1 Pro, chỉ giải mã luồng hình (`-f null`):
+ *   H.264 8-bit 1080x1920 (bản chuẩn hoá, 6.170 khung): CPU 6,0 s / 31 giây-CPU,
+ *                                                      VideoToolbox 21,3 s / 3,3 giây-CPU  -> CHẬM HƠN
+ *   HEVC Main10 1920x1080 xoay 90° (1.800 khung):      CPU 8,4 s / 48 giây-CPU,
+ *                                                      VideoToolbox 4,95 s / 5,5 giây-CPU -> nhanh hơn
+ * nên chỉ bật cho nguồn HEVC hoặc > 8-bit (điện thoại / máy quay được nối `-c copy`); H.264 8-bit
+ * giữ giải mã CPU. Không đặt `-hwaccel_output_format`: khung chép về bộ nhớ thường (nv12/p010) —
+ * bộ nhớ hợp nhất nên rẻ — rồi đi tiếp như khung phần mềm. Luồng VideoToolbox không nhận (4:2:2,
+ * cỡ lạ, AV1 trước M3…) thì ffmpeg tự lùi về giải mã phần mềm, lượt xuất không hỏng.
+ * CRABBYCUT_EXPORT_HWDEC=0 tắt. */
+bool SourceHighBitDepth(const std::string& pixFmt) {
+  return pixFmt.find("10") != std::string::npos || pixFmt.find("12") != std::string::npos
+      || pixFmt.find("16") != std::string::npos;
+}
+
+std::vector<std::string> SourceHwDecodeArgs(const ExportSettings& settings) {
+#ifdef __APPLE__
+  if (const char* env = std::getenv("CRABBYCUT_EXPORT_HWDEC")) {
+    const std::string value = env;
+    if (value == "0" || value == "false" || value == "off") return {};
+  }
+  if (settings.sourceCodec == "hevc" || SourceHighBitDepth(settings.sourcePixFmt)) {
+    return {"-hwaccel", "videotoolbox"};
+  }
+#else
+  (void)settings;
+#endif
+  return {};
+}
+
 void AppendOverlayInputArgs(
   std::vector<std::string>& cmd,
   const std::vector<ExportOverlay>& overlays,
@@ -6381,9 +6416,16 @@ bool PrepareExportBatch(
    * NVDEC qua -hwaccel_device) để mọi khung chung một ngữ cảnh CUDA với NVENC. NVDEC theo batch
    * (BatchGpuEligible đặt g_gpuBatchNvdec ngay trước khi ghi kịch bản GPU ở trên). */
   const bool nvdecMain = gpu && g_gpuBatchNvdec;
+  // Lượt chỉ tiếng không giải mã hình -> không cần (SourceHwDecodeArgs).
+  const std::vector<std::string> hwDecode =
+    mode == FilterScriptMode::AudioOnly ? std::vector<std::string>{} : SourceHwDecodeArgs(settings);
   const auto makeBuildCmd = [=](bool gpuGraph) {
     const fs::path graphPath = gpuGraph ? gpuScriptPath : scriptPath;
     const bool nvdec = gpuGraph && nvdecMain;
+    const auto appendSourceDecodeArgs = [=](std::vector<std::string>& cmd) {
+      if (nvdec) AppendNvdecInputArgs(cmd);
+      else if (!gpuGraph) cmd.insert(cmd.end(), hwDecode.begin(), hwDecode.end());
+    };
     return [=](const EncoderPlan& plan, const std::string& runLabel) {
       std::vector<std::string> cmd = {"ffmpeg", "-y", "-hide_banner", "-v", "error", "-nostdin"};
       if (gpuGraph) cmd.insert(cmd.end(), {"-init_hw_device", "cuda=cu", "-filter_hw_device", "cu"});
@@ -6391,7 +6433,7 @@ bool PrepareExportBatch(
       if (seekTo > 0.0) {
         cmd.insert(cmd.end(), {"-itsoffset", FixedSeconds(seekTo), "-ss", FixedSeconds(seekTo)});
       }
-      if (nvdec) AppendNvdecInputArgs(cmd);
+      appendSourceDecodeArgs(cmd);
       cmd.insert(cmd.end(), {"-i", source});
       AppendOverlayInputArgs(cmd, overlays, sequenceDuration, tempDir, settings, gpuGraph);
       for (size_t k = firstExtraRange; k < ranges.seekTo.size(); k++) {
@@ -6399,7 +6441,7 @@ bool PrepareExportBatch(
         if (ranges.seekTo[k] > 0.0) {
           cmd.insert(cmd.end(), {"-itsoffset", FixedSeconds(ranges.seekTo[k]), "-ss", FixedSeconds(ranges.seekTo[k])});
         }
-        if (nvdec) AppendNvdecInputArgs(cmd);
+        appendSourceDecodeArgs(cmd);
         cmd.insert(cmd.end(), {"-i", source});
       }
       AppendStreamMapArgs(cmd, graphPath, mode);
