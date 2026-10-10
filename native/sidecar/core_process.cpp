@@ -7406,6 +7406,22 @@ int CommandWhisperCpp(int argc, char** argv) {
   return 0;
 }
 
+/* Bộ mã hoá mà lượt xuất SẼ dùng cho một codec — đúng SelectEncoderPlan, không suy đoán riêng.
+ * Hộp thoại xuất hỏi `hevc` để biết máy có HEVC phần cứng không (tự chọn H.265 khi xuất 4K):
+ * macOS = VideoToolbox; Windows = phép thử thật nvenc -> qsv -> amf (WorkingHardwareEncoder,
+ * nhớ 3 ngày ở %TEMP%); không có thì ra bộ mã hoá CPU (libx265). Trả `result` với message =
+ * tên bộ mã hoá. */
+int CommandExportEncoder(int argc, char** argv) {
+  ExportSettings settings;
+  settings.codec = argc > 2 ? argv[2] : "h264";
+  if (!IsAllowed(settings.codec, {"h264", "hevc", "prores"})) {
+    Emit("error", "export-encoder expects h264|hevc|prores", 2);
+    return 2;
+  }
+  Emit("result", SelectEncoderPlan(settings).videoEncoder);
+  return 0;
+}
+
 void PrintUsage() {
   std::cout
     << "core_process commands:\n"
@@ -7415,6 +7431,7 @@ void PrintUsage() {
     << "  preprocess-audio <input> <output> <mode>\n"
     << "  preview-proxy <input> <output>\n"
     << "  export-video <source> <output> <timeline_json_file> <temp_dir> <preset> <fps>\n"
+    << "  export-encoder <h264|hevc|prores>\n"
     << "  transcribe-whispercpp <audio_wav> <model_path> <output_json>\n";
 }
 
@@ -7487,6 +7504,7 @@ int main(int argc, char** argv) {
     if (command == "preprocess-audio") return CommandPreprocessAudio(argc, argv);
     if (command == "preview-proxy") return CommandPreviewProxy(argc, argv);
     if (command == "export-video") return CommandExportVideo(argc, argv);
+    if (command == "export-encoder") return CommandExportEncoder(argc, argv);
     if (command == "transcribe-whispercpp") return CommandWhisperCpp(argc, argv);
     if (command == "--help" || command == "help") {
       PrintUsage();

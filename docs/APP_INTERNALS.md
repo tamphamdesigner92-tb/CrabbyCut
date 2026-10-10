@@ -5364,6 +5364,7 @@ NỀN KHUNG PREVIEW — đen hay xanh nhấp nháy (isSequenceTransparencyWarnin
   - Timeline (ruler + segment) render bằng PixiJS; sóng âm render bằng canvas 2D riêng (audio-waveform.js), cả hai giới hạn devicePixelRatio tối đa 2 để giảm tải.
   - Export ưu tiên VideoToolbox cho h264/hevc/prores khi FFmpeg hỗ trợ.
   - Export giải mã nguồn chính bằng VideoToolbox (`-hwaccel videotoolbox`, khung chép về RAM) khi nguồn là HEVC hoặc > 8-bit; H.264 8-bit giữ giải mã CPU vì VideoToolbox chậm hơn với nó (SourceHwDecodeArgs, mục M.4). Tắt: CRABBYCUT_EXPORT_HWDEC=0. Test: test:export-hw-decode.
+  - Hộp thoại xuất tự chọn H.265 khi khung xuất 4K (cạnh dài >= 3840, theo preset hoặc sequence), dưới 4K về H.264 — chỉ khi lượt xuất SẼ dùng HEVC phần cứng: hỏi /api/export-encoder (sidecar `export-encoder` = SelectEncoderPlan; macOS VideoToolbox, Windows NVENC/QSV/AMF qua phép thử thật). Máy chỉ có libx265 thì giữ H.264. Tay chọn codec giữ theo từng dự án (resetExportCodecForProject khi mở/tạo dự án — chỉ máy có HEVC phần cứng; máy chỉ có CPU giữ suốt phiên như trước); ProRes không đổi (index.html, syncExportCodecForFrame). Test: test:export-auto-hevc.
   - Preview proxy ưu tiên h264_videotoolbox và scale_vt nếu FFmpeg hỗ trợ, nhưng chỉ chạy sau ASR để tránh tranh MLX/MPS/unified memory.
   - Playback preview dùng HTML video decoder của Chromium/Electron với proxy all-keyframe để seek mượt hơn.
 - Windows:

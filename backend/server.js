@@ -6216,6 +6216,29 @@ function createApp() {
     res.json(collectHardwareInfo());
   });
 
+  /* Bộ mã hoá mà lượt xuất SẼ dùng cho một codec (sidecar `export-encoder` = SelectEncoderPlan).
+   * Hộp thoại xuất hỏi `hevc` để tự chọn H.265 khi xuất 4K chỉ khi máy có HEVC phần cứng
+   * (VideoToolbox / NVENC / QSV / AMF); bộ mã hoá CPU (libx265) -> `hardware: false`. Windows dò
+   * bằng phép mã hoá thử (vài giây lần đầu, sidecar nhớ 3 ngày) — ở đây nhớ thêm 10 phút trong
+   * tiến trình để mỗi lần tải trang không phải chạy lại sidecar. */
+  const exportEncoderMemo = new Map();
+  app.get('/api/export-encoder', async (req, res) => {
+    const codec = ['h264', 'hevc', 'prores'].includes(req.query?.codec) ? req.query.codec : 'h264';
+    try {
+      const cached = exportEncoderMemo.get(codec);
+      if (cached && Date.now() - cached.at < 10 * 60 * 1000) return res.json(await cached.promise);
+      const promise = runSidecar(['export-encoder', codec], { forwardStatus: false }).then((events) => {
+        const encoder = String(events.find((evt) => evt.type === 'result')?.message || '');
+        return { codec, encoder, hardware: Boolean(encoder) && !encoder.startsWith('lib') && encoder !== 'prores_ks' };
+      });
+      exportEncoderMemo.set(codec, { at: Date.now(), promise });
+      promise.catch(() => exportEncoderMemo.delete(codec));
+      res.json(await promise);
+    } catch (error) {
+      httpError(res, 500, error);
+    }
+  });
+
   app.get('/api/asr-models', async (req, res) => {
     try {
       res.json(await collectWindowsAsrModels(req.query?.model || WINDOWS_ASR_DEFAULT_MODEL));
