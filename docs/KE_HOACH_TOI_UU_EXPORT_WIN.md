@@ -944,7 +944,7 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
 >   - **M.4 trên dự án thật:** Yêu Con 37,2 -> 24,0 s (−35%, `CRABBYCUT_EXPORT_HWDEC=0` để so). VideoToolbox giải mã
 >     được cả HEVC 4:2:2 của Sữa 16 (85 so với 59 khung/s, 24 so với 52 giây-CPU).
 >   - **Trần encoder VideoToolbox 4K trên M1 Pro (một engine):** H.264 ~45 khung/s, hai lượt song song TỔNG ~50;
->     HEVC ~60 (×1,35). Forever Inside đã ở sàn này — muốn nhanh hơn chỉ còn cách xuất HEVC (quyết định sản phẩm, chưa chốt).
+>     HEVC ~60 (×1,35). Forever Inside đã ở sàn này. **Người dùng chốt 2026-10-10: tự chọn H.265 khi khung xuất 4K, trên macOS và Windows có HEVC phần cứng; tay chọn giữ theo từng dự án (máy chỉ có CPU giữ suốt phiên như trước)** (`syncExportCodecForFrame`, cạnh dài khung xuất >= 3840; hỏi `/api/export-encoder` = SelectEncoderPlan của sidecar — máy chỉ có libx265 thì giữ H.264; ProRes không đổi). Windows NVENC chưa đo tốc độ H.265 so với H.264. Lưu ý bench: fixture 4K trên máy có HEVC phần cứng nay mặc định xuất H.265 (ép H.264 bằng `--eval-before`) — số đo không so thẳng với các lần đo H.264 trước. Đo Forever Inside cắt 300 s: **120,6 -> 89,2 s (−26%)**; 30 s cùng đồ thị: H.265 33,5 Mbps so với H.264 39,6 Mbps — hai bản 51 dB với nhau, cách bản chuẩn FFV1 như nhau (32,03 / 32,04 dB, SSIM 0,9731 / 0,9738), file H.265 nhỏ hơn 15%. Test `test:export-auto-hevc`.
 >   - **Co nhỏ nguồn lớn là phần CPU lớn nhất sau M.4:** 10 s Yêu Con -> 1080×1920: giải mã VT + chép về 0,8
 >     giây-CPU; + swscale bicubic 9,3; + `scale_vt` trên GPU 0,65. **M.4b (co nhỏ bằng `scale_vt` trước
 >     `hwdownload`) — NGƯỜI DÙNG KHÔNG LÀM (2026-10-10):** so bản chuẩn lanczos, `scale_vt` 39,5 dB (SSIM 0,992)

@@ -12790,6 +12790,7 @@
         // Tệp .crab cũ (trước v1.0.6) không có trường này -> tên bám theo tên file như xưa.
         projectName = sanitizeProjectName(proj.name || '');
         exportFileNameTouched = false;
+        resetExportCodecForProject();
         projectDirty = relink.didRelink;
         updateProjectTitle();
         touchRecentProject(filePath);   // mở cũng là "gần đây", không chỉ lưu
@@ -13408,6 +13409,7 @@
         currentProjectPath = null;
         projectName = '';
         exportFileNameTouched = false;
+        resetExportCodecForProject();
         projectDirty = false;
         updateProjectTitle();
         showStep('step4');
@@ -16469,6 +16471,60 @@
         document.getElementById(id)?.addEventListener('change', syncExportBitrateUi);
     });
     syncExportBitrateUi();
+
+    /* H.265 TỰ CHỌN KHI XUẤT 4K (người dùng chốt 2026-10-10: tự chọn khi khung xuất 4K, macOS và
+     * Windows có bộ mã hoá HEVC phần cứng; tay chọn giữ theo từng dự án). Encoder VideoToolbox của
+     * M1 Pro: H.264 4K ~45–50 khung/s đã là trần (xuất song song không tăng), H.265 ~60 (×1,35).
+     * Chỉ bật khi lượt xuất SẼ dùng HEVC phần cứng — hỏi đúng SelectEncoderPlan của sidecar
+     * (/api/export-encoder): máy không có NVENC/QSV/AMF thì H.265 đi libx265 trên CPU, chậm hơn
+     * libx264, nên giữ H.264. "4K" = cạnh dài khung XUẤT >= 3840 (preset, hoặc sequence khi "Theo
+     * Sequence"). ProRes không bao giờ bị đổi. */
+    let exportAutoHevc = false;
+    let exportCodecTouched = false;
+    function exportFrameIs4k() {
+        const preset = document.getElementById('exportResolution')?.value || 'source';
+        let seq = null;
+        try { seq = getSequencePayload(); } catch (_) { /* chưa có sequence */ }
+        const [w, h] = EXPORT_PRESET_FRAMES[preset] || [Number(seq?.width) || 0, Number(seq?.height) || 0];
+        return Math.max(w, h) >= 3840;
+    }
+    function syncExportCodecForFrame() {
+        if (!exportAutoHevc || exportCodecTouched) return;
+        const select = document.getElementById('exportCodec');
+        if (!select || select.value === 'prores') return;
+        const want = exportFrameIs4k() ? 'hevc' : 'h264';
+        if (select.value === want) return;
+        select.value = want;
+        syncExportBitrateUi();
+    }
+    // Mở / tạo dự án: bỏ lựa chọn tay của dự án trước, về mặc định rồi chọn lại theo khung xuất.
+    // Máy không có HEVC phần cứng giữ lựa chọn suốt phiên như trước (người dùng chốt 2026-10-10).
+    function resetExportCodecForProject() {
+        if (!exportAutoHevc) return;
+        exportCodecTouched = false;
+        const select = document.getElementById('exportCodec');
+        if (select && select.value !== 'h264') {
+            select.value = 'h264';
+            syncExportBitrateUi();
+        }
+        syncExportCodecForFrame();
+    }
+    document.getElementById('exportCodec')?.addEventListener('change', () => { exportCodecTouched = true; });
+    document.getElementById('exportResolution')?.addEventListener('change', syncExportCodecForFrame);
+    // Mở hộp thoại xuất (openExportModal thêm class `active`): sequence có thể đã đổi cỡ từ lần trước.
+    const exportModalPanelEl = document.getElementById('exportModalPanel');
+    if (exportModalPanelEl) {
+        new MutationObserver(() => {
+            if (exportModalPanelEl.classList.contains('active')) syncExportCodecForFrame();
+        }).observe(exportModalPanelEl, { attributes: true, attributeFilter: ['class'] });
+    }
+    fetch(`${API_BASE}/export-encoder?codec=hevc`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+            exportAutoHevc = data?.hardware === true;
+            syncExportCodecForFrame();
+        })
+        .catch(() => { /* không hỏi được: giữ H.264 như trước */ });
 </script>
 <script src="/static/js/editing-runtime.js?v=lumen-p5-lsub-asetpl2"></script>
 <script src="/static/js/perf-runtime.js"></script>
