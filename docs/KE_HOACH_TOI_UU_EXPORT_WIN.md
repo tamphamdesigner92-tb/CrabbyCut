@@ -952,6 +952,12 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
 >     nhỏ giảm chất lượng. (Nếu làm lại: mặt nạ video/lớp Điều chỉnh, xoá logo, vá logo AI tính theo điểm ảnh
 >     NGUỒN; clip keyframe không biết trước mức phóng to; nguồn xoay có thể mất autorotate với khung GPU.)
 >   - Bộ đo: `--split` nay chép `-hwaccel` sang lệnh "chỉ giải mã" (trước đó số tách khâu sai sau M.4).
+>   - **Số lượt song song (1.8) cho Sữa 16 — đo 2026-10-10, mỗi mức 3 lượt phát lại, `CRABBYCUT_EXPORT_PARALLEL=N`:**
+>     1 lượt 117,0 s (115–119, CPU 63–72%); **2 lượt (mặc định trên M1 Pro 10 luồng) 54,3 s (54,1–54,5, CPU 95%,
+>     không swap)**; 3 lượt 53,0 s (−2%, CPU 97%, bắt đầu đẩy ra swap ~5.300 trang). Mặc định đúng — KHÔNG đổi.
+>     Giả thuyết "song song quá nhiều làm tràn RAM" sai. Các lượt 77–129 s đo trước đó không tái hiện được (lần này
+>     9/9 lượt dao động < 1 s) — nhiều khả năng máy đang bận việc khác lúc ấy. Sữa 16 thật: ~54 s cho 65 s video,
+>     nghẽn CPU; phần CPU lớn nhất là co nhỏ nguồn 4K bằng swscale (M.4b — người dùng không làm).
 > - M.1 (bản ffmpeg ghim cho Mac): **XONG 2026-10-05** — `n8.1.1-crabbycut.2` macOS arm64, cùng nguồn với bản
 >   Windows (`build-macos.sh` của ffmpeg-for-CrabbyCut, Release `n8.1.1-crabbycut.2-macos`), `npm run ffmpeg:install`.
 >   Với bản ghim: 102/104 xanh; `test:export-hdr-asset-usage` hết đỏ; 2 test còn lại đỏ vì làm tròn SIMD x86 ≠ ARM
