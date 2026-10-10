@@ -2146,5 +2146,6 @@
   "Nhóm 6 — Vỡ hạt / Bokeh": "Group 6 — Pixelize / Bokeh",
   "Nhóm 7 — Mờ dần / Hoà tan": "Group 7 — Fade / Dissolve",
   "Nhóm 8 — Chớp sáng": "Group 8 — Flash",
-  "Nhóm 9 — Lấp lánh": "Group 9 — Sparkle"
+  "Nhóm 9 — Lấp lánh": "Group 9 — Sparkle",
+  "Không chuyển được ảnh vector \"{name}\" sang PNG nên không xuất được. Hãy nhập lại tệp này.": "Could not convert the vector image \"{name}\" to PNG, so the video cannot be exported. Please import this file again."
 }

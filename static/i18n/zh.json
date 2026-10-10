@@ -1846,5 +1846,6 @@
   "Nhóm 6 — Vỡ hạt / Bokeh": "第 6 组 — 像素化 / 散景",
   "Nhóm 7 — Mờ dần / Hoà tan": "第 7 组 — 淡化 / 溶解",
   "Nhóm 8 — Chớp sáng": "第 8 组 — 闪光",
-  "Nhóm 9 — Lấp lánh": "第 9 组 — 闪烁"
+  "Nhóm 9 — Lấp lánh": "第 9 组 — 闪烁",
+  "Không chuyển được ảnh vector \"{name}\" sang PNG nên không xuất được. Hãy nhập lại tệp này.": "无法将矢量图“{name}”转换为 PNG，因此无法导出视频。请重新导入此文件。"
 }
