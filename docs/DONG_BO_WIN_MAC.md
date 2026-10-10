@@ -122,3 +122,27 @@ là ≤ 1.
 
 Bài học cho test mới: một ngưỡng chỉnh cho vừa khít số đo trên MỘT máy sẽ hỏng ở kiến trúc kia. Hoặc
 chừa biên cho sai khác làm tròn (1–2 mức 8-bit, ~1 dB PSNR), hoặc so tương đối (tỉ lệ, so bản chuẩn).
+
+## 7. Việc còn mở và nhật ký kết quả (chuyển từ file bàn giao đợt 2026-10-05, đã xoá 2026-10-10)
+
+Đợt đồng bộ đã xong: PR #2 gộp 2026-10-09 (`10179f7`), máy Windows kéo về và chạy xanh 2026-10-10.
+Bảng commit của đợt xem bằng `git log 10179f7^2` hoặc PR [#2](https://github.com/tamphamdesigner92-tb/CrabbyCut/pull/2).
+
+**Còn mở:**
+- Bật **branch protection** cho `main` (bắt buộc hai job CI) — mục 2.
+- **Còn theo dõi:** `test:media-scale-fit` ca keyframe đỏ MỘT lần trên runner Windows (khung 8 khác nhau),
+  hai lượt khác xanh, Mac 8/8 lần xanh — chưa rõ nguồn không tất định.
+- Bộ cài macOS: `scripts/setup_runtime.js` mới chỉ hỗ trợ Windows (Python nhúng, tải ffmpeg). Bản Mac đóng
+  gói chưa tự dựng runtime; `pinFor('darwin','arm64')` đã sẵn cho việc đó.
+- Mac Intel: chưa có bản ghim (`pinFor` trả `null`, `ffmpeg:install` báo rõ).
+- `THIRD-PARTY-NOTICES` (`generate_third_party_notices.js`) mới ghi bản ffmpeg Windows.
+
+**Nhật ký `test:all`:**
+
+| Ngày | Máy | ffmpeg | test:all |
+|---|---|---|---|
+| 2026-10-04 | Mac M1 Pro | Homebrew 8.1 | `main` không biên dịch được; 24 đỏ |
+| 2026-10-05 | Mac M1 Pro | Homebrew 8.1 | 101/104 xanh, 3 lỗ hổng |
+| 2026-10-05 | Mac M1 Pro | ghim `n8.1.1-crabbycut.2` | 102/104 xanh, 2 lỗ hổng; sau khi đổi ngưỡng (mục 6): **104/104** |
+| 2026-10-10 | Windows 10 x64 (GTX 1060) | ghim `n8.1.1-crabbycut.2` | `main` `61d246e` (app 1.1.16): **109/109 xanh** (gồm `export-gpu` trên CUDA/NVENC) |
+| 2026-10-10 | Mac M1 Pro | ghim `n8.1.1-crabbycut.2` | `main` sau PR #5: **109/109 xanh** |
