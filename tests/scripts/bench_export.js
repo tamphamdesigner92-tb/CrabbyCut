@@ -594,7 +594,11 @@ function splitStages(benchDir, sidecarRuns) {
     // Giải mã ĐÚNG khoảng mà lệnh thật giải mã: từ mốc seek của batch (nếu có) tới source_to.
     // `-to` của input là vị trí tuyệt đối, không tính từ -ss.
     const seek = Number(run.seek_to) > 0 ? ['-ss', Number(run.seek_to).toFixed(6)] : [];
-    const decodeArgs = [args[0], '-hide_banner', '-v', 'info', '-nostdin', '-benchmark', ...seek,
+    // Cùng bộ giải mã với lệnh thật: giải mã phần cứng (VideoToolbox — SourceHwDecodeArgs) đứng trước -i nguồn.
+    const firstInput = args.indexOf('-i');
+    const hwaccelAt = args.indexOf('-hwaccel');
+    const hwaccel = hwaccelAt >= 0 && hwaccelAt < firstInput ? ['-hwaccel', args[hwaccelAt + 1]] : [];
+    const decodeArgs = [args[0], '-hide_banner', '-v', 'info', '-nostdin', '-benchmark', ...seek, ...hwaccel,
       '-to', (Number(run.source_to) + 0.5).toFixed(3), '-i', source, '-map', '0:v:0', '-f', 'null', '-'];
     console.log(`  [split] ${run.label}: -f null ...`);
     const nullRun = runFfmpegTimed(nullArgs, cwd);
