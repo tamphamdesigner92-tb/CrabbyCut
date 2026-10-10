@@ -958,6 +958,21 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
 >     Giả thuyết "song song quá nhiều làm tràn RAM" sai. Các lượt 77–129 s đo trước đó không tái hiện được (lần này
 >     9/9 lượt dao động < 1 s) — nhiều khả năng máy đang bận việc khác lúc ấy. Sữa 16 thật: ~54 s cho 65 s video,
 >     nghẽn CPU; phần CPU lớn nhất là co nhỏ nguồn 4K bằng swscale (M.4b — người dùng không làm).
+>   - **Retouch ở lượt xuất ĐẦU — đo theo trạng thái cache (2026-10-10, Yêu Con ver 6, 6 block Retouch, mỗi dòng
+>     một lượt mở dự án + xuất trong Electron; `CRAB_RETOUCH_CACHE_DIR` / `CRAB_PREBAKE_CACHE_DIR` cho bench):**
+>
+>     | Trạng thái | Tổng | Vẽ trước | Chờ bám mặt | Dựng miếng vá Retouch (gồm chờ) | Server |
+>     |---|---|---|---|---|---|
+>     | Lạnh hoàn toàn (chưa từng bám mặt) | 69,4 s | 27,9 | 14,0 | 26,0 | 40,6 |
+>     | Đã chỉnh trước, xuất lần đầu (×2) | 58,6 / 56,0 s | 14,3 / 14,6 | 0,1 | 12,3 / 12,6 | 43,5 / 40,7 |
+>     | Xuất lại (đủ cache) | 43,2 s | 0,4 | 0,1 | 0,1 | 42,0 |
+>
+>     Bám mặt (14 s) người dùng thật hầu như không chờ: preview tự gọi `ensureRetouchFaces` khi vẽ clip có Retouch
+>     và cache bám mặt sống qua lần mở lại. Con số 25,9 s đo trước đó là ca xấu nhất (bench hồ sơ trống). Khoản
+>     THẬT còn lại ở lượt xuất đầu: **dựng miếng vá Retouch ở renderer ~12–14 s (~22% lượt đầu)**, chạy TUẦN TỰ
+>     trước khi gửi server; xuất lại thì vẽ trước 0,4 s. Server ~41–45 s ở cả ba ca (bench tắt cache render — app
+>     thật xuất lại không đổi gì còn nhanh hơn). Hướng mở (chưa làm, cần profile khâu dựng miếng vá trước): chạy
+>     dựng miếng vá song song với server render, hoặc tăng tốc chính khâu dựng.
 > - M.1 (bản ffmpeg ghim cho Mac): **XONG 2026-10-05** — `n8.1.1-crabbycut.2` macOS arm64, cùng nguồn với bản
 >   Windows (`build-macos.sh` của ffmpeg-for-CrabbyCut, Release `n8.1.1-crabbycut.2-macos`), `npm run ffmpeg:install`.
 >   Với bản ghim: 102/104 xanh; `test:export-hdr-asset-usage` hết đỏ; 2 test còn lại đỏ vì làm tròn SIMD x86 ≠ ARM
