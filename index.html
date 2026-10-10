@@ -16062,6 +16062,26 @@
     // Phải khoá NGAY TỪ ĐẦU hàm, trước mọi việc nặng.
     let videoExportInFlight = false;
 
+    /* THU HỒI blob: URL CỦA BẢN XUẤT (đường tải về dự phòng bên dưới). Không thu hồi thì
+     * Chromium giữ cả tệp trong <userData>/blob_storage tới khi tắt app — mỗi lượt xuất thêm
+     * một bản (đo 11 GB sau lượt 39 phút). Thu hồi ngay sau click lại làm hỏng lượt lưu còn
+     * chờ hộp thoại, nên trong Electron chờ main báo lượt tải đã xong/huỷ (watchBlobDownloads);
+     * trình duyệt thường đã đọc xong Blob khi bắt đầu tải -> thu hồi sau một phút. */
+    const pendingExportBlobUrls = new Set();
+    if (window.desktopEnv?.onBlobDownloadDone) {
+        window.desktopEnv.onBlobDownloadDone((url) => {
+            if (!pendingExportBlobUrls.delete(url)) return;
+            try { URL.revokeObjectURL(url); } catch (_) {}
+        });
+    }
+    function releaseExportBlobUrlWhenSaved(url) {
+        if (window.desktopEnv?.onBlobDownloadDone) {
+            pendingExportBlobUrls.add(url);
+            return;
+        }
+        setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 60000);
+    }
+
     /* CHỖ LƯU VIDEO XUẤT — hỏi TRƯỚC khi render, như Premiere (mục 1.16, người dùng chốt
      * 2026-09-29). ffmpeg ghi thẳng ra đó: hết vòng tải cả file qua trình duyệt (11,5 GB mất 64 s)
      * rồi ghi thêm một bản, hết bản sao trong blob_storage. Trả { path, ticket } | false (người
@@ -16357,6 +16377,7 @@
         a.href = URL.createObjectURL(exportBlob);
         a.download = `${exportFileName}.${exportCodec === 'prores' ? 'mov' : 'mp4'}`;
         a.click();
+        releaseExportBlobUrlWhenSaved(a.href);
         exportResult = { ok: true, message: _t('Đã xuất xong: {name}', { name: a.download }) };
         // Bake khung chuyển cảnh (nặng, nhiều phút) NẰM TRONG try này: trước đây nó ở ngoài
         // nên khi bake nổ lỗi — ví dụ JSON.stringify vượt trần chuỗi của V8 vì payload quá

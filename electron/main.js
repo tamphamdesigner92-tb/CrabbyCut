@@ -215,6 +215,27 @@ async function stopBackendSidecar() {
   }
 }
 
+/* BÁO RENDERER THU HỒI blob: URL KHI LƯỢT TẢI XONG.
+ *
+ * Đường xuất dự phòng (không có chỗ lưu chọn trước — backend ngoài, hộp thoại lỗi, bench)
+ * tải bản xuất về Blob rồi `a.click()`. Không thu hồi URL thì Chromium giữ cả tệp trong
+ * `<userData>/blob_storage` tới khi tắt app (đo: 11 GB sau lượt xuất 39 phút; mỗi lượt xuất
+ * thêm một bản). Nhưng thu hồi NGAY sau click là sai: lượt tải còn chờ hộp thoại lưu của
+ * Chromium. Nên chờ DownloadItem `done` (xong / huỷ / gián đoạn) rồi mới báo về đúng trang
+ * đã tải. Gắn một lần cho session: createWindow có thể chạy lại. */
+const watchedDownloadSessions = new WeakSet();
+function watchBlobDownloads(ses) {
+  if (!ses || watchedDownloadSessions.has(ses)) return;
+  watchedDownloadSessions.add(ses);
+  ses.on('will-download', (_event, item, contents) => {
+    const url = item.getURL();
+    if (!url.startsWith('blob:')) return;
+    item.once('done', () => {
+      if (contents && !contents.isDestroyed()) contents.send('blob-download-done', url);
+    });
+  });
+}
+
 function createWindow() {
   /* GỠ HẲN MENU MẶC ĐỊNH CỦA ELECTRON.
    * `autoHideMenuBar` chỉ ẩn chứ không xoá: bấm Alt là File/Edit/View/Window/Help lại
@@ -239,6 +260,8 @@ function createWindow() {
       sandbox: false,
     },
   });
+
+  watchBlobDownloads(mainWindow.webContents.session);
 
   mainWindowLoaded = false;
   mainWindow.webContents.on('did-finish-load', () => {
