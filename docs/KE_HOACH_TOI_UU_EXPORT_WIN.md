@@ -931,6 +931,27 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
 >   gian lợi ít vì lượt này nghẽn ở encoder — phần CPU rảnh ra có ích nhất khi xuất song song (1.8). Bin Tom
 >   (H.264) không đổi (10,2 s). Test `test:export-hw-decode`. Chưa làm: ProRes (media engine M1 Pro/Max) và
 >   video lớp phủ HEVC — chưa có số đo.
+> - **M.7 — đo trên dự án thật của người dùng (2026-10-10, M1 Pro 16 GB, ffmpeg ghim `.2`, `npm run bench:export`):**
+>
+>   | Dự án | Nguồn -> khung xuất | Lượt đầu trong app | Phát lại | Nghẽn |
+>   |---|---|---|---|---|
+>   | Yêu Con 1 ver 6 (47 s) | HEVC 10-bit 1728×3072 60p -> 1080×1920 | 62,5 s (vẽ trước 27,8: Retouch 25,9, trong đó bám mặt 14,1) | ~24 s | chia đều: giải mã ~40%, filter ~30%, encode ~30%; CPU 87% |
+>   | Thanh Hạnh 4 (65 s) | HEVC 10-bit 1728×3072 -> 1080×1920 | 26,0 s | ~16 s | giải mã |
+>   | Sữa 16 Test 2 (65 s) | HEVC **4:2:2** 10-bit 4K 50p -> 1080×1920 | 146 s | 55–129 s (dao động lớn) | CPU 97–100%; mỗi ffmpeg 1,2–2,3 GB RAM, swap 1,8 GB |
+>   | Forever Inside (cắt 300 s) | AV1 4K -> 3840×1646 | 122 s | ~120 s | encoder H.264 4K (CPU 35–50%) |
+>   | Shop Yêu Con 1 | HEVC 10-bit | lỗi -> sửa ở PR #4 (asset .svg của dự án cũ), sau sửa 52,7 s | 16,1 s | — |
+>
+>   - **M.4 trên dự án thật:** Yêu Con 37,2 -> 24,0 s (−35%, `CRABBYCUT_EXPORT_HWDEC=0` để so). VideoToolbox giải mã
+>     được cả HEVC 4:2:2 của Sữa 16 (85 so với 59 khung/s, 24 so với 52 giây-CPU).
+>   - **Trần encoder VideoToolbox 4K trên M1 Pro (một engine):** H.264 ~45 khung/s, hai lượt song song TỔNG ~50;
+>     HEVC ~60 (×1,35). Forever Inside đã ở sàn này — muốn nhanh hơn chỉ còn cách xuất HEVC (quyết định sản phẩm, chưa chốt).
+>   - **Co nhỏ nguồn lớn là phần CPU lớn nhất sau M.4:** 10 s Yêu Con -> 1080×1920: giải mã VT + chép về 0,8
+>     giây-CPU; + swscale bicubic 9,3; + `scale_vt` trên GPU 0,65. **M.4b (co nhỏ bằng `scale_vt` trước
+>     `hwdownload`) — NGƯỜI DÙNG KHÔNG LÀM (2026-10-10):** so bản chuẩn lanczos, `scale_vt` 39,5 dB (SSIM 0,992)
+>     còn swscale 55,9 dB; nhìn gần như không khác nhưng người dùng giữ chất lượng. Không đề xuất lại đường co
+>     nhỏ giảm chất lượng. (Nếu làm lại: mặt nạ video/lớp Điều chỉnh, xoá logo, vá logo AI tính theo điểm ảnh
+>     NGUỒN; clip keyframe không biết trước mức phóng to; nguồn xoay có thể mất autorotate với khung GPU.)
+>   - Bộ đo: `--split` nay chép `-hwaccel` sang lệnh "chỉ giải mã" (trước đó số tách khâu sai sau M.4).
 > - M.1 (bản ffmpeg ghim cho Mac): **XONG 2026-10-05** — `n8.1.1-crabbycut.2` macOS arm64, cùng nguồn với bản
 >   Windows (`build-macos.sh` của ffmpeg-for-CrabbyCut, Release `n8.1.1-crabbycut.2-macos`), `npm run ffmpeg:install`.
 >   Với bản ghim: 102/104 xanh; `test:export-hdr-asset-usage` hết đỏ; 2 test còn lại đỏ vì làm tròn SIMD x86 ≠ ARM
