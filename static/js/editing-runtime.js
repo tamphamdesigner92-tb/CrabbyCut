@@ -17048,6 +17048,61 @@
         return out;
     }
 
+    /* ---- DỰ ÁN CŨ CÒN ASSET .svg (nhập trước khi có bước vẽ lúc nhập ở trên) ----
+     *
+     * Asset vẫn trỏ vào tệp .svg nên ffmpeg dừng với "no decoder found for: svg" ở khâu
+     * xuất (dự án "Shop Yêu Con" tháng 8). Mỗi lần nạp trạng thái (mở dự án, undo/redo)
+     * vẽ lại các asset đó ra PNG bằng ĐÚNG đường lúc nhập, giữ `id` nên block trên
+     * timeline không phải đổi gì. KHÔNG dọn tệp .svg (không gửi `replace_path`): các
+     * trạng thái undo cũ còn trỏ vào nó. KHÔNG ghi lịch sử: đây là sửa dữ liệu, không phải
+     * thao tác của người dùng — vẽ lại mỗi lần mở chỉ tốn vài ms, lưu lần sau là cất PNG.
+     * Giữ cỡ cũ của asset: block đã dựng theo cỡ đó, PNG cùng tỉ lệ. Lượt xuất chờ việc
+     * này xong (exportPayload). */
+    let legacyVectorMigration = null;
+
+    // Xét TỆP mà asset trỏ vào (path/url), không xét `name`: bản PNG cố ý giữ tên hiển thị .svg.
+    function isVectorAssetRecord(asset) {
+        return [asset?.path, asset?.url].some((v) => VECTOR_ASSET_RE.test(String(v || '').split('?')[0]));
+    }
+
+    function migrateLegacyVectorAssets() {
+        const legacy = editingAssets.filter(isVectorAssetRecord);
+        if (!legacy.length) return null;
+        const job = (async () => {
+            const raws = legacy.map((asset) => ({
+                ...asset,
+                name: VECTOR_ASSET_RE.test(String(asset.name || '')) ? asset.name
+                    : String(asset.path || asset.url || 'vector.svg').split('?')[0].split(/[\\/]/).pop(),
+                path: '',
+            }));
+            const converted = await rasterizeVectorAssets(raws, 'media');
+            let changed = false;
+            converted.forEach((raw, i) => {
+                const id = legacy[i].id;
+                const current = editingAssets.find((a) => a.id === id);
+                // Bản vẽ hỏng (raw vẫn là .svg) hoặc trạng thái đã đổi giữa chừng (undo): để nguyên.
+                if (!current || !isVectorAssetRecord(current) || isVectorAssetRecord(raw)) return;
+                Object.assign(current, {
+                    url: raw.url || current.url,
+                    thumbnail_url: raw.thumbnail_url || raw.url || current.thumbnail_url,
+                    path: raw.path || current.path,
+                    linked: false,
+                    width: current.width || raw.width || null,
+                    height: current.height || raw.height || null,
+                });
+                changed = true;
+            });
+            if (changed) {
+                renderEditPanel();
+                renderAll();
+            }
+        })().finally(() => {
+            if (legacyVectorMigration === job) legacyVectorMigration = null;
+        });
+        legacyVectorMigration = job;
+        return job;
+    }
+
     async function importFiles(kind, files) {
         const list = Array.from(files || []);
         const form = new FormData();
@@ -21745,6 +21800,15 @@
                 timingCount[key] = (timingCount[key] || 0) + 1;
             }
         };
+        // Asset .svg của dự án cũ phải thành PNG trước khi xuất (migrateLegacyVectorAssets).
+        if (legacyVectorMigration) await legacyVectorMigration;
+        else await migrateLegacyVectorAssets();
+        const vectorItem = editingItems.find((item) => item?.asset_id && isVectorAssetRecord(findAsset(item.asset_id)));
+        if (vectorItem) {
+            // Vẽ lại hỏng (tệp .svg mất, SVG lỗi): báo rõ thay vì để ffmpeg chết "no decoder found for: svg".
+            throw new Error(_t('Không chuyển được ảnh vector "{name}" sang PNG nên không xuất được. Hãy nhập lại tệp này.',
+                { name: findAsset(vectorItem.asset_id).name }));
+        }
         ensureMainTrack();
         editingItems.forEach((item) => {
             fixItemTrack(item);
@@ -22046,6 +22110,8 @@
         editingAssets = Array.isArray(state.editingAssets) ? deepClone(state.editingAssets) : [];
         // Dự án cũ: scale media overlay tính trên cỡ gốc -> quy về mốc vừa khung (xem hàm).
         if (state.mediaScaleBasis !== 'fit') migrateMediaScaleToFit();
+        // Dự án cũ: asset .svg -> PNG (chạy nền, sau quy đổi scale vì giữ cỡ cũ của asset).
+        migrateLegacyVectorAssets();
         selectedEditingItemId = String(state.selectedEditingItemId || '');
         selectedEditingItemIds = new Set(Array.isArray(state.selectedEditingItemIds) ? state.selectedEditingItemIds.map(String) : []);
         selectedMainClipIndexes = new Set((Array.isArray(state.selectedMainClipIndexes) ? state.selectedMainClipIndexes : [])
