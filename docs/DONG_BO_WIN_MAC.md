@@ -31,8 +31,9 @@ git push -u origin <tên-việc>        # mở pull request vào main
 ```
 
 - CI chạy trên pull request; xanh cả hai nền tảng thì gộp vào `main`, rồi máy kia `git pull`.
-- Không đẩy thẳng lên `main` khi CI chưa chạy. Nên bật **branch protection** cho `main` trên
-  GitHub (Settings › Branches: "Require status checks to pass" với hai job của CI).
+- `main` có ruleset **"Protect Main Branch"** (bật 2026-10-10): cấm xoá và push ép, mọi thay đổi —
+  kể cả chỉ sửa tài liệu — phải qua PR, và PR chỉ gộp được khi cả `test (macos-14)` lẫn
+  `test (windows-2022)` xanh. Không ai được miễn. Repo tắt auto-merge: CI xanh thì gộp tay.
 - `native/sidecar/build/` và `native/addon/build/` KHÔNG nằm trong git: mỗi máy tự build. Sau mỗi
   lần `git pull` có đụng `native/`, chạy lại `npm run build:native` (build hỏng thì
   `build_sidecar.js` xoá binary cũ, không để test chạy nhầm bản cũ — xem mục 4).
@@ -129,7 +130,7 @@ chừa biên cho sai khác làm tròn (1–2 mức 8-bit, ~1 dB PSNR), hoặc so
 Bảng commit của đợt xem bằng `git log 10179f7^2` hoặc PR [#2](https://github.com/tamphamdesigner92-tb/CrabbyCut/pull/2).
 
 **Còn mở:**
-- Bật **branch protection** cho `main` (bắt buộc hai job CI) — mục 2.
+- ~~Bật branch protection cho `main`~~ — **XONG 2026-10-10** (ruleset, bắt buộc hai job CI — mục 2).
 - **Còn theo dõi:** `test:media-scale-fit` ca keyframe đỏ MỘT lần trên runner Windows (khung 8 khác nhau),
   hai lượt khác xanh, Mac 8/8 lần xanh — chưa rõ nguồn không tất định.
 - Bộ cài macOS: `scripts/setup_runtime.js` mới chỉ hỗ trợ Windows (Python nhúng, tải ffmpeg). Bản Mac đóng
