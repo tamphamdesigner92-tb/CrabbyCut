@@ -2252,5 +2252,6 @@
   "Gỡ tệp phụ đề này để chọn tệp khác": "Remove this subtitle file to choose another",
   "Bỏ chọn bộ phụ đề này (phụ đề trên timeline giữ nguyên)": "Deselect this subtitle set (subtitles on the timeline stay as they are)",
   "Gỡ phụ đề nguồn": "Remove source subtitles",
-  "Gỡ": "Remove"
+  "Gỡ": "Remove",
+  "{n} tệp trong dự án không còn đọc được nên không nạp lại: {names}": "{n} project files can no longer be read and were not reloaded: {names}"
 }

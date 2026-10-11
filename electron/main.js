@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { writeCrabFile, readCrabFile, fingerprintFile } = require('./crab-format');
 const {
-  packageProject, resolvePayloadPaths, writeSrtTo, projectSidecarPath, SIDECAR_PREVIEW_PROXY,
+  packageProject, resolvePayloadPaths, writeSrtTo, projectSidecarPath, SIDECAR_PREVIEW_PROXY, relocateDubbingAudio,
 } = require('./project-package');
 const { registerRecentProjectIpc } = require('./recent-projects');
 const { runSetupWindow } = require('./setup-window');
@@ -376,8 +376,12 @@ ipcMain.handle('project-save', async (_event, { payloadJson, targetPath, suggest
       finalPath = result.filePath;
       if (!finalPath.toLowerCase().endsWith('.crab')) finalPath += '.crab';
     }
-    const sizeBytes = writeCrabFile(finalPath, payloadJson);
-    return { path: finalPath, size_bytes: sizeBytes };
+    /* Giọng lồng tiếng còn ở thư mục TẠM -> chép vào "<Tên>_TTS/" cạnh .crab, ghi đường dẫn tương đối
+     * (xem relocateDubbingAudio ở project-package.js — lỗi mất lồng tiếng sau khi mở lại dự án). */
+    const tts = relocateDubbingAudio(payloadJson, finalPath);
+    if (tts.failed.length) console.warn(`[project-save] thiếu ${tts.failed.length} tệp lồng tiếng trong thư mục tạm:`, tts.failed);
+    const sizeBytes = writeCrabFile(finalPath, tts.payloadJson);
+    return { path: finalPath, size_bytes: sizeBytes, tts: { copied: tts.copied, kept: tts.kept, removed: tts.removed, missing: tts.failed.length } };
   } catch (error) {
     return { error: 'write_failed', detail: String(error?.message || error) };
   }
@@ -696,6 +700,18 @@ function readCrabResolved(filePath) {
    * nó nói ra đã khôi phục gì / còn thiếu gì. */
   const library = { restored: [], missing: [], failed: [] };
   result.payloadJson = resolvePayloadPaths(result.payloadJson, filePath, { library });
+  /* CỨU DỰ ÁN LƯU TRƯỚC BẢN SỬA LỖI MẤT LỒNG TIẾNG: .crab còn trỏ giọng lồng tiếng vào thư mục TẠM, mà
+   * renderer sắp gọi /api/reset-project xoá thư mục đó TRƯỚC khi nạp lại. Tệp còn thì chép ngay sang
+   * "<Tên>_TTS/" cạnh .crab và trỏ về đó (lượt Lưu kế tiếp ghi hẳn vào .crab). Không dọn gì ở lượt mở. */
+  try {
+    const tts = relocateDubbingAudio(result.payloadJson, filePath, { prune: false });
+    if (tts.copied) {
+      console.log(`[project-open] đã cứu ${tts.copied} tệp lồng tiếng từ thư mục tạm sang thư mục _TTS cạnh dự án`);
+      result.payloadJson = resolvePayloadPaths(tts.payloadJson, filePath, {});
+    }
+  } catch (error) {
+    console.warn('[project-open] không chép được tệp lồng tiếng:', error.message);
+  }
   result.library = library;
   return result;
 }

@@ -12521,6 +12521,7 @@
             byKind.get(key).push({ entry, path: resolvedPath });
         }
         const patches = new Map();
+        const notRestored = [];
         for (const [key, items] of byKind) {
             const [mode, kind] = key.split('|');
             const endpoint = mode === 'link' ? 'editing-assets/link' : 'editing-assets/import-local';
@@ -12529,8 +12530,13 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ kind, paths: items.map((i) => i.path) }),
             });
-            if (!res.ok) throw new Error(_t('Không thể nạp lại tài nguyên Editing (HTTP {status}).', { status: res.status }));
-            const data = await res.json();
+            /* 400 của import-local = KHÔNG tệp nào trong lượt còn đọc được (tệp lồng tiếng của dự án
+               lưu trước bản sửa lỗi mất lồng tiếng nằm ở thư mục tạm đã bị dọn). Trước đây ném lỗi ở đây làm HỎNG CẢ LƯỢT
+               MỞ dự án vì vài tệp phụ; nay bỏ qua chúng và báo ra như mọi tệp thiếu khác. */
+            if (!res.ok && !(res.status === 400 && mode === 'copy')) {
+                throw new Error(_t('Không thể nạp lại tài nguyên Editing (HTTP {status}).', { status: res.status }));
+            }
+            const data = res.ok ? await res.json() : { assets: [] };
             const imported = data.assets || [];
             const bySourcePath = new Map(imported.map((a) => [a.source_path, a]));
             const byBaseName = new Map(imported.map((a) => [a.name, a]));
@@ -12538,7 +12544,14 @@
                 const match = bySourcePath.get(item.path)
                     || byBaseName.get(item.path.split(/[\\/]/).pop());
                 if (match) patches.set(item.entry.asset_id, match);
+                else notRestored.push(item.entry.name || item.path.split(/[\\/]/).pop());
             }
+        }
+        if (notRestored.length) {
+            console.warn('[project-open] không nạp lại được tài nguyên:', notRestored);
+            showToast(_t('{n} tệp trong dự án không còn đọc được nên không nạp lại: {names}', {
+                n: notRestored.length, names: notRestored.slice(0, 3).join(', ') + (notRestored.length > 3 ? '…' : ''),
+            }), { type: 'warning' });
         }
         return patches;
     }

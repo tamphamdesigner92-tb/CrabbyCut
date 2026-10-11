@@ -1952,5 +1952,6 @@
   "Gỡ tệp phụ đề này để chọn tệp khác": "移除此字幕文件以选择其他文件",
   "Bỏ chọn bộ phụ đề này (phụ đề trên timeline giữ nguyên)": "取消选择此字幕（时间线上的字幕保持不变）",
   "Gỡ phụ đề nguồn": "移除来源字幕",
-  "Gỡ": "移除"
+  "Gỡ": "移除",
+  "{n} tệp trong dự án không còn đọc được nên không nạp lại: {names}": "项目中有 {n} 个文件已无法读取，未能重新载入：{names}"
 }

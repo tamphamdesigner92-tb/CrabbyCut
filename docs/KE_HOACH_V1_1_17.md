@@ -228,6 +228,31 @@ Chưa kiểm:
 - **Bộ cài .exe** (chế độ `site`, `pip --target` với Python nhúng) cho hai môi trường mới.
 - **RTX 50**: Chatterbox sẽ không chạy được GPU, vì torch 2.6 không có sm_120.
 
+### 8. Sửa lỗi mất lồng tiếng sau khi lưu rồi mở lại dự án (người dùng báo 2026-10-11)
+
+**Nguyên nhân.** Server TTS ghi WAV vào thư mục TẠM `temp_uploads/editing_assets/dubbing/<lượt>/`, và tệp `.crab` lưu `source_path` trỏ vào đó. Mỗi lượt mở dự án, về Trang chủ hay tạo Dự án mới đều gọi `/api/reset-project`, lệnh này xoá sạch thư mục tạm **trước khi** `reimportEditingAssets()` nạp lại tài sản từ `source_path`. Kịch bản người dùng gặp:
+1. Lưu dự án, tắt app. Khởi động app không xoá thư mục tạm, nên lúc mở lại, bước kiểm tệp vẫn thấy WAV và không báo thiếu.
+2. Ngay sau đó reset-project xoá WAV.
+3. Lượt nạp lại bỏ qua tệp đó mà không báo gì. Nếu cả lượt chỉ toàn tệp lồng tiếng thì trả lỗi 400 và làm hỏng cả lượt mở dự án.
+
+**Sửa.** Người dùng chốt: gom tệp vào một thư mục riêng cạnh `.crab`.
+- **Lúc Lưu:** `relocateDubbingAudio` (electron/project-package.js), gọi trong `project-save` ở main.js, làm các việc sau:
+  - Chép các WAV còn trong thư mục tạm sang `<Tên dự án>_TTS/`.
+  - Đặt tên theo lượt tạo, vì mọi lượt văn bản gõ tay đều ra cùng tên "Văn bản (lồng tiếng).wav".
+  - Ghi đường dẫn tương đối ở cả `media.editingAssets` lẫn `editingState.editingAssets`.
+  - Dọn các `.wav` mồ côi trong thư mục đó.
+  - Clip lấy lại bằng Ctrl+Z sau khi WAV đã bị dọn thì được chép lại từ bản làm việc (`path`).
+- **Lúc mở:** `resolvePayloadPaths` có sẵn đã giải đường dẫn tương đối theo thư mục chứa `.crab`, nên chép cả thư mục dự án đi nơi khác vẫn mở được. "Đóng gói dự án" cũng tự mang thư mục này theo.
+- **Cứu dự án lưu trước bản sửa:** `readCrabResolved` chép ngay các WAV còn sót trong thư mục tạm sang `_TTS` trước khi renderer reset; lượt mở này không dọn gì.
+- **Lượt nạp lại chịu lỗi:** `reimportEditingAssets` (index.html) không còn làm hỏng cả lượt mở khi một nhóm tệp toàn bộ không đọc được. Nó bỏ qua các tệp đó và báo tên những tệp không nạp lại được.
+
+**Đã kiểm.**
+- `npm run test:dubbing-project-persist` (mới, 6 tình huống): lưu, xoá thư mục tạm rồi mở, chép thư mục dự án sang chỗ khác, lưu lại sau khi mở, Ctrl+Z sau khi đã dọn, và lượt mở cứu tệp.
+- Electron thật qua CDP (backend thử ở cổng 8123, user-data riêng): lồng tiếng → Lưu → `Phim thử_TTS/…wav` + đường dẫn tương đối trong `.crab` → về Trang chủ (thư mục tạm bị xoá) → mở lại → clip lồng tiếng vẫn còn, tệp phát được (HTTP 200).
+- Test cũ vẫn qua: `project-package`, `recents`.
+
+**Chưa làm.** Tự lưu (autosave) vẫn ghi đường dẫn thư mục tạm, vì bản tự lưu không nằm cạnh tệp `.crab` của người dùng. Hệ quả: khôi phục từ bản tự lưu sau khi thư mục tạm đã bị dọn thì mất lồng tiếng. Muốn xử lý trường hợp này cần chốt chỗ lưu riêng.
+
 ## Chưa làm, chưa kiểm, cần biết
 
 - **Chưa push và chưa tạo PR.** `main` có ruleset nên phải đi PR và qua CI Win+Mac. **Chưa đóng gói** `dist:win`.

@@ -83,6 +83,100 @@ function writeSrtTo(filePath, content, writeFile = fs.writeFileSync) {
   return filePath;
 }
 
+/* ===== TỆP LỒNG TIẾNG ĐI KÈM DỰ ÁN (v1.1.17) ===================================
+ * LỖI ĐÃ SỬA (người dùng báo 2026-10-11): giọng lồng tiếng mất sau khi Lưu, tắt rồi mở lại dự án.
+ * Server TTS ghi WAV vào thư mục TẠM `temp_uploads/editing_assets/dubbing/<lượt>/` và asset nhớ
+ * `source_path` trỏ vào đó — nhưng mỗi lượt mở dự án (cả Trang chủ / Dự án mới) gọi
+ * /api/reset-project XOÁ SẠCH thư mục tạm TRƯỚC khi reimportEditingAssets() nạp lại từ
+ * `source_path` -> tệp đã mất, asset bị bỏ qua không một lời báo.
+ *
+ * Sửa: khi Lưu, chép mọi tệp lồng tiếng còn nằm trong thư mục tạm sang MỘT thư mục riêng cạnh
+ * .crab, "<Tên dự án>_TTS/" (người dùng chốt: gom riêng, không rải WAV ra thư mục dự án), và ghi
+ * đường dẫn TƯƠNG ĐỐI vào .crab. Chiều mở đã có sẵn: resolvePayloadPaths() giải đường dẫn tương đối
+ * theo thư mục chứa .crab — chép cả thư mục dự án sang máy khác vẫn mở được; "Đóng gói dự án" cũng
+ * tự mang theo (eachPathSite có `editingAssets[].source_path`).
+ * Tệp trong <Tên>_TTS/ không còn asset nào trỏ tới (lồng lại / xoá clip) bị dọn đi ở lượt Lưu đó. */
+const SIDECAR_TTS_DIR = '_TTS';
+
+// Tệp lồng tiếng còn nằm trong thư mục TẠM của backend (…/editing_assets/dubbing/<lượt>/<tên>).
+function isTempDubbingPath(p) {
+  return /[\\/]editing_assets[\\/]dubbing[\\/][^\\/]+[\\/][^\\/]+$/i.test(String(p || ''));
+}
+
+/* Trả { payloadJson, copied, kept, removed, failed }. `copyFile`/`exists`/… tiêm vào được để test. */
+function relocateDubbingAudio(payloadJson, crabFilePath, {
+  copyFile = fs.copyFileSync, exists = fs.existsSync, mkdir = (d) => fs.mkdirSync(d, { recursive: true }),
+  readdir = (d) => (fs.existsSync(d) ? fs.readdirSync(d) : []), remove = (f) => fs.rmSync(f, { force: true }),
+  prune = true,   // false: lượt MỞ dự án (cứu tệp) — không dọn gì
+} = {}) {
+  let payload;
+  try {
+    payload = JSON.parse(payloadJson);
+  } catch (_) {
+    return { payloadJson, copied: 0, kept: 0, removed: 0, failed: [] };
+  }
+  const ttsDir = projectSidecarPath(crabFilePath, SIDECAR_TTS_DIR);
+  const ttsDirName = path.basename(ttsDir);
+  const crabDir = path.dirname(crabFilePath);
+  const mapped = new Map();     // đường dẫn cũ -> đường dẫn tương đối mới (cùng tệp ở hai chỗ = một bản)
+  const keep = new Set();       // tên tệp trong <Tên>_TTS/ còn được dùng
+  const failed = [];
+  let copied = 0;
+  const visit = (p) => {
+    const value = String(p || '');
+    if (!value) return value;
+    if (mapped.has(value)) return mapped.get(value);
+    let next = value;
+    if (isTempDubbingPath(value)) {
+      if (!exists(value)) { failed.push(value); return value; }
+      // Tên theo LƯỢT tạo: mọi lượt văn bản gõ tay đều ra "Văn bản (lồng tiếng).wav" — chép cùng tên
+      // là lượt sau đè lượt trước. Thư mục lượt (vd 20261011030116_ymrs) là duy nhất.
+      const ext = path.extname(value);
+      const stem = path.basename(value, ext);
+      const run = path.basename(path.dirname(value));
+      const name = `${stem} (${run})${ext}`;
+      mkdir(ttsDir);
+      copyFile(value, path.join(ttsDir, name));
+      copied += 1;
+      keep.add(name.toLowerCase());
+      next = `${ttsDirName}/${name}`;
+    } else {
+      // Đã ở <Tên>_TTS/ (mở lại dự án thì là đường dẫn tuyệt đối) -> ghi lại TƯƠNG ĐỐI cho chép đi được.
+      const abs = path.isAbsolute(value) ? value : path.resolve(crabDir, value);
+      if (path.dirname(abs).toLowerCase() === ttsDir.toLowerCase()) {
+        keep.add(path.basename(abs).toLowerCase());
+        next = `${ttsDirName}/${path.basename(abs)}`;
+      }
+    }
+    mapped.set(value, next);
+    return next;
+  };
+  (payload?.media?.editingAssets || []).forEach((entry) => {
+    if (entry?.source_path) entry.source_path = visit(entry.source_path);
+  });
+  (payload?.project?.history?.editingState?.editingAssets || []).forEach((asset) => {
+    if (!asset?.source_path) return;
+    asset.source_path = visit(asset.source_path);
+    /* Tệp trong <Tên>_TTS/ đã bị một lượt Lưu trước dọn (xoá clip -> Lưu -> Ctrl+Z lấy lại clip): bản
+       chép làm việc trong temp_uploads/editing_assets (`path`) vẫn còn — chép lại từ đó. */
+    const rel = String(asset.source_path);
+    if (!rel.startsWith(`${ttsDirName}/`)) return;
+    const target = path.resolve(crabDir, rel);
+    if (!exists(target) && asset.path && exists(asset.path)) {
+      mkdir(ttsDir);
+      copyFile(asset.path, target);
+      copied += 1;
+    }
+  });
+  // Dọn WAV mồ côi của chính thư mục này (chỉ .wav — thư mục do app đặt tên, không đụng tệp khác).
+  let removed = 0;
+  for (const name of (prune ? readdir(ttsDir) : [])) {
+    if (!/\.wav$/i.test(name) || keep.has(name.toLowerCase())) continue;
+    try { remove(path.join(ttsDir, name)); removed += 1; } catch (_) { /* tệp đang mở: để lượt sau */ }
+  }
+  return { payloadJson: JSON.stringify(payload), copied, kept: keep.size, removed, failed };
+}
+
 /* MỌI CHỖ trong payload có chứa đường dẫn file trên máy. Thiếu một chỗ là mở bản đã gói
  * lên vẫn còn một nhánh trỏ về máy cũ — và nhánh đó chỉ lộ ra khi người dùng thao tác đúng
  * vào nó (vd thêm video vào lane chính đọc source_path của clip). Đây là danh sách DUY NHẤT,
@@ -577,7 +671,7 @@ function createProjectPackager({
   return {
     packageProject, resolvePayloadPaths, collectMediaPaths, subtitleStateOf, writeSrtTo, MEDIA_DIR_NAME,
     eachPathSite, eachMirrorPathSite, previewProxyOf, projectSidecarPath,
-    SIDECAR_SUBTITLE, SIDECAR_PREVIEW_PROXY,
+    SIDECAR_SUBTITLE, SIDECAR_PREVIEW_PROXY, SIDECAR_TTS_DIR, relocateDubbingAudio, isTempDubbingPath,
     collectLibraryRefs, collectLutIds, libraryRelPathOf, LIBRARY_DIR_NAME,
   };
 }
