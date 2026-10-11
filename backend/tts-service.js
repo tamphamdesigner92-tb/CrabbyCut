@@ -8,8 +8,9 @@
  * VÒNG ĐỜI SERVER:
  *   · Bật LƯỜI ở lượt lồng tiếng / nghe thử / tải model đầu tiên — mở panel thôi thì không bật
  *     (import torch mất vài giây và giữ ~300 MB RAM dù chưa nạp model nào).
- *   · Server nhả model NGAY khi mỗi lượt xong (v1.1.17, trả VRAM; CRAB_TTS_KEEP_LOADED=1 thì
- *     giữ ấm tới IDLE_UNLOAD_SECONDS) nhưng tiến trình vẫn sống để lượt sau khỏi khởi động lại.
+ *   · Server nhả model NGAY khi mỗi lượt xong, và backend TẮT luôn tiến trình sau khi panel đọc
+ *     kết quả (v1.1.17 — trả cả CUDA context; xem scheduleIdleStop). CRAB_TTS_KEEP_LOADED=1 giữ
+ *     server + model ấm như cũ (model tự nhả sau IDLE_UNLOAD_SECONDS).
  *   · Backend tắt -> stop(); backend chết bất thường -> server tự thoát nhờ --parent-pid.
  *
  * CỔNG 4124, không phải 4123 của bản Private: hai bản cùng chạy trên máy tác giả không được
@@ -31,14 +32,18 @@ const _t = (k, p) => ((typeof globalThis._t === 'function')
 
 const PORT = Number(process.env.CRAB_TTS_PORT || 4124);
 const HOST = '127.0.0.1';
-const BOOT_TIMEOUT_MS = 180000;   // lần đầu import torch + f5_tts trên HDD có thể mất cả phút
+const BOOT_TIMEOUT_MS = 180000;   // lần đầu import torch + vieneu trên HDD có thể mất cả phút
 
 /* Mô tả TĨNH của engine — dùng khi server chưa bật (mở panel không bật server). Phải khớp
  * ENGINES + model_store.MODELS ở phía Python; `size_mb` chỉ để báo "cần tải ~… lần đầu". */
 const ENGINES = [
   {
-    id: 'f5', label: 'F5-TTS tiếng Việt', models: ['f5-vi', 'vocos'], size_mb: 1400,
-    clone: true, voices: [],
+    /* Mặc định từ v1.1.17 (thay F5-TTS). Bộ tệp model theo máy: GPU (CUDA/MPS) dùng đường
+     * PyTorch, không có GPU dùng ONNX — khớp VieNeu3Engine.models ở server.py. */
+    id: 'vieneu3', label: 'VieNeu-TTS v3 Turbo',
+    models_gpu: ['vieneu3-torch', 'moss-nano'], size_mb_gpu: 420,
+    models_cpu: ['vieneu3-onnx', 'moss-nano-onnx'], size_mb_cpu: 650,
+    clone: true, clone_needs_text: false, voices: [],
   },
   {
     id: 'vieneu', label: 'VieNeu-TTS', models: ['vieneu-tts', 'neucodec-onnx'], size_mb: 900,
@@ -187,6 +192,52 @@ async function stop() {
 
 // ── Trạng thái cho panel ────────────────────────────────────────────────────
 
+/* Máy này sẽ chạy VieNeu v3 bằng đường nào — đoán KHÔNG cần bật server: macOS dùng MPS, máy có
+ * card NVIDIA (theo setup_tts) dùng CUDA. Server là nguồn đúng khi đã chạy (/v1/engines). */
+function gpuPath() {
+  return process.platform === 'darwin' || SetupTts.torchVariant().id.startsWith('cu');
+}
+function staticModels(meta) {
+  if (meta.models_gpu) return gpuPath() ? meta.models_gpu : meta.models_cpu;
+  return meta.models || [];
+}
+function staticSizeMb(meta) {
+  if (meta.models_gpu) return gpuPath() ? meta.size_mb_gpu : meta.size_mb_cpu;
+  return meta.size_mb || 0;
+}
+
+/* Danh sách giọng có sẵn của VieNeu v3 đọc thẳng từ tệp JSON của gói `vieneu` đã cài — để panel
+ * hiện được giọng mà không phải bật server (import torch mất vài giây + ~300 MB RAM). */
+let v3VoicesCache = null;
+function vieneu3Voices() {
+  if (v3VoicesCache) return v3VoicesCache;
+  const env = SetupTts.ttsEnv();
+  const roots = [];
+  if (env.site) roots.push(env.site);
+  if (env.mode === 'venv' && env.location) {
+    roots.push(path.join(env.location, 'Lib', 'site-packages'));
+    try {
+      for (const name of fs.readdirSync(path.join(env.location, 'lib'))) {
+        roots.push(path.join(env.location, 'lib', name, 'site-packages'));
+      }
+    } catch (_) { /* không có lib/ (Windows) */ }
+  }
+  for (const root of roots) {
+    const file = path.join(root, 'vieneu', 'assets', 'voices_v3_turbo.json');
+    try {
+      const presets = JSON.parse(fs.readFileSync(file, 'utf8')).presets || {};
+      const names = Object.keys(presets).sort((a, b) => {
+        const fa = presets[a].featured; const fb = presets[b].featured;
+        if ((fa == null) !== (fb == null)) return fa == null ? 1 : -1;
+        return (fa || 0) - (fb || 0);
+      });
+      v3VoicesCache = names.map((n) => ({ id: n, label: n, description: String(presets[n].description || '') }));
+      return v3VoicesCache;
+    } catch (_) { /* thử chỗ kế */ }
+  }
+  return [];
+}
+
 function modelReadyLocally(key) {
   return fs.existsSync(path.join(modelDir(), key, '.crab-model.json'));
 }
@@ -207,8 +258,9 @@ async function status() {
         available: platformOk,
         reason: platformOk ? '' : _t('{name} chỉ chạy trên macOS (MLX).', { name: e.label }),
         loaded: false,
-        voices: e.voices,
-        models: e.models.map((key) => ({ key, ready: modelReadyLocally(key) })),
+        voices: e.id === 'vieneu3' ? vieneu3Voices().map((v) => v.id) : e.voices,
+        voice_details: e.id === 'vieneu3' ? vieneu3Voices() : e.voices.map((v) => ({ id: v, label: v, description: '' })),
+        models: staticModels(e).map((key) => ({ key, ready: modelReadyLocally(key) })),
       };
     });
   }
@@ -223,7 +275,13 @@ async function status() {
     server: { running: !!live, port: PORT, model_root: modelDir() },
     engines: engines.map((e) => {
       const meta = ENGINES.find((s) => s.id === e.id) || {};
-      return { ...e, size_mb: meta.size_mb || 0, clone: !!meta.clone, describe: !!meta.describe };
+      return {
+        ...e,
+        size_mb: staticSizeMb(meta),
+        clone: e.clone != null ? !!e.clone : !!meta.clone,
+        clone_needs_text: e.clone_needs_text != null ? !!e.clone_needs_text : !!meta.clone_needs_text,
+        describe: !!meta.describe,
+      };
     }),
   };
 }
@@ -280,6 +338,7 @@ function jobOutputDir() {
 }
 
 async function createJob(params = {}) {
+  cancelIdleStop();
   await ensureServer();
   const body = {
     engine: String(params.engine || 'vieneu'),
@@ -315,9 +374,37 @@ function decorate(job) {
   };
 }
 
+/* TẮT SERVER SAU MỖI LƯỢT (v1.1.17, người dùng yêu cầu VRAM phải được trả hết khi xong).
+ * server.py đã nhả model ngay khi lượt xong, nhưng đo thật trên GTX 1060: VRAM còn dư ~160 MiB
+ * (764 -> đỉnh 1556 -> 926 MiB) — đó là CUDA context của tiến trình Python, chỉ mất khi tiến
+ * trình thoát. Nên lượt nào xong (panel đã đọc được kết quả) thì tắt hẳn server; lượt sau bật lại
+ * (vài giây import). Chờ một nhịp để panel kịp poll lần cuối; không tắt khi đang tải model hay
+ * đã có lượt mới. CRAB_TTS_KEEP_LOADED=1 giữ server sống như cũ. */
+const IDLE_STOP_DELAY_MS = 3000;
+let idleStopTimer = null;
+function keepLoaded() {
+  return ['1', 'true', 'yes'].includes(String(process.env.CRAB_TTS_KEEP_LOADED || '').trim().toLowerCase());
+}
+function cancelIdleStop() {
+  if (idleStopTimer) clearTimeout(idleStopTimer);
+  idleStopTimer = null;
+}
+function scheduleIdleStop() {
+  if (keepLoaded() || !child) return;
+  cancelIdleStop();
+  idleStopTimer = setTimeout(async () => {
+    idleStopTimer = null;
+    const live = await health();
+    if (!live || live.active_job) return;
+    if ((live.downloads || []).some((d) => d.state === 'downloading' || d.state === 'preparing')) return;
+    await stop();
+  }, IDLE_STOP_DELAY_MS);
+}
+
 async function getJob(id) {
   const job = await request('GET', `/v1/dub/jobs/${encodeURIComponent(id)}`);
   await syncDownloads();
+  if (job && ['done', 'error', 'cancelled'].includes(job.state)) scheduleIdleStop();
   return decorate(job);
 }
 

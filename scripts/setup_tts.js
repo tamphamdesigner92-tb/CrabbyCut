@@ -28,6 +28,13 @@ const RuntimePaths = require('./runtime_paths.js');
 const REQUIREMENTS = path.join(PROJECT_ROOT, 'requirements-tts.txt');
 const SERVER_SCRIPT = path.join(PROJECT_ROOT, 'tts', 'server.py');
 const MARKER = '.crab-tts-ready.json';
+/* Đổi số này khi bộ gói đổi tới mức môi trường cũ KHÔNG chạy được bản mới -> marker cũ bị coi là
+ * chưa cài, panel hiện lại nút "Cài đặt". 2 = v1.1.17: VieNeu v3 Turbo, gỡ F5, torch 2.11 CUDA. */
+const ENV_REVISION = 2;
+/* torch ghim cứng: torchaudio dừng ở 2.11.0, để pip tự chọn là kéo torch 2.14 + torchaudio 2.11
+ * lệch nhau (đúng thứ .venv-tts của máy tác giả từng bị). 2.11.0 có cả cu126 (còn Pascal sm_6x —
+ * từ torch 2.8 bản cu128 đã bỏ GTX 10xx) lẫn cu128 (có RTX 50 sm_120). */
+const TORCH_VERSION = '2.11.0';
 const STALL_MS = 5 * 60 * 1000;
 /* Sau dòng "Installing collected packages" pip IM LẶNG tới khi xong cả lượt: chép torch +
  * transformers… (hàng chục nghìn tệp, Defender quét từng tệp) vào thư mục tạm rồi chuyển sang
@@ -50,6 +57,57 @@ function usingProvisionedRuntime() {
   }
 }
 
+/* Bản torch hợp với máy này:
+ *   · CRAB_TTS_TORCH_INDEX đặt tay -> dùng đúng chỉ mục đó.
+ *   · Windows/Linux có card NVIDIA -> CUDA (người dùng chốt 2026-10-11: tự cài, không hỏi).
+ *     compute capability < 7.5 (Pascal/Volta) lấy cu126, còn lại cu128.
+ *   · Còn lại (kể cả macOS: torch PyPI cho Mac đã có MPS) -> PyPI thường.
+ * Đọc compute_cap bằng nvidia-smi (đi kèm driver). Máy không có driver NVIDIA thì lệnh không có
+ * -> CPU. Kết quả cache theo tiến trình. */
+let torchVariantCache = null;
+function nvidiaComputeCap() {
+  if (process.platform === 'darwin') return 0;
+  try {
+    const out = spawnSync('nvidia-smi', ['--query-gpu=compute_cap', '--format=csv,noheader'], {
+      windowsHide: true, timeout: 15000, encoding: 'utf8',
+    });
+    if (out.status !== 0) return 0;
+    const caps = String(out.stdout || '').split(/\r?\n/).map((l) => Number.parseFloat(l)).filter((n) => n > 0);
+    return caps.length ? Math.max(...caps) : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+function torchVariant() {
+  if (torchVariantCache) return torchVariantCache;
+  const forced = String(process.env.CRAB_TTS_TORCH_INDEX || '').trim();
+  if (forced) {
+    const tag = (forced.match(/\/(cu\d+|cpu|rocm[\d.]+)\/?$/) || [])[1] || 'custom';
+    torchVariantCache = { id: tag, index: forced, cap: 0 };
+  } else {
+    const cap = nvidiaComputeCap();
+    if (cap > 0) {
+      const id = cap < 7.5 ? 'cu126' : 'cu128';
+      torchVariantCache = { id, index: `https://download.pytorch.org/whl/${id}`, cap };
+    } else {
+      torchVariantCache = { id: 'default', index: '', cap: 0 };
+    }
+  }
+  return torchVariantCache;
+}
+
+/* Marker còn dùng được không: cùng ENV_REVISION và cùng bản torch mà máy này cần. Máy vừa lắp
+ * card NVIDIA (hoặc nâng từ bản <= 1.1.16, vốn luôn cài torch CPU) -> cài lại để lên CUDA. */
+function markerUsable(file) {
+  try {
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (Number(data.revision || 1) < ENV_REVISION) return false;
+    return String(data.torch_variant || 'default') === torchVariant().id;
+  } catch (_) {
+    return false;
+  }
+}
+
 /* Interpreter + cách chạy server. `ready` = đã cài xong ít nhất một lần (có marker) hoặc
  * người phát triển tự dựng .venv-tts bằng tay và nó import được gói lõi. */
 let importCheckCache = null;
@@ -59,12 +117,16 @@ function ttsEnv() {
     return { mode: 'custom', python: override, site: '', ready: true, location: override };
   }
   if (fs.existsSync(venvPython())) {
-    const marker = fs.existsSync(path.join(venvDir(), MARKER));
-    if (!marker && importCheckCache === null) {
+    const markerFile = path.join(venvDir(), MARKER);
+    // Có marker mà marker cũ (bản trước / thiếu CUDA) -> chưa sẵn sàng, KHÔNG rơi về dò import.
+    if (fs.existsSync(markerFile)) {
+      return { mode: 'venv', python: venvPython(), site: '', ready: markerUsable(markerFile), location: venvDir() };
+    }
+    if (importCheckCache === null) {
       const probe = spawnSync(venvPython(), ['-c', 'import fastapi, uvicorn, soundfile, huggingface_hub'], { windowsHide: true, timeout: 30000 });
       importCheckCache = probe.status === 0;
     }
-    return { mode: 'venv', python: venvPython(), site: '', ready: marker || !!importCheckCache, location: venvDir() };
+    return { mode: 'venv', python: venvPython(), site: '', ready: !!importCheckCache, location: venvDir() };
   }
   if (usingProvisionedRuntime()) {
     const site = siteDir();
@@ -72,7 +134,7 @@ function ttsEnv() {
       mode: 'site',
       python: RuntimePaths.runtimePython(),
       site,
-      ready: fs.existsSync(path.join(site, MARKER)),
+      ready: markerUsable(path.join(site, MARKER)),
       location: site,
     };
   }
@@ -202,19 +264,30 @@ function setupTts({ onEvent } = {}) {
       await run(python, ['-m', 'pip', 'install', '--upgrade', 'pip', ...baseFlags], { env });
     }
     const onLine = pipReader(emit);
-    const torchIndex = String(process.env.CRAB_TTS_TORCH_INDEX || '').trim();
-    if (torchIndex) {
-      // Cài torch TRƯỚC từ chỉ mục CUDA; lượt -r sau thấy torch đã thoả nên không kéo bản CPU.
-      emit({ type: 'progress', stage: 'torch', message: `Đang tải torch (${torchIndex})…` });
-      await run(python, ['-m', 'pip', 'install', ...pipFlags, ...target, '--index-url', torchIndex, 'torch', 'torchaudio'], { env, onLine });
-    }
-    emit({ type: 'progress', stage: 'packages', message: 'Đang tải thư viện lồng tiếng (F5-TTS, VieNeu)…' });
-    await run(python, ['-m', 'pip', 'install', ...pipFlags, ...target, '-r', REQUIREMENTS], { env, onLine });
+    const variant = torchVariant();
+    // MỘT lệnh pip cho cả torch lẫn phần còn lại. Hai lệnh (torch CUDA trước, `-r` sau) hỏng ở
+    // chế độ `--target`: pip không coi gói đã nằm trong thư mục đích là "đã cài" nên lượt `-r`
+    // kéo torch CPU từ PyPI về ghi đè bản CUDA vừa cài.
+    const torchSpecs = variant.index
+      ? [`torch==${TORCH_VERSION}+${variant.id}`, `torchaudio==${TORCH_VERSION}+${variant.id}`]
+      : [`torch==${TORCH_VERSION}`, `torchaudio==${TORCH_VERSION}`];
+    if (variant.id === 'custom') torchSpecs.splice(0, 2, `torch==${TORCH_VERSION}`, `torchaudio==${TORCH_VERSION}`);
+    const indexFlags = variant.index ? ['--extra-index-url', variant.index] : [];
+    emit({
+      type: 'progress', stage: 'packages',
+      message: variant.index
+        ? `Đang tải thư viện lồng tiếng + torch GPU (${variant.id}, ~2,6 GB)…`
+        : 'Đang tải thư viện lồng tiếng (VieNeu)…',
+    });
+    await run(python, ['-m', 'pip', 'install', ...pipFlags, ...target, ...indexFlags, ...torchSpecs, '-r', REQUIREMENTS], { env, onLine });
     fs.writeFileSync(path.join(markerDir, MARKER), JSON.stringify({
       installed_at: new Date().toISOString(),
       python,
       mode: provisioned ? 'site' : 'venv',
-      torch_index: torchIndex || null,
+      revision: ENV_REVISION,
+      torch_variant: variant.id,
+      torch_index: variant.index || null,
+      torch_version: TORCH_VERSION,
     }, null, 2));
     importCheckCache = null;
     emit({ type: 'done', message: 'Đã cài xong môi trường lồng tiếng.' });
@@ -225,7 +298,7 @@ function setupTts({ onEvent } = {}) {
 
 function setupInProgress() { return !!running; }
 
-module.exports = { ttsEnv, setupTts, setupInProgress, SERVER_SCRIPT, REQUIREMENTS, humanBytes };
+module.exports = { ttsEnv, setupTts, setupInProgress, torchVariant, SERVER_SCRIPT, REQUIREMENTS, humanBytes, ENV_REVISION, TORCH_VERSION };
 
 if (require.main === module && process.argv.includes('--serve')) {
   /* `npm run tts:serve`: chạy server tay (gỡ lỗi) bằng đúng interpreter mà backend sẽ dùng. */

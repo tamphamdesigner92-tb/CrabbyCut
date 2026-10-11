@@ -7,18 +7,17 @@ Nhận danh sách câu phụ đề có mốc thời gian, đọc từng câu b�
 rồi trộn thành file WAV đặt lên timeline. Backend Node (backend/tts-service.js) bật server này
 khi cần, và nói chuyện qua HTTP 127.0.0.1.
 
-VÌ SAO LÀ SERVER THƯỜNG TRÚ chứ không phải sidecar mỗi lượt một tiến trình như ASR: nạp model
-mất 7-30 giây (F5-TTS ~1,3 GB, VieNeu ~0,9 GB). Người dùng nghe thử giọng, đổi câu, lồng lại —
-nạp lại mỗi lượt là mỗi lượt chờ nửa phút. TỪ v1.1.17 model bị nhả NGAY khi mỗi lượt xong
-(người dùng yêu cầu trả VRAM cho dựng phim/xuất GPU) — server thường trú giờ chỉ còn tiết kiệm
-khởi động Python + import thư viện; CRAB_TTS_KEEP_LOADED=1 khôi phục kiểu giữ ấm, khi đó model
-tự nhả sau IDLE_UNLOAD_SECONDS.
+VÌ SAO LÀ SERVER THƯỜNG TRÚ chứ không phải sidecar mỗi lượt một tiến trình như ASR: import
+torch/onnxruntime + khởi động Python mất vài giây mỗi lượt. TỪ v1.1.17 model bị nhả NGAY khi mỗi
+lượt xong (người dùng yêu cầu trả VRAM cho dựng phim/xuất GPU); CRAB_TTS_KEEP_LOADED=1 khôi phục
+kiểu giữ ấm, khi đó model tự nhả sau IDLE_UNLOAD_SECONDS.
 
-BA ENGINE:
-  f5      Vi-F5-TTS (port từ Vi-TTS Studio / repo TTS-App): NHÂN BẢN GIỌNG từ một đoạn mẫu
-          3-12 giây + lời của đoạn mẫu. Chạy được CPU, nhanh hơn nhiều nếu torch có CUDA.
+BA ENGINE (F5-TTS đã gỡ ở v1.1.17 — giấy phép weights tiếng Việt phi thương mại, không có giọng
+mặc định; xem docs/KE_HOACH_V1_1_17.md):
+  vieneu3 VieNeu-TTS v3 Turbo — MẶC ĐỊNH: 25 giọng Việt dựng sẵn + nhân bản giọng từ mẫu 3-8 s
+          (không cần lời của mẫu). GPU (CUDA/MPS) bằng PyTorch, không có GPU thì ONNX trên CPU.
   vieneu  VieNeu-TTS v2 (port từ server TTS của CrabbyCut_Private): 7 giọng Việt dựng sẵn,
-          chạy CPU tốt.
+          chạy CPU.
   voxcpm  VoxCPM2 8-bit qua MLX — CHỈ macOS Apple Silicon (MLX không có trên Windows).
           Giọng tả bằng lời ("giọng nữ trẻ, ấm").
 
@@ -133,6 +132,8 @@ class Engine:
     module = ""             # gói Python bắt buộc
     platforms: Optional[List[str]] = None
     chunked = True          # cắt đoạn dài + canh chunk câm ở dubbing_core
+    clone = False           # nhận giọng mẫu (hồ sơ giọng trong Cài đặt)
+    clone_needs_text = False  # nhân bản cần cả lời nói trong mẫu
 
     def __init__(self) -> None:
         self._model: Any = None
@@ -181,6 +182,9 @@ class Engine:
 
     def voices(self) -> List[str]:
         return []
+
+    def voice_details(self) -> List[dict]:
+        return [{"id": v, "label": v, "description": ""} for v in self.voices()]
 
     def prepare(self, opts: dict) -> dict:
         """Chuẩn bị một lượt (kiểm giọng mẫu…). Trả opts đã chuẩn hoá."""
@@ -231,93 +235,133 @@ class Engine:
             return joined, rate, {"chunks": len(chunks), "retries": retries, "suspects": suspects}
 
 
-def _patch_torchaudio_load() -> None:
-    """torchaudio >= 2.9 chuyển `torchaudio.load` sang torchcodec, mà torchcodec trên Windows
-    đòi bộ DLL FFmpeg "shared" (bản ffmpeg.exe tĩnh app đang dùng không có) -> F5-TTS chết ngay
-    ở bước đọc giọng mẫu. F5 chỉ cần đọc WAV nên thay bằng soundfile là đủ và chạy mọi bản."""
+def _cuda_capability() -> tuple:
     try:
-        import soundfile as sf
         import torch
-        import torchaudio
+        if torch.cuda.is_available():
+            return tuple(torch.cuda.get_device_capability(0))
     except Exception:
-        return
-    if getattr(torchaudio, "_crab_patched", False):
-        return
-
-    def _load(path, *args, **kwargs):
-        data, rate = sf.read(str(path), dtype="float32", always_2d=True)
-        return torch.from_numpy(np.ascontiguousarray(data.T)), int(rate)
-
-    torchaudio.load = _load
-    torchaudio._crab_patched = True
+        pass
+    return ()
 
 
-class F5Engine(Engine):
-    """Vi-F5-TTS — nhân bản giọng. Cấu hình kiến trúc khớp F5TTS_Base (dim 1024, depth 22…,
-    xem vi-fine-tuned-f5-tts.yaml trong repo model) nên dùng thẳng config có sẵn của f5_tts."""
+class VieNeu3Engine(Engine):
+    """VieNeu-TTS v3 Turbo — engine mặc định từ v1.1.17 (thay F5-TTS, xem docs/KE_HOACH_V1_1_17.md).
 
-    name = "f5"
-    label = "F5-TTS tiếng Việt"
-    sample_rate = 24000
-    models = ["f5-vi", "vocos"]
-    module = "f5_tts"
-    chunked = False         # F5 tự cắt đoạn theo độ dài giọng mẫu và tự nối có cross-fade
+    25 giọng Việt dựng sẵn (Bắc/Trung/Nam, nhiều phong cách đọc) + NHÂN BẢN GIỌNG từ một mẫu 3-8 s,
+    KHÔNG cần gõ lời của mẫu. Ra 48 kHz. Apache-2.0 (cả model lẫn codec MOSS).
 
-    # Số bước giải ODE: 32 là mặc định của F5 (Vi-TTS Studio chế độ "fast"). ĐO THẬT trên CPU
-    # (torch bản CPU, máy dựng tính năng): ~3 phút MỘT câu ở 32 bước — không dùng nổi. Trên CPU hạ
-    # xuống 16 (nhanh gấp đôi, giọng hơi kém mịn); GPU giữ 32. Ghi đè: CRAB_TTS_F5_NFE.
-    NFE_STEP = 32
-    NFE_STEP_CPU = 16
-    CFG_STRENGTH = 2.0
+    Hai đường, chọn theo máy — mỗi đường một bộ tệp riêng (model_store) nên chỉ tải đúng thứ cần:
+      · GPU (CUDA trên Windows, MPS trên macOS): PyTorch, `vieneu3-torch` + `moss-nano`.
+      · CPU (không có GPU dùng được):            ONNX Runtime, `vieneu3-onnx` + `moss-nano-onnx`.
+    Người dùng yêu cầu macOS PHẢI chạy GPU -> trên Mac có MPS là dùng MPS, không rơi về ONNX/CPU."""
 
-    def nfe_step(self) -> int:
-        forced = os.environ.get("CRAB_TTS_F5_NFE", "").strip()
-        if forced.isdigit():
-            return max(4, min(64, int(forced)))
-        return self.NFE_STEP if self.device in ("cuda", "mps") else self.NFE_STEP_CPU
+    name = "vieneu3"
+    label = "VieNeu-TTS v3 Turbo"
+    sample_rate = 48000
+    module = "vieneu"
+    chunked = False          # SDK tự cắt câu (max_chars) + tự sinh lại chunk "nói lảm nhảm"
+    clone = True
+    clone_needs_text = False
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._planned = ""
+
+    def planned_device(self) -> str:
+        if not self._planned:
+            forced = os.environ.get("CRAB_TTS_DEVICE", "").strip().lower()
+            self._planned = forced if forced in {"cpu", "cuda", "mps"} else _torch_device()
+        return self._planned
+
+    @property
+    def models(self) -> List[str]:  # type: ignore[override]
+        if self.planned_device() == "cpu":
+            return ["vieneu3-onnx", "moss-nano-onnx"]
+        return ["vieneu3-torch", "moss-nano"]
+
+    def _dtype(self, device: str) -> str:
+        # SDK để "auto" thì CUDA nào cũng nhận bf16 — GTX 10xx (Pascal, sm_6x) chỉ GIẢ LẬP bf16 và
+        # fp16 của nó chạy ở 1/64 tốc độ fp32, nên dưới Volta phải ép fp32.
+        if device == "cuda":
+            cap = _cuda_capability()
+            if cap and cap >= (8, 0):
+                return "bfloat16"
+            if cap and cap >= (7, 0):
+                return "float16"
+            return "float32"
+        return "float32"
 
     def _build(self, paths: Dict[str, Path]) -> Any:
-        _patch_torchaudio_load()
-        from f5_tts.api import F5TTS
+        from vieneu.v3turbo import V3TurboVieNeuTTS
 
-        self.device = _torch_device()
-        ckpt = paths["f5-vi"] / "Vi_F5_TTS_ckpts" / "pruning_model.pt"
-        vocab = paths["f5-vi"] / "vocab.txt"
-        return F5TTS(model="F5TTS_Base", ckpt_file=str(ckpt), vocab_file=str(vocab),
-                     vocoder_local_path=str(paths["vocos"]), device=self.device)
+        device = self.planned_device()
+        if device == "cpu":
+            from vieneu._v3_turbo_engine import onnx_runtime_lite as lite
+
+            root = paths["vieneu3-onnx"]
+            codec_dir = paths["moss-nano-onnx"]
+            # SDK không chuyển `codec_dir` xuống engine ONNX mà tự tải codec từ Hub vào
+            # ~/.cache/huggingface (ngoài kho model của app, không có tiến trình). Chặn đúng lượt
+            # tải codec đó và trỏ về bản model_store đã tải.
+            original = lite.OnnxV3LiteEngine._fetch
+            if not getattr(original, "_crab_local", False):
+                def _fetch(repo: str, files: List[str], subfolder: Optional[str]) -> Path:
+                    if repo == lite._CODEC_REPO:
+                        return codec_dir
+                    return original(repo, files, subfolder)
+                _fetch._crab_local = True  # type: ignore[attr-defined]
+                lite.OnnxV3LiteEngine._fetch = staticmethod(_fetch)
+            self.device = "cpu"
+            return V3TurboVieNeuTTS(backbone_repo=str(root), backend="onnx",
+                                    onnx_dir=str(root / "onnx_update"))
+        root = paths["vieneu3-torch"]
+        self.device = device
+        return V3TurboVieNeuTTS(backbone_repo=str(root), model_subfolder="update",
+                                moss_tokenizer=str(paths["moss-nano"]), device=device,
+                                dtype=self._dtype(device), backend="pytorch")
+
+    def voice_details(self) -> List[dict]:
+        """Giọng dựng sẵn, đọc thẳng từ tệp JSON của SDK — không cần nạp model để hiện danh sách."""
+        try:
+            spec = importlib.util.find_spec("vieneu")
+            base = Path(list(spec.submodule_search_locations)[0]) if spec else None
+            import json
+            data = json.loads((base / "assets" / "voices_v3_turbo.json").read_text(encoding="utf-8"))
+            presets = data.get("presets") or {}
+            names = sorted(presets, key=lambda n: (presets[n].get("featured") is None,
+                                                   presets[n].get("featured") or 0))
+            return [{"id": n, "label": n, "description": str(presets[n].get("description") or "")}
+                    for n in names]
+        except Exception:
+            return []
+
+    def voices(self) -> List[str]:
+        return [v["id"] for v in self.voice_details()]
 
     def prepare(self, opts: dict) -> dict:
         ref_audio = str(opts.get("ref_audio") or "").strip()
-        ref_text = " ".join(str(opts.get("ref_text") or "").split())
-        if not ref_audio or not Path(ref_audio).is_file():
-            raise UserError("F5-TTS cần một tệp giọng mẫu (3-12 giây, một người nói, không nhạc nền).")
-        if not ref_text:
-            # Để trống thì F5 tự bóc băng giọng mẫu bằng Whisper large-v3-turbo — thêm 1,6 GB
-            # tải ngầm KHÔNG có tiến trình. Bắt người dùng gõ lời thì rẻ hơn nhiều.
-            raise UserError("Nhập đúng lời nói trong tệp giọng mẫu — F5-TTS cần nó để bắt chước giọng.")
-        self.ensure()
-        from f5_tts.infer.utils_infer import preprocess_ref_audio_text
-
-        # Cắt giọng mẫu về <= 12 giây + chuẩn hoá lời; kết quả được f5 cache theo hash nên
-        # các lượt infer sau không làm lại. Cần độ dài THẬT của mẫu vì `fix_duration` của F5
-        # là tổng (mẫu + câu mới), không phải riêng câu mới.
-        processed_audio, processed_text = preprocess_ref_audio_text(ref_audio, ref_text, show_info=lambda *_a, **_k: None)
-        import soundfile as sf
-        info = sf.info(processed_audio)
-        return {**opts, "ref_audio": processed_audio, "ref_text": processed_text,
-                "ref_seconds": float(info.frames) / float(info.samplerate or 1)}
+        if ref_audio and not Path(ref_audio).is_file():
+            raise UserError("Không tìm thấy tệp giọng mẫu của hồ sơ giọng — hãy tạo lại hồ sơ trong Cài đặt.")
+        return opts
 
     def _synth_once(self, text: str, opts: dict, target: Optional[float]) -> tuple[np.ndarray, int]:
         model = self.ensure()
-        fix = None
-        if target and opts.get("timing_mode") == "fixed_duration":
-            fix = float(opts.get("ref_seconds") or 0) + max(0.3, float(target))
-        wav, rate, _spec = model.infer(
-            ref_file=opts["ref_audio"], ref_text=opts["ref_text"], gen_text=text,
-            show_info=lambda *_a, **_k: None, nfe_step=self.nfe_step(), cfg_strength=self.CFG_STRENGTH,
-            speed=float(opts.get("speed") or 1.0), fix_duration=fix, remove_silence=False,
-        )
-        return np.asarray(wav, dtype=np.float32), int(rate)
+        ref_audio = str(opts.get("ref_audio") or "").strip()
+        if ref_audio:
+            audio = model.infer(text, ref_audio=ref_audio)
+        else:
+            name = str(opts.get("voice") or "").strip() or None
+            try:
+                audio = model.infer(text, voice=name) if name else model.infer(text)
+            except ValueError as exc:
+                raise UserError(f"Giọng '{name}' không có trong VieNeu-TTS v3.") from exc
+        rate = int(getattr(model, "sample_rate", self.sample_rate) or self.sample_rate)
+        audio = core.to_mono(audio)
+        speed = float(opts.get("speed") or 1.0)
+        if abs(speed - 1.0) > 1e-3:
+            audio, _ = core.change_speed(audio, rate, speed)
+        return audio, rate
 
 
 class VieNeuEngine(Engine):
@@ -408,7 +452,7 @@ class VoxCPMEngine(Engine):
         return audio, rate
 
 
-ENGINES: Dict[str, Engine] = {e.name: e for e in (F5Engine(), VieNeuEngine(), VoxCPMEngine())}
+ENGINES: Dict[str, Engine] = {e.name: e for e in (VieNeu3Engine(), VieNeuEngine(), VoxCPMEngine())}
 
 
 def engine_info(engine: Engine) -> dict:
@@ -422,6 +466,9 @@ def engine_info(engine: Engine) -> dict:
         "device": engine.device,
         "sample_rate": engine.sample_rate,
         "voices": engine.voices(),
+        "voice_details": engine.voice_details(),
+        "clone": bool(engine.clone),
+        "clone_needs_text": bool(engine.clone_needs_text),
         "models": model_store.status(engine.models),
         "idle_seconds": round(time.time() - engine.last_used, 1) if engine.last_used else None,
     }

@@ -166,8 +166,8 @@ msg = store._friendly_error(SPEC, RuntimeError("x"), ["a: ConnectionError timed 
 check("mất mạng -> báo mất kết nối", "mất kết nối mạng" in msg, msg)
 
 # 8. Model không có mirror vẫn chạy đường cũ (một nguồn, token ngầm).
-check("model khác: nguồn duy nhất là repo", store._sources(store.MODELS["vocos"]) == ["charactr/vocos-mel-24khz"])
-check("model khác: token ngầm", store._token_for(store.MODELS["vocos"], "charactr/vocos-mel-24khz") is None)
+check("model khác: nguồn duy nhất là repo", store._sources(store.MODELS["moss-nano"]) == ["OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano"])
+check("model khác: token ngầm", store._token_for(store.MODELS["moss-nano"], "OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano") is None)
 
 import shutil  # noqa: E402
 shutil.rmtree(tmp, ignore_errors=True)

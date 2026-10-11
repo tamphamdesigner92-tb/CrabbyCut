@@ -8,23 +8,26 @@
 # Dựng bằng:  npm run setup:tts   (scripts/setup_tts.js — từ mã nguồn tạo .venv-tts; bản cài
 # .exe tự cài vào %LOCALAPPDATA%\CrabbyCut\runtime\tts-site khi bấm "Cài đặt" trong panel).
 #
-# CHỈ GÓI PYTHON — KHÔNG MODEL. Model (F5 ~1,4 GB, VieNeu ~0,9 GB) do tts/model_store.py tải ở
-# lần dùng đầu, có thanh tiến trình trên thanh trạng thái.
+# CHỈ GÓI PYTHON — KHÔNG MODEL. Model (VieNeu v3 ~0,4-0,65 GB, VieNeu v2 ~0,9 GB) do
+# tts/model_store.py tải ở lần dùng đầu, có thanh tiến trình trên thanh trạng thái.
+#
+# F5-TTS đã gỡ ở v1.1.17 (weights tiếng Việt phi thương mại, không có giọng mặc định) — xem
+# docs/KE_HOACH_V1_1_17.md.
 
-# Engine "f5" — Vi-F5-TTS, nhân bản giọng (port từ Vi-TTS Studio / repo TTS-App).
-f5-tts>=1.1.0
-# Engine "vieneu" — VieNeu-TTS v2, 7 giọng Việt (port từ server TTS của CrabbyCut_Private).
-vieneu>=3.3.0
+# Engine "vieneu3" (VieNeu-TTS v3 Turbo, mặc định) + "vieneu" (v2). 3.8 là bản đầu đã thử với
+# đường v3 Turbo + `onnx_dir`/`moss_tokenizer` local mà server.py dùng.
+vieneu>=3.8.3
 # Engine "voxcpm" — VoxCPM2 qua MLX, chỉ macOS Apple Silicon (Windows không có wheel MLX).
 mlx-audio>=0.5.0; sys_platform == "darwin"
 
 # VieNeu đường safetensors cần transformers>=4.51 + torch (đường GGUF cần llama-cpp-python,
-# không có wheel dựng sẵn ở mọi nền tảng). F5-TTS cũng cần torch/torchaudio.
-# Trên Windows, torch từ PyPI là bản CPU. Máy có GPU NVIDIA muốn nhanh hơn: đặt biến môi trường
-# CRAB_TTS_TORCH_INDEX=https://download.pytorch.org/whl/cu126 trước khi chạy setup:tts.
+# không có wheel dựng sẵn ở mọi nền tảng).
+# torch GHIM 2.11.0: torchaudio dừng ở 2.11, để trôi là lệch phiên bản. setup_tts.js tự thêm chỉ
+# mục CUDA khi máy có card NVIDIA (cu126 cho GTX 10xx, cu128 cho RTX 20 trở lên) — đặt
+# CRAB_TTS_TORCH_INDEX để ép một chỉ mục khác.
 transformers>=4.51
-torch>=2.4
-torchaudio>=2.4
+torch==2.11.0
+torchaudio==2.11.0
 
 fastapi>=0.115
 uvicorn>=0.32
