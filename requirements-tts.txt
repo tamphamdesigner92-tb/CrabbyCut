@@ -17,8 +17,7 @@
 # Engine "vieneu3" (VieNeu-TTS v3 Turbo, mặc định) + "vieneu" (v2). 3.8 là bản đầu đã thử với
 # đường v3 Turbo + `onnx_dir`/`moss_tokenizer` local mà server.py dùng.
 vieneu>=3.8.3
-# Engine "voxcpm" — VoxCPM2 qua MLX, chỉ macOS Apple Silicon (Windows không có wheel MLX).
-mlx-audio>=0.5.0; sys_platform == "darwin"
+# Engine "voxcpm" (VoxCPM2 qua MLX, chỉ Mac chip Apple) cài riêng: requirements-tts-mac.txt.
 
 # VieNeu đường safetensors cần transformers>=4.51 + torch (đường GGUF cần llama-cpp-python,
 # không có wheel dựng sẵn ở mọi nền tảng).

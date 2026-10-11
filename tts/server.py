@@ -142,6 +142,27 @@ def _hub_offline():
             mod.HF_HUB_OFFLINE = value
 
 
+def _append_error_log(job: "DubJob", exc: BaseException) -> None:
+    """Lỗi không phải do người dùng -> ghi kèm traceback vào `<kho model>/../logs/tts_errors.log`
+    (bản cài: %LOCALAPPDATA%/CrabbyCut/logs, macOS: ~/Library/Application Support/CrabbyCut/logs).
+    stdout của server chỉ còn trong terminal của backend — người dùng cuối không thấy được. Giữ
+    tối đa ~512 KB: quá thì cắt nửa cũ."""
+    try:
+        folder = model_store.model_root().parent / "logs"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / "tts_errors.log"
+        if path.is_file() and path.stat().st_size > 512 * 1024:
+            data = path.read_bytes()
+            path.write_bytes(data[len(data) // 2:])
+        engine = ENGINES.get(str(job.params.get("engine") or ""))
+        head = (f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} · engine={job.params.get('engine')} "
+                f"· device={getattr(engine, 'device', '')} · python={sys.version.split()[0]} · {sys.platform}\n")
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(head + "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+    except Exception:
+        pass
+
+
 def _keep_loaded_after_job() -> bool:
     """Mặc định nhả model NGAY khi một lượt (lồng tiếng hay nghe thử) xong — yêu cầu v1.1.17:
     VRAM phải trả lại cho dựng phim/xuất GPU. Đặt CRAB_TTS_KEEP_LOADED=1 để giữ như cũ (chỉ
@@ -456,7 +477,20 @@ class VieNeuEngine(Engine):
 
 
 class VoxCPMEngine(Engine):
-    """VoxCPM2-8bit qua MLX (GPU Metal), ra 48 kHz, đa ngôn ngữ. `voice` = MÔ TẢ giọng."""
+    """VoxCPM2-8bit qua MLX (GPU Metal), ra 48 kHz, đa ngôn ngữ. `voice` = MÔ TẢ giọng.
+
+    v1.1.17 — người dùng báo "không tạo được giọng" trên macOS (chưa có log). Mã gọi đúng API
+    mlx-audio hiện hành, nên sửa theo các nguyên nhân khả dĩ nhất (docs/KE_HOACH_V1_1_17.md):
+
+    1. MỘT LUỒNG MLX CỐ ĐỊNH. Từ mlx 0.31.2, GPU stream gắn với luồng tạo ra nó: mảng/stream tạo
+       ở luồng A mà dùng ở luồng B thì nổ "There is no Stream(gpu, 0) in current thread"
+       (ml-explore/mlx#3727, Blaizzy/mlx-audio#744). Server mở một threading.Thread MỚI cho mỗi
+       job -> lượt nạp và lượt sinh chạy ở hai luồng khác nhau. Nên mọi lệnh MLX (import, nạp,
+       sinh, chuyển sang numpy, xoá cache) đi qua `_MLX` — executor đúng một luồng.
+    2. CHỈ Apple Silicon + macOS 14: MLX chỉ có wheel arm64 macosx_14_0 trở lên. Mac Intel / macOS
+       13 trước đây vẫn được báo "có sẵn" rồi chết lúc cài hoặc lúc nạp.
+    3. Ghi rõ tham số sinh (inference_timesteps, cfg_value) thay vì phụ thuộc mặc định đổi theo bản.
+    CHƯA KIỂM TRÊN MAC THẬT — máy dựng tính năng là Windows."""
 
     name = "voxcpm"
     label = "VoxCPM2"
@@ -464,22 +498,72 @@ class VoxCPMEngine(Engine):
     models = ["voxcpm2-8bit"]
     module = "mlx_audio"
     platforms = ["darwin"]
+    INFERENCE_TIMESTEPS = 10
+    CFG_VALUE = 2.0
+
+    _MLX = None   # ThreadPoolExecutor(max_workers=1), dựng lười
+
+    @classmethod
+    def _mlx_run(cls, fn, *args, **kwargs):
+        if cls._MLX is None:
+            from concurrent.futures import ThreadPoolExecutor
+            cls._MLX = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
+        return cls._MLX.submit(fn, *args, **kwargs).result()
+
+    def availability(self) -> tuple[bool, str]:
+        ok, reason = super().availability()
+        if sys.platform != "darwin":
+            return ok, reason
+        import platform
+        if platform.machine() != "arm64":
+            return False, f"{self.label} cần máy Mac chip Apple (M1 trở lên) — MLX không chạy trên Mac Intel."
+        try:
+            major = int((platform.mac_ver()[0] or "0").split(".")[0])
+        except ValueError:
+            major = 0
+        if major and major < 14:
+            return False, f"{self.label} cần macOS 14 (Sonoma) trở lên."
+        return ok, reason
 
     def _build(self, paths: Dict[str, Path]) -> Any:
-        from mlx_audio.tts import load_model
+        def load():
+            from mlx_audio.tts import load_model
+            return load_model(str(paths["voxcpm2-8bit"]))
         self.device = "mps"
-        return load_model(str(paths["voxcpm2-8bit"]))
+        return self._mlx_run(load)
+
+    def unload(self) -> bool:
+        with self._lock:
+            if self._model is None:
+                return False
+            self._model = None
+        # Xoá cache Metal trên CHÍNH luồng MLX (cache gắn với stream của luồng đó).
+        try:
+            self._mlx_run(_release_accelerator_memory)
+        except Exception:
+            pass
+        log(f"đã nhả {self.name}")
+        return True
 
     def _synth_once(self, text: str, opts: dict, target: Optional[float]) -> tuple[np.ndarray, int]:
         model = self.ensure()
         instruct = str(opts.get("voice") or "").strip() or None
-        chunks, rate = [], self.sample_rate
-        for result in model.generate(text=text, instruct=instruct):
-            chunks.append(core.to_mono(result.audio))
-            rate = int(getattr(result, "sample_rate", None) or rate)
-        if not chunks:
+
+        def generate() -> tuple[np.ndarray, int]:
+            import mlx.core as mx
+            chunks, rate = [], self.sample_rate
+            for result in model.generate(text=text, instruct=instruct,
+                                         inference_timesteps=self.INFERENCE_TIMESTEPS, cfg_value=self.CFG_VALUE):
+                audio = result.audio
+                mx.eval(audio)
+                # float32 TƯỜNG MINH: np.asarray(mx.array bfloat16) không chuyển được.
+                chunks.append(core.to_mono(np.array(audio.astype(mx.float32))))
+                rate = int(getattr(result, "sample_rate", None) or rate)
+            return (np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)), rate
+
+        audio, rate = self._mlx_run(generate)
+        if not audio.size:
             raise RuntimeError("VoxCPM2 không sinh ra âm thanh nào")
-        audio = np.concatenate(chunks)
         speed = float(opts.get("speed") or 1.0)
         if abs(speed - 1.0) > 1e-3:
             audio, _ = core.change_speed(audio, rate, speed)
@@ -566,6 +650,7 @@ class DubJob:
             self.error = str(exc) or exc.__class__.__name__
             if not isinstance(exc, UserError):
                 traceback.print_exc()
+                _append_error_log(self, exc)
         finally:
             self.finished = time.time()
 

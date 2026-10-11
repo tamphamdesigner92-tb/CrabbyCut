@@ -242,7 +242,28 @@ function modelReadyLocally(key) {
   return fs.existsSync(path.join(modelDir(), key, '.crab-model.json'));
 }
 
+/* Model của engine ĐÃ GỠ (F5-TTS ở v1.1.17: Vi-F5-TTS 1,35 GB + Vocos) nằm lại trong kho model của
+ * app sau khi nâng cấp — không còn gì dùng tới. Dọn một lần mỗi phiên, CHỈ thư mục do model_store
+ * tạo (có marker .crab-model.json) để không bao giờ xoá nhầm thứ người dùng tự đặt vào. */
+const OBSOLETE_MODELS = ['f5-vi', 'vocos'];
+let obsoletePruned = false;
+function pruneObsoleteModels() {
+  if (obsoletePruned) return;
+  obsoletePruned = true;
+  for (const key of OBSOLETE_MODELS) {
+    const dir = path.join(modelDir(), key);
+    try {
+      if (!fs.existsSync(path.join(dir, '.crab-model.json'))) continue;
+      fs.rmSync(dir, { recursive: true, force: true });
+      console.log(`[tts] đã dọn model của engine đã gỡ: ${dir}`);
+    } catch (error) {
+      console.warn(`[tts] không dọn được ${dir}: ${error.message}`);
+    }
+  }
+}
+
 async function status() {
+  pruneObsoleteModels();
   const env = SetupTts.ttsEnv();
   const live = await health();
   let engines = null;

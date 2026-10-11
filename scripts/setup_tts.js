@@ -26,6 +26,7 @@ const { pythonCommand, PROJECT_ROOT } = require('./python_command.js');
 const RuntimePaths = require('./runtime_paths.js');
 
 const REQUIREMENTS = path.join(PROJECT_ROOT, 'requirements-tts.txt');
+const REQUIREMENTS_MAC = path.join(PROJECT_ROOT, 'requirements-tts-mac.txt');
 const SERVER_SCRIPT = path.join(PROJECT_ROOT, 'tts', 'server.py');
 const MARKER = '.crab-tts-ready.json';
 /* Đổi số này khi bộ gói đổi tới mức môi trường cũ KHÔNG chạy được bản mới -> marker cũ bị coi là
@@ -94,6 +95,48 @@ function torchVariant() {
     }
   }
   return torchVariantCache;
+}
+
+/* PYTHON CHO .venv-tts TRÊN macOS (v1.1.17 — một nguyên nhân khả dĩ của lỗi VoxCPM2).
+ * Bản Mac không có Python nhúng, nên venv được tạo từ `python3` trên PATH. App mở từ Finder chỉ
+ * có PATH tối thiểu -> đó thường là /usr/bin/python3 của Xcode CLT = 3.9, trong khi mlx-audio
+ * cần >= 3.10 (vieneu cũng vậy). Dò thêm các chỗ Homebrew / python.org hay cài, lấy bản đầu
+ * tiên >= 3.10; không có thì báo lỗi rõ ràng thay vì để pip chết giữa chừng. */
+function pythonAtLeast310(candidate) {
+  try {
+    const out = spawnSync(candidate, ['-c', 'import sys; print(int(sys.version_info[:2] >= (3, 10)))'], {
+      windowsHide: true, timeout: 15000, encoding: 'utf8',
+    });
+    return out.status === 0 && String(out.stdout || '').trim() === '1';
+  } catch (_) {
+    return false;
+  }
+}
+function venvBasePython() {
+  if (process.platform !== 'darwin') return pythonCommand();
+  const minors = ['3.13', '3.12', '3.11', '3.10'];
+  const candidates = [
+    pythonCommand(),
+    ...minors.map((v) => `/opt/homebrew/bin/python${v}`),
+    '/opt/homebrew/bin/python3',
+    ...minors.map((v) => `/usr/local/bin/python${v}`),
+    ...minors.map((v) => `/Library/Frameworks/Python.framework/Versions/${v}/bin/python3`),
+  ];
+  const found = candidates.find((c) => (c.includes('/') ? fs.existsSync(c) : true) && pythonAtLeast310(c));
+  if (!found) {
+    throw new Error('Lồng tiếng cần Python 3.10 trở lên, máy này chỉ có bản cũ hơn. Cài Python 3.12 '
+      + '(ví dụ `brew install python@3.12` hoặc từ python.org) rồi bấm cài lại.');
+  }
+  return found;
+}
+
+/* Mac chip Apple + macOS 14 -> có wheel MLX cho VoxCPM2. */
+function macCanUseMlx() {
+  if (process.platform !== 'darwin') return false;
+  const arm = process.arch === 'arm64'
+    || String(spawnSync('sysctl', ['-n', 'hw.optional.arm64'], { encoding: 'utf8' }).stdout || '').trim() === '1';
+  const major = Number.parseInt(String(require('os').release()).split('.')[0], 10);   // Darwin 23 = macOS 14
+  return arm && Number.isFinite(major) && major >= 23;
 }
 
 /* Marker còn dùng được không: cùng ENV_REVISION và cùng bản torch mà máy này cần. Máy vừa lắp
@@ -256,7 +299,7 @@ function setupTts({ onEvent } = {}) {
     } else {
       if (!fs.existsSync(venvPython())) {
         emit({ type: 'progress', stage: 'venv', message: 'Đang tạo môi trường Python cho lồng tiếng (.venv-tts)…' });
-        await run(pythonCommand(), ['-m', 'venv', venvDir()], { env });
+        await run(venvBasePython(), ['-m', 'venv', venvDir()], { env });
       }
       python = venvPython();
       markerDir = venvDir();
@@ -280,6 +323,17 @@ function setupTts({ onEvent } = {}) {
         : 'Đang tải thư viện lồng tiếng (VieNeu)…',
     });
     await run(python, ['-m', 'pip', 'install', ...pipFlags, ...target, ...indexFlags, ...torchSpecs, '-r', REQUIREMENTS], { env, onLine });
+    // VoxCPM2 (MLX) cài riêng và KHÔNG được làm hỏng cả lượt: lỗi thì chỉ engine đó báo thiếu gói.
+    let voxcpmError = null;
+    if (macCanUseMlx()) {
+      emit({ type: 'progress', stage: 'packages', message: 'Đang tải thư viện VoxCPM2 (MLX)…' });
+      try {
+        await run(python, ['-m', 'pip', 'install', ...pipFlags, ...target, '-r', REQUIREMENTS_MAC], { env, onLine });
+      } catch (error) {
+        voxcpmError = String(error?.message || error).slice(-500);
+        emit({ type: 'progress', stage: 'packages', message: `Không cài được VoxCPM2 (MLX) — các giọng khác vẫn dùng được. ${voxcpmError}` });
+      }
+    }
     fs.writeFileSync(path.join(markerDir, MARKER), JSON.stringify({
       installed_at: new Date().toISOString(),
       python,
@@ -288,6 +342,7 @@ function setupTts({ onEvent } = {}) {
       torch_variant: variant.id,
       torch_index: variant.index || null,
       torch_version: TORCH_VERSION,
+      voxcpm_error: voxcpmError,
     }, null, 2));
     importCheckCache = null;
     emit({ type: 'done', message: 'Đã cài xong môi trường lồng tiếng.' });
