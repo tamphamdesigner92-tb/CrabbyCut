@@ -17,7 +17,7 @@ mặc định; xem docs/KE_HOACH_V1_1_17.md):
   vieneu3 VieNeu-TTS v3 Turbo — MẶC ĐỊNH: 25 giọng Việt dựng sẵn + nhân bản giọng từ mẫu 3-8 s
           (không cần lời của mẫu). GPU (CUDA/MPS) bằng PyTorch, không có GPU thì ONNX trên CPU.
   vieneu  VieNeu-TTS v2 (port từ server TTS của CrabbyCut_Private): 7 giọng Việt dựng sẵn,
-          chạy CPU.
+          backbone lên GPU khi có (CUDA/MPS).
   voxcpm  VoxCPM2 8-bit qua MLX — CHỈ macOS Apple Silicon (MLX không có trên Windows).
           Giọng tả bằng lời ("giọng nữ trẻ, ấm").
 
@@ -28,6 +28,7 @@ Chạy tay:  npm run tts:serve   (= <python của .venv-tts> tts/server.py [--po
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import os
 import sys
@@ -111,6 +112,36 @@ def _release_accelerator_memory() -> None:
             pass
 
 
+@contextlib.contextmanager
+def _hub_offline():
+    """Tạm bật chế độ offline của huggingface_hub trong lúc NẠP model.
+
+    Mọi tệp đã nằm sẵn trong kho model (model_store tải trước), nhưng thư viện vẫn gọi Hub để
+    "chạm" config.json/voices.json theo repo id — trỏ đường dẫn local thì lượt gọi đó hỏng sau
+    vài lần thử lại mạng. Đo trên VieNeu v2 (GTX 1060): nạp 109 s -> ~42 s khi offline.
+    Cờ được đọc LÚC GỌI (huggingface_hub.is_offline_mode trả biến cấp module) nên bật tạm được.
+    Không bật khi model_store đang tải dở một model khác: lượt tải đó cần mạng."""
+    if any(d.get("state") in ("downloading", "preparing") for d in model_store.downloads_snapshot()):
+        yield
+        return
+    saved = []
+    try:
+        import huggingface_hub
+        from huggingface_hub import constants
+        holder = sys.modules.get(huggingface_hub.is_offline_mode.__module__)
+        for mod in {id(m): m for m in (constants, holder) if m is not None}.values():
+            if hasattr(mod, "HF_HUB_OFFLINE"):
+                saved.append((mod, mod.HF_HUB_OFFLINE))
+                mod.HF_HUB_OFFLINE = True
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        for mod, value in saved:
+            mod.HF_HUB_OFFLINE = value
+
+
 def _keep_loaded_after_job() -> bool:
     """Mặc định nhả model NGAY khi một lượt (lồng tiếng hay nghe thử) xong — yêu cầu v1.1.17:
     VRAM phải trả lại cho dựng phim/xuất GPU. Đặt CRAB_TTS_KEEP_LOADED=1 để giữ như cũ (chỉ
@@ -165,7 +196,8 @@ class Engine:
                 paths = self.ensure_models()
                 started = time.time()
                 log(f"đang nạp {self.name}…")
-                self._model = self._build(paths)
+                with _hub_offline():
+                    self._model = self._build(paths)
                 self.load_seconds = time.time() - started
                 log(f"nạp {self.name} xong sau {self.load_seconds:.1f}s (thiết bị: {self.device or 'cpu'})")
             self.last_used = time.time()
@@ -391,10 +423,12 @@ class VieNeuEngine(Engine):
                     return
                 super()._load_codec(codec_repo, codec_device)
 
-        self.device = "cpu"
+        # Backbone (transformers, fp32) lên GPU khi có — v1.1.17 yêu cầu lồng tiếng chạy GPU. Đo trên
+        # GTX 1060 trước đây: ghim CPU thì nạp 68 s + một câu 112 s. Codec ONNX vẫn ở CPU (nhẹ).
+        self.device = _torch_device()
         codec = paths["neucodec-onnx"] / "model.onnx"
         return LocalCodecVieNeuTTS(backbone_repo=str(paths["vieneu-tts"]), codec_repo=str(codec),
-                                   gguf_filename=None, backbone_device="cpu")
+                                   gguf_filename=None, backbone_device=self.device)
 
     def voices(self) -> List[str]:
         if self._model is not None:
