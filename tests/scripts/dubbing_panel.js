@@ -274,6 +274,59 @@ const SRT = [
         console.log('  ok  văn bản: sequential + hồ sơ giọng + phụ đề khớp tiếng');
     }
 
+    /* ---------- 5. Qwen3-TTS / Chatterbox (v1.1.17): tuỳ chọn engine + môi trường riêng ---------- */
+    {
+        const panel = loadPanel(fakeRuntime());
+        const qwen = {
+            id: 'qwen3', label: 'Qwen3-TTS', available: true, clone: true, env_id: 'qwen', env_ready: true,
+            models: [{ key: 'qwen3-0.6b-custom', ready: true }], voices: ['Ryan'],
+            voice_details: [{ id: 'Ryan', label: 'Ryan', description: '' }],
+            languages: [{ id: 'Auto', label: 'Auto' }, { id: 'English', label: 'English' }],
+            modes: [{ id: 'custom', available: true }, { id: 'clone', available: true },
+                { id: 'design', available: false, reason: 'cần GPU mạnh' }],
+        };
+        const cb = {
+            id: 'chatterbox', label: 'Chatterbox Multilingual', available: true, clone: true, env_id: 'chatterbox', env_ready: false,
+            env_size_mb: 3800, models: [{ key: 'chatterbox-mtl', ready: false }], voices: ['default'],
+            voice_details: [{ id: 'default', label: 'Giọng mặc định', description: '' }],
+            languages: [{ id: 'en', label: 'Tiếng Anh' }, { id: 'fr', label: 'Tiếng Pháp' }],
+        };
+        panel.state.status = { env: { ready: true }, envs: {}, engines: [qwen, cb] };
+        panel.state.profiles = [{ id: 'vp_abc123', name: 'Giọng tôi', ref_text: '', duration: 6 }];
+        panel.state.cues = [{ start: 0, end: 1, text: 'Hello' }];
+
+        panel.state.engine = 'qwen3';
+        panel.state.qwenMode = 'custom';
+        panel.state.voice = 'Ryan';
+        panel.state.languages.qwen3 = 'English';
+        panel.state.instruct = 'Speak happily';
+        panel.state.voiceProfile = 'vp_abc123';
+        let body = panel.jobBody(false);
+        assert.deepStrictEqual(body.engine_options, { mode: 'custom', language: 'English', instruct: 'Speak happily' });
+        assert.strictEqual(body.voice, 'Ryan');
+        assert.ok(!body.voice_profile, 'giọng có sẵn của Qwen không gửi hồ sơ giọng');
+        panel.state.qwenMode = 'clone';
+        body = panel.jobBody(false);
+        assert.strictEqual(body.voice_profile, 'vp_abc123', 'chế độ nhân bản gửi hồ sơ giọng');
+        panel.state.voiceProfile = '';
+        assert.match(panel.validate(false), /hồ sơ giọng/, 'nhân bản mà chưa chọn hồ sơ');
+        panel.state.qwenMode = 'design';
+        assert.match(panel.validate(false), /GPU mạnh/, 'thiết kế giọng trên máy không đủ sức -> báo lý do của server');
+        assert.ok(panel.renderPaneHtml().includes('dubQwenMode'), 'panel vẽ ô chọn chế độ Qwen');
+
+        panel.state.engine = 'chatterbox';
+        assert.match(panel.validate(false), /Cài thêm/, 'môi trường riêng chưa cài -> nhắc bấm "Cài thêm"');
+        assert.ok(panel.renderPaneHtml().includes('data-dub-env-setup="chatterbox"'), 'panel vẽ nút cài thêm');
+        cb.env_ready = true;
+        panel.state.languages.chatterbox = 'fr';
+        panel.state.exaggeration = 0.8;
+        panel.state.cfgWeight = 0.3;
+        body = panel.jobBody(false);
+        assert.deepStrictEqual(body.engine_options, { language: 'fr', exaggeration: 0.8, cfg_weight: 0.3 });
+        assert.ok(panel.renderPaneHtml().includes('dubExaggeration'), 'panel vẽ thanh cảm xúc của Chatterbox');
+        console.log('  ok  Qwen3-TTS / Chatterbox: tuỳ chọn engine, hồ sơ giọng theo chế độ, nút cài môi trường riêng');
+    }
+
     console.log('\nTất cả đều qua.');
 })().catch((error) => {
     console.error(error);

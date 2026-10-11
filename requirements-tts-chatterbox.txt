@@ -1,0 +1,14 @@
+# Môi trường RIÊNG của engine "chatterbox" (Chatterbox Multilingual V3) — v1.1.17, chỉ Windows/Linux
+# (Mac chạy Chatterbox bằng mlx-audio trong môi trường chính). Cài bằng nút "Cài thêm" của engine trong
+# panel Lồng tiếng, hoặc
+#   node scripts/setup_tts.js --env chatterbox
+# torch/torchaudio do setup_tts.js truyền (2.6.0+cu126 — chatterbox-tts ghim torch 2.6, và torch 2.6
+# không có bản cu128).
+#
+# VÌ SAO TÁCH RIÊNG: chatterbox-tts 0.1.7 ghim torch==2.6.0, numpy<2, transformers==5.2.0,
+# diffusers==0.29.0 — xung đột với môi trường chính (torch 2.11, numpy 2 của vieneu).
+chatterbox-tts==0.1.7
+
+fastapi>=0.115
+uvicorn>=0.32
+soundfile>=0.12

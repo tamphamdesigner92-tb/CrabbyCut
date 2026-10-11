@@ -1,0 +1,15 @@
+# Môi trường RIÊNG của engine "qwen3" (Qwen3-TTS) — v1.1.17, chỉ Windows/Linux (Mac chạy Qwen3-TTS
+# bằng mlx-audio trong môi trường chính). Cài bằng nút "Cài thêm" của engine trong panel Lồng tiếng, hoặc
+#   node scripts/setup_tts.js --env qwen
+# torch/torchaudio KHÔNG ghi ở đây: setup_tts.js truyền đúng bản (2.11.0 + cu126/cu128 theo card) trên
+# cùng dòng lệnh pip — xem ENVS.
+#
+# VÌ SAO TÁCH RIÊNG: qwen-tts 0.1.1 ghim transformers==4.57.3 + accelerate==1.12.0 (mã model của nó
+# vỡ với transformers 5.x), còn môi trường chính cần transformers 5 cho VieNeu.
+qwen-tts==0.1.1
+
+fastapi>=0.115
+uvicorn>=0.32
+soundfile>=0.12
+huggingface-hub
+numpy

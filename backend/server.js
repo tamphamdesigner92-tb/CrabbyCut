@@ -7482,9 +7482,10 @@ function createApp() {
     }
   });
 
-  app.post('/api/tts/setup', (_req, res) => {
+  app.post('/api/tts/setup', (req, res) => {
     try {
-      res.json({ status: 'success', ...ttsService.startSetup() });
+      // body.env: 'main' (mặc định) | 'qwen' | 'chatterbox' — môi trường riêng của từng engine nặng.
+      res.json({ status: 'success', ...ttsService.startSetup(String(req.body?.env || 'main')) });
     } catch (error) {
       httpError(res, 500, error);
     }
@@ -7492,7 +7493,7 @@ function createApp() {
 
   app.post('/api/tts/models/ensure', async (req, res) => {
     try {
-      res.json({ status: 'success', ...(await ttsService.ensureModels(String(req.body?.engine || ''))) });
+      res.json({ status: 'success', ...(await ttsService.ensureModels(String(req.body?.engine || ''), req.body?.engine_options)) });
     } catch (error) {
       httpError(res, error?.status || 500, error);
     }

@@ -155,6 +155,68 @@ Biết sẵn từ trước, không thuộc đợt này:
 - Tắt tiếng lane chính không áp vào bản xuất (cả video lẫn âm thanh).
 - Track media bị ẩn thì mất luôn tiếng của nó.
 
+### 7. Thêm Qwen3-TTS và Chatterbox Multilingual (thêm 2026-10-11)
+
+Quyết định của người dùng:
+- **Mỗi engine một môi trường Python riêng.**
+- **Qwen3-TTS:** bản 0.6B cho mọi máy. Bản 1.7B (thiết kế giọng) chỉ mở khi máy có GPU RTX 20 trở lên và từ 8 GB VRAM, hoặc là Mac.
+- **Chatterbox:** chỉ dùng bản chính thức. Bản tiếng Việt cộng đồng "Viterbox" có giấy phép CC BY-NC nên không đưa vào.
+- **Cách cài:** mỗi engine có nút "Cài thêm" riêng trong panel.
+
+Dữ kiện đã kiểm:
+- Cả hai mô hình **không có tiếng Việt**. Qwen3-TTS có 10 ngôn ngữ, Chatterbox có 23.
+- Gói ghim phiên bản cứng nên không chung môi trường được:
+  - `qwen-tts` 0.1.1 ghim transformers 4.57.3.
+  - `chatterbox-tts` 0.1.7 ghim torch 2.6.0, numpy < 2, transformers 5.2.0, diffusers 0.29.0.
+- Gói `chatterbox-tts` 0.1.7 trên PyPI nạp **Multilingual V2**: `t3_mtl23ls_v2` + `s3gen.pt` + `ve.pt`. V3 mới chỉ có trên nhánh main ở GitHub. Bản Mac dùng mlx-community `chatterbox-multilingual-v3`.
+- Mọi tệp Chatterbox xuất ra đều có watermark Perth, panel có ghi chú việc này.
+- Qwen trên Windows in cảnh báo "SoX not found" nhưng vẫn chạy bình thường.
+
+Cách làm:
+- **`scripts/setup_tts.js` có bảng `ENVS`:**
+
+  | Môi trường | Thư mục | Thư viện chính |
+  |---|---|---|
+  | main | `.venv-tts` / `runtime/tts-site` | — |
+  | qwen | `.venv-tts-qwen` | torch 2.11 |
+  | chatterbox | `.venv-tts-chatterbox` | torch 2.6, luôn cu126 vì torch 2.6 không có cu128 |
+
+  - Marker và `revision` tính riêng cho từng môi trường. Lệnh cài: `node scripts/setup_tts.js --env qwen|chatterbox`.
+  - Hàm `nvidiaInfo()` đọc compute capability + VRAM để quyết định có mở chế độ thiết kế giọng hay không.
+- **`tts/server.py`:**
+  - Mỗi môi trường chạy chung tệp này. `CRAB_TTS_ENV` lọc engine: Windows/Linux đặt Qwen3/Chatterbox ở môi trường riêng; Mac để cả năm engine ở môi trường chính, chạy bằng mlx-audio.
+  - `Qwen3Engine`:
+    - Ba chế độ, mỗi chế độ một checkpoint: custom = 0.6B CustomVoice với 9 giọng + instruct; clone = 0.6B Base, dùng lời mẫu nếu có, không có thì dùng x-vector; design = 1.7B VoiceDesign.
+    - dtype fp32 trước Volta, fp16 từ Volta, bf16 từ Ampere.
+  - `ChatterboxEngine`:
+    - 23 ngôn ngữ, giọng mặc định hoặc hồ sơ giọng, hai thanh `exaggeration` và `cfg_weight`.
+    - `Cangjie5_TC.json` được trỏ về kho model thay vì để gói tự tải vào cache HF.
+  - Mọi lệnh MLX đi qua `_mlx_run`, một luồng dùng chung cho VoxCPM, Qwen và Chatterbox.
+- **`backend/tts-service.js`:**
+  - Ba server trên ba cổng: 4124 (chính), 4125 (Qwen), 4126 (Chatterbox).
+  - `engineEnv()` định tuyến job; mỗi `job_id` được nhớ kèm môi trường. Server nào cũng tắt sau mỗi lượt.
+  - Trạng thái gửi cho panel có `envs` và các trường `env_*` của từng engine. `/api/tts/setup` nhận `{env}`.
+- **Panel:** nút "Cài thêm …" khi môi trường chưa cài; chọn chế độ, ngôn ngữ và instruct cho Qwen; chọn ngôn ngữ, giọng hoặc hồ sơ, và hai thanh trượt cho Chatterbox.
+
+Đo trên GTX 1060 6 GB (Windows), một câu tiếng Anh:
+
+| | Nạp | Sinh | Đỉnh VRAM | Sau khi tắt server |
+|---|---|---|---|---|
+| Qwen3 0.6B CustomVoice | 11,9 s | ~15 s cho 3,8 s tiếng | 5.631 MiB (sát 6 GB) | 820 MiB (về nền) |
+| Qwen3 0.6B Base (clone, x-vector) | 11,8 s | ~32 s cho 3 s tiếng | 5.654 MiB | 812 MiB |
+| Chatterbox Multilingual | 46,5 s | — | 4.367 MiB | 778 MiB |
+
+- Qwen nhả model trong tiến trình chỉ về khoảng 4,4 GB. Có thể thư viện còn giữ tham chiếu ở đâu đó, chưa tìm ra. Bước tắt server sau mỗi lượt đã trả hết VRAM, nên chỉ ảnh hưởng khi đặt `CRAB_TTS_KEEP_LOADED=1`.
+- Đã chạy trọn vòng qua giao diện thật: văn bản → Qwen3 (Aiden, English) và văn bản → Chatterbox (en). Cả hai lượt đều có audio và phụ đề, server tự tắt, VRAM về khoảng 790 MiB.
+- Mẫu nghe ở `reports/v1.1.17_mau_giong/`: `qwen3_*`, `chatterbox_mac_dinh.wav`.
+- Test: `test:tts-engines` (mới; sổ engine theo môi trường, chế độ Qwen, ngôn ngữ Chatterbox) và `test:dubbing-panel` (thêm mục 5).
+
+Chưa kiểm:
+- **Mac**: đường MLX của Qwen3 và Chatterbox.
+- **Bản 1.7B VoiceDesign**: máy này không đủ sức chạy.
+- **Bộ cài .exe** (chế độ `site`, `pip --target` với Python nhúng) cho hai môi trường mới.
+- **RTX 50**: Chatterbox sẽ không chạy được GPU, vì torch 2.6 không có sm_120.
+
 ## Chưa làm, chưa kiểm, cần biết
 
 - **Chưa push và chưa tạo PR.** `main` có ruleset nên phải đi PR và qua CI Win+Mac. **Chưa đóng gói** `dist:win`.

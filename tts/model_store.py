@@ -43,6 +43,14 @@ MARKER = ".crab-model.json"
 # Phải đặt TRƯỚC khi huggingface_hub được import lần đầu (nó đọc cờ lúc import).
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
+# Tệp của đường đa ngôn ngữ trong repo ResembleAI/chatterbox — ĐÚNG danh sách `allow_patterns` của
+# ChatterboxMultilingualTTS.from_pretrained ở gói chatterbox-tts 0.1.7 (bản PyPI mới nhất). Bản này nạp
+# V2 (t3_mtl23ls_v2 + s3gen.pt + ve.pt); V3 chỉ có ở nhánh main trên GitHub, chưa phát hành.
+CHATTERBOX_MTL_FILES = [
+    "ve.pt", "t3_mtl23ls_v2.safetensors", "s3gen.pt", "grapheme_mtl_merged_expanded_v1.json",
+    "conds.pt", "Cangjie5_TC.json",
+]
+
 # Mỗi khoá là MỘT repo HuggingFace. `files` = danh sách file cần (None = cả repo trừ `ignore`).
 MODELS: Dict[str, dict] = {
     # VieNeu-TTS v3 Turbo (Apache-2.0, 48 kHz, 25 giọng có sẵn + clone từ mẫu 3-8 s). Repo gộp
@@ -117,6 +125,59 @@ MODELS: Dict[str, dict] = {
         "sha256": {"model.onnx": "3ddd9e56396e6029e0e948ac0255c89c803f981f23dcf4c154f50820bd74a6b3"},
         "files": ["model.onnx"],
         "aihub": "neucodec-onnx",
+    },
+    # ── Qwen3-TTS (Apache-2.0) — v1.1.17. Mỗi repo tự đủ (kèm speech_tokenizer/), nên không cần repo
+    # Qwen3-TTS-Tokenizer-12Hz riêng. 0.6B chạy fp32 vừa GPU 6 GB; 1.7B VoiceDesign chỉ mở khi đủ VRAM.
+    # Windows/Linux đọc bản PyTorch của Qwen; Mac đọc bản MLX của mlx-community (cùng nội dung).
+    "qwen3-0.6b-custom": {
+        "label": "Qwen3-TTS 0.6B (giọng có sẵn)",
+        "repo": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    "qwen3-0.6b-base": {
+        "label": "Qwen3-TTS 0.6B (nhân bản)",
+        "repo": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    "qwen3-1.7b-design": {
+        "label": "Qwen3-TTS 1.7B (thiết kế giọng)",
+        "repo": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    "qwen3-0.6b-custom-mlx": {
+        "label": "Qwen3-TTS 0.6B (giọng có sẵn, MLX)",
+        "repo": "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    "qwen3-0.6b-base-mlx": {
+        "label": "Qwen3-TTS 0.6B (nhân bản, MLX)",
+        "repo": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    "qwen3-1.7b-design-mlx": {
+        "label": "Qwen3-TTS 1.7B (thiết kế giọng, MLX)",
+        "repo": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    # ── Chatterbox Multilingual (MIT, Resemble AI) — v1.1.17. Repo gốc gộp cả bản tiếng Anh, V2, V3
+    # và tệp .pt trùng .safetensors (13,9 GB); chỉ lấy đúng tệp mà gói chatterbox-tts đọc (~3,2 GB).
+    # Mac dùng bản V3 của mlx-community (mlx-audio đã có V3).
+    "chatterbox-mtl": {
+        "label": "Chatterbox Multilingual",
+        "repo": "ResembleAI/chatterbox",
+        "files": CHATTERBOX_MTL_FILES,
+    },
+    "chatterbox-mtl-v3-mlx": {
+        "label": "Chatterbox Multilingual V3 (MLX)",
+        "repo": "mlx-community/chatterbox-multilingual-v3",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
     },
     "voxcpm2-8bit": {
         "label": "VoxCPM2 (MLX 8-bit)",

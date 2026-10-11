@@ -78,6 +78,12 @@
         voiceProfile: '',      // id hồ sơ giọng (Cài đặt → Hồ sơ giọng); rỗng = giọng dựng sẵn
         styleFilter: '',       // lọc danh sách giọng theo phong cách đọc
         describe: '',
+        // Qwen3-TTS / Chatterbox (v1.1.17)
+        qwenMode: 'custom',    // 'custom' | 'clone' | 'design'
+        languages: { qwen3: 'Auto', chatterbox: 'en' },
+        instruct: '',          // Qwen: cảm xúc/phong cách (custom) hoặc mô tả giọng (design)
+        exaggeration: 0.5,     // Chatterbox: độ cảm xúc
+        cfgWeight: 0.5,        // Chatterbox: bám giọng mẫu / nhịp
         speed: 1,
         timingMode: 'auto_fit',
         maxSpeed: 1.45,
@@ -116,10 +122,14 @@
         try {
             const raw = JSON.parse(localStorage.getItem(PREFS_KEY) || 'null');
             if (!raw || typeof raw !== 'object') return;
-            ['engine', 'voice', 'voiceProfile', 'styleFilter', 'describe', 'timingMode', 'startAt', 'sourceMode'].forEach((k) => {
+            ['engine', 'voice', 'voiceProfile', 'styleFilter', 'describe', 'timingMode', 'startAt', 'sourceMode',
+                'qwenMode', 'instruct'].forEach((k) => {
                 if (typeof raw[k] === 'string') state[k] = raw[k];
             });
-            ['speed', 'maxSpeed', 'gap'].forEach((k) => { if (Number.isFinite(Number(raw[k]))) state[k] = Number(raw[k]); });
+            ['speed', 'maxSpeed', 'gap', 'exaggeration', 'cfgWeight'].forEach((k) => { if (Number.isFinite(Number(raw[k]))) state[k] = Number(raw[k]); });
+            if (raw.languages && typeof raw.languages === 'object') {
+                Object.entries(raw.languages).forEach(([k, v]) => { if (typeof v === 'string') state.languages[k] = v; });
+            }
             ['split', 'replace', 'makeSubs'].forEach((k) => { if (typeof raw[k] === 'boolean') state[k] = raw[k]; });
             // F5-TTS gỡ ở v1.1.17: prefs cũ trỏ vào nó -> về engine mặc định.
             if (state.engine === 'f5') { state.engine = DEFAULT_ENGINE; state.voice = DEFAULT_V3_VOICE; }
@@ -130,7 +140,7 @@
         try {
             const keep = {};
             ['engine', 'voice', 'voiceProfile', 'styleFilter', 'describe', 'speed', 'timingMode', 'maxSpeed', 'startAt', 'split', 'replace',
-                'sourceMode', 'gap', 'makeSubs']
+                'sourceMode', 'gap', 'makeSubs', 'qwenMode', 'languages', 'instruct', 'exaggeration', 'cfgWeight']
                 .forEach((k) => { keep[k] = state[k]; });
             localStorage.setItem(PREFS_KEY, JSON.stringify(keep));
         } catch (_) { /* no-op */ }
@@ -168,7 +178,9 @@
         await refreshProfiles({ paint: false });
         // Đang cài thư viện thì hỏi lại đều đặn để nút "Cài đặt" tự biến mất khi xong.
         clearTimeout(statusTimer);
-        if (state.status?.env?.setup_in_progress) statusTimer = setTimeout(refreshStatus, 3000);
+        const installing = state.status?.env?.setup_in_progress
+            || Object.values(state.status?.envs || {}).some((e) => e?.setup_in_progress);
+        if (installing) statusTimer = setTimeout(refreshStatus, 3000);
         repaint();
     }
 
@@ -189,9 +201,9 @@
     function currentEngine() { return engines().find((e) => e.id === state.engine) || null; }
     function engineModelsReady(engine) { return (engine?.models || []).every((m) => m.ready); }
 
-    async function startSetup() {
+    async function startSetup(envId = 'main') {
         try {
-            await api('POST', '/tts/setup');
+            await api('POST', '/tts/setup', { env: envId });
             window.ModelDownloadStatus?.kick();
             toast(_t('Đang cài thư viện lồng tiếng — tiến trình ở góc trái thanh trạng thái.'), 'info');
         } catch (error) {
@@ -381,7 +393,22 @@
 
     // Engine đang chọn có nhận hồ sơ giọng không (server báo `clone`).
     function usesProfile() {
-        return !!(state.voiceProfile && currentEngine()?.clone);
+        const engine = currentEngine();
+        if (!state.voiceProfile || !engine?.clone) return false;
+        // Qwen3-TTS: chỉ chế độ nhân bản dùng giọng mẫu (giọng có sẵn / thiết kế giọng thì không).
+        if (state.engine === 'qwen3') return state.qwenMode === 'clone';
+        return true;
+    }
+
+    // Tuỳ chọn riêng của engine -> body.engine_options (server.py đọc ở Qwen3Engine / ChatterboxEngine).
+    function engineOptions() {
+        if (state.engine === 'qwen3') {
+            return { mode: state.qwenMode, language: state.languages.qwen3 || 'Auto', instruct: state.instruct || '' };
+        }
+        if (state.engine === 'chatterbox') {
+            return { language: state.languages.chatterbox || 'en', exaggeration: state.exaggeration, cfg_weight: state.cfgWeight };
+        }
+        return {};
     }
 
     function jobBody(preview) {
@@ -398,6 +425,8 @@
         };
         if (text) body.gap = state.gap;
         if (usesProfile()) body.voice_profile = state.voiceProfile;
+        const options = engineOptions();
+        if (Object.keys(options).length) body.engine_options = options;
         if (preview) {
             body.preview = true;
             const first = activeCues().find((c) => String(c.text || '').trim());
@@ -413,6 +442,15 @@
         if (!state.status?.env?.ready) return _t('Chưa cài thư viện lồng tiếng — bấm "Cài thư viện lồng tiếng" ở trên.');
         if (!engine) return _t('Chọn một mô hình giọng đọc.');
         if (!engine.available) return engine.reason || _t('Mô hình này không chạy được trên máy này.');
+        if (engine.env_id && engine.env_id !== 'main' && !engine.env_ready) {
+            return _t('{name} cần cài thêm thư viện riêng — bấm "Cài thêm {name}" ở trên.', { name: engine.label });
+        }
+        if (state.engine === 'qwen3') {
+            const mode = (engine.modes || []).find((m) => m.id === state.qwenMode);
+            if (mode && !mode.available) return mode.reason || _t('Chế độ này không chạy được trên máy này.');
+            if (state.qwenMode === 'clone' && !state.voiceProfile) return _t('Chế độ nhân bản cần một hồ sơ giọng — chọn ở ô "Hồ sơ giọng" hoặc tạo trong Cài đặt.');
+            if (state.qwenMode === 'design' && !String(state.instruct || '').trim()) return _t('Thiết kế giọng cần một câu mô tả giọng.');
+        }
         // Nghe thử không cần câu nào: server đọc câu mẫu (PREVIEW_TEXT) khi text rỗng.
         if (!preview) {
             if (!activeCues().length) {
@@ -708,6 +746,7 @@
 
     function engineOptionLabel(engine) {
         if (!engine.available) return `${engine.label} — ${_t('không hỗ trợ trên máy này')}`;
+        if (engine.env_id && engine.env_id !== 'main' && !engine.env_ready) return `${engine.label} — ${_t('cần cài thêm')}`;
         if (!engineModelsReady(engine)) {
             return engine.size_mb
                 ? `${engine.label} — ${_t('tải ~{size} lần đầu', { size: engine.size_mb >= 1000 ? `${(engine.size_mb / 1000).toFixed(1)} GB` : `${engine.size_mb} MB` })}`
@@ -716,12 +755,99 @@
         return engine.label;
     }
 
+    // Khối "cài thêm" cho engine có môi trường Python riêng (Qwen3-TTS, Chatterbox trên Windows).
+    function renderEnvSetupHtml(engine) {
+        const busy = !!engine.env_setup_in_progress;
+        const size = engine.env_size_mb >= 1000 ? `${(engine.env_size_mb / 1000).toFixed(1).replace('.', ',')} GB` : `${engine.env_size_mb} MB`;
+        return `
+            <div class="edit-dub-setup">
+                <div class="edit-sub-warn">${_t('{name} dùng bộ thư viện riêng (không đụng tới VieNeu) — cần cài thêm một lần, khoảng {size}, chưa gồm mô hình.', { name: esc(engine.label), size })}</div>
+                <div class="edit-sub-actions">
+                    <button class="btn btn-primary" type="button" data-dub-env-setup="${esc(engine.env_id)}" ${busy ? 'disabled' : ''}>
+                        ${busy ? _t('Đang cài… (xem thanh trạng thái)') : _t('Cài thêm {name}', { name: esc(engine.label) })}
+                    </button>
+                </div>
+                ${engine.env_setup_error ? `<div class="edit-sub-error">${esc(engine.env_setup_error).replace(/\n/g, '<br>')}</div>` : ''}
+            </div>`;
+    }
+
+    function languageSelectHtml(engine, disabled) {
+        const list = engine.languages || [];
+        if (!list.length) return '';
+        const current = state.languages[state.engine] || list[0].id;
+        return `
+            <label class="edit-sub-label" for="dubLanguage">${_t('Ngôn ngữ của văn bản')}</label>
+            <select id="dubLanguage" class="edit-sub-input" ${disabled}>
+                ${list.map((l) => `<option value="${esc(l.id)}"${l.id === current ? ' selected' : ''}>${esc(l.id === 'Auto' ? _t('Tự nhận diện') : l.label)}</option>`).join('')}
+            </select>
+            <div class="edit-sub-hint">${_t('Mô hình này không đọc được tiếng Việt — dùng VieNeu-TTS cho tiếng Việt.')}</div>`;
+    }
+
+    function profileSelectHtml(disabled) {
+        if (!state.profiles.length) {
+            return `<div class="edit-sub-hint">${_t('Chưa có hồ sơ giọng nào.')}</div>
+                <div class="edit-dub-row"><button class="btn btn-secondary" type="button" data-dub-profiles>${_t('Tạo hồ sơ giọng nhân bản…')}</button></div>`;
+        }
+        return `
+            <label class="edit-sub-label" for="dubProfile">${_t('Hồ sơ giọng')}</label>
+            <select id="dubProfile" class="edit-sub-input" ${disabled}>
+                <option value="">${_t('— Chọn hồ sơ giọng —')}</option>
+                ${state.profiles.map((p) => `<option value="${esc(p.id)}"${p.id === state.voiceProfile ? ' selected' : ''}>${esc(p.name)}${p.ref_text ? '' : ` (${esc(_t('không có lời mẫu'))})`}</option>`).join('')}
+            </select>
+            <div class="edit-sub-hint">${_t('Hồ sơ có "Lời nói trong mẫu" cho giọng giống hơn; không có thì chỉ lấy đặc trưng giọng.')}</div>
+            <div class="edit-dub-row"><button class="btn btn-secondary" type="button" data-dub-profiles>${_t('Quản lý hồ sơ giọng…')}</button></div>`;
+    }
+
+    function renderQwenHtml(engine, disabled) {
+        const modes = engine.modes || [];
+        const labels = { custom: _t('Giọng có sẵn'), clone: _t('Nhân bản giọng'), design: _t('Thiết kế giọng bằng mô tả') };
+        const mode = modes.find((m) => m.id === state.qwenMode) || modes[0] || { id: 'custom', available: true };
+        let body = '';
+        if (mode.id === 'custom') {
+            body = renderPresetVoicesHtml({ ...engine, clone: false }, disabled) + `
+                <label class="edit-sub-label" for="dubInstruct">${_t('Cảm xúc / phong cách (tuỳ chọn)')}</label>
+                <input id="dubInstruct" class="edit-sub-input" type="text" value="${esc(state.instruct)}" placeholder="${esc(_t('Ví dụ: Speak happily and energetically'))}" ${disabled}>`;
+        } else if (mode.id === 'clone') {
+            body = profileSelectHtml(disabled);
+        } else {
+            body = `
+                <label class="edit-sub-label" for="dubInstruct">${_t('Mô tả giọng')}</label>
+                <input id="dubInstruct" class="edit-sub-input" type="text" value="${esc(state.instruct)}" placeholder="${esc(_t('Ví dụ: A calm, deep male voice, speaking slowly'))}" ${disabled}>`;
+        }
+        return `
+            <label class="edit-sub-label" for="dubQwenMode">${_t('Chế độ')}</label>
+            <select id="dubQwenMode" class="edit-sub-input" ${disabled}>
+                ${modes.map((m) => `<option value="${esc(m.id)}"${m.id === mode.id ? ' selected' : ''}${m.available ? '' : ' disabled'}>${esc(labels[m.id] || m.id)}${m.available ? '' : ` — ${esc(_t('máy này chưa đủ sức'))}`}</option>`).join('')}
+            </select>
+            ${mode.available === false && mode.reason ? `<div class="edit-sub-warn">${esc(mode.reason)}</div>` : ''}
+            ${languageSelectHtml(engine, disabled)}
+            ${body}`;
+    }
+
+    function renderChatterboxHtml(engine, disabled) {
+        return `
+            ${languageSelectHtml(engine, disabled)}
+            ${renderPresetVoicesHtml(engine, disabled)}
+            <label class="edit-sub-label" for="dubExaggeration">${_t('Độ cảm xúc')} · ${state.exaggeration.toFixed(2)}</label>
+            <input id="dubExaggeration" type="range" min="0.25" max="2" step="0.05" value="${state.exaggeration}" ${disabled}>
+            <label class="edit-sub-label" for="dubCfg">${_t('Bám giọng mẫu / nhịp đọc')} · ${state.cfgWeight.toFixed(2)}</label>
+            <input id="dubCfg" type="range" min="0" max="1" step="0.05" value="${state.cfgWeight}" ${disabled}>
+            <div class="edit-sub-hint">${_t('Cảm xúc cao thì nên hạ "Bám giọng mẫu" (~0,3) để nhịp đọc chậm lại. Tệp do Chatterbox tạo có gắn watermark không nghe thấy (Perth).')}</div>`;
+    }
+
     function renderVoiceHtml() {
         const list = engines();
         const engine = currentEngine();
         const disabled = state.busy ? 'disabled' : '';
         let voiceHtml = '';
-        if (engine && (state.engine === 'vieneu3' || state.engine === 'vieneu')) {
+        const needsEnv = engine && engine.env_id && engine.env_id !== 'main' && !engine.env_ready && engine.available;
+        if (needsEnv) {
+            voiceHtml = renderEnvSetupHtml(engine);
+        } else if (engine && state.engine === 'qwen3') {
+            voiceHtml = renderQwenHtml(engine, disabled);
+        } else if (engine && state.engine === 'chatterbox') {
+            voiceHtml = renderChatterboxHtml(engine, disabled);
+        } else if (engine && (state.engine === 'vieneu3' || state.engine === 'vieneu')) {
             voiceHtml = renderPresetVoicesHtml(engine, disabled);
         } else if (engine && state.engine === 'voxcpm') {
             voiceHtml = `
@@ -734,13 +860,14 @@
                 <select id="dubEngine" class="edit-sub-input" ${disabled}>
                     ${list.map((e) => `<option value="${esc(e.id)}"${e.id === state.engine ? ' selected' : ''}${e.available ? '' : ' disabled'}>${esc(engineOptionLabel(e))}</option>`).join('')}
                 </select>
-                ${engine && !engineModelsReady(engine) && engine.available ? `<div class="edit-sub-hint">${_t('Lần đầu dùng sẽ tải mô hình — tiến trình hiện ở góc trái thanh trạng thái.')}</div>` : ''}
+                ${engine && !needsEnv && !engineModelsReady(engine) && engine.available ? `<div class="edit-sub-hint">${_t('Lần đầu dùng sẽ tải mô hình — tiến trình hiện ở góc trái thanh trạng thái.')}</div>` : ''}
                 ${voiceHtml}
+                ${needsEnv ? '' : `
                 <label class="edit-sub-label" for="dubSpeed">${_t('Tốc độ đọc')} · ${state.speed.toFixed(2)}x</label>
                 <input id="dubSpeed" type="range" min="0.8" max="1.3" step="0.05" value="${state.speed}" ${disabled}>
                 <div class="edit-sub-actions">
                     <button class="btn btn-secondary" type="button" data-dub-preview ${state.busy ? 'disabled' : ''}>${_t('Nghe thử')}</button>
-                </div>
+                </div>`}
             </div>`;
     }
 
@@ -856,6 +983,8 @@
             const t = event.target;
             if (t.closest('[data-dub-pick]')) { if (!state.busy) fileInput?.click(); return; }
             if (t.closest('[data-dub-setup]')) { startSetup(); return; }
+            const envBtn = t.closest('[data-dub-env-setup]');
+            if (envBtn) { startSetup(envBtn.dataset.dubEnvSetup); return; }
             const modeBtn = t.closest('[data-dub-mode]');
             if (modeBtn) {
                 if (state.busy) return;
@@ -899,6 +1028,9 @@
                 if (t.value.startsWith('profile:')) state.voiceProfile = t.value.slice('profile:'.length);
                 else { state.voiceProfile = ''; state.voice = t.value; }
             } else if (t.id === 'dubStyle') state.styleFilter = t.value;
+            else if (t.id === 'dubQwenMode') state.qwenMode = ['custom', 'clone', 'design'].includes(t.value) ? t.value : 'custom';
+            else if (t.id === 'dubLanguage') state.languages[state.engine] = t.value;
+            else if (t.id === 'dubProfile') state.voiceProfile = t.value;
             else if (t.id === 'dubGap') state.gap = Number(t.value) || 0.4;
             else if (t.matches('[data-dub-subs]')) state.makeSubs = !!t.checked;
             else if (t.id === 'dubTiming') state.timingMode = TIMING_MODES.some((m) => m.id === t.value) ? t.value : 'auto_fit';
@@ -920,6 +1052,13 @@
                 if (count) count.textContent = `${state.textName ? `${state.textName} · ` : ''}${_t('{n} câu', { n: textCues().length })}`;
                 const startBtn = zone.querySelector('[data-dub-start]');
                 if (startBtn) startBtn.disabled = !textCues().length;
+            } else if (t.id === 'dubInstruct') { state.instruct = t.value; savePrefs(); }
+            else if (t.id === 'dubExaggeration' || t.id === 'dubCfg') {
+                const key = t.id === 'dubExaggeration' ? 'exaggeration' : 'cfgWeight';
+                state[key] = Number(t.value) || 0;
+                const label = zone.querySelector(`label[for="${t.id}"]`);
+                if (label) label.textContent = `${t.id === 'dubExaggeration' ? _t('Độ cảm xúc') : _t('Bám giọng mẫu / nhịp đọc')} · ${state[key].toFixed(2)}`;
+                savePrefs();
             } else if (t.id === 'dubDescribe') { state.describe = t.value; savePrefs(); }
             else if (t.id === 'dubSpeed') {
                 state.speed = Math.max(0.8, Math.min(1.3, Number(t.value) || 1));
