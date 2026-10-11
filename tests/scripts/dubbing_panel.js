@@ -7,8 +7,11 @@
  *      (result.full.start), không phải 00:00.
  *   2. "Mỗi câu một clip": đặt từng câu tại mốc THẬT sau khi xếp (clip.start), không phải mốc
  *      phụ đề — câu bị đẩy lùi vì câu trước tràn phải nằm đúng chỗ đã đẩy.
- *   3. KIỂM TRƯỚC KHI GỬI: F5 thiếu giọng mẫu/lời mẫu, chưa cài môi trường, timeline trống —
- *      báo ngay, không gửi job để rồi chết sau vài phút tải model.
+ *   3. KIỂM TRƯỚC KHI GỬI: chưa cài môi trường, chưa có câu/văn bản, timeline trống — báo ngay,
+ *      không gửi job để rồi chết sau vài phút tải model.
+ *   4. VĂN BẢN KHÔNG MỐC (v1.1.17): tách câu, gửi chế độ "sequential" + khoảng nghỉ, chọn hồ sơ
+ *      giọng thì gửi id (không gửi tên giọng dựng sẵn), và phụ đề sinh kèm đúng mốc tiếng đọc
+ *      (+ playhead), câu dài chia thành nhiều block theo tỉ lệ ký tự.
  *
  * DOM giả + fetch giả, không cần trình duyệt hay server TTS.
  * Chạy: npm run test:dubbing-panel
@@ -20,8 +23,9 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..', '..');
 const SF = require(path.join(ROOT, 'static', 'js', 'subtitle-formats.js'));
 
-function loadPanel(ER) {
+function loadPanel(ER, extra = {}) {
     const win = {
+        ...extra,
         document: { getElementById: () => null, createElement: () => ({}), head: { insertBefore: () => {} } },
         setTimeout, clearTimeout, console,
         SubtitleFormats: SF,
@@ -57,7 +61,14 @@ const READY_STATUS = {
     env: { ready: true, setup_in_progress: false },
     server: { running: true },
     engines: [
-        { id: 'f5', label: 'F5', available: true, voices: [], models: [{ key: 'f5-vi', ready: true }] },
+        {
+            id: 'vieneu3', label: 'VieNeu v3', available: true, clone: true, models: [{ key: 'vieneu3-torch', ready: true }],
+            voices: ['Hải Đăng', 'Mai Anh'],
+            voice_details: [
+                { id: 'Hải Đăng', label: 'Hải Đăng', description: 'Nam · Bắc · Phong cách tự nhiên' },
+                { id: 'Mai Anh', label: 'Mai Anh', description: 'Nữ · Bắc · Phong cách tin tức' },
+            ],
+        },
         { id: 'vieneu', label: 'VieNeu', available: true, voices: ['Ly', 'Ngoc'], models: [{ key: 'vieneu-tts', ready: false }] },
     ],
 };
@@ -74,6 +85,7 @@ function installFetch(result) {
         seen.push({ url, method: init.method || 'GET', body });
         let data;
         if (url.endsWith('/tts/status')) data = READY_STATUS;
+        else if (url.endsWith('/voice-profiles')) data = { profiles: [{ id: 'vp_abc123', name: 'Giọng tôi', ref_text: '', duration: 6 }] };
         else if (url.endsWith('/dubbing/jobs') && init.method === 'POST') data = { job_id: 'dub_1', state: 'running', stage: 'models', done: 0, total: 2 };
         else if (url.includes('/dubbing/jobs/dub_1')) data = { job_id: 'dub_1', state: 'done', stage: 'done', done: 2, total: 2, warnings: [], result };
         else data = {};
@@ -103,15 +115,12 @@ const SRT = [
         panel.state.status = { env: { ready: false }, engines: [] };
         assert.match(panel.validate(false), /Cài thư viện/, 'chưa cài môi trường -> nhắc bấm nút cài');
         panel.state.status = READY_STATUS;
-        panel.state.engine = 'f5';
-        panel.state.refPath = '';
-        assert.match(panel.validate(true), /giọng mẫu/, 'F5 thiếu tệp giọng mẫu');
-        panel.state.refPath = 'C:\\mau.wav';
-        panel.state.refText = '   ';
-        assert.match(panel.validate(true), /Lời|lời/, 'F5 thiếu lời của giọng mẫu');
-        panel.state.refText = 'xin chào';
-        assert.strictEqual(panel.validate(true), '', 'nghe thử F5 đủ điều kiện');
+        panel.state.engine = 'vieneu3';
+        assert.strictEqual(panel.validate(true), '', 'nghe thử không cần câu nào (server đọc câu mẫu)');
         assert.match(panel.validate(false), /phụ đề/, 'lồng tiếng mà chưa có câu nào');
+        panel.state.sourceMode = 'text';
+        panel.state.text = '   ';
+        assert.match(panel.validate(false), /văn bản/, 'chế độ văn bản mà chưa có chữ');
         const empty = loadPanel(fakeRuntime({ total: 0 }));
         empty.state.status = READY_STATUS;
         empty.state.engine = 'vieneu';
@@ -130,7 +139,7 @@ const SRT = [
         panel.state.voice = 'Ngoc';
         const body = panel.jobBody(false);
         assert.strictEqual(body.voice, 'Ngoc');
-        assert.strictEqual(body.ref_audio, '', 'VieNeu không gửi giọng mẫu');
+        assert.ok(!('ref_audio' in body) && !('voice_profile' in body), 'không chọn hồ sơ -> không gửi giọng mẫu');
         assert.strictEqual(body.cues.length, 3);
         assert.strictEqual(body.name, 'Phim A (lồng tiếng)', 'tên tệp ra theo tên phụ đề');
         const preview = panel.jobBody(true);
@@ -204,6 +213,65 @@ const SRT = [
         assert.strictEqual(entry.path, 'C:\\out\\1.wav');
         assert.strictEqual(ER.calls[0].options.sourceKey, 'set:auto');
         console.log('  ok  bộ phụ đề trên timeline + mỗi câu một clip: đúng mốc thật, không cộng playhead');
+    }
+
+    /* ---------- 4. Văn bản không mốc + hồ sơ giọng + phụ đề sinh kèm ---------- */
+    {
+        const P = loadPanel(fakeRuntime());
+        assert.deepStrictEqual(
+            P.splitSentences('Xin chào các bạn. Hôm nay trời đẹp!\n\nTiêu đề không dấu chấm\nCâu cuối…'),
+            ['Xin chào các bạn.', 'Hôm nay trời đẹp!', 'Tiêu đề không dấu chấm', 'Câu cuối…'],
+            'tách theo dấu câu và xuống dòng, bỏ dòng trống');
+        const long = `${'một hai ba bốn, '.repeat(30)}hết.`;
+        assert.ok(P.splitSentences(long).every((x) => x.length <= 220), 'câu quá dài bị cắt nhỏ');
+        const subs = P.subtitleCuesFromClips([
+            { start: 0, duration: 2, text: 'Ngắn.' },
+            { start: 2.4, duration: 6, text: `${'a'.repeat(50)} ${'b'.repeat(50)}` },
+        ], 10);
+        assert.strictEqual(subs.length, 3, 'câu > 84 ký tự chia hai block');
+        assert.deepStrictEqual([subs[0].start, subs[0].end], [10, 12], 'cộng mốc bắt đầu');
+        assert.ok(Math.abs(subs[1].start - 12.4) < 1e-9 && Math.abs(subs[2].end - 18.4) < 1e-9, 'các block phủ đúng khoảng tiếng đọc');
+        console.log('  ok  tách câu + chia phụ đề theo tiếng đọc');
+    }
+    {
+        const ER = fakeRuntime({ playhead: 5 });
+        const imported = [];
+        const LocalSubtitlePanel = { importCues: (cues, meta) => { imported.push({ cues, meta }); return { count: cues.length }; } };
+        const panel = loadPanel(ER, { LocalSubtitlePanel });
+        installFetch({
+            full: { path: 'C:\\out\\full.wav', start: 0, duration: 4 },
+            clips: [{ start: 0, duration: 1.5, text: 'Câu một.' }, { start: 1.9, duration: 2.1, text: 'Câu hai.' }],
+            summary: { count: 2 }, skipped: {},
+        });
+        await panel.refreshStatus();
+        panel.state.engine = 'vieneu3';
+        panel.state.sourceMode = 'text';
+        panel.state.text = 'Câu một. Câu hai.';
+        panel.state.textName = '';
+        panel.state.gap = 0.4;
+        panel.state.startAt = 'playhead';
+        panel.state.makeSubs = true;
+        panel.state.split = false;
+        panel.state.voiceProfile = 'vp_abc123';
+        const body = panel.jobBody(false);
+        assert.strictEqual(body.timing_mode, 'sequential');
+        assert.strictEqual(body.gap, 0.4);
+        assert.strictEqual(body.voice_profile, 'vp_abc123', 'gửi id hồ sơ giọng');
+        assert.strictEqual(body.voice, '', 'chọn hồ sơ thì không gửi giọng dựng sẵn');
+        assert.deepStrictEqual(body.cues.map((c) => c.text), ['Câu một.', 'Câu hai.']);
+        assert.ok(panel.renderPaneHtml().includes('Giọng tôi'), 'danh sách giọng có hồ sơ của người dùng');
+        let clickHandler = null;
+        const zone = { querySelector: () => null, addEventListener: (type, fn) => { if (type === 'click') clickHandler = fn; } };
+        panel.bindPane({ querySelector: (sel) => (sel === '[data-dub-zone]' ? zone : null) });
+        clickHandler({ target: { closest: (sel) => (sel === '[data-dub-start]' ? {} : null) } });
+        await waitFor(() => ER.calls.length === 1 && imported.length === 1);
+        assert.strictEqual(ER.calls[0].entries[0].start, 5, 'audio văn bản đặt từ playhead');
+        assert.strictEqual(ER.calls[0].options.sourceKey, 'text:typed');
+        assert.deepStrictEqual(imported[0].cues.map((c) => [c.start, c.end]), [[5, 6.5], [6.9, 9]], 'phụ đề khớp mốc tiếng + playhead');
+        panel.state.makeSubs = false;
+        panel.state.voiceProfile = '';
+        assert.strictEqual(panel.jobBody(false).voice_profile, undefined);
+        console.log('  ok  văn bản: sequential + hồ sơ giọng + phụ đề khớp tiếng');
     }
 
     console.log('\nTất cả đều qua.');

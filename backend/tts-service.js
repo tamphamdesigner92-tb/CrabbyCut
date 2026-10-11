@@ -270,6 +270,8 @@ async function status() {
       mode: env.mode,
       location: env.location,
       setup_in_progress: SetupTts.setupInProgress(),
+      // 'cu126' | 'cu128' | 'default'… — panel báo trước dung lượng tải khi máy sẽ lấy torch GPU.
+      torch_variant: SetupTts.torchVariant().id,
       setup_error: setupError,
     },
     server: { running: !!live, port: PORT, model_root: modelDir() },
@@ -348,6 +350,8 @@ async function createJob(params = {}) {
     speed: Number(params.speed) || 1,
     timing_mode: String(params.timing_mode || 'auto_fit'),
     max_speed: Number(params.max_speed) || 1.45,
+    // Nghỉ giữa câu khi đọc văn bản không mốc (timing_mode "sequential"); kẹp 0-3 s.
+    ...(params.gap != null && Number.isFinite(Number(params.gap)) ? { gap: Math.max(0, Math.min(3, Number(params.gap))) } : {}),
     split_clips: !!params.split_clips,
     preview: !!params.preview,
     text: params.text ? String(params.text) : '',

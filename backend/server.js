@@ -388,6 +388,7 @@ const subtitleJobs = require('./subtitle-jobs.js');
 /* LỒNG TIẾNG (tab Âm thanh) + SỔ TẢI MODEL AI cho thanh trạng thái — xem đầu hai tệp. */
 const ttsService = require('./tts-service.js');
 const modelDownloads = require('./model-downloads.js');
+const { createVoiceProfiles } = require('./voice-profiles.js');
 const { createLogoAi } = require('./logo-ai.js');
 const { createRetouchFramesHandler } = require('./retouch-frames.js');
 const { createPrebakeCache } = require('./prebake-cache.js');
@@ -463,6 +464,10 @@ subtitleJobs.init({
   resolveSourcePath: (raw) => resolveSubtitleSourcePath(raw),
   transcribe: (audioPath, opts) => transcribeSubtitleMix(audioPath, opts),
 });
+
+/* Hồ sơ giọng (Cài đặt → Hồ sơ giọng): nằm ở gốc dữ liệu người dùng để sống qua cài lại/nâng cấp
+ * — xem đầu backend/voice-profiles.js. */
+const voiceProfiles = createVoiceProfiles({ rootDir: path.join(USER_DATA_ROOT, 'voice_profiles') });
 
 ttsService.init({
   tempDir: TEMP_DIR,
@@ -7465,9 +7470,56 @@ function createApp() {
     }
   });
 
+  /* ===== HỒ SƠ GIỌNG (Cài đặt → Hồ sơ giọng) ===== */
+  app.get('/api/voice-profiles', (_req, res) => {
+    try {
+      res.json({ status: 'success', dir: voiceProfiles.root(), profiles: voiceProfiles.list() });
+    } catch (error) {
+      httpError(res, error?.status || 500, error);
+    }
+  });
+
+  app.post('/api/voice-profiles', async (req, res) => {
+    try {
+      res.json({ status: 'success', profile: await voiceProfiles.create(req.body || {}) });
+    } catch (error) {
+      httpError(res, error?.status || 500, error);
+    }
+  });
+
+  app.patch('/api/voice-profiles/:id', (req, res) => {
+    try {
+      res.json({ status: 'success', profile: voiceProfiles.update(req.params.id, req.body || {}) });
+    } catch (error) {
+      httpError(res, error?.status || 500, error);
+    }
+  });
+
+  app.delete('/api/voice-profiles/:id', (req, res) => {
+    try {
+      res.json({ status: 'success', ...voiceProfiles.remove(req.params.id) });
+    } catch (error) {
+      httpError(res, error?.status || 500, error);
+    }
+  });
+
+  app.get('/api/voice-profiles/:id/audio', (req, res) => {
+    try {
+      res.sendFile(voiceProfiles.audioPath(req.params.id), { headers: { 'Cache-Control': 'no-store' } });
+    } catch (error) {
+      httpError(res, error?.status || 500, error);
+    }
+  });
+
   app.post('/api/dubbing/jobs', async (req, res) => {
     try {
       const body = req.body || {};
+      // Hồ sơ giọng thắng tệp mẫu rời: panel chỉ gửi id, đường dẫn thật do backend tra.
+      if (body.voice_profile) {
+        const ref = voiceProfiles.resolveForDubbing(String(body.voice_profile));
+        body.ref_audio = ref.ref_audio;
+        body.ref_text = ref.ref_text;
+      }
       if (body.ref_audio) {
         const resolved = path.resolve(String(body.ref_audio));
         if (!fs.existsSync(resolved)) return httpError(res, 400, _t('Không tìm thấy tệp giọng mẫu: {path}', { path: resolved }));

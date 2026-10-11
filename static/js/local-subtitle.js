@@ -81,7 +81,9 @@
         if (!(total > 0)) {
             throw new Error(_t('Timeline chưa có video nào. Thêm video vào lane chính trước — phụ đề được khớp theo mốc thời gian của timeline.'));
         }
-        const offset = state.startAt === 'playhead' ? (Number(runtime.currentSequenceTime?.()) || 0) : 0;
+        // meta.startAt: người gọi ngoài panel (Lồng tiếng) đưa mốc đã là mốc timeline -> 'zero'.
+        const startAt = meta?.startAt || state.startAt;
+        const offset = startAt === 'playhead' ? (Number(runtime.currentSequenceTime?.()) || 0) : 0;
         const firstStart = parsed.cues[0].start;
         const shiftedHours = (firstStart >= BROADCAST_HOUR && firstStart + offset >= total)
             ? Math.floor(firstStart / BROADCAST_HOUR)
@@ -132,7 +134,7 @@
                 source_name: fileName,
                 format: parsed.format,
                 language,
-                start_at: state.startAt,
+                start_at: startAt,
                 offset: shift,
                 // Bật sẵn như bộ của Auto Subtitle — xem subtitleStyleSyncEnabled.
                 sync_style: existing ? existing.sync_style !== false : true,
@@ -433,12 +435,24 @@
         repaint();
     }
 
+    /* Cho "Lồng tiếng" từ văn bản (v1.1.17): câu đã có mốc timeline thật -> một bộ phụ đề như bộ
+     * nhập từ tệp (sửa, đổi kiểu, xuất SRT được). Cùng `fileName` thì thay bộ cũ — lồng lại cùng
+     * văn bản không để lại hai lớp phụ đề chồng nhau. */
+    function importCues(cues, { fileName = 'dubbing.srt', language = '' } = {}) {
+        const list = (cues || []).filter((c) => Number(c.end) > Number(c.start) && String(c.text || '').trim());
+        if (!list.length) return { set: null, count: 0, skipped: 0, clamped: 0, replaced: false };
+        const result = applyImport({ cues: list, format: 'dubbing', language }, { fileName, startAt: 'zero' });
+        repaint();
+        return result;
+    }
+
     window.LocalSubtitlePanel = {
         renderPaneHtml,
         bindPane,
         resetState,
         state,
         START_OPTIONS,
+        importCues,
         // Mở ra cho test (tests/scripts/subtitle_import.js).
         applyImport,
         importFiles,
