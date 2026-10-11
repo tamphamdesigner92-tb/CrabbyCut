@@ -593,6 +593,17 @@ ipcMain.handle('save-frame-image', async (_event, { dataBase64, suggestedName })
   }
 });
 
+/* Đuôi được phép + tên bộ lọc của hộp lưu. Đuôi âm thanh (v1.1.17): chỉ tích ô "Audio" ở hộp Xuất
+ * thì tệp đích là tệp âm thanh (xem trustedExportOutputPath — backend kiểm lại đúng đuôi này). */
+const EXPORT_OUTPUT_KINDS = {
+  mp4: { filter: () => _t('Video MP4'), title: () => _t('Lưu video xuất') },
+  mov: { filter: () => _t('Video QuickTime'), title: () => _t('Lưu video xuất') },
+  mp3: { filter: () => _t('Âm thanh MP3'), title: () => _t('Lưu âm thanh xuất') },
+  wav: { filter: () => _t('Âm thanh WAV'), title: () => _t('Lưu âm thanh xuất') },
+  m4a: { filter: () => _t('Âm thanh AAC'), title: () => _t('Lưu âm thanh xuất') },
+  flac: { filter: () => _t('Âm thanh FLAC'), title: () => _t('Lưu âm thanh xuất') },
+};
+
 /* CHỌN CHỖ LƯU VIDEO XUẤT — TRƯỚC khi render (mục 1.16, người dùng chốt 2026-09-29: như
  * Premiere). ffmpeg ghi thẳng ra đó, không còn vòng tải file qua trình duyệt rồi ghi thêm một
  * bản. Trả kèm `ticket` = HMAC của đường dẫn bằng khoá phiên: backend chỉ nhận đường dẫn có
@@ -602,7 +613,8 @@ ipcMain.handle('save-frame-image', async (_event, { dataBase64, suggestedName })
 ipcMain.handle('export-pick-output', async (_event, { suggestedName, ext, projectPath } = {}) => {
   if (isExternalBackend) return { unsupported: true };
   try {
-    const extension = ext === 'mov' ? 'mov' : 'mp4';
+    const extension = EXPORT_OUTPUT_KINDS[ext] ? ext : 'mp4';
+    const kind = EXPORT_OUTPUT_KINDS[extension];
     // CHỈ DÙNG CHO TEST (như CRAB_TEMP_DIR): bỏ hộp thoại gốc — CDP không bấm được nó.
     const testDir = process.env.CRAB_TEST_EXPORT_OUTPUT_DIR;
     if (testDir) {
@@ -613,9 +625,9 @@ ipcMain.handle('export-pick-output', async (_event, { suggestedName, ext, projec
       || (projectPath ? path.dirname(String(projectPath)) : '')
       || app.getPath('videos');
     const result = await dialog.showSaveDialog(mainWindow, {
-      title: _t('Lưu video xuất'),
+      title: kind.title(),
       defaultPath: path.join(baseDir, `${String(suggestedName || 'studio_final_cut')}.${extension}`),
-      filters: [{ name: extension === 'mov' ? _t('Video QuickTime') : _t('Video MP4'), extensions: [extension] }],
+      filters: [{ name: kind.filter(), extensions: [extension] }],
     });
     if (result.canceled || !result.filePath) return { canceled: true };
     let finalPath = result.filePath;

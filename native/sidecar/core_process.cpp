@@ -1120,6 +1120,10 @@ struct ExportSettings {
   std::string rateMode = "recommended";
   double rateMbps = 0.0;
   std::string audioBitrate = "192k";
+  /* Xuất RIÊNG ÂM THANH (lệnh export-audio, v1.1.17 — hộp Xuất kiểu CapCut, ô "Audio"):
+   * mp3 | wav | aac | flac. Rỗng = không phải lượt xuất âm thanh riêng (lượt tiếng trung gian của
+   * export-video giữ AAC/PCM như cũ — xem AppendEncoderArgsForMode). */
+  std::string audioFormat;
   double mainAudioVolume = 100.0;
   /* ============ TRỤC THỜI GIAN THẬT CỦA FILE NGUỒN ============
    *
@@ -2304,6 +2308,8 @@ bool ReadExportPayload(
     settings.rateMode = "recommended";
   }
   if (!IsAllowed(settings.audioBitrate, {"128k", "192k", "320k"})) settings.audioBitrate = "192k";
+  settings.audioFormat = ExtractStringField(text, "audio_format", "");
+  if (!IsAllowed(settings.audioFormat, {"mp3", "wav", "aac", "flac"})) settings.audioFormat.clear();
   settings.renderDevice = ExtractStringField(text, "render_device", "auto");
   if (!IsAllowed(settings.renderDevice, {"auto", "gpu", "cpu"})) settings.renderDevice = "auto";
 
@@ -5668,6 +5674,15 @@ void AppendEncoderArgsForMode(std::vector<std::string>& cmd, const ExportSetting
   if (mode == FilterScriptMode::AudioOnly) {
     /* Không có luồng hình -> mọi tham số encoder hình (kể cả -r/-fps_mode/-g) đều vô nghĩa,
        và `-r` trên một lượt chỉ-tiếng làm ffmpeg cảnh báo rồi bỏ qua. */
+    /* Xuất riêng âm thanh (export-audio): đúng bộ định dạng của CapCut. Bitrate chỉ có nghĩa với
+       MP3/AAC; WAV là PCM 16-bit, FLAC không mất dữ liệu. */
+    if (settings.audioFormat == "mp3") {
+      cmd.insert(cmd.end(), {"-c:a", "libmp3lame", "-b:a", settings.audioBitrate});
+      return;
+    }
+    if (settings.audioFormat == "wav") { cmd.insert(cmd.end(), {"-c:a", "pcm_s16le"}); return; }
+    if (settings.audioFormat == "flac") { cmd.insert(cmd.end(), {"-c:a", "flac"}); return; }
+    if (settings.audioFormat == "aac") { cmd.insert(cmd.end(), {"-c:a", "aac", "-b:a", settings.audioBitrate}); return; }
     if (settings.codec == "prores") cmd.insert(cmd.end(), {"-c:a", "pcm_s16le"});
     else cmd.insert(cmd.end(), {"-c:a", "aac", "-b:a", settings.audioBitrate});
     return;
@@ -6454,7 +6469,9 @@ bool PrepareExportBatch(
       /* `+faststart` chỉ cho tệp CUỐI (một batch ghi thẳng ra đích). Batch trung gian và lượt
        * tiếng chỉ là đầu vào của bước ghép: dời `moov` lên đầu là đọc + ghi lại cả tệp lần hai
        * cho không ai dùng (đo: ~0,6 s mỗi batch 4K 180 s). */
-      if (batchCount <= 1) cmd.insert(cmd.end(), {"-movflags", "+faststart"});
+      /* `+faststart` là tuỳ chọn của muxer MP4/MOV — tệp .mp3/.wav/.flac của export-audio không có. */
+      const bool movContainer = settings.audioFormat.empty() || settings.audioFormat == "aac";
+      if (batchCount <= 1 && movContainer) cmd.insert(cmd.end(), {"-movflags", "+faststart"});
       cmd.push_back(output);
       return cmd;
     };
@@ -7422,6 +7439,65 @@ int CommandExportEncoder(int argc, char** argv) {
   return 0;
 }
 
+/* XUẤT RIÊNG ÂM THANH (v1.1.17 — hộp Xuất kiểu CapCut: ô "Audio", định dạng MP3/WAV/AAC/FLAC).
+ *
+ * Đúng MỘT lượt AudioOnly trên toàn bộ intervals — CHÍNH lượt tiếng mà export-video dùng khi chia
+ * batch (cùng WriteFilterScript, cùng OverlaysForAudioPass), nên tệp âm thanh riêng nghe y hệt tiếng
+ * trong video: lane chính, mọi lớp phủ có tiếng (nhạc, SFX, lồng tiếng, tiếng của video lớp phủ),
+ * âm lượng + keyframe âm lượng, tốc độ, khử ồn, tắt tiếng từng block/track. Không dò GPU/encoder
+ * hình, không giải mã hình nguồn (lượt chỉ-tiếng dựng đoạn hình giả 16x16 vào nullsink).
+ * Chỉ cần mốc bắt đầu thật của luồng (videoStart/audioStart) — thiếu là lệch mốc cắt như export-video. */
+int CommandExportAudio(int argc, char** argv) {
+  if (argc < 8) {
+    Emit("error", "export-audio expects source output timeline_json_file temp_dir preset fps", 2);
+    return 2;
+  }
+  const std::string source = argv[2];
+  const std::string output = argv[3];
+  const std::string timelineFile = argv[4];
+  const fs::path tempDir = argv[5];
+  const std::string preset = argv[6];
+  const std::string fps = argv[7];
+  g_exportTiming = ExportTimingLog{};
+  g_exportBenchDir.clear();
+  g_renderCacheIds.clear();
+
+  std::vector<ExportInterval> intervals;
+  std::vector<ExportOverlay> overlays;
+  ExportSettings settings;
+  std::string payloadError;
+  if (!ReadExportPayload(timelineFile, preset, fps, intervals, overlays, settings, payloadError)) {
+    Emit("error", payloadError, 4);
+    return 4;
+  }
+  if (settings.audioFormat.empty()) {
+    Emit("error", "export-audio needs settings.audio_format (mp3|wav|aac|flac)", 4);
+    return 4;
+  }
+  auto videoStartProbe = std::async(std::launch::async, [&source]() { return MediaStreamStartTime(source, "v:0"); });
+  auto audioStartProbe = std::async(std::launch::async, [&source]() { return MediaStreamStartTime(source, "a:0"); });
+  auto fpsProbe = std::async(std::launch::async, [&source]() { return MediaStreamFps(source); });
+  settings.videoStart = videoStartProbe.get();
+  settings.audioStart = audioStartProbe.get();
+  settings.sourceFps = fpsProbe.get();
+  settings.seekSafe = false;   // một lượt từ đầu nguồn: không seek theo dải
+  g_exportTiming.probeMs = MsSince(g_exportTiming.started);
+
+  std::vector<BatchJob> jobs(1);
+  if (!PrepareExportBatch(jobs[0], source, output, tempDir, intervals, 0, intervals.size(), 0, 1, settings,
+                          OverlaysForAudioPass(overlays), FilterScriptMode::AudioOnly)) {
+    return 6;
+  }
+  jobs[0].progressText = "âm thanh (" + settings.audioFormat + ")";
+  Emit("progress", "Đang trộn và mã hoá âm thanh (" + settings.audioFormat + ")...");
+  EncoderPlan plan;
+  const int code = RunExportJobs(jobs, plan, 1, settings);
+  if (code != 0) return code;
+  EmitExportTiming("audio-" + settings.audioFormat);
+  Emit("result", "export audio complete", 0, output);
+  return 0;
+}
+
 void PrintUsage() {
   std::cout
     << "core_process commands:\n"
@@ -7431,6 +7507,7 @@ void PrintUsage() {
     << "  preprocess-audio <input> <output> <mode>\n"
     << "  preview-proxy <input> <output>\n"
     << "  export-video <source> <output> <timeline_json_file> <temp_dir> <preset> <fps>\n"
+    << "  export-audio <source> <output> <timeline_json_file> <temp_dir> <preset> <fps>\n"
     << "  export-encoder <h264|hevc|prores>\n"
     << "  transcribe-whispercpp <audio_wav> <model_path> <output_json>\n";
 }
@@ -7504,6 +7581,7 @@ int main(int argc, char** argv) {
     if (command == "preprocess-audio") return CommandPreprocessAudio(argc, argv);
     if (command == "preview-proxy") return CommandPreviewProxy(argc, argv);
     if (command == "export-video") return CommandExportVideo(argc, argv);
+    if (command == "export-audio") return CommandExportAudio(argc, argv);
     if (command == "export-encoder") return CommandExportEncoder(argc, argv);
     if (command == "transcribe-whispercpp") return CommandWhisperCpp(argc, argv);
     if (command == "--help" || command == "help") {

@@ -114,6 +114,47 @@ Tăng tốc lúc nạp nhờ `_hub_offline()`: thư viện vẫn gọi Hub dù m
 - Phụ đề khớp tiếng được bật sẵn và có ô tắt. Chúng tạo qua `LocalSubtitlePanel.importCues`; câu dài hơn 84 ký tự chia thành nhiều block theo tỉ lệ ký tự.
 - Đã chạy thật trong trình duyệt: 3 câu, nghỉ 0,4 s, 3 block phụ đề đúng mốc.
 
+### 6. Xuất riêng âm thanh — hai ô Video / Audio kiểu CapCut (thêm 2026-10-11)
+
+Quyết định của người dùng:
+- Mặc định LUÔN chỉ tích Video, xuất như cũ (video có cả hình lẫn tiếng).
+- Tích Video + Audio: xuất video bình thường, cộng thêm một tệp âm thanh riêng cùng tên, đặt cạnh video. Nếu đã có tệp trùng tên thì ghi đè, như hộp lưu đã hỏi.
+- Chỉ tích Audio: chỉ xuất tệp âm thanh.
+- Định dạng MP3 / WAV / AAC (.m4a) / FLAC, mặc định MP3. MP3 và AAC chọn được bitrate 128/192/320k. WAV là PCM 16-bit, FLAC nén không mất dữ liệu.
+
+Cách làm:
+- **Sidecar**, lệnh mới `export-audio`: chạy đúng MỘT lượt `AudioOnly`, dùng chung `WriteFilterScript` và `OverlaysForAudioPass` với lượt tiếng của export-video. Vì vậy tệp riêng nghe y hệt tiếng trong video.
+  - Bộ mã hoá chọn theo `settings.audio_format`.
+  - Lượt này không dò GPU và không giải mã hình.
+- **Backend** (`/api/export-video`):
+  - Đọc thêm `export_video`, `export_audio`, `audio_file_format`, `audio_file_bitrate`.
+  - Khoá `audio_format` chỉ ghi vào tệp timeline riêng của lượt export-audio, vì sidecar dò khoá này trong cả tệp.
+  - Kiểm độ dài tệp âm thanh như với video.
+  - Chỉ Audio thì đường dẫn đã ký phải có đuôi âm thanh.
+- **main.js**: `export-pick-output` nhận thêm đuôi mp3, wav, m4a, flac.
+- **Giao diện**:
+  - Ô tích nằm trong `<legend>`, nên `fieldset disabled` khoá các ô còn lại mà không khoá chính nó.
+  - Nhãn nút đổi theo lựa chọn: "Xuất video ngay", "Xuất âm thanh ngay", "Xuất video + âm thanh".
+- **Chỉ Audio thì bỏ hết khâu vẽ trước phần hình** (chữ, chuyển cảnh, retouch, màu, xoá logo AI).
+  - Vẫn giữ keyframe âm lượng.
+  - Vẫn cắt item ở vùng chuyển cảnh overlay, vì lượt xuất video cũng cắt cả tiếng ở đó (`appendOverlayTransitionItems(…, {trimOnly})`).
+
+Đã kiểm:
+- `npm run test:export-audio-file` (mới):
+  - Đủ 4 định dạng: đúng codec, không có luồng hình, dài đúng timeline với 2 đoạn cắt.
+  - Video + Audio: mức âm của tệp riêng bằng tiếng trong video (-21,1 / -21,1 dB).
+  - Từ chối đúng: sai đuôi, hoặc bỏ cả hai ô.
+- Không vỡ test cũ: `export`, `export-output-path`, `audio-mix`, `audio-denoise`, `clip-speed`, `export-render-cache`, `export-parallel`.
+- Giao diện thật trong trình duyệt, timeline 30 s có block lồng tiếng: chỉ Audio WAV mất khoảng 1 s, đoạn có lồng tiếng -16,9 dB, đoạn chỉ có lane chính -21,1 dB.
+
+Chưa kiểm:
+- **macOS**: ffmpeg của bản Mac có `libmp3lame` không.
+- Hộp lưu Electron thật (đã kiểm qua đường ký HMAC trong test).
+
+Biết sẵn từ trước, không thuộc đợt này:
+- Tắt tiếng lane chính không áp vào bản xuất (cả video lẫn âm thanh).
+- Track media bị ẩn thì mất luôn tiếng của nó.
+
 ## Chưa làm, chưa kiểm, cần biết
 
 - **Chưa push và chưa tạo PR.** `main` có ruleset nên phải đi PR và qua CI Win+Mac. **Chưa đóng gói** `dist:win`.
