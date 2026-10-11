@@ -39,18 +39,94 @@ Nhánh: `win/v1.1.17` (tách từ `main` `099f30b`). Bắt đầu 2026-10-11.
   - Đường GPU (PyTorch) cần khoảng 410 MB, đường CPU (ONNX) khoảng 640 MB.
   - SDK `vieneu` 3.8.3 đã có trong môi trường.
 
-## Việc đã làm
+## Việc đã làm (nhánh `win/v1.1.17`, chưa push)
 
-- [x] Nâng 1.1.17 (`package.json` + lock), `npm run test:app-version` PASS.
-- [x] Dời "Kịch bản" thành tab con cuối cùng của "Văn bản".
-  - Sửa luôn chỗ chặn ở `refreshScriptPane` và các câu hướng dẫn trỏ tới `tab "Văn bản → Kịch bản"` (vi/en/zh).
-  - Đã xem hình thật trong trình duyệt. `i18n:check`, `subtitle_import`, `auto_subtitle`, `dubbing_panel` đều PASS.
-- [x] TTS server nhả model ngay khi mỗi lượt xong, kể cả lượt nghe thử, rồi xoá cache CUDA/MPS/MLX.
-  - Việc nhả nằm trong cổng job, nên không lượt mới nào bị mất model giữa chừng.
-  - `CRAB_TTS_KEEP_LOADED=1` để giữ kiểu cũ.
-  - Đã chạy thật với VieNeu: xong thì `/health` báo `loaded: False`.
+| Commit | Nội dung |
+|---|---|
+| `1b4c5e9` | Nâng phiên bản lên 1.1.17. "Kịch bản" thành tab con cuối của tab "Văn bản". |
+| `797af31` | Server TTS nhả model ngay khi mỗi lượt xong (kể cả nghe thử) và xoá cache CUDA/MPS/MLX. |
+| `80246be` | VieNeu-TTS v3 Turbo thay F5-TTS. `setup_tts` tự chọn torch CUDA. Backend tắt server TTS sau mỗi lượt. |
+| `774c374` | Nguồn "Văn bản" cho lồng tiếng, phụ đề sinh kèm, hồ sơ giọng trong Cài đặt. |
+| `bb2dacd` | VieNeu v2 chạy GPU. Server tạm chuyển Hub sang offline trong lúc nạp model. |
+| `5d9037e` | Sửa VoxCPM2 cho macOS (chưa kiểm trên Mac thật). Ghi log lỗi. Dọn model F5 cũ. |
 
-## VoxCPM2 trên macOS: nguyên nhân khả dĩ (chưa có log, chưa tái hiện được trên Mac)
+### 1. Phiên bản và tab Kịch bản
+
+- `package.json` và lock ở 1.1.17; `npm run test:app-version` PASS.
+- Thêm `{id:'script'}` vào `EDIT_PANEL_SUBTABS.text`. `refreshScriptPane` chỉ vẽ khi `editPanelTab==='text' && editPanelTextSub==='script'`.
+- Các câu hướng dẫn trỏ tới `tab "Văn bản → Kịch bản"`, có đủ vi/en/zh.
+- Đã xem hình thật trong trình duyệt.
+
+### 2. GPU và VRAM (đo trên GTX 1060 6 GB, Windows)
+
+**Bóc băng:** không phải sửa. Chạy CUDA int8, VRAM 642 → ~1.870 → 643 MiB vì mỗi lượt là một tiến trình riêng và thoát khi xong.
+
+**Lồng tiếng, ba lớp nhả bộ nhớ:**
+1. Model được nhả ngay khi lượt xong. Bước này nằm trong cổng job, nên lượt mới không bị nhả mất model giữa chừng.
+2. Xoá cache CUDA/MPS/MLX.
+3. Backend tắt hẳn tiến trình server sau khi panel đọc xong kết quả (`scheduleIdleStop`, chờ 3 s). Bước này trả nốt CUDA context ~160 MiB mà chỉ tắt tiến trình mới trả được.
+
+Đo một lượt thật từ giao diện (VieNeu v3, 3 câu): VRAM 785 → 1.540 → 954 (đã nhả model) → **783 MiB** (đã tắt server).
+
+`CRAB_TTS_KEEP_LOADED=1` giữ kiểu cũ: server và model không bị nhả ngay.
+
+**torch:**
+- Ghim `2.11.0`. Máy NVIDIA có compute capability < 7.5 lấy `cu126`, còn lại lấy `cu128`. Máy không có NVIDIA và macOS lấy torch từ PyPI (Mac đã có MPS).
+- Cài bằng MỘT lệnh pip. Với `--target`, hai lệnh riêng làm torch CPU ghi đè bản CUDA.
+- `ENV_REVISION=2`: môi trường cũ bị coi là chưa cài, panel hiện lại nút cài. Máy NVIDIA tải khoảng 3,5 GB.
+- Đã chạy thật `npm run setup:tts`: torch giữ `2.11.0+cu126`, CUDA True.
+
+**Tốc độ, mỗi lượt gồm khởi động server + nạp + một câu:**
+
+| Engine | Trước | Sau |
+|---|---|---|
+| VieNeu v3 GPU | — | nạp 11,5 s, cả lượt 17 s |
+| VieNeu v3 CPU (ONNX) | — | nạp 9 s |
+| VieNeu v2 | CPU 118 s | GPU 38 s |
+
+Tăng tốc lúc nạp nhờ `_hub_offline()`: thư viện vẫn gọi Hub dù model đã nằm trên đĩa.
+
+**Pascal:** VieNeu v3 trên sm < 7.0 bị ép fp32, vì bf16 trên Pascal chỉ là giả lập và fp16 chạy ở 1/64 tốc độ.
+
+### 3. Mô hình tiếng Việt: VieNeu-TTS v3 Turbo (engine `vieneu3`, mặc định)
+
+- Đường GPU dùng PyTorch: `vieneu3-torch` + `moss-nano`, ~420 MB. Đường CPU dùng ONNX: `vieneu3-onnx` + `moss-nano-onnx`, ~650 MB.
+- SDK tự tải codec về `~/.cache/huggingface`. Lượt tải đó bị chặn và trỏ về `model_store`; đã kiểm, cache HF trống.
+- 25 giọng có sẵn. Dropdown lọc được theo "Phong cách đọc": tự nhiên, tin tức, kể chuyện, đọc truyện.
+- Clone từ hồ sơ giọng, không cần lời mẫu. Đã chạy thật: tạo hồ sơ từ một mp3 13 s rồi lồng tiếng 3 câu, có tiếng.
+- Mẫu nghe thử ở `reports/v1.1.17_mau_giong/`: giọng có sẵn "Mai Anh" và giọng clone.
+- F5-TTS đã gỡ khỏi server, model_store, requirements, UI và test. Prefs cũ trỏ `f5` tự chuyển sang `vieneu3`. Thư mục `f5-vi/` và `vocos/` trong kho model bị xoá một lần, chỉ khi có marker của model_store.
+
+### 4. Hồ sơ giọng (Cài đặt → Hồ sơ giọng)
+
+- Lưu ở `USER_DATA_ROOT/voice_profiles/<id>/{profile.json, reference.wav}`. Bản cài là `%LOCALAPPDATA%\CrabbyCut\voice_profiles`.
+- Tệp gốc được chép và chuẩn hoá về WAV mono 44,1 kHz, tối đa 20 s; hồ sơ vẫn chạy khi tệp gốc bị xoá.
+- Làm được: tạo, nghe, đổi tên, sửa lời mẫu, xoá, mở thư mục. Thay đổi ghi ngay, không cần bấm Lưu.
+- API `/api/voice-profiles` (GET/POST/PATCH/DELETE, `/:id/audio`). Panel lồng tiếng chỉ gửi `voice_profile: id`.
+- Test: `npm run test:voice-profiles`.
+
+### 5. Lồng tiếng từ văn bản
+
+- Chuyển nguồn bằng hai nút "Phụ đề (có mốc thời gian)" / "Văn bản".
+- Nhập văn bản bằng cách gõ tay, nạp .txt/.md/.docx, hoặc kéo thả. Tệp .doc kiểu cũ thì báo lưu sang .docx.
+- Câu được tách theo dấu câu và xuống dòng, câu dài quá 220 ký tự bị cắt tiếp.
+- Server dùng chế độ `sequential`: các câu nối tiếp nhau, khoảng nghỉ 0,2–1,2 s. Điểm bắt đầu là đầu timeline hoặc playhead.
+- Phụ đề khớp tiếng được bật sẵn và có ô tắt. Chúng tạo qua `LocalSubtitlePanel.importCues`; câu dài hơn 84 ký tự chia thành nhiều block theo tỉ lệ ký tự.
+- Đã chạy thật trong trình duyệt: 3 câu, nghỉ 0,4 s, 3 block phụ đề đúng mốc.
+
+## Chưa làm, chưa kiểm, cần biết
+
+- **Chưa push và chưa tạo PR.** `main` có ruleset nên phải đi PR và qua CI Win+Mac. **Chưa đóng gói** `dist:win`.
+- **Chưa thử trên Mac thật:** các sửa VoxCPM2, VieNeu v3 trên MPS, tìm Python ≥ 3.10, cài mlx-audio riêng.
+  - Lần tới trên Mac: nếu còn lỗi, gửi `~/Library/Application Support/CrabbyCut/logs/tts_errors.log`.
+- **Chưa thử** đường `cu128` (RTX 20 trở lên) và RTX 50.
+- **Nghe thử cũng tắt server sau lượt**, theo yêu cầu trả VRAM. Mỗi lần nghe thử nạp lại khoảng 12–15 s trên GPU.
+- **Undo:** audio lồng tiếng và phụ đề sinh kèm là hai bước Ctrl+Z riêng.
+- Lồng tiếng văn bản vẫn cần có video trên lane chính; audio bị kẹp ở cuối timeline.
+- VoxCPM2 chưa nối clone bằng giọng mẫu. Thẻ cảm xúc thử nghiệm của VieNeu v3 (`[cười]`…) chưa đưa ra giao diện.
+- Có từ trước, không thuộc đợt này: `addSourcePathsToMainLane` không nhận đường dẫn 8.3 (`THANHT~1`).
+
+## VoxCPM2 trên macOS: nguyên nhân khả dĩ và cách đã sửa (`5d9037e`, chưa kiểm trên Mac thật)
 
 Mã gọi API đúng với mlx-audio hiện tại: `mlx_audio.tts.load_model`, `generate(text=, instruct=)`, kết quả `GenerationResult.audio` là float32. Các nguyên nhân xếp theo khả năng:
 
@@ -66,11 +142,3 @@ Mã gọi API đúng với mlx-audio hiện tại: `mlx_audio.tts.load_model`, `
 4. Máy 8 GB thiếu RAM: model 3,2 GB lại bị nạp lại mỗi lượt.
 5. Ghi traceback của job ra tệp log để lần sau có bằng chứng.
 
-## Việc còn lại
-
-- [ ] Engine `vieneu3`: GPU khi có CUDA (Windows) hoặc MPS (macOS), ONNX CPU chỉ khi không có GPU. Đặt làm mặc định.
-- [ ] Gỡ F5 khỏi server, model_store, requirements, UI và test.
-- [ ] Hồ sơ giọng: backend lưu trữ + API, mục Cài đặt (tạo, đặt tên, nghe thử, xoá, mở thư mục), panel lồng tiếng chọn được hồ sơ.
-- [ ] Nguồn "Văn bản" cho lồng tiếng: gõ tay hoặc nạp tệp, tách câu, đọc nối tiếp, sinh phụ đề kèm.
-- [ ] `setup_tts.js`: tự cài torch 2.11.0 CUDA (cu126/cu128 theo compute capability) bằng một lệnh pip, ghim torch/torchaudio.
-- [ ] VoxCPM: áp các sửa ở trên (chưa kiểm được trên Mac).
