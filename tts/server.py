@@ -9,8 +9,10 @@ khi cần, và nói chuyện qua HTTP 127.0.0.1.
 
 VÌ SAO LÀ SERVER THƯỜNG TRÚ chứ không phải sidecar mỗi lượt một tiến trình như ASR: nạp model
 mất 7-30 giây (F5-TTS ~1,3 GB, VieNeu ~0,9 GB). Người dùng nghe thử giọng, đổi câu, lồng lại —
-nạp lại mỗi lượt là mỗi lượt chờ nửa phút. Server giữ model ấm và TỰ NHẢ sau
-IDLE_UNLOAD_SECONDS để trả RAM cho việc dựng phim.
+nạp lại mỗi lượt là mỗi lượt chờ nửa phút. TỪ v1.1.17 model bị nhả NGAY khi mỗi lượt xong
+(người dùng yêu cầu trả VRAM cho dựng phim/xuất GPU) — server thường trú giờ chỉ còn tiết kiệm
+khởi động Python + import thư viện; CRAB_TTS_KEEP_LOADED=1 khôi phục kiểu giữ ấm, khi đó model
+tự nhả sau IDLE_UNLOAD_SECONDS.
 
 BA ENGINE:
   f5      Vi-F5-TTS (port từ Vi-TTS Studio / repo TTS-App): NHÂN BẢN GIỌNG từ một đoạn mẫu
@@ -81,6 +83,42 @@ def _torch_device() -> str:
     return "cpu"
 
 
+def _release_accelerator_memory() -> None:
+    """Trả bộ nhớ GPU về hệ điều hành sau khi bỏ tham chiếu model.
+
+    `_model = None` chỉ làm tensor thành rác; allocator của torch (CUDA lẫn MPS) và MLX vẫn GIỮ
+    các khối đã cấp để dùng lại, nên nvidia-smi / Activity Monitor vẫn thấy chiếm chỗ cho tới khi
+    xoá cache. Mỗi nhánh tự bọc try: máy không có torch (chỉ MLX) hay ngược lại đều phải chạy."""
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        mps = getattr(torch, "mps", None)
+        if mps is not None and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            mps.empty_cache()
+    except Exception:
+        pass
+    if "mlx.core" in sys.modules:
+        try:
+            import mlx.core as mx
+            clear = getattr(mx, "clear_cache", None) or getattr(getattr(mx, "metal", None), "clear_cache", None)
+            if clear:
+                clear()
+        except Exception:
+            pass
+
+
+def _keep_loaded_after_job() -> bool:
+    """Mặc định nhả model NGAY khi một lượt (lồng tiếng hay nghe thử) xong — yêu cầu v1.1.17:
+    VRAM phải trả lại cho dựng phim/xuất GPU. Đặt CRAB_TTS_KEEP_LOADED=1 để giữ như cũ (chỉ
+    nhả sau IDLE_UNLOAD_SECONDS), tiện khi đo/thử nhiều lượt liền."""
+    return os.environ.get("CRAB_TTS_KEEP_LOADED", "").strip().lower() in {"1", "true", "yes"}
+
+
 class UserError(RuntimeError):
     """Lỗi do dữ liệu người dùng đưa vào (thiếu giọng mẫu, câu rỗng…) -> HTTP 400."""
 
@@ -137,14 +175,7 @@ class Engine:
             if self._model is None:
                 return False
             self._model = None
-            try:
-                import gc
-                gc.collect()
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
+            _release_accelerator_memory()
             log(f"đã nhả {self.name}")
             return True
 
@@ -437,7 +468,13 @@ class DubJob:
         self.state = "running"
         try:
             with _synth_gate:
-                self._run()
+                try:
+                    self._run()
+                finally:
+                    # Nhả model khi CÒN giữ cổng và job còn "running": giao diện thấy "done" là
+                    # VRAM đã trống, và không lượt mới nào kịp nạp model rồi bị lượt này nhả
+                    # mất giữa chừng (create_job trả 409 khi còn job đang chạy).
+                    self._release_engine()
             self.state = "done"
             self.stage = "done"
         except Cancelled:
@@ -450,6 +487,15 @@ class DubJob:
                 traceback.print_exc()
         finally:
             self.finished = time.time()
+
+    def _release_engine(self) -> None:
+        engine = ENGINES.get(str(self.params.get("engine") or ""))
+        if engine is None or _keep_loaded_after_job():
+            return
+        try:
+            engine.unload()
+        except Exception as exc:  # noqa: BLE001 — nhả lỗi không được che kết quả lượt sinh
+            log(f"nhả {engine.name} lỗi: {exc}")
 
     def _run(self) -> None:
         import soundfile as sf

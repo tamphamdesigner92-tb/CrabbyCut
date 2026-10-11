@@ -8,8 +8,8 @@
  * VÒNG ĐỜI SERVER:
  *   · Bật LƯỜI ở lượt lồng tiếng / nghe thử / tải model đầu tiên — mở panel thôi thì không bật
  *     (import torch mất vài giây và giữ ~300 MB RAM dù chưa nạp model nào).
- *   · Server tự nhả model sau 5 phút rảnh (IDLE_UNLOAD_SECONDS ở server.py) nhưng tiến trình
- *     vẫn sống để lượt sau khỏi khởi động lại.
+ *   · Server nhả model NGAY khi mỗi lượt xong (v1.1.17, trả VRAM; CRAB_TTS_KEEP_LOADED=1 thì
+ *     giữ ấm tới IDLE_UNLOAD_SECONDS) nhưng tiến trình vẫn sống để lượt sau khỏi khởi động lại.
  *   · Backend tắt -> stop(); backend chết bất thường -> server tự thoát nhờ --parent-pid.
  *
  * CỔNG 4124, không phải 4123 của bản Private: hai bản cùng chạy trên máy tác giả không được
