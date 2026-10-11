@@ -36,6 +36,6 @@ Chi tiết đầy đủ, gồm quyết định, số đo và nguyên nhân VoxCP
 
 ## Lưu ý khi sửa tiếp
 
-- Server TTS **tắt sau mỗi lượt**, kể cả nghe thử. Muốn giữ server sống khi đo hoặc thử nhiều lượt liền thì đặt `CRAB_TTS_KEEP_LOADED=1`.
+- Server TTS **giữ model trong VRAM sau mỗi lượt**. Nó chỉ tắt (trả sạch VRAM) khi đổi sang model khác, khi một tính năng khác cần GPU bắt đầu chạy (`ttsService.releaseAll`), hoặc khi rảnh 15 phút. Khi đo: `CRAB_TTS_UNLOAD_AFTER_JOB=1` cho nhả ngay sau mỗi lượt, `CRAB_TTS_IDLE_STOP_SECONDS` để đổi mốc rảnh.
 - Kho model nằm ở `%LOCALAPPDATA%\CrabbyCut\tts_models`. Hồ sơ giọng nằm ở `USER_DATA_ROOT/voice_profiles`; chạy từ mã nguồn thì đó là thư mục dự án, đã đưa vào `.gitignore`.
 - Script đo VRAM nằm ở scratchpad của phiên, không lưu lại. Cách đo: bật `tts/server.py` bằng `.venv-tts`, POST `/v1/dub/jobs`, poll, lấy mẫu `nvidia-smi` mỗi giây.

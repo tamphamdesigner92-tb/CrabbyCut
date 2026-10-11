@@ -7,10 +7,12 @@ Nhận danh sách câu phụ đề có mốc thời gian, đọc từng câu b�
 rồi trộn thành file WAV đặt lên timeline. Backend Node (backend/tts-service.js) bật server này
 khi cần, và nói chuyện qua HTTP 127.0.0.1.
 
-VÌ SAO LÀ SERVER THƯỜNG TRÚ chứ không phải sidecar mỗi lượt một tiến trình như ASR: import
-torch/onnxruntime + khởi động Python mất vài giây mỗi lượt. TỪ v1.1.17 model bị nhả NGAY khi mỗi
-lượt xong (người dùng yêu cầu trả VRAM cho dựng phim/xuất GPU); CRAB_TTS_KEEP_LOADED=1 khôi phục
-kiểu giữ ấm, khi đó model tự nhả sau IDLE_UNLOAD_SECONDS.
+VÌ SAO LÀ SERVER THƯỜNG TRÚ chứ không phải sidecar mỗi lượt một tiến trình như ASR: nạp model mất
+10-50 giây. Người dùng chốt 2026-10-11: model được GIỮ trong VRAM sau mỗi lượt để tạo giọng tiếp
+không phải nạp lại; chỉ nhả khi (1) chọn model khác rồi bấm tạo, (2) một tính năng khác cần GPU bắt
+đầu (xuất video, bóc băng…), hoặc (3) rảnh IDLE_UNLOAD_SECONDS (15 phút). (1)(2) và phần "tắt hẳn
+tiến trình" do backend/tts-service.js lo; ở đây chỉ còn nhả engine khác khi lượt mới chọn engine khác,
+và mốc rảnh làm chốt chặn cuối. CRAB_TTS_UNLOAD_AFTER_JOB=1: nhả ngay sau mỗi lượt (để đo).
 
 BA ENGINE (F5-TTS đã gỡ ở v1.1.17 — giấy phép weights tiếng Việt phi thương mại, không có giọng
 mặc định; xem docs/KE_HOACH_V1_1_17.md):
@@ -53,7 +55,7 @@ import dubbing_core as core  # noqa: E402
 import model_store  # noqa: E402
 
 DEFAULT_PORT = 4124
-IDLE_UNLOAD_SECONDS = int(os.environ.get("CRAB_TTS_IDLE_UNLOAD", "300"))
+IDLE_UNLOAD_SECONDS = int(os.environ.get("CRAB_TTS_IDLE_UNLOAD", "900"))   # 15 phút — người dùng chốt 2026-10-11
 PREVIEW_TEXT = "Xin chào, đây là giọng đọc thử cho video của bạn."
 
 
@@ -163,11 +165,10 @@ def _append_error_log(job: "DubJob", exc: BaseException) -> None:
         pass
 
 
-def _keep_loaded_after_job() -> bool:
-    """Mặc định nhả model NGAY khi một lượt (lồng tiếng hay nghe thử) xong — yêu cầu v1.1.17:
-    VRAM phải trả lại cho dựng phim/xuất GPU. Đặt CRAB_TTS_KEEP_LOADED=1 để giữ như cũ (chỉ
-    nhả sau IDLE_UNLOAD_SECONDS), tiện khi đo/thử nhiều lượt liền."""
-    return os.environ.get("CRAB_TTS_KEEP_LOADED", "").strip().lower() in {"1", "true", "yes"}
+def _unload_after_job() -> bool:
+    """Mặc định GIỮ model sau mỗi lượt (người dùng chốt 2026-10-11 — xem đầu tệp). Đặt
+    CRAB_TTS_UNLOAD_AFTER_JOB=1 để nhả ngay sau mỗi lượt như bản đầu của v1.1.17 (tiện khi đo VRAM)."""
+    return os.environ.get("CRAB_TTS_UNLOAD_AFTER_JOB", "").strip().lower() in {"1", "true", "yes"}
 
 
 class UserError(RuntimeError):
@@ -1002,10 +1003,10 @@ class DubJob:
                 try:
                     self._run()
                 finally:
-                    # Nhả model khi CÒN giữ cổng và job còn "running": giao diện thấy "done" là
-                    # VRAM đã trống, và không lượt mới nào kịp nạp model rồi bị lượt này nhả
-                    # mất giữa chừng (create_job trả 409 khi còn job đang chạy).
-                    self._release_engine()
+                    # (Chỉ khi CRAB_TTS_UNLOAD_AFTER_JOB=1.) Nhả khi CÒN giữ cổng và job còn
+                    # "running": không lượt mới nào kịp nạp model rồi bị lượt này nhả mất giữa chừng.
+                    if _unload_after_job():
+                        self._release_engine()
             self.state = "done"
             self.stage = "done"
         except Cancelled:
@@ -1022,7 +1023,7 @@ class DubJob:
 
     def _release_engine(self) -> None:
         engine = ENGINES.get(str(self.params.get("engine") or ""))
-        if engine is None or _keep_loaded_after_job():
+        if engine is None:
             return
         try:
             engine.unload()
@@ -1049,6 +1050,12 @@ class DubJob:
         if not cues:
             raise UserError("Không có câu nào đọc được (câu rỗng, chỉ ký hiệu hoặc chú thích nhạc).")
         self.total = len(cues)
+        # Lượt này dùng engine KHÁC lượt trước -> nhả engine cũ trước khi nạp (chỉ giữ MỘT model
+        # trong VRAM). Backend thường đã tắt hẳn server khi đổi model (sạch hơn); đây là chốt chặn
+        # cho server chạy tay / đổi engine cùng môi trường.
+        for other in ENGINES.values():
+            if other is not engine and other.loaded:
+                other.unload()
         engine.configure(params)
 
         self.stage = "models"

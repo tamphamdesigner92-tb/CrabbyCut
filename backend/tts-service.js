@@ -8,9 +8,13 @@
  * VÒNG ĐỜI SERVER:
  *   · Bật LƯỜI ở lượt lồng tiếng / nghe thử / tải model đầu tiên — mở panel thôi thì không bật
  *     (import torch mất vài giây và giữ ~300 MB RAM dù chưa nạp model nào).
- *   · Server nhả model NGAY khi mỗi lượt xong, và backend TẮT luôn tiến trình sau khi panel đọc
- *     kết quả (v1.1.17 — trả cả CUDA context; xem scheduleIdleStop). CRAB_TTS_KEEP_LOADED=1 giữ
- *     server + model ấm như cũ (model tự nhả sau IDLE_UNLOAD_SECONDS).
+ *   · GIỮ model trong VRAM sau mỗi lượt (người dùng chốt 2026-10-11) để tạo giọng tiếp không phải
+ *     nạp lại. Nhả bằng cách TẮT HẲN tiến trình server (trả cả CUDA context — chỉ nhả model trong tiến
+ *     trình thì Qwen3-TTS còn giữ ~4,4 GB, đo trên GTX 1060) khi:
+ *       1. lượt mới chọn model KHÁC (hoặc đổi chế độ Qwen3-TTS) — xem prepareServerFor;
+ *       2. một tính năng khác cần GPU bắt đầu (xuất video, bóc băng/ASR, Auto-Reframe…) — server.js
+ *          gọi releaseAll(); đang có lượt lồng tiếng chạy thì nhả ngay khi lượt đó xong;
+ *       3. rảnh IDLE_STOP_MS (15 phút) — scheduleIdleStop.
  *   · Backend tắt -> stop(); backend chết bất thường -> server tự thoát nhờ --parent-pid.
  *
  * CỔNG 4124, không phải 4123 của bản Private: hai bản cùng chạy trên máy tác giả không được
@@ -113,7 +117,11 @@ function modelDir() {
 }
 
 // Trạng thái từng server (theo môi trường).
-const servers = Object.fromEntries(ENV_IDS.map((id) => [id, { child: null, booting: null, idleStopTimer: null }]));
+const servers = Object.fromEntries(ENV_IDS.map((id) => [id, {
+  child: null, booting: null, idleStopTimer: null,
+  lastModelKey: '',        // model đang nằm trong VRAM của server này (xem prepareServerFor)
+  releaseWhenIdle: false,  // tính năng GPU khác đã xin nhả khi lượt đang chạy (xem releaseAll)
+}]));
 const setupErrors = Object.fromEntries(ENV_IDS.map((id) => [id, '']));
 const jobEnvs = new Map();   // job_id -> envId
 
@@ -233,15 +241,25 @@ function killTree(proc) {
 }
 
 // Không truyền envId = tắt mọi server do backend bật (backend đóng).
+// Không truyền envId = tắt mọi server do backend bật (backend đóng). Chờ tiến trình THOÁT thật (tối
+// đa ~4 s) rồi mới trả về: người gọi releaseAll() sắp dùng GPU, VRAM phải trống trước đã.
 async function stop(envId) {
   if (!envId) {
     await Promise.all(ENV_IDS.map((id) => stop(id)));
     return;
   }
-  const proc = servers[envId].child;
+  const server = servers[envId];
+  const proc = server.child;
+  server.lastModelKey = '';
   if (!proc) return;
+  const exited = new Promise((resolve) => {
+    if (proc.exitCode !== null) resolve();
+    else proc.once('exit', resolve);
+  });
   try { await request('POST', '/shutdown', {}, 2000, envId); } catch (_) { /* rơi xuống kill */ }
-  setTimeout(() => killTree(proc), 1500);
+  const timer = setTimeout(() => killTree(proc), 1500);
+  await Promise.race([exited, new Promise((r) => setTimeout(r, 4000))]);
+  clearTimeout(timer);
 }
 
 // ── Trạng thái cho panel ────────────────────────────────────────────────────
@@ -489,10 +507,33 @@ function jobOutputDir() {
   return path.join(ctx.tempDir, 'editing_assets', 'dubbing', `${stamp}_${Math.random().toString(36).slice(2, 6)}`);
 }
 
+/* "Model" của một lượt: engine, và với Qwen3-TTS thêm chế độ (mỗi chế độ một checkpoint). */
+function modelKeyOf(engine, engineOptions) {
+  if (engine === 'qwen3') return `qwen3:${String(engineOptions?.mode || '') || 'auto'}`;
+  return engine;
+}
+
+/* Trước một lượt: chỉ giữ MỘT model trong VRAM. Server của môi trường khác đang chạy -> tắt; server
+ * của chính môi trường này đang giữ model khác -> tắt rồi bật lại (sạch hơn nhả trong tiến trình). */
+async function prepareServerFor(envId, modelKey) {
+  await Promise.all(ENV_IDS.filter((id) => id !== envId && servers[id].child).map((id) => {
+    console.log(`[tts] đổi sang ${modelKey}: tắt server ${id} để nhả VRAM`);
+    return stop(id);
+  }));
+  const server = servers[envId];
+  if (server.child && server.lastModelKey && server.lastModelKey !== modelKey) {
+    console.log(`[tts] đổi model ${server.lastModelKey} -> ${modelKey}: khởi động lại server ${envId}`);
+    await stop(envId);
+  }
+}
+
 async function createJob(params = {}) {
   const engine = String(params.engine || 'vieneu');
   const envId = engineEnv(engine);
-  cancelIdleStop(envId);
+  const modelKey = modelKeyOf(engine, params.engine_options);
+  ENV_IDS.forEach((id) => cancelIdleStop(id));
+  servers[envId].releaseWhenIdle = false;
+  await prepareServerFor(envId, modelKey);
   await ensureServer(envId);
   const body = {
     engine,
@@ -516,6 +557,7 @@ async function createJob(params = {}) {
   };
   const job = await request('POST', '/v1/dub/jobs', body, 15000, envId);
   if (job?.job_id) jobEnvs.set(job.job_id, envId);
+  servers[envId].lastModelKey = modelKey;
   return decorate(job);
 }
 
@@ -532,32 +574,46 @@ function decorate(job) {
   };
 }
 
-/* TẮT SERVER SAU MỖI LƯỢT (v1.1.17, người dùng yêu cầu VRAM phải được trả hết khi xong).
- * server.py đã nhả model ngay khi lượt xong, nhưng đo thật trên GTX 1060: VRAM còn dư ~160 MiB
- * (764 -> đỉnh 1556 -> 926 MiB) — đó là CUDA context của tiến trình Python, chỉ mất khi tiến
- * trình thoát. Nên lượt nào xong (panel đã đọc được kết quả) thì tắt hẳn server; lượt sau bật lại
- * (vài giây import). Chờ một nhịp để panel kịp poll lần cuối; không tắt khi đang tải model hay
- * đã có lượt mới. CRAB_TTS_KEEP_LOADED=1 giữ server sống như cũ. */
-const IDLE_STOP_DELAY_MS = 3000;
-function keepLoaded() {
-  return ['1', 'true', 'yes'].includes(String(process.env.CRAB_TTS_KEEP_LOADED || '').trim().toLowerCase());
-}
+/* RẢNH LÂU THÌ NHẢ (người dùng chốt 2026-10-11: 15 phút). Tính từ lúc lượt cuối xong; lượt mới
+ * huỷ đồng hồ. Tắt hẳn tiến trình (trả cả CUDA context). Không tắt khi đang tải model hay đã có lượt mới.
+ * CRAB_TTS_IDLE_STOP_SECONDS đổi mốc (đo/test). */
+const IDLE_STOP_MS = Math.max(1, Number(process.env.CRAB_TTS_IDLE_STOP_SECONDS) || 15 * 60) * 1000;
 function cancelIdleStop(envId = 'main') {
   const server = servers[envId];
   if (server.idleStopTimer) clearTimeout(server.idleStopTimer);
   server.idleStopTimer = null;
 }
-function scheduleIdleStop(envId = 'main') {
+function scheduleIdleStop(envId = 'main', delayMs = IDLE_STOP_MS) {
   const server = servers[envId];
-  if (keepLoaded() || !server.child) return;
+  if (!server.child) return;
   cancelIdleStop(envId);
   server.idleStopTimer = setTimeout(async () => {
     server.idleStopTimer = null;
     const live = await health(envId);
     if (!live || live.active_job) return;
     if ((live.downloads || []).some((d) => d.state === 'downloading' || d.state === 'preparing')) return;
+    console.log(`[tts] server ${envId} rảnh ${Math.round(delayMs / 1000)} s: tắt để nhả VRAM`);
     await stop(envId);
-  }, IDLE_STOP_DELAY_MS);
+  }, delayMs);
+}
+
+/* MỘT TÍNH NĂNG KHÁC CẦN GPU sắp chạy (xuất video, bóc băng, Auto-Reframe… — server.js gọi): tắt mọi
+ * server lồng tiếng để trả VRAM. Server đang có lượt chạy thì KHÔNG giết giữa chừng — đánh dấu, lượt
+ * đó xong là tắt ngay (getJob). Trả về khi các server rảnh đã thoát hẳn. */
+async function releaseAll(reason = '') {
+  await Promise.all(ENV_IDS.map(async (envId) => {
+    const server = servers[envId];
+    if (!server.child) return;
+    const live = await health(envId);
+    if (live?.active_job) {
+      server.releaseWhenIdle = true;
+      console.log(`[tts] ${reason || 'tính năng khác'} cần GPU: server ${envId} đang lồng tiếng, sẽ nhả khi lượt xong`);
+      return;
+    }
+    cancelIdleStop(envId);
+    console.log(`[tts] ${reason || 'tính năng khác'} cần GPU: tắt server ${envId} để nhả VRAM`);
+    await stop(envId);
+  }));
 }
 
 async function getJob(id) {
@@ -566,7 +622,14 @@ async function getJob(id) {
   await syncDownloads();
   if (job && ['done', 'error', 'cancelled'].includes(job.state)) {
     jobEnvs.delete(id);
-    scheduleIdleStop(envId);
+    // Có tính năng GPU khác đã xin nhả trong lúc lượt này chạy -> nhả ngay (chờ một nhịp cho panel
+    // poll lần cuối); còn lại giữ model, rảnh 15 phút mới nhả.
+    if (servers[envId].releaseWhenIdle) {
+      servers[envId].releaseWhenIdle = false;
+      scheduleIdleStop(envId, 1500);
+    } else {
+      scheduleIdleStop(envId);
+    }
   }
   return decorate(job);
 }
@@ -586,6 +649,7 @@ module.exports = {
   cancelJob,
   syncDownloads,
   stop,
+  releaseAll,
   health,
   modelDir,
   engineEnv,

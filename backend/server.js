@@ -3801,6 +3801,9 @@ async function ensureFeatureInstalled(featureId) {
 
 async function runPythonSidecar(scriptPath, inputPath, outputPath, options = {}) {
   await ensureFeatureInstalled(options.feature);
+  /* Mọi sidecar Python (bóc băng, lọc/sắp kịch bản, Auto-Reframe, xoá logo AI…) là "tính năng khác cần
+   * GPU": nhả model lồng tiếng đang giữ trong VRAM trước (người dùng chốt 2026-10-11, xem tts-service). */
+  await ttsService.releaseAll(options.feature || path.basename(scriptPath)).catch(() => {});
   return spawnPythonSidecar(scriptPath, inputPath, outputPath, options);
 }
 
@@ -7649,6 +7652,8 @@ function createApp() {
       prebakeCache.release();   // khung vẽ trước renderer hỏi trúng đã được dùng xong
     };
     res.on('close', releaseExportLock);
+    // Xuất video dùng GPU (NVENC/CUDA): nhả model lồng tiếng đang giữ trong VRAM trước.
+    await ttsService.releaseAll('xuất video').catch(() => {});
     let exportSettingsForError = null;
     let userOutputPath = null;   // chỗ người dùng chọn (mục 1.16); null = đường tải về cũ
     // Khung vùng chuyển cảnh đã được multer ghi ra đĩa trước khi vào handler; tra theo TÊN

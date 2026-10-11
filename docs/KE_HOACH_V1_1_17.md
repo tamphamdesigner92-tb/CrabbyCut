@@ -61,14 +61,25 @@ Nhánh: `win/v1.1.17` (tách từ `main` `099f30b`). Bắt đầu 2026-10-11.
 
 **Bóc băng:** không phải sửa. Chạy CUDA int8, VRAM 642 → ~1.870 → 643 MiB vì mỗi lượt là một tiến trình riêng và thoát khi xong.
 
-**Lồng tiếng, ba lớp nhả bộ nhớ:**
-1. Model được nhả ngay khi lượt xong. Bước này nằm trong cổng job, nên lượt mới không bị nhả mất model giữa chừng.
-2. Xoá cache CUDA/MPS/MLX.
-3. Backend tắt hẳn tiến trình server sau khi panel đọc xong kết quả (`scheduleIdleStop`, chờ 3 s). Bước này trả nốt CUDA context ~160 MiB mà chỉ tắt tiến trình mới trả được.
+**Lồng tiếng — GIỮ model, nhả khi cần (người dùng sửa lại 2026-10-11, thay cho "nhả sau mỗi lượt"):**
+- Sau mỗi lượt, model được giữ trong VRAM để tạo giọng tiếp mà không phải nạp lại.
+- Nhả bằng cách **tắt hẳn tiến trình server**. Cách này trả cả CUDA context, khoảng 160 MiB. Nó cũng là cách duy nhất trả sạch VRAM của Qwen3-TTS, vì nhả trong tiến trình thì Qwen còn giữ khoảng 4,4 GB.
+- Server bị tắt trong ba trường hợp:
+  1. **Lượt mới chọn model khác**, hoặc đổi chế độ Qwen3-TTS (`prepareServerFor`). Server của môi trường khác bị tắt; server cùng môi trường mà đang giữ model khác thì được khởi động lại.
+  2. **Tính năng khác cần GPU bắt đầu**: route xuất video và mọi `runPythonSidecar` (bóc băng, lọc/sắp kịch bản, Auto-Reframe, xoá logo AI) gọi `ttsService.releaseAll()`. Nếu đang có lượt lồng tiếng chạy thì không giết giữa chừng; lượt đó xong là nhả ngay.
+  3. **Rảnh 15 phút** (`IDLE_STOP_MS`, đổi được bằng `CRAB_TTS_IDLE_STOP_SECONDS`). Phía server cũng có `IDLE_UNLOAD_SECONDS` = 900 làm chốt chặn cuối.
+- `CRAB_TTS_UNLOAD_AFTER_JOB=1` cho server nhả ngay sau mỗi lượt, dùng khi đo.
 
-Đo một lượt thật từ giao diện (VieNeu v3, 3 câu): VRAM 785 → 1.540 → 954 (đã nhả model) → **783 MiB** (đã tắt server).
+Đo thật trên GTX 1060 bằng cách gọi thẳng `tts-service`:
 
-`CRAB_TTS_KEEP_LOADED=1` giữ kiểu cũ: server và model không bị nhả ngay.
+| Bước | Kết quả |
+|---|---|
+| VieNeu3 lượt 1 (bật server + nạp) | 44,6 s; VRAM 852 → 1.633 MiB |
+| VieNeu3 lượt 2 | **0,8 s**, model còn ấm |
+| Đổi sang Qwen3 | Server chính tắt, Qwen 5.623 MiB |
+| `releaseAll` | **836 MiB** |
+| Rảnh hết mốc (thử 20 s) | 825 MiB |
+| `releaseAll` giữa lượt 6 câu | Lượt chạy xong đủ 6 câu, server tắt ngay sau đó |
 
 **torch:**
 - Ghim `2.11.0`. Máy NVIDIA có compute capability < 7.5 lấy `cu126`, còn lại lấy `cu128`. Máy không có NVIDIA và macOS lấy torch từ PyPI (Mac đã có MPS).
@@ -206,7 +217,7 @@ Cách làm:
 | Qwen3 0.6B Base (clone, x-vector) | 11,8 s | ~32 s cho 3 s tiếng | 5.654 MiB | 812 MiB |
 | Chatterbox Multilingual | 46,5 s | — | 4.367 MiB | 778 MiB |
 
-- Qwen nhả model trong tiến trình chỉ về khoảng 4,4 GB. Có thể thư viện còn giữ tham chiếu ở đâu đó, chưa tìm ra. Bước tắt server sau mỗi lượt đã trả hết VRAM, nên chỉ ảnh hưởng khi đặt `CRAB_TTS_KEEP_LOADED=1`.
+- Qwen nhả model trong tiến trình chỉ về khoảng 4,4 GB. Có thể thư viện còn giữ tham chiếu ở đâu đó, chưa tìm ra. Vì vậy khi đổi model, backend tắt hẳn server thay vì chỉ nhả model trong tiến trình (xem mục 2).
 - Đã chạy trọn vòng qua giao diện thật: văn bản → Qwen3 (Aiden, English) và văn bản → Chatterbox (en). Cả hai lượt đều có audio và phụ đề, server tự tắt, VRAM về khoảng 790 MiB.
 - Mẫu nghe ở `reports/v1.1.17_mau_giong/`: `qwen3_*`, `chatterbox_mac_dinh.wav`.
 - Test: `test:tts-engines` (mới; sổ engine theo môi trường, chế độ Qwen, ngôn ngữ Chatterbox) và `test:dubbing-panel` (thêm mục 5).
