@@ -4190,9 +4190,6 @@
                 <div class="edit-panel">
                     <div class="edit-tabs" id="editPanelTabs" role="tablist" aria-label="Nhóm nội dung panel Editing">
                         <button class="edit-tab is-active" type="button" data-edit-tab="media" role="tab" aria-selected="true" aria-controls="editPanelBody"><svg class="edit-tab-ico" aria-hidden="true"><use href="#ic-film"/></svg><span class="edit-tab-label">Tệp phương tiện</span></button>
-                        <!-- Kịch bản đặt cạnh Tệp phương tiện: hai thứ này là "nguyên liệu
-                             đầu vào" của luồng Lọc video theo kịch bản, đọc liền nhau. -->
-                        <button class="edit-tab" type="button" data-edit-tab="script" role="tab" aria-selected="false" aria-controls="editPanelBody"><svg class="edit-tab-ico" aria-hidden="true"><use href="#ic-script"/></svg><span class="edit-tab-label">Kịch bản</span></button>
                         <button class="edit-tab" type="button" data-edit-tab="audio" role="tab" aria-selected="false" aria-controls="editPanelBody"><svg class="edit-tab-ico" aria-hidden="true"><use href="#ic-music"/></svg><span class="edit-tab-label">Âm thanh</span></button>
                         <button class="edit-tab" type="button" data-edit-tab="text" role="tab" aria-selected="false" aria-controls="editPanelBody"><svg class="edit-tab-ico" aria-hidden="true"><use href="#ic-type"/></svg><span class="edit-tab-label">Văn bản</span></button>
                         <button class="edit-tab" type="button" data-edit-tab="shape" role="tab" aria-selected="false" aria-controls="editPanelBody"><svg class="edit-tab-ico" aria-hidden="true"><use href="#ic-shapes"/></svg><span class="edit-tab-label">Hình học</span></button>
@@ -7970,7 +7967,7 @@
      *
      * Mặc định của Chromium/Electron khi nhận một tệp thả vào trang là ĐIỀU HƯỚNG tới
      * tệp đó: cả phiên dựng phim biến mất, thay bằng nội dung thô của tệp. Vùng nhận .md
-     * ở tab "Kịch bản" chỉ là một dải hẹp, trong khi ô dán chữ ngay bên dưới mới là chỗ
+     * ở tab "Văn bản → Kịch bản" chỉ là một dải hẹp, trong khi ô dán chữ ngay bên dưới mới là chỗ
      * người dùng nhắm vào — thả trượt vài chục pixel là mất dự án.
      *
      * Chỉ chặn khi con trỏ đang mang TỆP: các thao tác kéo-thả nội bộ (sắp xếp block,
@@ -8137,7 +8134,7 @@
         const enabled = hasScript && inEditing;
         btn.disabled = !enabled;
         btn.title = !hasScript
-            ? _t('Magic Fill — cần kịch bản .md có cụm in đậm (**…**) hoặc ghi chú (/*…*/); thêm ở tab "Kịch bản"')
+            ? _t('Magic Fill — cần kịch bản .md có cụm in đậm (**…**) hoặc ghi chú (/*…*/); thêm ở tab "Văn bản → Kịch bản"')
             : (!inEditing
                 ? _t('Magic Fill — mở giai đoạn Editing để sử dụng')
                 : _t('Magic Fill — tạo khung văn bản từ cụm in đậm + thêm ảnh/video thư viện theo ghi chú'));
@@ -8205,7 +8202,7 @@
         const picked = getSelectedDesktopSourcePaths();
         const script = document.getElementById('refScriptInput').value.trim();
         if (!picked.length && !script) {
-            showToast(_t('1) Đưa video lên LANE CHÍNH (nút "+" trên thẻ ở tab "Tệp phương tiện", hoặc kéo thả xuống lane chính).\n2) Tab "Kịch bản" → kéo thả tệp .md hoặc dán nội dung kịch bản.'),
+            showToast(_t('1) Đưa video lên LANE CHÍNH (nút "+" trên thẻ ở tab "Tệp phương tiện", hoặc kéo thả xuống lane chính).\n2) Tab "Văn bản → Kịch bản" → kéo thả tệp .md hoặc dán nội dung kịch bản.'),
                 { type: 'warning', title: _t('Chưa có nguồn video và chưa có kịch bản'), duration: 11000 });
             return;
         }
@@ -8215,7 +8212,7 @@
             return;
         }
         if (!script) {
-            showToast(_t('Mở tab "Kịch bản" ở panel bên trái, kéo thả tệp .md (hoặc .txt / .doc / .docx) vào ô, hoặc dán thẳng nội dung kịch bản vào khung soạn thảo.'),
+            showToast(_t('Mở tab "Văn bản → Kịch bản" ở panel bên trái, kéo thả tệp .md (hoặc .txt / .doc / .docx) vào ô, hoặc dán thẳng nội dung kịch bản vào khung soạn thảo.'),
                 { type: 'warning', title: _t('Chưa có kịch bản'), duration: 11000 });
             return;
         }
@@ -8304,7 +8301,7 @@
 
     /* ===== MỘT KỊCH BẢN, BA CHỖ HIỂN THỊ =====
      * #refScriptInput          — nguồn sự thật (ô nhập ở giai đoạn Upload)
-     * #editScriptText          — ô nhập ở tab "Kịch bản" của Editing (gương, sửa được)
+     * #editScriptText          — ô nhập ở tab "Văn bản → Kịch bản" của Editing (gương, sửa được)
      * #refScriptCompare        — "Kịch bản chuẩn (Đối chiếu)" ở cột giữa (chỉ đọc)
      * Trước đây nạp tệp chỉ ghi vào ô thứ nhất: tab Kịch bản còn trống trơn và ô Đối chiếu
      * chỉ được vẽ ở hai chỗ lẻ (mở .crab, sau khi So khớp). Nay MỌI đường đổi kịch bản đều
@@ -14155,7 +14152,7 @@
             return;
         }
         if (!hasScript) {
-            btn.title = _t('Sắp xếp theo kịch bản chuẩn — chưa có kịch bản chuẩn. Thêm ở bước Tải lên, hoặc tab "Kịch bản" của Editing.');
+            btn.title = _t('Sắp xếp theo kịch bản chuẩn — chưa có kịch bản chuẩn. Thêm ở bước Tải lên, hoặc tab "Văn bản → Kịch bản" của Editing.');
             return;
         }
         btn.title = _t('Sắp xếp theo kịch bản chuẩn — bóc băng lại {n} block để lấy mốc từng từ, rồi xếp cho khớp trình tự kịch bản (câu Hook quay ở giữa video sẽ lên đầu). Block chứa nhiều câu được cắt theo biên từ. Có bảng xem trước trước khi áp dụng. Lần đầu mất vài giây để bóc băng, các lần sau dùng cache.', { n: blockCount });

@@ -17372,6 +17372,9 @@
             { id: 'effect', label: _t('Hiệu ứng chữ') },
             { id: 'subtitle', label: 'Auto Subtitle' },
             { id: 'local-subtitle', label: 'Local Subtitle' },
+            /* "Kịch bản" từng là tab riêng; v1.1.17 dời vào đây làm tab con (theo yêu cầu người
+               dùng) — kịch bản cũng là văn bản, gom về một chỗ cho dải tab gọn hơn. */
+            { id: 'script', label: _t('Kịch bản') },
         ],
         shape: [{ id: 'shapes', label: _t('Hình dạng') }],
         transition: [
@@ -18516,7 +18519,7 @@
      * Cố ý KHÔNG dựng lại cả pane khi người dùng đang gõ — chỉ cập nhật dòng trạng thái,
      * nếu không con trỏ nhảy về đầu sau mỗi phím. */
     function refreshScriptPane({ keepText = false } = {}) {
-        if (editPanelTab !== 'script') return;
+        if (editPanelTab !== 'text' || editPanelTextSub !== 'script') return;
         const body = document.getElementById('editPanelBody');
         if (!body) return;
         const status = body.querySelector('.edit-script-status');
@@ -18856,7 +18859,7 @@
                 }
             } else bodyEl.innerHTML = renderImportPaneHtml('audio');
         }
-        else if (editPanelTab === 'script') { bodyEl.innerHTML = renderScriptPaneHtml(); bindScriptPane(bodyEl); }
+        else if (editPanelTab === 'text' && editPanelTextSub === 'script') { bodyEl.innerHTML = renderScriptPaneHtml(); bindScriptPane(bodyEl); }
         else if (editPanelTab === 'text') {
             /* Hai panel phụ đề sống ở tệp riêng (auto-subtitle.js, local-subtitle.js) — tính
                năng độc lập, test riêng được mà không cần DOM thật. */
