@@ -4,10 +4,11 @@ Chi tiết đầy đủ, gồm quyết định, số đo và nguyên nhân VoxCP
 
 ## Trạng thái
 
-- Nhánh `win/v1.1.17` có 7 commit trên `main` `099f30b` (6 mã + 1 tài liệu). **Chưa push, chưa PR, chưa đóng gói.**
+- Nhánh `win/v1.1.17` có 9 commit trên `main` `099f30b`. **Chưa push, chưa PR, chưa đóng gói.**
+- Thêm sau: **xuất riêng âm thanh** (hai ô Video / Audio kiểu CapCut, MP3/WAV/AAC/FLAC), commit `a777704`, mục 6 của kế hoạch. Đã build lại sidecar (`npm run build:sidecar`); CI Mac phải build lại cho bản Mac.
 - Đã làm xong cả 7 mục người dùng giao. Riêng VoxCPM2 trên macOS mới **sửa theo nguyên nhân khả dĩ**, chưa chạy trên Mac thật.
 - Test đã chạy và PASS:
-  - Node: `dubbing-panel`, `voice-profiles` (mới), `subtitle-import`, `auto-subtitle`, `app-settings`, `app-version`, `model-downloads`.
+  - Node: `export-audio-file` (mới), `export`, `export-output-path`, `audio-mix`, `audio-denoise`, `clip-speed`, `export-render-cache`, `export-parallel`, `dubbing-panel`, `voice-profiles` (mới), `subtitle-import`, `auto-subtitle`, `app-settings`, `app-version`, `model-downloads`.
   - Python: `dubbing-core`, `tts-model-store`.
   - i18n: `i18n`, `i18n:check` (en/zh 1852/1852).
   - Chưa chạy cả bộ `npm test`.
@@ -22,6 +23,7 @@ Chi tiết đầy đủ, gồm quyết định, số đo và nguyên nhân VoxCP
 
 1. Nghe hai mẫu trong `reports/v1.1.17_mau_giong/`: giọng có sẵn và giọng clone. Đánh giá chất lượng tiếng Việt của VieNeu v3.
 2. Thử trên Mac (Apple Silicon, macOS ≥ 14):
+   - Xuất riêng âm thanh MP3: kiểm ffmpeg bản Mac có `libmp3lame`.
    - Cài lại môi trường lồng tiếng. Bản cũ sẽ tự hiện nút cài vì `ENV_REVISION=2`.
    - Chạy VieNeu v3 trên MPS và VoxCPM2.
    - Nếu lỗi, lấy `~/Library/Application Support/CrabbyCut/logs/tts_errors.log`.
