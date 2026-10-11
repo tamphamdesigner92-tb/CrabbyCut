@@ -1945,5 +1945,12 @@
   "Thư viện {name}": "{name} 库",
   "Đã cài xong {name}.": "{name} 已安装完成。",
   "cần cài thêm": "需要安装",
-  "Thiết kế giọng (Qwen3-TTS 1.7B) cần GPU NVIDIA RTX 20 trở lên có từ 8 GB VRAM, hoặc máy Mac chip Apple.": "声音设计（Qwen3-TTS 1.7B）需要 RTX 20 系列或更新、显存不少于 8 GB 的 NVIDIA 显卡，或 Apple 芯片的 Mac。"
+  "Thiết kế giọng (Qwen3-TTS 1.7B) cần GPU NVIDIA RTX 20 trở lên có từ 8 GB VRAM, hoặc máy Mac chip Apple.": "声音设计（Qwen3-TTS 1.7B）需要 RTX 20 系列或更新、显存不少于 8 GB 的 NVIDIA 显卡，或 Apple 芯片的 Mac。",
+  "Gỡ tệp văn bản đã nạp để chọn lại": "移除已载入的文本文件以重新选择",
+  "Xoá văn bản đã gõ": "清除已输入的文本",
+  "Gỡ tệp": "移除文件",
+  "Gỡ tệp phụ đề này để chọn tệp khác": "移除此字幕文件以选择其他文件",
+  "Bỏ chọn bộ phụ đề này (phụ đề trên timeline giữ nguyên)": "取消选择此字幕（时间线上的字幕保持不变）",
+  "Gỡ phụ đề nguồn": "移除来源字幕",
+  "Gỡ": "移除"
 }

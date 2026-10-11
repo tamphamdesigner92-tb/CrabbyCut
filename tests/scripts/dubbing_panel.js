@@ -274,6 +274,39 @@ const SRT = [
         console.log('  ok  văn bản: sequential + hồ sơ giọng + phụ đề khớp tiếng');
     }
 
+    /* ---------- 6. Gỡ nguồn nạp nhầm (v1.1.17) ---------- */
+    {
+        const panel = loadPanel(fakeRuntime());
+        panel.state.status = READY_STATUS;
+        await panel.importFile(fakeFile('Nhầm tệp.srt', SRT));
+        assert.ok(panel.renderPaneHtml().includes('data-dub-clear-source'), 'có tệp phụ đề -> có nút Gỡ');
+        // Bấm qua đúng đường người dùng đi.
+        let clickHandler = null;
+        const zone = { querySelector: () => null, addEventListener: (type, fn) => { if (type === 'click') clickHandler = fn; } };
+        panel.bindPane({ querySelector: (sel) => (sel === '[data-dub-zone]' ? zone : null) });
+        clickHandler({ target: { closest: (sel) => (sel === '[data-dub-clear-source]' ? {} : null) } });
+        assert.strictEqual(panel.state.source, '');
+        assert.strictEqual(panel.state.cues.length, 0);
+        assert.strictEqual(panel.state.sourceName, '');
+        assert.ok(!panel.renderPaneHtml().includes('data-dub-clear-source'), 'gỡ xong thì hết thẻ nguồn');
+        assert.match(panel.validate(false), /phụ đề/, 'gỡ xong -> phải chọn lại nguồn');
+        // Tệp không có câu nào: báo lỗi, KHÔNG thành nguồn (nên không có gì phải gỡ).
+        await panel.importFile(fakeFile('Rỗng.srt', '1\n00:00:01,000 --> 00:00:02,000\n\n'));
+        assert.strictEqual(panel.state.source, '');
+        assert.ok(panel.state.lastError, 'tệp rỗng -> báo lỗi');
+        await panel.importFile(fakeFile('Đúng tệp.srt', SRT));
+        // Văn bản nạp từ tệp: nút đổi thành "Gỡ tệp", gỡ là xoá cả chữ lẫn tên tệp.
+        panel.state.sourceMode = 'text';
+        panel.state.text = 'Câu một. Câu hai.';
+        panel.state.textName = 'kich-ban.docx';
+        assert.ok(panel.renderPaneHtml().includes('Gỡ tệp'), 'văn bản từ tệp -> nút "Gỡ tệp"');
+        panel.clearSource();
+        assert.strictEqual(panel.state.text, '');
+        assert.strictEqual(panel.state.textName, '');
+        assert.strictEqual(panel.state.source, 'file', 'gỡ văn bản không đụng tới nguồn phụ đề của chế độ kia');
+        console.log('  ok  gỡ nguồn nạp nhầm: tệp phụ đề và tệp văn bản');
+    }
+
     /* ---------- 5. Qwen3-TTS / Chatterbox (v1.1.17): tuỳ chọn engine + môi trường riêng ---------- */
     {
         const panel = loadPanel(fakeRuntime());

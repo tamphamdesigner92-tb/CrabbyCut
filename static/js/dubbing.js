@@ -263,6 +263,25 @@
         repaint();
     }
 
+    /* Gỡ nguồn đang chọn để chọn lại (người dùng nạp nhầm tệp). Chỉ bỏ khỏi panel: tệp trên đĩa và
+       bộ phụ đề trên timeline KHÔNG bị đụng tới; bản lồng tiếng đã tạo trên timeline cũng giữ nguyên. */
+    function clearSource() {
+        if (state.busy) return;
+        if (state.sourceMode === 'text') {
+            state.text = '';
+            state.textName = '';
+        } else {
+            state.source = '';
+            state.sourceName = '';
+            state.cues = [];
+            state.fileNotes = '';
+            state.showCues = false;
+        }
+        state.lastError = '';
+        state.lastNotes = [];
+        repaint();
+    }
+
     function sourceKey() {
         if (state.sourceMode === 'text') return `text:${(state.textName || 'typed').toLowerCase()}`;
         return state.source === 'file' ? `file:${state.sourceName.toLowerCase()}` : state.source;
@@ -586,10 +605,18 @@
         el.textContent = `
             .edit-dub-drop { min-height: 96px; flex: 0 0 auto; }
             .edit-dub-drop.is-dragover { border-color: var(--primary); background: rgba(255,176,32,0.08); }
-            .edit-dub-source { display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+            .edit-dub-source { display: flex; align-items: center; justify-content: space-between; gap: 8px;
                 padding: 8px; border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; }
+            .edit-dub-source-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
             .edit-dub-source b { font-size: 12px; overflow-wrap: anywhere; }
-            .edit-dub-source span { font-size: 10px; opacity: 0.6; white-space: nowrap; }
+            .edit-dub-source span { font-size: 10px; opacity: 0.6; }
+            /* width/margin/box-shadow: gỡ quy tắc chung button { width: 100% … } của index.html. */
+            .edit-dub-remove { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px;
+                width: auto; margin: 0; box-shadow: none; white-space: nowrap;
+                border: 1px solid rgba(255,255,255,0.14); border-radius: 5px; background: transparent; color: inherit;
+                font: inherit; font-size: 11px; cursor: pointer; }
+            .edit-dub-remove:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+            .edit-dub-remove:disabled { opacity: 0.4; cursor: not-allowed; }
             .edit-dub-row { display: flex; gap: 8px; }
             .edit-dub-row > * { flex: 1; min-width: 0; }
             .edit-dub-row > [data-dub-text-clear] { flex: 0 0 auto; }
@@ -646,7 +673,7 @@
                 <textarea id="dubText" class="edit-sub-input edit-dub-text" rows="7" placeholder="${esc(_t('Gõ hoặc dán văn bản vào đây, hoặc nạp tệp .txt / .md / .docx'))}" ${disabled}>${esc(state.text)}</textarea>
                 <div class="edit-dub-row">
                     <button class="btn btn-secondary" type="button" data-dub-text-pick ${disabled}>${_t('Nạp tệp văn bản…')}</button>
-                    ${state.text ? `<button class="btn btn-secondary" type="button" data-dub-text-clear ${disabled}>${_t('Xoá')}</button>` : ''}
+                    ${state.text ? `<button class="btn btn-secondary" type="button" data-dub-text-clear title="${esc(state.textName ? _t('Gỡ tệp văn bản đã nạp để chọn lại') : _t('Xoá văn bản đã gõ'))}" ${disabled}>${state.textName ? _t('Gỡ tệp') : _t('Xoá')}</button>` : ''}
                 </div>
                 <input type="file" id="dubTextInput" accept="${TEXT_ACCEPT}" hidden>
                 <div class="edit-sub-hint" data-dub-text-count>${state.textName ? `${esc(state.textName)} · ` : ''}${esc(_t('{n} câu', { n: cues.length }))}</div>
@@ -684,14 +711,20 @@
                         <option value="">${_t('…hoặc dùng bộ phụ đề trên timeline')}</option>
                         ${sets.map((s) => `<option value="${esc(s.key)}"${s.key === state.source ? ' selected' : ''}>${esc(s.name)} · ${esc(_t('{n} câu', { n: s.cues.length }))}</option>`).join('')}
                     </select>` : ''}
-                ${state.cues.length ? `
+                ${state.source ? `
                     <div class="edit-dub-source">
-                        <b title="${esc(state.sourceName)}">${esc(state.sourceName)}</b>
-                        <span>${esc(_t('{n} câu', { n: state.cues.length }))} · ${clock(state.cues[0].start)}–${clock(state.cues[state.cues.length - 1].end)}</span>
+                        <div class="edit-dub-source-main">
+                            <b title="${esc(state.sourceName)}">${esc(state.sourceName)}</b>
+                            <span>${esc(_t('{n} câu', { n: state.cues.length }))}${state.cues.length ? ` · ${clock(state.cues[0].start)}–${clock(state.cues[state.cues.length - 1].end)}` : ''}</span>
+                        </div>
+                        <button type="button" class="edit-dub-remove" data-dub-clear-source
+                            title="${esc(state.source === 'file' ? _t('Gỡ tệp phụ đề này để chọn tệp khác') : _t('Bỏ chọn bộ phụ đề này (phụ đề trên timeline giữ nguyên)'))}"
+                            aria-label="${esc(_t('Gỡ phụ đề nguồn'))}" ${state.busy ? 'disabled' : ''}>✕ ${_t('Gỡ')}</button>
                     </div>
                     ${state.fileNotes ? `<div class="edit-sub-hint">${esc(state.fileNotes)}</div>` : ''}
-                    <button type="button" class="edit-dub-toggle" data-dub-cues>${state.showCues ? `▾ ${_t('Ẩn danh sách câu')}` : `▸ ${_t('Xem danh sách câu')}`}</button>
-                    ${rows ? `<div class="edit-sub-list">${rows}</div>` : ''}` : ''}
+                    ${state.cues.length ? `
+                        <button type="button" class="edit-dub-toggle" data-dub-cues>${state.showCues ? `▾ ${_t('Ẩn danh sách câu')}` : `▸ ${_t('Xem danh sách câu')}`}</button>
+                        ${rows ? `<div class="edit-sub-list">${rows}</div>` : ''}` : ''}` : ''}
                 ${state.source === 'file' ? `
                     <label class="edit-sub-label" for="dubStart">${_t('Bắt đầu từ')}</label>
                     <select id="dubStart" class="edit-sub-input" ${state.busy ? 'disabled' : ''}>
@@ -996,7 +1029,7 @@
                 return;
             }
             if (t.closest('[data-dub-text-pick]')) { textInput?.click(); return; }
-            if (t.closest('[data-dub-text-clear]')) { state.text = ''; state.textName = ''; repaint(); return; }
+            if (t.closest('[data-dub-text-clear]') || t.closest('[data-dub-clear-source]')) { clearSource(); return; }
             if (t.closest('[data-dub-profiles]')) {
                 if (window.SettingsPanel?.open) window.SettingsPanel.open('voices');
                 return;
@@ -1124,6 +1157,7 @@
         textCues,
         subtitleCuesFromClips,
         importFile,
+        clearSource,
         jobBody,
         validate,
     };

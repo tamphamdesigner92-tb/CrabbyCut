@@ -2245,5 +2245,12 @@
   "Thư viện {name}": "{name} libraries",
   "Đã cài xong {name}.": "{name} installed.",
   "cần cài thêm": "needs installing",
-  "Thiết kế giọng (Qwen3-TTS 1.7B) cần GPU NVIDIA RTX 20 trở lên có từ 8 GB VRAM, hoặc máy Mac chip Apple.": "Voice design (Qwen3-TTS 1.7B) needs an NVIDIA RTX 20-series or newer GPU with at least 8 GB of VRAM, or an Apple-silicon Mac."
+  "Thiết kế giọng (Qwen3-TTS 1.7B) cần GPU NVIDIA RTX 20 trở lên có từ 8 GB VRAM, hoặc máy Mac chip Apple.": "Voice design (Qwen3-TTS 1.7B) needs an NVIDIA RTX 20-series or newer GPU with at least 8 GB of VRAM, or an Apple-silicon Mac.",
+  "Gỡ tệp văn bản đã nạp để chọn lại": "Remove the loaded text file to choose another",
+  "Xoá văn bản đã gõ": "Clear the typed text",
+  "Gỡ tệp": "Remove file",
+  "Gỡ tệp phụ đề này để chọn tệp khác": "Remove this subtitle file to choose another",
+  "Bỏ chọn bộ phụ đề này (phụ đề trên timeline giữ nguyên)": "Deselect this subtitle set (subtitles on the timeline stay as they are)",
+  "Gỡ phụ đề nguồn": "Remove source subtitles",
+  "Gỡ": "Remove"
 }
