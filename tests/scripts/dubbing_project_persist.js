@@ -42,6 +42,18 @@ const projectDir = path.join(work, 'Dự án');
 fs.mkdirSync(projectDir, { recursive: true });
 const crab = path.join(projectDir, 'Phim thử.crab');
 
+/* KHÔNG dùng fs.cpSync: trên runner Windows, cpSync (C++ của Node 22) chép thư mục tên có dấu làm Node
+ * chết native 0xC0000409 không in một chữ (CI 2026-10-11, như project_package.js 2026-10-05). */
+function copyDir(src, dest) {
+    fs.mkdirSync(dest, { recursive: true });
+    for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+        const from = path.join(src, entry.name);
+        const to = path.join(dest, entry.name);
+        if (entry.isDirectory()) copyDir(from, to);
+        else fs.copyFileSync(from, to);
+    }
+}
+
 function payloadWith(p1, p2) {
     return JSON.stringify({
         media: {
@@ -85,7 +97,7 @@ try {
 
     // 3. Chép cả thư mục dự án sang chỗ khác.
     const moved = path.join(work, 'Máy khác', 'Dự án');
-    fs.cpSync(projectDir, moved, { recursive: true });
+    copyDir(projectDir, moved);
     const movedCrab = path.join(moved, 'Phim thử.crab');
     const movedPaths = JSON.parse(resolvePayloadPaths(fs.readFileSync(movedCrab, 'utf8'), movedCrab)).media.editingAssets.map((e) => e.source_path);
     assert.ok(movedPaths.slice(0, 2).every((x) => x.startsWith(moved) && fs.existsSync(x)), `chép đi chỗ khác: ${movedPaths}`);
