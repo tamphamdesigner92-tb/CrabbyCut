@@ -10,6 +10,7 @@ const { spawn } = require('child_process');
 const { writeCrabFile, readCrabFile, fingerprintFile } = require('./crab-format');
 const {
   packageProject, resolvePayloadPaths, writeSrtTo, projectSidecarPath, SIDECAR_PREVIEW_PROXY, relocateDubbingAudio,
+  isAutosaveTtsPath, pruneTtsDir, ttsReferences, ttsDirForCrab,
 } = require('./project-package');
 const { registerRecentProjectIpc } = require('./recent-projects');
 const { runSetupWindow } = require('./setup-window');
@@ -501,7 +502,17 @@ ipcMain.handle('project-autosave', async (_event, { payloadJson, projectPath, su
     const base = autosaveSafeBase(projectPath ? path.basename(projectPath) : suggestedName);
     fs.mkdirSync(dir, { recursive: true });
     const target = path.join(dir, `${base}_${autosaveStamp(new Date())}.crab`);
-    const sizeBytes = writeCrabFile(target, payloadJson);
+    /* GIỌNG LỒNG TIẾNG CỦA BẢN TỰ LƯU (người dùng chốt 2026-10-11): chép vào "<thư mục tự lưu>/<Tên>_TTS/"
+     * riêng — bản tự lưu TỰ ĐỦ, không trỏ vào thư mục tạm (bị dọn mỗi lần mở dự án) cũng không trỏ vào
+     * "<Tên>_TTS/" của bản Lưu chính (lượt Lưu dọn WAV mồ côi mà bản tự lưu cũ có thể còn cần). */
+    const ttsDir = path.join(dir, `${base}_TTS`);
+    const projectTts = projectPath ? projectSidecarPath(projectPath, '_TTS').toLowerCase() : '';
+    const tts = relocateDubbingAudio(payloadJson, target, {
+      ttsDir,
+      prune: false,
+      adopt: (abs) => isAutosaveTtsPath(abs) || (!!projectTts && path.dirname(abs).toLowerCase() === projectTts),
+    });
+    const sizeBytes = writeCrabFile(target, tts.payloadJson);
     // Xoay vòng: giữ N bản mới nhất. Không giới hạn thì thư mục phình vô hạn — Premiere cũng
     // có đúng thông số "Maximum project versions".
     const keep = Math.max(1, Math.min(50, Number(keepVersions) || 10));
@@ -509,6 +520,22 @@ ipcMain.handle('project-autosave', async (_event, { payloadJson, projectPath, su
     files.slice(keep).forEach((name) => {
       try { fs.unlinkSync(path.join(dir, name)); } catch (_) { /* bỏ qua */ }
     });
+    // Dọn WAV của bản tự lưu không còn bản nào (trong N bản giữ lại) trỏ tới.
+    if (fs.existsSync(ttsDir)) {
+      const referenced = new Set();
+      let readable = true;
+      for (const name of files.slice(0, keep)) {
+        try {
+          const json = name === path.basename(target) ? tts.payloadJson : readCrabFile(path.join(dir, name))?.payloadJson;
+          if (!json) throw new Error('empty');
+          ttsReferences(json, tts.ttsRelDir).forEach((n) => referenced.add(n));
+        } catch (_) {
+          readable = false;   // không biết bản hỏng cần WAV nào -> lượt này KHÔNG dọn gì
+          break;
+        }
+      }
+      if (readable) pruneTtsDir(ttsDir, referenced);
+    }
     return { path: target, dir, size_bytes: sizeBytes, kept: Math.min(files.length, keep) };
   } catch (error) {
     return { error: 'autosave_failed', detail: String(error?.message || error) };
@@ -704,7 +731,8 @@ function readCrabResolved(filePath) {
    * renderer sắp gọi /api/reset-project xoá thư mục đó TRƯỚC khi nạp lại. Tệp còn thì chép ngay sang
    * "<Tên>_TTS/" cạnh .crab và trỏ về đó (lượt Lưu kế tiếp ghi hẳn vào .crab). Không dọn gì ở lượt mở. */
   try {
-    const tts = relocateDubbingAudio(result.payloadJson, filePath, { prune: false });
+    // Chỉ cứu tệp TRONG THƯ MỤC TẠM (adopt: không gì khác); bản tự lưu cứu vào "<Tên>_TTS/" chung của nó.
+    const tts = relocateDubbingAudio(result.payloadJson, filePath, { prune: false, adopt: () => false, ttsDir: ttsDirForCrab(filePath) });
     if (tts.copied) {
       console.log(`[project-open] đã cứu ${tts.copied} tệp lồng tiếng từ thư mục tạm sang thư mục _TTS cạnh dự án`);
       result.payloadJson = resolvePayloadPaths(tts.payloadJson, filePath, {});

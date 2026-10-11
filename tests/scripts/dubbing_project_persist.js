@@ -125,6 +125,56 @@ try {
     assert.ok(fs.existsSync(path.join(ttsDir, 'cũ.wav')), 'lượt mở không dọn');
     console.log('  ok  lượt mở: cứu tệp còn trong thư mục tạm, không dọn gì');
 
+    // 6. BẢN TỰ LƯU: thư mục _TTS riêng trong "CrabbyCut Auto-Save", tự đủ.
+    const { isAutosaveTtsPath, pruneTtsDir, ttsReferences } = require(path.join(ROOT, 'electron', 'project-package.js'));
+    const autoDir = path.join(projectDir, 'CrabbyCut Auto-Save');
+    const autoTts = path.join(autoDir, 'Phim thử_TTS');
+    const projTts = path.join(projectDir, 'Phim thử_TTS');
+    fs.mkdirSync(run2, { recursive: true });
+    fs.writeFileSync(wav2, 'RIFF-tạm-mới');
+    const projWav = path.join(projTts, path.basename(m1));   // WAV đã nằm trong _TTS của bản Lưu chính
+    const auto1 = path.join(autoDir, 'Phim thử_20261011-120000.crab');
+    const autoOut = relocateDubbingAudio(payloadWith(projWav, wav2), auto1, {
+        ttsDir: autoTts, prune: false,
+        adopt: (abs) => isAutosaveTtsPath(abs) || path.dirname(abs).toLowerCase() === projTts.toLowerCase(),
+    });
+    const ap = JSON.parse(autoOut.payloadJson).media.editingAssets.map((e) => e.source_path);
+    assert.strictEqual(ap[0], `Phim thử_TTS/${path.basename(m1)}`, 'WAV của bản Lưu chính được CHÉP sang bản tự lưu');
+    assert.strictEqual(ap[1], 'Phim thử_TTS/Văn bản (lồng tiếng) (20261011030404_tenn).wav');
+    assert.ok(fs.existsSync(path.join(autoTts, path.basename(m1))) && fs.existsSync(path.join(autoTts, path.basename(ap[1]))));
+    assert.ok(fs.existsSync(projWav), 'không đụng _TTS của bản Lưu chính');
+    fs.writeFileSync(auto1, autoOut.payloadJson);
+    fs.rmSync(temp, { recursive: true, force: true });
+    const fromAuto = JSON.parse(resolvePayloadPaths(fs.readFileSync(auto1, 'utf8'), auto1)).media.editingAssets.map((e) => e.source_path);
+    assert.ok(fromAuto.slice(0, 2).every((x) => x.startsWith(autoTts) && fs.existsSync(x)), `mở bản tự lưu: ${fromAuto}`);
+    console.log('  ok  bản tự lưu: WAV vào "CrabbyCut Auto-Save/<Tên>_TTS/", tự đủ, mở được sau khi xoá thư mục tạm');
+
+    // 7. Dọn theo MỌI bản tự lưu còn giữ: WAV bản cũ còn cần thì giữ.
+    const auto2Json = JSON.stringify({ media: { editingAssets: [{ asset_id: 'a1', source_path: ap[0] }] } });
+    const refs = new Set([...ttsReferences(auto2Json, 'Phim thử_TTS')]);
+    fs.writeFileSync(path.join(autoTts, 'mồ côi.wav'), 'x');
+    assert.strictEqual(pruneTtsDir(autoTts, refs), 2, 'chỉ bản mới còn lại -> dọn WAV bản cũ + mồ côi');
+    ttsReferences(fs.readFileSync(auto1, 'utf8'), 'Phim thử_TTS').forEach((n) => refs.add(n));
+    fs.writeFileSync(path.join(autoTts, path.basename(ap[1])), 'RIFF-tạm-mới');
+    assert.strictEqual(pruneTtsDir(autoTts, refs), 0, 'còn bản tự lưu cũ trỏ tới -> giữ');
+    console.log('  ok  dọn WAV của bản tự lưu theo mọi bản còn giữ');
+
+    // 8. Khôi phục từ bản tự lưu rồi LƯU dự án: WAV chép từ Auto-Save sang _TTS của dự án.
+    const restored = JSON.parse(resolvePayloadPaths(fs.readFileSync(auto1, 'utf8'), auto1));
+    const savedFromAuto = relocateDubbingAudio(JSON.stringify(restored), crab);
+    const sp = JSON.parse(savedFromAuto.payloadJson).media.editingAssets.map((e) => e.source_path);
+    assert.ok(sp.slice(0, 2).every((x) => x.startsWith('Phim thử_TTS/') && fs.existsSync(path.join(projectDir, x))), `lưu sau khôi phục: ${sp}`);
+    console.log('  ok  khôi phục từ bản tự lưu rồi Lưu: WAV chép sang _TTS của dự án');
+
+    // 9. Mở một bản tự lưu: cứu tệp vào "<Tên>_TTS/" CHUNG của thư mục tự lưu, không đẻ thư mục theo từng bản.
+    const { ttsDirForCrab } = require(path.join(ROOT, 'electron', 'project-package.js'));
+    assert.strictEqual(ttsDirForCrab(auto1), autoTts);
+    assert.strictEqual(ttsDirForCrab(crab), projTts);
+    const reopenAuto = relocateDubbingAudio(JSON.stringify(restored), auto1, { prune: false, adopt: () => false, ttsDir: ttsDirForCrab(auto1) });
+    assert.strictEqual(reopenAuto.copied, 0, 'mở bản tự lưu: WAV đã ở đúng chỗ, không chép thêm');
+    assert.deepStrictEqual(fs.readdirSync(autoDir).filter((n) => /_TTS$/.test(n)), ['Phim thử_TTS'], 'không có thư mục _TTS theo từng bản');
+    console.log('  ok  mở bản tự lưu: dùng chung "<Tên>_TTS/" của thư mục tự lưu');
+
     console.log('\ndubbing_project_persist: PASS');
 } finally {
     fs.rmSync(work, { recursive: true, force: true });

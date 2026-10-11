@@ -251,7 +251,15 @@ Chưa kiểm:
 - Electron thật qua CDP (backend thử ở cổng 8123, user-data riêng): lồng tiếng → Lưu → `Phim thử_TTS/…wav` + đường dẫn tương đối trong `.crab` → về Trang chủ (thư mục tạm bị xoá) → mở lại → clip lồng tiếng vẫn còn, tệp phát được (HTTP 200).
 - Test cũ vẫn qua: `project-package`, `recents`.
 
-**Chưa làm.** Tự lưu (autosave) vẫn ghi đường dẫn thư mục tạm, vì bản tự lưu không nằm cạnh tệp `.crab` của người dùng. Hệ quả: khôi phục từ bản tự lưu sau khi thư mục tạm đã bị dọn thì mất lồng tiếng. Muốn xử lý trường hợp này cần chốt chỗ lưu riêng.
+**Bản tự lưu** (người dùng chốt 2026-10-11: một thư mục `_TTS` riêng trong Auto-Save):
+- Mỗi lượt tự lưu chép WAV vào `<thư mục tự lưu>/<Tên>_TTS/`. Thư mục tự lưu là `CrabbyCut Auto-Save/` cạnh `.crab`, hoặc `%APPDATA%/CrabbyCut/autosave/` khi dự án chưa Lưu.
+- Bản tự lưu **tự đủ**: chép cả WAV trong thư mục tạm lẫn WAV đang ở `_TTS` của bản Lưu chính. Nó không trỏ vào `_TTS` chính, vì lượt Lưu có dọn WAV mồ côi mà bản tự lưu cũ có thể còn cần.
+- WAV của bản tự lưu được dọn theo **mọi bản tự lưu còn giữ** (`ttsReferences` + `pruneTtsDir`). Có bản tự lưu nào đọc lỗi thì lượt đó không dọn gì.
+- Khôi phục từ bản tự lưu rồi bấm Lưu: WAV ở `_TTS` của Auto-Save được chép sang `<Tên>_TTS/` của dự án (`adopt` = `isAutosaveTtsPath`).
+- Mở một bản tự lưu: bước cứu tệp chỉ cứu tệp trong thư mục tạm, vào `<Tên>_TTS/` chung (`ttsDirForCrab`), không tạo thư mục theo từng bản.
+- Đã kiểm:
+  - Test thêm các mục 6–9 trong `test:dubbing-project-persist`.
+  - Electron thật: Lưu → tự lưu 3 lượt (giữ 2) → `Auto-Save/Phim tự lưu_TTS/` có đủ 2 WAV, trong đó một WAV chỉ có ở bản tự lưu → xoá thư mục tạm → mở bản tự lưu mới nhất → cả 2 clip lồng tiếng còn và phát được (HTTP 200).
 
 ## Chưa làm, chưa kiểm, cần biết
 
