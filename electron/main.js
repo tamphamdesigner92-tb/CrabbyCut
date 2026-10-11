@@ -9,7 +9,8 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { writeCrabFile, readCrabFile, fingerprintFile } = require('./crab-format');
 const {
-  packageProject, resolvePayloadPaths, writeSrtTo, projectSidecarPath, SIDECAR_PREVIEW_PROXY,
+  packageProject, resolvePayloadPaths, writeSrtTo, projectSidecarPath, SIDECAR_PREVIEW_PROXY, relocateDubbingAudio,
+  isAutosaveTtsPath, pruneTtsDir, ttsReferences, ttsDirForCrab,
 } = require('./project-package');
 const { registerRecentProjectIpc } = require('./recent-projects');
 const { runSetupWindow } = require('./setup-window');
@@ -376,8 +377,12 @@ ipcMain.handle('project-save', async (_event, { payloadJson, targetPath, suggest
       finalPath = result.filePath;
       if (!finalPath.toLowerCase().endsWith('.crab')) finalPath += '.crab';
     }
-    const sizeBytes = writeCrabFile(finalPath, payloadJson);
-    return { path: finalPath, size_bytes: sizeBytes };
+    /* Giọng lồng tiếng còn ở thư mục TẠM -> chép vào "<Tên>_TTS/" cạnh .crab, ghi đường dẫn tương đối
+     * (xem relocateDubbingAudio ở project-package.js — lỗi mất lồng tiếng sau khi mở lại dự án). */
+    const tts = relocateDubbingAudio(payloadJson, finalPath);
+    if (tts.failed.length) console.warn(`[project-save] thiếu ${tts.failed.length} tệp lồng tiếng trong thư mục tạm:`, tts.failed);
+    const sizeBytes = writeCrabFile(finalPath, tts.payloadJson);
+    return { path: finalPath, size_bytes: sizeBytes, tts: { copied: tts.copied, kept: tts.kept, removed: tts.removed, missing: tts.failed.length } };
   } catch (error) {
     return { error: 'write_failed', detail: String(error?.message || error) };
   }
@@ -497,7 +502,17 @@ ipcMain.handle('project-autosave', async (_event, { payloadJson, projectPath, su
     const base = autosaveSafeBase(projectPath ? path.basename(projectPath) : suggestedName);
     fs.mkdirSync(dir, { recursive: true });
     const target = path.join(dir, `${base}_${autosaveStamp(new Date())}.crab`);
-    const sizeBytes = writeCrabFile(target, payloadJson);
+    /* GIỌNG LỒNG TIẾNG CỦA BẢN TỰ LƯU (người dùng chốt 2026-10-11): chép vào "<thư mục tự lưu>/<Tên>_TTS/"
+     * riêng — bản tự lưu TỰ ĐỦ, không trỏ vào thư mục tạm (bị dọn mỗi lần mở dự án) cũng không trỏ vào
+     * "<Tên>_TTS/" của bản Lưu chính (lượt Lưu dọn WAV mồ côi mà bản tự lưu cũ có thể còn cần). */
+    const ttsDir = path.join(dir, `${base}_TTS`);
+    const projectTts = projectPath ? projectSidecarPath(projectPath, '_TTS').toLowerCase() : '';
+    const tts = relocateDubbingAudio(payloadJson, target, {
+      ttsDir,
+      prune: false,
+      adopt: (abs) => isAutosaveTtsPath(abs) || (!!projectTts && path.dirname(abs).toLowerCase() === projectTts),
+    });
+    const sizeBytes = writeCrabFile(target, tts.payloadJson);
     // Xoay vòng: giữ N bản mới nhất. Không giới hạn thì thư mục phình vô hạn — Premiere cũng
     // có đúng thông số "Maximum project versions".
     const keep = Math.max(1, Math.min(50, Number(keepVersions) || 10));
@@ -505,6 +520,22 @@ ipcMain.handle('project-autosave', async (_event, { payloadJson, projectPath, su
     files.slice(keep).forEach((name) => {
       try { fs.unlinkSync(path.join(dir, name)); } catch (_) { /* bỏ qua */ }
     });
+    // Dọn WAV của bản tự lưu không còn bản nào (trong N bản giữ lại) trỏ tới.
+    if (fs.existsSync(ttsDir)) {
+      const referenced = new Set();
+      let readable = true;
+      for (const name of files.slice(0, keep)) {
+        try {
+          const json = name === path.basename(target) ? tts.payloadJson : readCrabFile(path.join(dir, name))?.payloadJson;
+          if (!json) throw new Error('empty');
+          ttsReferences(json, tts.ttsRelDir).forEach((n) => referenced.add(n));
+        } catch (_) {
+          readable = false;   // không biết bản hỏng cần WAV nào -> lượt này KHÔNG dọn gì
+          break;
+        }
+      }
+      if (readable) pruneTtsDir(ttsDir, referenced);
+    }
     return { path: target, dir, size_bytes: sizeBytes, kept: Math.min(files.length, keep) };
   } catch (error) {
     return { error: 'autosave_failed', detail: String(error?.message || error) };
@@ -593,6 +624,17 @@ ipcMain.handle('save-frame-image', async (_event, { dataBase64, suggestedName })
   }
 });
 
+/* Đuôi được phép + tên bộ lọc của hộp lưu. Đuôi âm thanh (v1.1.17): chỉ tích ô "Audio" ở hộp Xuất
+ * thì tệp đích là tệp âm thanh (xem trustedExportOutputPath — backend kiểm lại đúng đuôi này). */
+const EXPORT_OUTPUT_KINDS = {
+  mp4: { filter: () => _t('Video MP4'), title: () => _t('Lưu video xuất') },
+  mov: { filter: () => _t('Video QuickTime'), title: () => _t('Lưu video xuất') },
+  mp3: { filter: () => _t('Âm thanh MP3'), title: () => _t('Lưu âm thanh xuất') },
+  wav: { filter: () => _t('Âm thanh WAV'), title: () => _t('Lưu âm thanh xuất') },
+  m4a: { filter: () => _t('Âm thanh AAC'), title: () => _t('Lưu âm thanh xuất') },
+  flac: { filter: () => _t('Âm thanh FLAC'), title: () => _t('Lưu âm thanh xuất') },
+};
+
 /* CHỌN CHỖ LƯU VIDEO XUẤT — TRƯỚC khi render (mục 1.16, người dùng chốt 2026-09-29: như
  * Premiere). ffmpeg ghi thẳng ra đó, không còn vòng tải file qua trình duyệt rồi ghi thêm một
  * bản. Trả kèm `ticket` = HMAC của đường dẫn bằng khoá phiên: backend chỉ nhận đường dẫn có
@@ -602,7 +644,8 @@ ipcMain.handle('save-frame-image', async (_event, { dataBase64, suggestedName })
 ipcMain.handle('export-pick-output', async (_event, { suggestedName, ext, projectPath } = {}) => {
   if (isExternalBackend) return { unsupported: true };
   try {
-    const extension = ext === 'mov' ? 'mov' : 'mp4';
+    const extension = EXPORT_OUTPUT_KINDS[ext] ? ext : 'mp4';
+    const kind = EXPORT_OUTPUT_KINDS[extension];
     // CHỈ DÙNG CHO TEST (như CRAB_TEMP_DIR): bỏ hộp thoại gốc — CDP không bấm được nó.
     const testDir = process.env.CRAB_TEST_EXPORT_OUTPUT_DIR;
     if (testDir) {
@@ -613,9 +656,9 @@ ipcMain.handle('export-pick-output', async (_event, { suggestedName, ext, projec
       || (projectPath ? path.dirname(String(projectPath)) : '')
       || app.getPath('videos');
     const result = await dialog.showSaveDialog(mainWindow, {
-      title: _t('Lưu video xuất'),
+      title: kind.title(),
       defaultPath: path.join(baseDir, `${String(suggestedName || 'studio_final_cut')}.${extension}`),
-      filters: [{ name: extension === 'mov' ? _t('Video QuickTime') : _t('Video MP4'), extensions: [extension] }],
+      filters: [{ name: kind.filter(), extensions: [extension] }],
     });
     if (result.canceled || !result.filePath) return { canceled: true };
     let finalPath = result.filePath;
@@ -684,6 +727,19 @@ function readCrabResolved(filePath) {
    * nó nói ra đã khôi phục gì / còn thiếu gì. */
   const library = { restored: [], missing: [], failed: [] };
   result.payloadJson = resolvePayloadPaths(result.payloadJson, filePath, { library });
+  /* CỨU DỰ ÁN LƯU TRƯỚC BẢN SỬA LỖI MẤT LỒNG TIẾNG: .crab còn trỏ giọng lồng tiếng vào thư mục TẠM, mà
+   * renderer sắp gọi /api/reset-project xoá thư mục đó TRƯỚC khi nạp lại. Tệp còn thì chép ngay sang
+   * "<Tên>_TTS/" cạnh .crab và trỏ về đó (lượt Lưu kế tiếp ghi hẳn vào .crab). Không dọn gì ở lượt mở. */
+  try {
+    // Chỉ cứu tệp TRONG THƯ MỤC TẠM (adopt: không gì khác); bản tự lưu cứu vào "<Tên>_TTS/" chung của nó.
+    const tts = relocateDubbingAudio(result.payloadJson, filePath, { prune: false, adopt: () => false, ttsDir: ttsDirForCrab(filePath) });
+    if (tts.copied) {
+      console.log(`[project-open] đã cứu ${tts.copied} tệp lồng tiếng từ thư mục tạm sang thư mục _TTS cạnh dự án`);
+      result.payloadJson = resolvePayloadPaths(tts.payloadJson, filePath, {});
+    }
+  } catch (error) {
+    console.warn('[project-open] không chép được tệp lồng tiếng:', error.message);
+  }
   result.library = library;
   return result;
 }

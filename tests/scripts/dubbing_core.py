@@ -127,6 +127,15 @@ print("looks_degenerate")
 check("giọng liền mạch không bị nghi", core.looks_degenerate(tone(2.0), SR) == "")
 check("dải câm 2s bị nghi", "im lặng" in core.looks_degenerate(np.concatenate([tone(0.5), np.zeros(2 * SR, np.float32), tone(0.5)]), SR))
 
+print("sequential (văn bản không mốc)")
+seq_cues, _ = core.normalize_cues([{"start": i, "end": i + 1, "text": f"Câu số {i + 1}."} for i in range(3)])
+seq = core.TimelinePlanner(mode="sequential", gap=0.5)
+seq_out = [seq.place(c, tone(d), SR)[1] for c, d in zip(seq_cues, (1.0, 2.0, 0.5))]
+check("câu đầu ở 0", abs(seq_out[0].start) < 1e-6, seq_out[0].start)
+check("câu sau = cuối câu trước + khoảng nghỉ", abs(seq_out[1].start - 1.5) < 1e-3 and abs(seq_out[2].start - 4.0) < 1e-3,
+      [p.start for p in seq_out])
+check("không đổi tốc độ, không tràn, không đếm dời", all(p.speed == 1.0 and p.overflow == 0 and p.shift == 0 for p in seq_out))
+
 if failures:
     print(f"\n{len(failures)} lỗi")
     sys.exit(1)

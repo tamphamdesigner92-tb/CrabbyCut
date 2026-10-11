@@ -275,7 +275,7 @@ def change_speed(audio: np.ndarray, sample_rate: int, speed: float) -> tuple[np.
 
 # ── Xếp lên trục thời gian ───────────────────────────────────────────────────
 
-TIMING_MODES = ("auto_fit", "dynamic_shift", "fixed_duration")
+TIMING_MODES = ("auto_fit", "dynamic_shift", "fixed_duration", "sequential")
 DEFAULT_MAX_SPEED = 1.45    # Vi-TTS Studio: TTS_AUTO_FIT_MAX_SPEED
 DEFAULT_GAP_SEC = 0.2       # Vi-TTS Studio: TTS_AUTO_FIT_MAX_GAP_SECONDS
 
@@ -323,8 +323,11 @@ class TimelinePlanner:
     dynamic_shift:
         Không đổi tốc độ. Câu nào đè lên câu trước thì dời tới ngay sau câu trước.
     fixed_duration:
-        Mỗi câu đúng mốc; dài hơn khung thì cắt đuôi (có fade). F5-TTS được nhắc độ dài từ lúc
-        sinh nên hiếm khi phải cắt.
+        Mỗi câu đúng mốc; dài hơn khung thì cắt đuôi (có fade).
+    sequential (v1.1.17 — lồng tiếng từ VĂN BẢN không có mốc thời gian):
+        Bỏ qua mốc của câu; câu đầu ở 0, mỗi câu sau đặt ngay sau câu trước + `gap` (khoảng
+        nghỉ người dùng chọn). Không đổi tốc độ, không tràn. Mốc thật trả về trong Placement
+        để giao diện dựng phụ đề khớp tiếng.
     """
 
     mode: str = "auto_fit"
@@ -344,7 +347,10 @@ class TimelinePlanner:
         placement = Placement(seq=cue.seq, index=cue.index, start=cue.start, duration=original,
                               cue_start=cue.start, cue_end=cue.end, original_duration=original)
 
-        if self.mode == "fixed_duration":
+        if self.mode == "sequential":
+            # shift giữ 0: văn bản không có mốc gốc nên "bị dời" là vô nghĩa (summary đếm shift).
+            placement.start = 0.0 if self._cursor is None else self._cursor
+        elif self.mode == "fixed_duration":
             limit = int(round(cue.duration * sample_rate))
             if limit > 0 and audio.size > limit:
                 audio = fade_tail(audio[:limit], sample_rate)
@@ -369,8 +375,10 @@ class TimelinePlanner:
                 placement.speed = speed
 
         placement.duration = audio.size / float(sample_rate) if sample_rate else 0.0
-        placement.overflow = max(0.0, placement.end - cue.end)
-        if self.mode == "dynamic_shift":
+        placement.overflow = 0.0 if self.mode == "sequential" else max(0.0, placement.end - cue.end)
+        if self.mode == "sequential":
+            self._cursor = placement.end + self.gap
+        elif self.mode == "dynamic_shift":
             self._cursor = placement.end
         elif self.mode == "auto_fit":
             self._cursor = (placement.end + self.gap) if placement.overflow > 0 else None

@@ -17372,6 +17372,9 @@
             { id: 'effect', label: _t('Hiệu ứng chữ') },
             { id: 'subtitle', label: 'Auto Subtitle' },
             { id: 'local-subtitle', label: 'Local Subtitle' },
+            /* "Kịch bản" từng là tab riêng; v1.1.17 dời vào đây làm tab con (theo yêu cầu người
+               dùng) — kịch bản cũng là văn bản, gom về một chỗ cho dải tab gọn hơn. */
+            { id: 'script', label: _t('Kịch bản') },
         ],
         shape: [{ id: 'shapes', label: _t('Hình dạng') }],
         transition: [
@@ -18516,7 +18519,7 @@
      * Cố ý KHÔNG dựng lại cả pane khi người dùng đang gõ — chỉ cập nhật dòng trạng thái,
      * nếu không con trỏ nhảy về đầu sau mỗi phím. */
     function refreshScriptPane({ keepText = false } = {}) {
-        if (editPanelTab !== 'script') return;
+        if (editPanelTab !== 'text' || editPanelTextSub !== 'script') return;
         const body = document.getElementById('editPanelBody');
         if (!body) return;
         const status = body.querySelector('.edit-script-status');
@@ -18856,7 +18859,7 @@
                 }
             } else bodyEl.innerHTML = renderImportPaneHtml('audio');
         }
-        else if (editPanelTab === 'script') { bodyEl.innerHTML = renderScriptPaneHtml(); bindScriptPane(bodyEl); }
+        else if (editPanelTab === 'text' && editPanelTextSub === 'script') { bodyEl.innerHTML = renderScriptPaneHtml(); bindScriptPane(bodyEl); }
         else if (editPanelTab === 'text') {
             /* Hai panel phụ đề sống ở tệp riêng (auto-subtitle.js, local-subtitle.js) — tính
                năng độc lập, test riêng được mà không cần DOM thật. */
@@ -20483,7 +20486,10 @@
     }
 
     // Chèn các item chuyển cảnh overlay đã bake vào danh sách export + trim 2 item gốc.
-    async function appendOverlayTransitionItems(items, exportFps, collect) {
+    // `trimOnly` (xuất CHỈ âm thanh): KHÔNG bake khung, chỉ cắt 2 item gốc đúng như lượt xuất video —
+    // cắt item là cắt luôn TIẾNG của nó trong vùng chuyển cảnh, nên tệp âm thanh riêng phải cắt y vậy
+    // thì mới nghe trùng tiếng trong video.
+    async function appendOverlayTransitionItems(items, exportFps, collect, { trimOnly = false } = {}) {
         if (!transitionsAvailable()) return;
         const seqDim = payloadSequence();
         const seqW = Math.max(2, Math.round(Number(seqDim.width)) || 1920);
@@ -20495,11 +20501,14 @@
             const d = transDef.duration, half = d / 2, J = b.junctionTime;
             try {
                 // Cùng công thức số khung với bakeTransitionSequence (so với meta của mục cache).
-                const frameCount = Math.max(2, Math.round(Math.max(0.05, d) * exportFps) + 1);
-                const cache = await overlayTransitionPrebakeKey(A, B, transDef, exportFps, seqW, seqH);
-                const seq = await cachedTransitionSeq(cache, frameCount, d, seqW, seqH,
-                    (status) => bakeTransitionSequence(A, B, transDef, exportFps, seqW, seqH, collect, status));
-                if (!bakedSeqHasFrames(seq)) continue;
+                let seq = null;
+                if (!trimOnly) {
+                    const frameCount = Math.max(2, Math.round(Math.max(0.05, d) * exportFps) + 1);
+                    const cache = await overlayTransitionPrebakeKey(A, B, transDef, exportFps, seqW, seqH);
+                    seq = await cachedTransitionSeq(cache, frameCount, d, seqW, seqH,
+                        (status) => bakeTransitionSequence(A, B, transDef, exportFps, seqW, seqH, collect, status));
+                    if (!bakedSeqHasFrames(seq)) continue;
+                }
                 // SNAP mép transition vào lưới frame xuất (khớp snapT của backend) + cho item gốc CHỒNG
                 // 1 frame vào 2 mép transition -> không còn khe hở 1 frame (lỗi mất hình). Frame đầu
                 // transition = A, frame cuối = B nên phần chồng bị transition (nằm trên) che, vô hình.
@@ -20517,6 +20526,7 @@
                     copyB.source_start = (Number(copyB.source_start) || 0) + shift * speedRate(copyB);
                     copyB.duration = Math.max(0.05, origDur - shift);
                 }
+                if (trimOnly) continue;
                 items.push({
                     id: `trans_${A.id}`,
                     type: 'text', // + rendered_text_png 1px -> backend cho qua guard asset, animation_render ghi đè thành image_seq
@@ -21781,6 +21791,10 @@
     async function exportPayload(options = {}) {
         const exportFps = clamp(Number(options.fps) || 30, 10, 60);
         const collectFile = typeof options.collectFile === 'function' ? options.collectFile : null;
+        /* XUẤT CHỈ ÂM THANH (ô "Audio" của hộp Xuất, v1.1.17): chỉ giữ block CÓ THỂ có tiếng (audio,
+           media) và bỏ mọi khâu vẽ trước phần hình — chữ, hình khối, chuỗi khung hoạt ảnh, retouch,
+           màu, chuyển cảnh. Lượt sidecar export-audio chỉ đọc mốc/âm lượng/tốc độ/khử ồn của chúng. */
+        const audioOnly = options.audioOnly === true;
         /* ĐO VẼ TRƯỚC THEO LOẠI (Bước 0.1, docs/KE_HOACH_TOI_UU_EXPORT_WIN.md): performVideoExport
            truyền `options.timing` để biết phần chờ trước khi tải lên nằm ở chữ, chuỗi khung
            hoạt ảnh, retouch hay chuyển cảnh — ngưỡng 30% của nhánh 1B đo trên chính các số này. */
@@ -21887,10 +21901,19 @@
             }
         };
         for (const item of editingItems) {
+            if (audioOnly && item?.type !== 'audio' && item?.type !== 'media') continue;
             const copy = deepClone(item);
             /* Media: sidecar co luồng CỠ GỐC (tệp, hoặc chuỗi khung bake ở cỡ gốc) theo scale/100 ×
              * fit_scale — cùng mốc "100% = vừa khung" với preview (xem mediaAssetFitScale). */
             if (copy?.type === 'media') copy.fit_scale = mediaAssetFitScale(findAsset(copy.asset_id));
+            if (audioOnly) {
+                // Keyframe ÂM LƯỢNG là phần duy nhất của keyframe_expr đi vào chuỗi tiếng (xem khối
+                // KEYFRAME bên dưới) — phải mang theo, không thì tệp âm thanh mất tăng/giảm âm lượng.
+                const volumeExpr = window.TextAnimations?.volumeKeyframeFfmpegExpr?.(copy.keyframes);
+                if (volumeExpr) copy.keyframe_expr = { volume_expr: volumeExpr };
+                items.push(copy);
+                continue;
+            }
             if (copy?.type === 'text') {
                 /* Mẫu bị phóng to -> bake dày thêm rồi CHIA lại transform.scale, để ffmpeg
                    nhận ảnh đã đủ pixel thay vì kéo raster lên (xem templateExportBakeDensity).
@@ -22021,13 +22044,18 @@
         // GĐ5: bake RETOUCH lane chính. Đặt TRƯỚC hai khối chuyển cảnh vì overlay vẽ theo
         // thứ tự mảng: trong vùng chuyển cảnh thì khung tổng hợp của chuyển cảnh mới đúng,
         // nên nó phải nằm TRÊN miếng vá retouch.
-        await timed('retouch', () => appendRetouchItems(items, exportFps, collectFile));
-        // Miếng vá Retouch cho media overlay VIDEO. Cùng ràng buộc thứ tự với lane chính.
-        await timed('retouch', () => appendOverlayRetouchItems(items, exportFps, collectFile));
-        // GĐ4: bake vùng chuyển cảnh OVERLAY -> item image-sequence + trim 2 item gốc (khớp preview).
-        await timed('transition', () => appendOverlayTransitionItems(items, exportFps, collectFile));
-        // GĐ4: bake vùng chuyển cảnh LANE CHÍNH (full-res) -> overlay image-sequence trên track_main.
-        await timed('transition', () => appendMainTransitionItems(items, exportFps, collectFile));
+        if (audioOnly) {
+            // Chỉ phần CẮT item ở vùng chuyển cảnh overlay (đổi tiếng); chuyển cảnh lane chính chỉ phủ hình.
+            await appendOverlayTransitionItems(items, exportFps, collectFile, { trimOnly: true });
+        } else {
+            await timed('retouch', () => appendRetouchItems(items, exportFps, collectFile));
+            // Miếng vá Retouch cho media overlay VIDEO. Cùng ràng buộc thứ tự với lane chính.
+            await timed('retouch', () => appendOverlayRetouchItems(items, exportFps, collectFile));
+            // GĐ4: bake vùng chuyển cảnh OVERLAY -> item image-sequence + trim 2 item gốc (khớp preview).
+            await timed('transition', () => appendOverlayTransitionItems(items, exportFps, collectFile));
+            // GĐ4: bake vùng chuyển cảnh LANE CHÍNH (full-res) -> overlay image-sequence trên track_main.
+            await timed('transition', () => appendMainTransitionItems(items, exportFps, collectFile));
+        }
         if (timingSink) {
             if (retouchFaceWaitMs > 0) timingSink.retouch_faces_ms = Math.round(retouchFaceWaitMs);
             for (const [key, ms] of Object.entries(timingMs)) {

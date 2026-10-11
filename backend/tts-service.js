@@ -8,12 +8,22 @@
  * VÒNG ĐỜI SERVER:
  *   · Bật LƯỜI ở lượt lồng tiếng / nghe thử / tải model đầu tiên — mở panel thôi thì không bật
  *     (import torch mất vài giây và giữ ~300 MB RAM dù chưa nạp model nào).
- *   · Server tự nhả model sau 5 phút rảnh (IDLE_UNLOAD_SECONDS ở server.py) nhưng tiến trình
- *     vẫn sống để lượt sau khỏi khởi động lại.
+ *   · GIỮ model trong VRAM sau mỗi lượt (người dùng chốt 2026-10-11) để tạo giọng tiếp không phải
+ *     nạp lại. Nhả bằng cách TẮT HẲN tiến trình server (trả cả CUDA context — chỉ nhả model trong tiến
+ *     trình thì Qwen3-TTS còn giữ ~4,4 GB, đo trên GTX 1060) khi:
+ *       1. lượt mới chọn model KHÁC (hoặc đổi chế độ Qwen3-TTS) — xem prepareServerFor;
+ *       2. một tính năng khác cần GPU bắt đầu (xuất video, bóc băng/ASR, Auto-Reframe…) — server.js
+ *          gọi releaseAll(); đang có lượt lồng tiếng chạy thì nhả ngay khi lượt đó xong;
+ *       3. rảnh IDLE_STOP_MS (15 phút) — scheduleIdleStop.
  *   · Backend tắt -> stop(); backend chết bất thường -> server tự thoát nhờ --parent-pid.
  *
  * CỔNG 4124, không phải 4123 của bản Private: hai bản cùng chạy trên máy tác giả không được
  * giành cổng của nhau — và `health()` còn kiểm chữ ký `app` để khỏi nhận nhầm server lạ.
+ *
+ * NHIỀU SERVER (v1.1.17): Qwen3-TTS và Chatterbox có môi trường Python RIÊNG (xem ENVS ở
+ * scripts/setup_tts.js) -> mỗi môi trường một tiến trình server.py trên cổng riêng (4124 chính,
+ * 4125 Qwen, 4126 Chatterbox), chỉ mở engine của mình. Mọi hàm ở đây nhận `envId`; job được gửi
+ * tới server của engine (engineEnv) và id job được nhớ kèm môi trường để poll/huỷ đúng chỗ.
  */
 'use strict';
 
@@ -30,15 +40,29 @@ const _t = (k, p) => ((typeof globalThis._t === 'function')
   : (p ? String(k).replace(/\{(\w+)\}/g, (m, n) => (n in p ? p[n] : m)) : k));
 
 const PORT = Number(process.env.CRAB_TTS_PORT || 4124);
+const ENV_PORTS = { main: PORT, qwen: PORT + 1, chatterbox: PORT + 2 };
+const ENV_IDS = Object.keys(ENV_PORTS);
+/* Engine sống ở môi trường nào — khớp engine_home() ở tts/server.py. Mac chạy Qwen3-TTS và
+ * Chatterbox bằng mlx-audio trong môi trường chính. */
+function engineEnv(engineId) {
+  if (process.platform === 'darwin') return 'main';
+  if (engineId === 'qwen3') return 'qwen';
+  if (engineId === 'chatterbox') return 'chatterbox';
+  return 'main';
+}
 const HOST = '127.0.0.1';
-const BOOT_TIMEOUT_MS = 180000;   // lần đầu import torch + f5_tts trên HDD có thể mất cả phút
+const BOOT_TIMEOUT_MS = 180000;   // lần đầu import torch + vieneu trên HDD có thể mất cả phút
 
 /* Mô tả TĨNH của engine — dùng khi server chưa bật (mở panel không bật server). Phải khớp
  * ENGINES + model_store.MODELS ở phía Python; `size_mb` chỉ để báo "cần tải ~… lần đầu". */
 const ENGINES = [
   {
-    id: 'f5', label: 'F5-TTS tiếng Việt', models: ['f5-vi', 'vocos'], size_mb: 1400,
-    clone: true, voices: [],
+    /* Mặc định từ v1.1.17 (thay F5-TTS). Bộ tệp model theo máy: GPU (CUDA/MPS) dùng đường
+     * PyTorch, không có GPU dùng ONNX — khớp VieNeu3Engine.models ở server.py. */
+    id: 'vieneu3', label: 'VieNeu-TTS v3 Turbo',
+    models_gpu: ['vieneu3-torch', 'moss-nano'], size_mb_gpu: 420,
+    models_cpu: ['vieneu3-onnx', 'moss-nano-onnx'], size_mb_cpu: 650,
+    clone: true, clone_needs_text: false, voices: [],
   },
   {
     id: 'vieneu', label: 'VieNeu-TTS', models: ['vieneu-tts', 'neucodec-onnx'], size_mb: 900,
@@ -47,6 +71,34 @@ const ENGINES = [
   {
     id: 'voxcpm', label: 'VoxCPM2', models: ['voxcpm2-8bit'], size_mb: 3300, platforms: ['darwin'],
     clone: false, voices: [], describe: true,
+  },
+  /* v1.1.17 (người dùng chốt 2026-10-11). Danh sách giọng/ngôn ngữ/chế độ phải khớp Qwen3Engine và
+   * ChatterboxEngine ở tts/server.py — dùng khi server của chúng chưa bật. */
+  {
+    id: 'qwen3', label: 'Qwen3-TTS', clone: true, clone_needs_text: false, instruct: true,
+    models: process.platform === 'darwin' ? ['qwen3-0.6b-custom-mlx'] : ['qwen3-0.6b-custom'], size_mb: 2500,
+    voices: ['Vivian', 'Serena', 'Uncle_Fu', 'Dylan', 'Eric', 'Ryan', 'Aiden', 'Ono_Anna', 'Sohee'],
+    voice_descriptions: {
+      Vivian: 'Nữ · tiếng Trung · trẻ, sáng', Serena: 'Nữ · tiếng Trung · dịu dàng',
+      Uncle_Fu: 'Nam · tiếng Trung · trầm, từng trải', Dylan: 'Nam · tiếng Trung (Bắc Kinh)',
+      Eric: 'Nam · tiếng Trung (Tứ Xuyên)', Ryan: 'Nam · tiếng Anh · khoẻ, nhịp nhanh',
+      Aiden: 'Nam · tiếng Anh · trẻ, tươi', Ono_Anna: 'Nữ · tiếng Nhật', Sohee: 'Nữ · tiếng Hàn · ấm',
+    },
+    languages: ['Auto', 'Chinese', 'English', 'Japanese', 'Korean', 'German', 'French', 'Russian', 'Portuguese', 'Spanish', 'Italian'],
+    modes: ['custom', 'clone', 'design'],
+  },
+  {
+    id: 'chatterbox', label: 'Chatterbox Multilingual', clone: true, clone_needs_text: false,
+    emotion: true, watermark: true,
+    models: process.platform === 'darwin' ? ['chatterbox-mtl-v3-mlx'] : ['chatterbox-mtl'], size_mb: 3200,
+    voices: ['default'], voice_labels: { default: 'Giọng mặc định' },
+    languages: [
+      ['ar', 'Tiếng Ả Rập'], ['da', 'Tiếng Đan Mạch'], ['de', 'Tiếng Đức'], ['el', 'Tiếng Hy Lạp'], ['en', 'Tiếng Anh'],
+      ['es', 'Tiếng Tây Ban Nha'], ['fi', 'Tiếng Phần Lan'], ['fr', 'Tiếng Pháp'], ['he', 'Tiếng Do Thái'], ['hi', 'Tiếng Hindi'],
+      ['it', 'Tiếng Ý'], ['ja', 'Tiếng Nhật'], ['ko', 'Tiếng Hàn'], ['ms', 'Tiếng Mã Lai'], ['nl', 'Tiếng Hà Lan'],
+      ['no', 'Tiếng Na Uy'], ['pl', 'Tiếng Ba Lan'], ['pt', 'Tiếng Bồ Đào Nha'], ['ru', 'Tiếng Nga'], ['sv', 'Tiếng Thụy Điển'],
+      ['sw', 'Tiếng Swahili'], ['tr', 'Tiếng Thổ Nhĩ Kỳ'], ['zh', 'Tiếng Trung'],
+    ],
   },
 ];
 
@@ -64,17 +116,22 @@ function modelDir() {
   return process.env.CRAB_TTS_MODEL_DIR || path.join(RuntimePaths.appDataRoot(), 'tts_models');
 }
 
-let child = null;
-let booting = null;
-let setupError = '';
+// Trạng thái từng server (theo môi trường).
+const servers = Object.fromEntries(ENV_IDS.map((id) => [id, {
+  child: null, booting: null, idleStopTimer: null,
+  lastModelKey: '',        // model đang nằm trong VRAM của server này (xem prepareServerFor)
+  releaseWhenIdle: false,  // tính năng GPU khác đã xin nhả khi lượt đang chạy (xem releaseAll)
+}]));
+const setupErrors = Object.fromEntries(ENV_IDS.map((id) => [id, '']));
+const jobEnvs = new Map();   // job_id -> envId
 
 // ── HTTP tới server Python ──────────────────────────────────────────────────
 
-function request(method, urlPath, body, timeoutMs = 15000) {
+function request(method, urlPath, body, timeoutMs = 15000, envId = 'main') {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
     const req = http.request({
-      host: HOST, port: PORT, path: urlPath, method,
+      host: HOST, port: ENV_PORTS[envId] || PORT, path: urlPath, method,
       headers: payload ? { 'Content-Type': 'application/json', 'Content-Length': payload.length } : {},
       timeout: timeoutMs,
     }, (res) => {
@@ -99,33 +156,37 @@ function request(method, urlPath, body, timeoutMs = 15000) {
   });
 }
 
-async function health() {
+async function health(envId = 'main') {
   try {
-    const data = await request('GET', '/health', undefined, 1500);
+    const data = await request('GET', '/health', undefined, 1500, envId);
     return data && data.app === 'crabbycut-tts' ? data : null;
   } catch (_) {
     return null;
   }
 }
 
-function envMissingError() {
-  const error = new Error(_t('Chưa cài môi trường lồng tiếng. Bấm "Cài thư viện lồng tiếng" trong panel Lồng tiếng (hoặc chạy npm run setup:tts).'));
+function envMissingError(envId = 'main') {
+  const error = new Error(envId === 'main'
+    ? _t('Chưa cài môi trường lồng tiếng. Bấm "Cài thư viện lồng tiếng" trong panel Lồng tiếng (hoặc chạy npm run setup:tts).')
+    : _t('Chưa cài {name}. Bấm "Cài thêm {name}" trong panel Lồng tiếng.', { name: SetupTts.ENVS[envId]?.label || envId }));
   error.code = 'TTS_ENV_MISSING';
   error.status = 409;
   return error;
 }
 
-/* Bật server nếu chưa chạy. Gọi đồng thời nhiều lần thì chung một lượt khởi động. */
-function ensureServer() {
-  if (booting) return booting;
-  booting = (async () => {
-    if (await health()) return;
-    const env = SetupTts.ttsEnv();
-    if (!env.ready) throw envMissingError();
+/* Bật server của một môi trường nếu chưa chạy. Gọi đồng thời nhiều lần thì chung một lượt. */
+function ensureServer(envId = 'main') {
+  const server = servers[envId];
+  if (server.booting) return server.booting;
+  server.booting = (async () => {
+    if (await health(envId)) return;
+    const env = SetupTts.ttsEnv(envId);
+    if (!env.ready) throw envMissingError(envId);
     fs.mkdirSync(modelDir(), { recursive: true });
-    const proc = spawn(env.python, [SetupTts.SERVER_SCRIPT, '--port', String(PORT), '--parent-pid', String(process.pid)], {
+    const proc = spawn(env.python, [SetupTts.SERVER_SCRIPT, '--port', String(ENV_PORTS[envId]), '--parent-pid', String(process.pid)], {
       cwd: path.dirname(SetupTts.SERVER_SCRIPT),
       env: pythonEnv({
+        CRAB_TTS_ENV: envId,
         CRAB_TTS_MODEL_DIR: modelDir(),
         ...(env.site ? { CRAB_TTS_SITE: env.site } : {}),
         HF_HUB_DISABLE_PROGRESS_BARS: '1',
@@ -134,7 +195,7 @@ function ensureServer() {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
-    child = proc;
+    server.child = proc;
     ctx.trackChild(proc);
     const tail = [];
     const onData = (prefix) => (chunk) => {
@@ -144,7 +205,8 @@ function ensureServer() {
         tail.push(line);
         if (tail.length > 25) tail.shift();
         // server.py tự gắn "[tts]" cho dòng của nó — đừng gắn thêm lần nữa.
-        process.stdout.write(line.startsWith('[tts]') ? `${line}\n` : `${prefix} ${line}\n`);
+        const tag = envId === 'main' ? '' : `[${envId}] `;
+        process.stdout.write(line.startsWith('[tts]') ? `${tag}${line}\n` : `${tag}${prefix} ${line}\n`);
       }
     };
     proc.stdout.on('data', onData('[tts]'));
@@ -153,7 +215,7 @@ function ensureServer() {
     proc.on('exit', (code) => {
       exited = code;
       ctx.untrackChild(proc);
-      if (child === proc) child = null;
+      if (server.child === proc) server.child = null;
     });
     proc.on('error', (error) => { exited = error.message; });
     const deadline = Date.now() + BOOT_TIMEOUT_MS;
@@ -161,13 +223,13 @@ function ensureServer() {
       if (exited !== null) {
         throw new Error(_t('Server lồng tiếng thoát ngay khi khởi động (mã {code}):\n{log}', { code: exited, log: tail.slice(-8).join('\n') }));
       }
-      if (await health()) return;
+      if (await health(envId)) return;
       await new Promise((r) => setTimeout(r, 500));
     }
     killTree(proc);
     throw new Error(_t('Server lồng tiếng không phản hồi sau {s} giây.', { s: Math.round(BOOT_TIMEOUT_MS / 1000) }));
-  })().finally(() => { booting = null; });
-  return booting;
+  })().finally(() => { server.booting = null; });
+  return server.booting;
 }
 
 function killTree(proc) {
@@ -178,66 +240,215 @@ function killTree(proc) {
   } catch (_) { /* no-op */ }
 }
 
-async function stop() {
-  if (!child) return;
-  const proc = child;
-  try { await request('POST', '/shutdown', {}, 2000); } catch (_) { /* rơi xuống kill */ }
-  setTimeout(() => killTree(proc), 1500);
+// Không truyền envId = tắt mọi server do backend bật (backend đóng).
+// Không truyền envId = tắt mọi server do backend bật (backend đóng). Chờ tiến trình THOÁT thật (tối
+// đa ~4 s) rồi mới trả về: người gọi releaseAll() sắp dùng GPU, VRAM phải trống trước đã.
+async function stop(envId) {
+  if (!envId) {
+    await Promise.all(ENV_IDS.map((id) => stop(id)));
+    return;
+  }
+  const server = servers[envId];
+  const proc = server.child;
+  server.lastModelKey = '';
+  if (!proc) return;
+  const exited = new Promise((resolve) => {
+    if (proc.exitCode !== null) resolve();
+    else proc.once('exit', resolve);
+  });
+  try { await request('POST', '/shutdown', {}, 2000, envId); } catch (_) { /* rơi xuống kill */ }
+  const timer = setTimeout(() => killTree(proc), 1500);
+  await Promise.race([exited, new Promise((r) => setTimeout(r, 4000))]);
+  clearTimeout(timer);
 }
 
 // ── Trạng thái cho panel ────────────────────────────────────────────────────
+
+/* Máy này sẽ chạy VieNeu v3 bằng đường nào — đoán KHÔNG cần bật server: macOS dùng MPS, máy có
+ * card NVIDIA (theo setup_tts) dùng CUDA. Server là nguồn đúng khi đã chạy (/v1/engines). */
+function gpuPath() {
+  return process.platform === 'darwin' || SetupTts.torchVariant().id.startsWith('cu');
+}
+function staticModels(meta) {
+  if (meta.models_gpu) return gpuPath() ? meta.models_gpu : meta.models_cpu;
+  return meta.models || [];
+}
+function staticSizeMb(meta) {
+  if (meta.models_gpu) return gpuPath() ? meta.size_mb_gpu : meta.size_mb_cpu;
+  return meta.size_mb || 0;
+}
+
+/* Danh sách giọng có sẵn của VieNeu v3 đọc thẳng từ tệp JSON của gói `vieneu` đã cài — để panel
+ * hiện được giọng mà không phải bật server (import torch mất vài giây + ~300 MB RAM). */
+let v3VoicesCache = null;
+function vieneu3Voices() {
+  if (v3VoicesCache) return v3VoicesCache;
+  const env = SetupTts.ttsEnv();
+  const roots = [];
+  if (env.site) roots.push(env.site);
+  if (env.mode === 'venv' && env.location) {
+    roots.push(path.join(env.location, 'Lib', 'site-packages'));
+    try {
+      for (const name of fs.readdirSync(path.join(env.location, 'lib'))) {
+        roots.push(path.join(env.location, 'lib', name, 'site-packages'));
+      }
+    } catch (_) { /* không có lib/ (Windows) */ }
+  }
+  for (const root of roots) {
+    const file = path.join(root, 'vieneu', 'assets', 'voices_v3_turbo.json');
+    try {
+      const presets = JSON.parse(fs.readFileSync(file, 'utf8')).presets || {};
+      const names = Object.keys(presets).sort((a, b) => {
+        const fa = presets[a].featured; const fb = presets[b].featured;
+        if ((fa == null) !== (fb == null)) return fa == null ? 1 : -1;
+        return (fa || 0) - (fb || 0);
+      });
+      v3VoicesCache = names.map((n) => ({ id: n, label: n, description: String(presets[n].description || '') }));
+      return v3VoicesCache;
+    } catch (_) { /* thử chỗ kế */ }
+  }
+  return [];
+}
 
 function modelReadyLocally(key) {
   return fs.existsSync(path.join(modelDir(), key, '.crab-model.json'));
 }
 
+/* Model của engine ĐÃ GỠ (F5-TTS ở v1.1.17: Vi-F5-TTS 1,35 GB + Vocos) nằm lại trong kho model của
+ * app sau khi nâng cấp — không còn gì dùng tới. Dọn một lần mỗi phiên, CHỈ thư mục do model_store
+ * tạo (có marker .crab-model.json) để không bao giờ xoá nhầm thứ người dùng tự đặt vào. */
+const OBSOLETE_MODELS = ['f5-vi', 'vocos'];
+let obsoletePruned = false;
+function pruneObsoleteModels() {
+  if (obsoletePruned) return;
+  obsoletePruned = true;
+  for (const key of OBSOLETE_MODELS) {
+    const dir = path.join(modelDir(), key);
+    try {
+      if (!fs.existsSync(path.join(dir, '.crab-model.json'))) continue;
+      fs.rmSync(dir, { recursive: true, force: true });
+      console.log(`[tts] đã dọn model của engine đã gỡ: ${dir}`);
+    } catch (error) {
+      console.warn(`[tts] không dọn được ${dir}: ${error.message}`);
+    }
+  }
+}
+
+function staticEngine(e) {
+  const platformOk = !e.platforms || e.platforms.includes(process.platform);
+  const voiceDetails = e.id === 'vieneu3' ? vieneu3Voices()
+    : (e.voices || []).map((v) => ({
+      id: v, label: e.voice_labels?.[v] || String(v).replace(/_/g, ' '), description: e.voice_descriptions?.[v] || '',
+    }));
+  const out = {
+    id: e.id,
+    label: e.label,
+    available: platformOk,
+    reason: platformOk ? '' : _t('{name} chỉ chạy trên macOS (MLX).', { name: e.label }),
+    loaded: false,
+    voices: voiceDetails.map((v) => v.id),
+    voice_details: voiceDetails,
+    models: staticModels(e).map((key) => ({ key, ready: modelReadyLocally(key) })),
+  };
+  if (e.languages) out.languages = e.languages.map((l) => (Array.isArray(l) ? { id: l[0], label: l[1] } : { id: l, label: l }));
+  if (e.modes) {
+    // Khớp Qwen3Engine.design_available ở server.py: Mac, hoặc GPU từ Volta (fp16/bf16) có >= 7,5 GiB.
+    const gpu = SetupTts.nvidiaInfo();
+    const designOk = process.platform === 'darwin' || (gpu.cap >= 7.0 && gpu.memMib >= 7.5 * 1024);
+    out.modes = e.modes.map((id) => ({
+      id,
+      available: id !== 'design' || designOk,
+      reason: id === 'design' && !designOk
+        ? _t('Thiết kế giọng (Qwen3-TTS 1.7B) cần GPU NVIDIA RTX 20 trở lên có từ 8 GB VRAM, hoặc máy Mac chip Apple.')
+        : '',
+    }));
+  }
+  if (e.instruct) out.instruct = true;
+  if (e.emotion) out.emotion = true;
+  if (e.watermark) out.watermark = true;
+  return out;
+}
+
+function envState(envId) {
+  const env = SetupTts.ttsEnv(envId);
+  return {
+    id: envId,
+    ready: env.ready,
+    supported: env.mode !== 'unsupported',
+    mode: env.mode,
+    location: env.location,
+    setup_in_progress: SetupTts.setupInProgress(envId),
+    torch_variant: SetupTts.envTorchVariant(envId).id,
+    setup_error: setupErrors[envId],
+    label: SetupTts.ENVS[envId]?.label || envId,
+    size_mb: SetupTts.ENVS[envId]?.size_mb || 0,
+  };
+}
+
 async function status() {
-  const env = SetupTts.ttsEnv();
-  const live = await health();
-  let engines = null;
-  if (live) {
-    try { engines = (await request('GET', '/v1/engines', undefined, 60000)).engines; } catch (_) { engines = null; }
-  }
-  if (!engines) {
-    engines = ENGINES.map((e) => {
-      const platformOk = !e.platforms || e.platforms.includes(process.platform);
-      return {
-        id: e.id,
-        label: e.label,
-        available: platformOk,
-        reason: platformOk ? '' : _t('{name} chỉ chạy trên macOS (MLX).', { name: e.label }),
-        loaded: false,
-        voices: e.voices,
-        models: e.models.map((key) => ({ key, ready: modelReadyLocally(key) })),
-      };
-    });
-  }
+  pruneObsoleteModels();
+  const mainEnv = envState('main');
+  const envs = {};
+  const liveByEnv = {};
+  const enginesByEnv = {};
+  await Promise.all(ENV_IDS.map(async (envId) => {
+    envs[envId] = envState(envId);
+    const live = await health(envId);
+    liveByEnv[envId] = !!live;
+    if (live) {
+      try { enginesByEnv[envId] = (await request('GET', '/v1/engines', undefined, 60000, envId)).engines; } catch (_) { /* tĩnh */ }
+    }
+  }));
+  const engines = ENGINES.map((meta) => {
+    const envId = engineEnv(meta.id);
+    const live = (enginesByEnv[envId] || []).find((e) => e.id === meta.id);
+    const e = live || staticEngine(meta);
+    return {
+      ...e,
+      env_id: envId,
+      env_ready: envs[envId].ready,
+      env_supported: envs[envId].supported,
+      env_setup_in_progress: envs[envId].setup_in_progress,
+      env_setup_error: envs[envId].setup_error,
+      env_size_mb: envId === 'main' ? 0 : envs[envId].size_mb,
+      size_mb: staticSizeMb(meta),
+      clone: e.clone != null ? !!e.clone : !!meta.clone,
+      clone_needs_text: e.clone_needs_text != null ? !!e.clone_needs_text : !!meta.clone_needs_text,
+      describe: !!meta.describe,
+    };
+  });
   return {
     env: {
-      ready: env.ready,
-      mode: env.mode,
-      location: env.location,
-      setup_in_progress: SetupTts.setupInProgress(),
-      setup_error: setupError,
+      ready: mainEnv.ready,
+      mode: mainEnv.mode,
+      location: mainEnv.location,
+      setup_in_progress: mainEnv.setup_in_progress,
+      // 'cu126' | 'cu128' | 'default'… — panel báo trước dung lượng tải khi máy sẽ lấy torch GPU.
+      torch_variant: mainEnv.torch_variant,
+      setup_error: mainEnv.setup_error,
     },
-    server: { running: !!live, port: PORT, model_root: modelDir() },
-    engines: engines.map((e) => {
-      const meta = ENGINES.find((s) => s.id === e.id) || {};
-      return { ...e, size_mb: meta.size_mb || 0, clone: !!meta.clone, describe: !!meta.describe };
-    }),
+    envs,
+    server: { running: liveByEnv.main, port: PORT, model_root: modelDir(), running_envs: liveByEnv },
+    engines,
   };
 }
 
 // ── Cài môi trường ──────────────────────────────────────────────────────────
 
-const SETUP_DOWNLOAD_ID = 'tts:packages';
-
-function startSetup() {
-  if (SetupTts.setupInProgress()) return { started: false, running: true };
-  setupError = '';
+function startSetup(envId = 'main') {
+  if (!ENV_PORTS[envId]) {
+    const error = new Error(`Không có môi trường lồng tiếng "${envId}"`);
+    error.status = 400;
+    throw error;
+  }
+  if (SetupTts.setupInProgress(envId)) return { started: false, running: true };
+  setupErrors[envId] = '';
   const reg = ctx.modelDownloads;
-  reg?.begin(SETUP_DOWNLOAD_ID, { label: _t('Thư viện lồng tiếng'), kind: 'packages', message: _t('Đang chuẩn bị…') });
+  const SETUP_DOWNLOAD_ID = envId === 'main' ? 'tts:packages' : `tts:packages:${envId}`;
+  const label = envId === 'main' ? _t('Thư viện lồng tiếng') : _t('Thư viện {name}', { name: SetupTts.ENVS[envId].label });
+  reg?.begin(SETUP_DOWNLOAD_ID, { label, kind: 'packages', message: _t('Đang chuẩn bị…') });
   SetupTts.setupTts({
+    env: envId,
     onEvent: (event) => {
       if (event.type !== 'progress') return;
       reg?.update(SETUP_DOWNLOAD_ID, {
@@ -248,11 +459,11 @@ function startSetup() {
     },
   }).then(() => {
     reg?.end(SETUP_DOWNLOAD_ID);
-    ctx.setStatus(_t('Đã cài xong môi trường lồng tiếng.'));
+    ctx.setStatus(envId === 'main' ? _t('Đã cài xong môi trường lồng tiếng.') : _t('Đã cài xong {name}.', { name: SetupTts.ENVS[envId].label }));
   }).catch((error) => {
-    setupError = String(error.message || error).slice(-1500);
-    reg?.end(SETUP_DOWNLOAD_ID, { error: setupError });
-    console.error('[tts] setup failed:', error.message);
+    setupErrors[envId] = String(error.message || error).slice(-1500);
+    reg?.end(SETUP_DOWNLOAD_ID, { error: setupErrors[envId] });
+    console.error(`[tts] setup ${envId} failed:`, error.message);
   });
   return { started: true, running: true };
 }
@@ -263,15 +474,32 @@ function startSetup() {
  * nên không cần đồng hồ riêng. Server chưa bật thì kết nối bị từ chối ngay — rẻ. Không chỉ hỏi
  * khi `child` có mặt: người phát triển hay bật server tay bằng `npm run tts:serve`. */
 async function syncDownloads() {
-  const live = await health();
-  if (live && Array.isArray(live.downloads)) ctx.modelDownloads?.syncSnapshot(live.downloads);
+  await Promise.all(ENV_IDS.map(async (envId) => {
+    const live = await health(envId);
+    if (live && Array.isArray(live.downloads)) ctx.modelDownloads?.syncSnapshot(live.downloads);
+  }));
 }
 
-async function ensureModels(engine) {
-  await ensureServer();
-  const data = await request('POST', '/v1/models/ensure', { engine });
+async function ensureModels(engine, engineOptions) {
+  const envId = engineEnv(engine);
+  await ensureServer(envId);
+  const data = await request('POST', '/v1/models/ensure', { engine, engine_options: plainOptions(engineOptions) }, 15000, envId);
   await syncDownloads();
   return data;
+}
+
+/* Tuỳ chọn riêng của engine (ngôn ngữ, chế độ Qwen, cảm xúc Chatterbox…): chỉ nhận khoá chữ và giá
+ * trị nguyên thuỷ, chuỗi tối đa 500 ký tự — server.py tự kiểm từng khoá nó dùng. */
+function plainOptions(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw).slice(0, 20)) {
+    if (!/^[a-z_]{1,32}$/.test(key)) continue;
+    if (typeof value === 'string') out[key] = value.slice(0, 500);
+    else if (typeof value === 'number' && Number.isFinite(value)) out[key] = value;
+    else if (typeof value === 'boolean') out[key] = value;
+  }
+  return out;
 }
 
 function jobOutputDir() {
@@ -279,16 +507,44 @@ function jobOutputDir() {
   return path.join(ctx.tempDir, 'editing_assets', 'dubbing', `${stamp}_${Math.random().toString(36).slice(2, 6)}`);
 }
 
+/* "Model" của một lượt: engine, và với Qwen3-TTS thêm chế độ (mỗi chế độ một checkpoint). */
+function modelKeyOf(engine, engineOptions) {
+  if (engine === 'qwen3') return `qwen3:${String(engineOptions?.mode || '') || 'auto'}`;
+  return engine;
+}
+
+/* Trước một lượt: chỉ giữ MỘT model trong VRAM. Server của môi trường khác đang chạy -> tắt; server
+ * của chính môi trường này đang giữ model khác -> tắt rồi bật lại (sạch hơn nhả trong tiến trình). */
+async function prepareServerFor(envId, modelKey) {
+  await Promise.all(ENV_IDS.filter((id) => id !== envId && servers[id].child).map((id) => {
+    console.log(`[tts] đổi sang ${modelKey}: tắt server ${id} để nhả VRAM`);
+    return stop(id);
+  }));
+  const server = servers[envId];
+  if (server.child && server.lastModelKey && server.lastModelKey !== modelKey) {
+    console.log(`[tts] đổi model ${server.lastModelKey} -> ${modelKey}: khởi động lại server ${envId}`);
+    await stop(envId);
+  }
+}
+
 async function createJob(params = {}) {
-  await ensureServer();
+  const engine = String(params.engine || 'vieneu');
+  const envId = engineEnv(engine);
+  const modelKey = modelKeyOf(engine, params.engine_options);
+  ENV_IDS.forEach((id) => cancelIdleStop(id));
+  servers[envId].releaseWhenIdle = false;
+  await prepareServerFor(envId, modelKey);
+  await ensureServer(envId);
   const body = {
-    engine: String(params.engine || 'vieneu'),
+    engine,
     voice: params.voice ? String(params.voice) : '',
     ref_audio: params.ref_audio ? String(params.ref_audio) : '',
     ref_text: params.ref_text ? String(params.ref_text) : '',
     speed: Number(params.speed) || 1,
     timing_mode: String(params.timing_mode || 'auto_fit'),
     max_speed: Number(params.max_speed) || 1.45,
+    // Nghỉ giữa câu khi đọc văn bản không mốc (timing_mode "sequential"); kẹp 0-3 s.
+    ...(params.gap != null && Number.isFinite(Number(params.gap)) ? { gap: Math.max(0, Math.min(3, Number(params.gap))) } : {}),
     split_clips: !!params.split_clips,
     preview: !!params.preview,
     text: params.text ? String(params.text) : '',
@@ -297,8 +553,11 @@ async function createJob(params = {}) {
       start: Number(c.start), end: Number(c.end), text: String(c.text || ''),
     })) : [],
     output_dir: jobOutputDir(),
+    engine_options: plainOptions(params.engine_options),
   };
-  const job = await request('POST', '/v1/dub/jobs', body);
+  const job = await request('POST', '/v1/dub/jobs', body, 15000, envId);
+  if (job?.job_id) jobEnvs.set(job.job_id, envId);
+  servers[envId].lastModelKey = modelKey;
   return decorate(job);
 }
 
@@ -315,14 +574,68 @@ function decorate(job) {
   };
 }
 
+/* RẢNH LÂU THÌ NHẢ (người dùng chốt 2026-10-11: 15 phút). Tính từ lúc lượt cuối xong; lượt mới
+ * huỷ đồng hồ. Tắt hẳn tiến trình (trả cả CUDA context). Không tắt khi đang tải model hay đã có lượt mới.
+ * CRAB_TTS_IDLE_STOP_SECONDS đổi mốc (đo/test). */
+const IDLE_STOP_MS = Math.max(1, Number(process.env.CRAB_TTS_IDLE_STOP_SECONDS) || 15 * 60) * 1000;
+function cancelIdleStop(envId = 'main') {
+  const server = servers[envId];
+  if (server.idleStopTimer) clearTimeout(server.idleStopTimer);
+  server.idleStopTimer = null;
+}
+function scheduleIdleStop(envId = 'main', delayMs = IDLE_STOP_MS) {
+  const server = servers[envId];
+  if (!server.child) return;
+  cancelIdleStop(envId);
+  server.idleStopTimer = setTimeout(async () => {
+    server.idleStopTimer = null;
+    const live = await health(envId);
+    if (!live || live.active_job) return;
+    if ((live.downloads || []).some((d) => d.state === 'downloading' || d.state === 'preparing')) return;
+    console.log(`[tts] server ${envId} rảnh ${Math.round(delayMs / 1000)} s: tắt để nhả VRAM`);
+    await stop(envId);
+  }, delayMs);
+}
+
+/* MỘT TÍNH NĂNG KHÁC CẦN GPU sắp chạy (xuất video, bóc băng, Auto-Reframe… — server.js gọi): tắt mọi
+ * server lồng tiếng để trả VRAM. Server đang có lượt chạy thì KHÔNG giết giữa chừng — đánh dấu, lượt
+ * đó xong là tắt ngay (getJob). Trả về khi các server rảnh đã thoát hẳn. */
+async function releaseAll(reason = '') {
+  await Promise.all(ENV_IDS.map(async (envId) => {
+    const server = servers[envId];
+    if (!server.child) return;
+    const live = await health(envId);
+    if (live?.active_job) {
+      server.releaseWhenIdle = true;
+      console.log(`[tts] ${reason || 'tính năng khác'} cần GPU: server ${envId} đang lồng tiếng, sẽ nhả khi lượt xong`);
+      return;
+    }
+    cancelIdleStop(envId);
+    console.log(`[tts] ${reason || 'tính năng khác'} cần GPU: tắt server ${envId} để nhả VRAM`);
+    await stop(envId);
+  }));
+}
+
 async function getJob(id) {
-  const job = await request('GET', `/v1/dub/jobs/${encodeURIComponent(id)}`);
+  const envId = jobEnvs.get(id) || 'main';
+  const job = await request('GET', `/v1/dub/jobs/${encodeURIComponent(id)}`, undefined, 15000, envId);
   await syncDownloads();
+  if (job && ['done', 'error', 'cancelled'].includes(job.state)) {
+    jobEnvs.delete(id);
+    // Có tính năng GPU khác đã xin nhả trong lúc lượt này chạy -> nhả ngay (chờ một nhịp cho panel
+    // poll lần cuối); còn lại giữ model, rảnh 15 phút mới nhả.
+    if (servers[envId].releaseWhenIdle) {
+      servers[envId].releaseWhenIdle = false;
+      scheduleIdleStop(envId, 1500);
+    } else {
+      scheduleIdleStop(envId);
+    }
+  }
   return decorate(job);
 }
 
 async function cancelJob(id) {
-  return request('POST', `/v1/dub/jobs/${encodeURIComponent(id)}/cancel`, {});
+  return request('POST', `/v1/dub/jobs/${encodeURIComponent(id)}/cancel`, {}, 15000, jobEnvs.get(id) || 'main');
 }
 
 module.exports = {
@@ -336,8 +649,11 @@ module.exports = {
   cancelJob,
   syncDownloads,
   stop,
+  releaseAll,
   health,
   modelDir,
+  engineEnv,
   PORT,
+  ENV_PORTS,
   ENGINES,
 };

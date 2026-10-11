@@ -4,7 +4,7 @@
 """Kho model của "Lồng tiếng": biết engine nào cần những file nào, tải về lần đầu và BÁO TIẾN
 TRÌNH TẢI theo byte để thanh trạng thái hiện được "Đang tải … 45% (600 MB / 1,3 GB)".
 
-VÌ SAO KHÔNG ĐỂ THƯ VIỆN TỰ TẢI (như F5-TTS/VieNeu vẫn làm khi nhận repo id):
+VÌ SAO KHÔNG ĐỂ THƯ VIỆN TỰ TẢI (như VieNeu vẫn làm khi nhận repo id):
   · nó tải vào ~/.cache/huggingface — ngoài tầm mục "Bộ nhớ đệm" của app, người dùng không
     biết mấy GB đó nằm đâu;
   · nó không báo tiến trình cho ai cả: lượt lồng tiếng đầu tiên đứng im 10-30 phút ở "Đang nạp
@@ -36,27 +36,64 @@ from typing import Callable, Dict, List, Optional
 
 MARKER = ".crab-model.json"
 
-# TẮT ĐƯỜNG TẢI hf_xet — đo thật (Vi-F5-TTS 1,35 GB): với xet, ~20 giây đầu KHÔNG một byte nào
+# TẮT ĐƯỜNG TẢI hf_xet — đo thật (Vi-F5-TTS 1,35 GB, engine đã gỡ ở v1.1.17): với xet, ~20 giây đầu KHÔNG một byte nào
 # xuất hiện trong thư mục đích (xet gom mảnh vào cache riêng ~/.cache/huggingface/xet rồi mới
 # ghép tệp), sau đó nhảy thẳng 0% -> 50% -> xong. Thanh tiến trình đứng im 20 giây là đúng thứ
 # người dùng đã phàn nàn. Đường HTTP thường ghi dần vào tệp `.incomplete` nên thanh chạy đều.
 # Phải đặt TRƯỚC khi huggingface_hub được import lần đầu (nó đọc cờ lúc import).
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
+# Tệp của đường đa ngôn ngữ trong repo ResembleAI/chatterbox — ĐÚNG danh sách `allow_patterns` của
+# ChatterboxMultilingualTTS.from_pretrained ở gói chatterbox-tts 0.1.7 (bản PyPI mới nhất). Bản này nạp
+# V2 (t3_mtl23ls_v2 + s3gen.pt + ve.pt); V3 chỉ có ở nhánh main trên GitHub, chưa phát hành.
+CHATTERBOX_MTL_FILES = [
+    "ve.pt", "t3_mtl23ls_v2.safetensors", "s3gen.pt", "grapheme_mtl_merged_expanded_v1.json",
+    "conds.pt", "Cangjie5_TC.json",
+]
+
 # Mỗi khoá là MỘT repo HuggingFace. `files` = danh sách file cần (None = cả repo trừ `ignore`).
 MODELS: Dict[str, dict] = {
-    "f5-vi": {
-        "label": "Vi-F5-TTS",
-        "repo": "danhtran2mind/Vi-F5-TTS",
-        # pruning_model.pt (1,35 GB) CHỈ có trọng số EMA — đúng thứ suy luận cần. model_last.pt
-        # 5,4 GB mang thêm trạng thái optimizer của lúc huấn luyện, tải về là phí 4 GB.
-        # (Đã kiểm: torch.load -> {'ema_model_state_dict': 364 tensor}.)
-        "files": ["Vi_F5_TTS_ckpts/pruning_model.pt", "vocab.txt"],
+    # VieNeu-TTS v3 Turbo (Apache-2.0, 48 kHz, 25 giọng có sẵn + clone từ mẫu 3-8 s). Repo gộp
+    # cả đường PyTorch (GPU) lẫn ONNX (CPU) + 2 bản GGUF; mỗi máy chỉ cần MỘT đường nên tách hai
+    # khoá — tải cả repo là 2,2 GB, tải đúng đường là ~0,4 GB (GPU) hoặc ~0,6 GB (CPU).
+    # denoiser.onnx + speaker_encoder.onnx (gốc repo) là phần CLONE, cả hai đường đều đọc.
+    "vieneu3-torch": {
+        "label": "VieNeu-TTS v3 Turbo (GPU)",
+        "repo": "pnnbao-ump/VieNeu-TTS-v3-Turbo",
+        "files": [
+            "config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
+            "denoiser.onnx", "speaker_encoder.onnx",
+            "update/config.json", "update/model.safetensors", "update/special_tokens_map.json",
+            "update/tokenizer.json", "update/tokenizer_config.json",
+        ],
     },
-    "vocos": {
-        "label": "Vocos vocoder",
-        "repo": "charactr/vocos-mel-24khz",
-        "files": ["config.yaml", "pytorch_model.bin"],
+    "vieneu3-onnx": {
+        "label": "VieNeu-TTS v3 Turbo (CPU)",
+        "repo": "pnnbao-ump/VieNeu-TTS-v3-Turbo",
+        "files": [
+            "config.json", "denoiser.onnx", "speaker_encoder.onnx",
+            "onnx_update/config.json", "onnx_update/tokenizer.json",
+            "onnx_update/vieneu_prefill.onnx", "onnx_update/vieneu_decode_step.onnx",
+            "onnx_update/vieneu_acoustic_cached.onnx", "onnx_update/vieneu_backbone_shared.data",
+            "onnx_update/vieneu_v3_heads.npz",
+        ],
+    },
+    # Codec MOSS-Audio-Tokenizer-Nano (Apache-2.0) — repo PyTorch có mã trust_remote_code nên
+    # tải cả repo; bản ONNX chỉ lấy đúng các tệp mà vieneu/_v3_turbo_engine/onnx_runtime_lite đọc.
+    "moss-nano": {
+        "label": "MOSS Audio Tokenizer Nano",
+        "repo": "OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    "moss-nano-onnx": {
+        "label": "MOSS Audio Tokenizer Nano (ONNX)",
+        "repo": "OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX",
+        "files": [
+            "moss_audio_tokenizer_decode_full.onnx", "moss_audio_tokenizer_decode_shared.data",
+            "moss_audio_tokenizer_decode_step.onnx", "codec_browser_onnx_meta.json",
+            "moss_audio_tokenizer_encode.onnx", "moss_audio_tokenizer_encode.data",
+        ],
     },
     "vieneu-tts": {
         "label": "VieNeu-TTS v2",
@@ -89,11 +126,65 @@ MODELS: Dict[str, dict] = {
         "files": ["model.onnx"],
         "aihub": "neucodec-onnx",
     },
+    # ── Qwen3-TTS (Apache-2.0) — v1.1.17. Mỗi repo tự đủ (kèm speech_tokenizer/), nên không cần repo
+    # Qwen3-TTS-Tokenizer-12Hz riêng. 0.6B chạy fp32 vừa GPU 6 GB; 1.7B VoiceDesign chỉ mở khi đủ VRAM.
+    # Windows/Linux đọc bản PyTorch của Qwen; Mac đọc bản MLX của mlx-community (cùng nội dung).
+    "qwen3-0.6b-custom": {
+        "label": "Qwen3-TTS 0.6B (giọng có sẵn)",
+        "repo": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    "qwen3-0.6b-base": {
+        "label": "Qwen3-TTS 0.6B (nhân bản)",
+        "repo": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    "qwen3-1.7b-design": {
+        "label": "Qwen3-TTS 1.7B (thiết kế giọng)",
+        "repo": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    "qwen3-0.6b-custom-mlx": {
+        "label": "Qwen3-TTS 0.6B (giọng có sẵn, MLX)",
+        "repo": "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    "qwen3-0.6b-base-mlx": {
+        "label": "Qwen3-TTS 0.6B (nhân bản, MLX)",
+        "repo": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    "qwen3-1.7b-design-mlx": {
+        "label": "Qwen3-TTS 1.7B (thiết kế giọng, MLX)",
+        "repo": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    # ── Chatterbox Multilingual (MIT, Resemble AI) — v1.1.17. Repo gốc gộp cả bản tiếng Anh, V2, V3
+    # và tệp .pt trùng .safetensors (13,9 GB); chỉ lấy đúng tệp mà gói chatterbox-tts đọc (~3,2 GB).
+    # Mac dùng bản V3 của mlx-community (mlx-audio đã có V3).
+    "chatterbox-mtl": {
+        "label": "Chatterbox Multilingual",
+        "repo": "ResembleAI/chatterbox",
+        "files": CHATTERBOX_MTL_FILES,
+    },
+    "chatterbox-mtl-v3-mlx": {
+        "label": "Chatterbox Multilingual V3 (MLX)",
+        "repo": "mlx-community/chatterbox-multilingual-v3",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
     "voxcpm2-8bit": {
         "label": "VoxCPM2 (MLX 8-bit)",
         "repo": "mlx-community/VoxCPM2-8bit",
         "files": None,
-        "ignore": [".gitattributes", "README.md"],
+        # test_*.wav: hai tệp nghe thử của repo, ~1,1 MB tải thừa.
+        "ignore": [".gitattributes", "README.md", "test_en.wav", "test_id.wav"],
         "aihub": "voxcpm2-8bit",
     },
 }

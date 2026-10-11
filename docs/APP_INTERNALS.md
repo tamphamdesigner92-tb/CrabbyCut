@@ -4638,7 +4638,7 @@ bọc nó vào IIFE ngày mai là hỏng lại mà không ai nhớ vì sao.
 
 MỘT KỊCH BẢN, BA CHỖ HIỂN THỊ:
   #refScriptInput   nguồn sự thật (ô nhập bước Upload)
-  #editScriptText   ô nhập ở tab "Kịch bản" của Editing — GƯƠNG, sửa được
+  #editScriptText   ô nhập ở tab con "Kịch bản" (tab Văn bản, từ v1.1.17) của Editing — GƯƠNG, sửa được
   #refScriptCompare "Kịch bản chuẩn (Đối chiếu)" ở cột giữa — chỉ đọc
 Mọi đường đổi kịch bản nay đi qua syncReferenceScriptViews(). Trước đây ô Đối chiếu chỉ được
 vẽ ở hai chỗ lẻ (mở .crab, sau khi bấm So khớp) nên gõ/nạp tệp ở Editing không tới được nó.
@@ -7470,6 +7470,9 @@ tới — `stats.dedupe_conflicts_resolved` vì thế luôn bằng 0). Giữ l�
 xử lý cùng đợt thay lõi.
 
 ## Nạp tệp kịch bản .md ở tab "Kịch bản" (đã sửa 2026-08-21)
+
+> Từ v1.1.17 "Kịch bản" là tab CON của tab Văn bản (`EDIT_PANEL_SUBTABS.text`, id `script`), không
+> còn là tab riêng. `refreshScriptPane` chỉ vẽ khi `editPanelTab === 'text' && editPanelTextSub === 'script'`.
 
 Tab "Kịch bản" là chỗ duy nhất trong Editing chưa đi qua hộp thoại gốc, và là chỗ
 duy nhất có vùng nhận thả nhỏ hơn khu vực người dùng nhắm vào. Hai lỗi độc lập,
