@@ -50,6 +50,9 @@
     <!-- Âm thanh → Lồng tiếng (TTS theo mốc phụ đề). Dùng SubtitleFormats + injectStyle của
          auto-subtitle.js nên nạp SAU hai tệp đó. -->
     <script src="/static/js/dubbing.js?v=dub-p1"></script>
+    <!-- Hình học → GeoCode: dựng ảnh/video từ mã (electron/geocode-renderer.js). Dùng injectStyle
+         của auto-subtitle.js nên nạp SAU nó. -->
+    <script src="/static/js/geocode.js?v=geocode-p1"></script>
     <!-- Thanh trạng thái: tiến trình tải model AI lần đầu (góc trái). -->
     <script src="/static/js/model-download-status.js?v=mdl-p1"></script>
     <style>
@@ -3753,7 +3756,7 @@
     </style>
     <!-- Lớp giao diện Lumen (mẫu Figma). PHẢI là phần tử cuối trong <head>: editing-runtime.js
          và auto-subtitle.js chèn <style> của chúng NGAY TRƯỚC #lumenSkin để lớp này thắng. -->
-    <link id="lumenSkin" rel="stylesheet" href="/static/css/lumen-skin.css?v=3">
+    <link id="lumenSkin" rel="stylesheet" href="/static/css/lumen-skin.css?v=4">
 </head>
 <!-- home-active ghi thẳng vào markup, đúng cơ chế #step0 dùng: JS không phải gọi gì lúc
      khởi động, và không có nháy hình giữa "giao diện dựng" và "Home". -->
@@ -5869,6 +5872,8 @@
             audio: ['audio', 'speed'],
             text: ['text', 'anim'],
             shape: ['shape', 'anim'],
+            // GeoCode: chỉ Biến đổi/Hiển thị (khối tĩnh, tab Video) + Hiệu ứng động.
+            geocode: ['video', 'anim'],
         };
         // Section Biến đổi/Hiển thị tĩnh được "gán nhà" theo loại đối tượng
         const INSPECTOR_STATIC_HOME = {
@@ -16880,8 +16885,8 @@
         })
         .catch(() => { /* không hỏi được: giữ H.264 như trước */ });
 </script>
-<script src="/static/js/editing-runtime.js?v=lumen-p5-lsub-asetpl2"></script>
-<script src="/static/js/automation-bridge.js?v=bridge-p1"></script>
+<script src="/static/js/editing-runtime.js?v=lumen-p5-geocode1"></script>
+<script src="/static/js/automation-bridge.js?v=bridge-p2"></script>
 <script src="/static/js/perf-runtime.js"></script>
 <!-- Dụng cụ đo hiệu năng (Giai đoạn 0). Nạp SAU perf-runtime.js vì nó bọc chính những
      hàm toàn cục mà perf-runtime gán đè; nạp trước là bọc phải bản cũ. Lúc tắt nó chỉ

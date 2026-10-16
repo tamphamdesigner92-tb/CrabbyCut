@@ -574,6 +574,57 @@ const automationBridge = createAutomationBridge({
   appInfo: () => ({ version: app.getVersion(), packaged: app.isPackaged, platform: process.platform }),
 });
 
+/* ---- GEOCODE (tab Hình học > GeoCode) ----
+ * Dựng khung từ mã người dùng — xem electron/geocode-renderer.js. Nạp LƯỜI: module kéo theo
+ * session riêng + i18n, không cần lúc khởi động. Renderer chỉ nhận KHOÁ + số đo, không nhận
+ * đường dẫn: preview đọc khung qua backend (/geocode_cache/<khoá>/…), bản xuất gửi khoá. */
+let geocodeModule = null;
+const geocode = () => {
+  if (!geocodeModule) geocodeModule = require('./geocode-renderer');
+  return geocodeModule;
+};
+const geocodePublic = (r) => ({
+  key: r.key, cached: !!r.cached, frame_count: r.frame_count, width: r.width, height: r.height,
+  fps: r.fps, duration: r.duration, kind: r.kind, proxy: r.proxy || null, render_ms: r.render_ms || 0,
+});
+const geocodeError = (error) => ({ ok: false, error: error?.message || String(error) });
+
+ipcMain.handle('geocode-render', async (event, { jobId, spec } = {}) => {
+  const sender = event.sender;
+  const send = (channel, payload) => { if (!sender.isDestroyed()) sender.send(channel, { jobId, ...payload }); };
+  try {
+    const result = await geocode().render(spec, {
+      jobId: String(jobId || ''),
+      onProgress: (p) => send('geocode-progress', p),
+      onLog: (l) => send('geocode-log', l),
+    });
+    return { ok: true, result: geocodePublic(result) };
+  } catch (error) {
+    return geocodeError(error);
+  }
+});
+ipcMain.handle('geocode-cancel', (_event, jobId) => ({ ok: geocode().cancel(jobId) }));
+ipcMain.handle('geocode-cache-info', (_event, spec) => {
+  try {
+    const info = geocode().cacheInfo(spec);
+    return { ok: true, key: info.key, cached: info.cached, meta: info.meta ? geocodePublic({ key: info.key, ...info.meta }) : null };
+  } catch (error) {
+    return geocodeError(error);
+  }
+});
+ipcMain.handle('geocode-preview', async (event, { spec, t, jobId } = {}) => {
+  const logs = [];
+  try {
+    const { png, t: at } = await geocode().previewFrame(spec, t, {
+      onLog: (l) => { logs.push(l); if (!event.sender.isDestroyed()) event.sender.send('geocode-log', { jobId, ...l }); },
+    });
+    return { ok: true, t: at, data_url: `data:image/png;base64,${png.toString('base64')}`, logs };
+  } catch (error) {
+    return { ...geocodeError(error), logs };
+  }
+});
+ipcMain.handle('geocode-check-python', async () => geocode().checkPython());
+
 /* Kiểm tra bản mới do NGƯỜI DÙNG chủ động bấm (menu Cài đặt). Khác lượt tự kiểm lúc
  * khởi động ở chỗ `silent: false` — đã chủ động hỏi thì phải được trả lời, kể cả khi câu
  * trả lời là 'đang ở bản mới nhất'. */

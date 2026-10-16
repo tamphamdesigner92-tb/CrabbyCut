@@ -109,6 +109,10 @@ const PEAKS_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
  * Cùng lý do đặt ngoài temp_uploads như peaks_cache: asset thư viện dùng lại qua nhiều dự
  * án, không được mất proxy mỗi lần tạo dự án mới. */
 const PROXY_CACHE_DIR = path.join(USER_DATA_ROOT, 'proxy_cache');
+/* Khung GeoCode (tab Hình học > GeoCode): main process GHI vào đây (electron/geocode-renderer.js),
+ * backend phục vụ preview + trỏ bản xuất vào. Đường dẫn do scripts/geocode_cache.js quyết cho cả
+ * hai bên — tự tính ở đây là sớm muộn lệch nhau. */
+const GeocodeCache = require(path.join(PROJECT_ROOT, 'scripts', 'geocode_cache.js'));
 const PROXY_FORMAT_VERSION = 1;          // tăng khi ĐỔI cách mã hoá proxy -> khoá cũ hết hiệu lực
 const PROXY_MAX_PARALLEL_JOBS = 1;       // job nền: MỘT tại một thời điểm, xem pumpAssetProxyQueue
 const PROXY_MAX_ATTEMPTS = 2;            // hỏng 2 lần thì thôi (tránh poll vô hạn)
@@ -5675,6 +5679,41 @@ function materializeAnimationFrameFiles(seqRender, uploadedByName, itemId, index
  *   - KÈM khung -> ghi như cũ rồi CẤT vào cache và dùng bản trong cache: đường dẫn + mtime của
  *     khung đứng yên giữa các lượt nên cache render (file_ids.tsv) không phải băm lại khung.
  * Trả undefined khi chuỗi không dùng cache (đi đường cũ). */
+/* GEOCODE: khung có sẵn trong cache GeoCode theo KHOÁ. Payload chỉ mang khoá + `loop` — đường
+ * dẫn backend tự dựng từ khoá (keyDir chặn khoá sai dạng), không bao giờ nhận đường dẫn từ
+ * renderer. Thiếu khung là lỗi THẬT: renderer đã dựng/kiểm khung trước khi xuất, im lặng bỏ
+ * block là bản xuất mất hình không báo gì.
+ *   - ảnh tĩnh (hoặc chuỗi 1 khung) -> { still }
+ *   - chuỗi khung, block dài hơn clip: `loop` -> thư mục liên kết cứng frame k -> k % N (rẻ, không
+ *     chép dữ liệu); không loop -> trỏ thẳng vào cache, sidecar giữ khung cuối (SequenceTailFrames). */
+function materializeGeocodeFrames(item, duration, index) {
+  const gc = item && item.geocode && typeof item.geocode === 'object' ? item.geocode : null;
+  const dir = gc ? GeocodeCache.keyDir(gc.render_key) : null;
+  if (!dir) throw new Error(_t('Block GeoCode thiếu khoá khung (render_key) — hãy bấm "Tạo lại".'));
+  let meta = null;
+  try { meta = JSON.parse(fs.readFileSync(path.join(dir, GeocodeCache.META_FILE), 'utf8')); } catch (_) { meta = null; }
+  const count = Number(meta && meta.frame_count) || 0;
+  if (!meta || count < 1 || !fs.existsSync(path.join(dir, GeocodeCache.frameName(count - 1)))) {
+    throw new Error(_t('Thiếu khung GeoCode của block "{id}" — mở lại dự án hoặc bấm "Tạo lại" để dựng lại.', { id: String(item.id || index) }));
+  }
+  if (meta.kind !== 'video' || count === 1) return { still: path.join(dir, GeocodeCache.frameName(0)) };
+  const fps = Math.max(1, Math.min(60, Number(meta.fps) || 30));
+  const needed = Math.min(3600, Math.max(1, Math.ceil(duration * fps - 1e-6)));
+  if (gc.loop !== true || needed <= count) {
+    return { pattern: path.join(dir, GeocodeCache.FRAME_PATTERN), frameCount: count, fps };
+  }
+  const safeId = String(item.id || `geocode_${index}`).replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 80) || `geocode_${index}`;
+  const out = path.join(GENERATED_TEXT_ASSET_DIR, `geocode_${safeId}_${index}`);
+  fs.rmSync(out, { recursive: true, force: true });
+  fs.mkdirSync(out, { recursive: true });
+  for (let k = 0; k < needed; k += 1) {
+    const src = path.join(dir, GeocodeCache.frameName(k % count));
+    const dst = path.join(out, GeocodeCache.frameName(k));
+    try { fs.linkSync(src, dst); } catch (_) { fs.copyFileSync(src, dst); }
+  }
+  return { pattern: path.join(out, GeocodeCache.FRAME_PATTERN), frameCount: needed, fps };
+}
+
 function materializePrebakeSeq(seq, uploadedByName, itemId, index) {
   if (!seq || !seq.cache_key) return undefined;
   const sourcePath = Object.prototype.hasOwnProperty.call(seq, 'source_path') ? seq.source_path : undefined;
@@ -5808,14 +5847,16 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
     if (!item || typeof item !== 'object') return;
     const type = String(item.type || '').trim().toLowerCase();
     if (type === 'vector') return;
-    if (!['media', 'text', 'shape', 'audio'].includes(type)) return;
+    if (!['media', 'text', 'shape', 'audio', 'geocode'].includes(type)) return;
     const start = Math.max(0, Number(item.timeline_start));
     const duration = Math.max(0, Number(item.duration));
     if (!Number.isFinite(start) || !Number.isFinite(duration) || duration < 0.05 || start >= totalDuration) return;
     const clampedDuration = Math.min(duration, Math.max(0.05, totalDuration - start));
     const asset = assetById.get(String(item.asset_id || '')) || null;
-    if (type !== 'text' && type !== 'shape' && !asset?.path) return;
-    if ((type === 'media' || type === 'text' || type === 'shape') && !trackVisible(item.track_id)) return;
+    if (type !== 'text' && type !== 'shape' && type !== 'geocode' && !asset?.path) return;
+    if ((type === 'media' || type === 'text' || type === 'shape' || type === 'geocode') && !trackVisible(item.track_id)) return;
+    // GeoCode = ảnh tĩnh hoặc chuỗi khung có sẵn (xem materializeGeocodeFrames), cỡ gốc = W×H px.
+    const geocodeSrc = type === 'geocode' ? materializeGeocodeFrames(item, clampedDuration, index) : null;
     const transform = normalizeClipTransform(item.transform);
     const style = item.style && typeof item.style === 'object' ? item.style : {};
     const fontFamily = normalizeEditingFontFamily(style.font_family);
@@ -5826,9 +5867,12 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
       ? materializeRenderedTextPng(item.rendered_shape_png, item.id, index)
       : null;
     if (type === 'shape' && !shapeImagePath) return;
-    const overlayType = textImagePath || shapeImagePath ? 'media' : type;
-    const overlayAssetType = textImagePath ? 'text_image' : (shapeImagePath ? 'shape_image' : cleanInlineText(asset?.type || '', 40));
-    const overlayAssetPath = textImagePath || shapeImagePath || cleanInlineText(usePath(asset?.path), 2000);
+    const overlayType = textImagePath || shapeImagePath || geocodeSrc ? 'media' : type;
+    const overlayAssetType = textImagePath ? 'text_image'
+      : (shapeImagePath ? 'shape_image'
+        : (geocodeSrc ? (geocodeSrc.still ? 'media_image' : 'image_seq') : cleanInlineText(asset?.type || '', 40)));
+    const overlayAssetPath = textImagePath || shapeImagePath
+      || (geocodeSrc ? (geocodeSrc.still || geocodeSrc.pattern) : cleanInlineText(usePath(asset?.path), 2000));
     const baseOverlay = {
       id: cleanInlineText(item.id || `overlay_${index}`, 120),
       type: overlayType,
@@ -5846,7 +5890,7 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
       ...normalizeSpeedFields(item.speed),
       // LÀM MỀM MÉP: chỉ miếng vá Retouch đặt field này (xem AppendFeatherAlpha ở sidecar).
       feather_px: Math.max(0, Math.min(256, Math.round(Number(item.feather_px) || 0))),
-      has_audio: textImagePath || shapeImagePath ? false : asset?.has_audio === true,
+      has_audio: textImagePath || shapeImagePath || geocodeSrc ? false : asset?.has_audio === true,
       text: cleanMetadataText(item.text || '', 2000),
       font_family: fontFamily,
       font_file: editingFontFileForFamily(fontFamily),
@@ -5867,6 +5911,13 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
       opacity: transform.opacity,
       flip_x: transform.flip_x,
       flip_y: transform.flip_y,
+      // Chuỗi khung GeoCode: overlay CHÍNH là chuỗi (không phải animation_render), mốc đầu snap vào
+      // lưới khung xuất như mọi chuỗi khung khác.
+      ...(geocodeSrc && geocodeSrc.pattern ? {
+        seq_fps: geocodeSrc.fps,
+        frame_count: geocodeSrc.frameCount,
+        timeline_start: snapT(start),
+      } : {}),
     };
 
     // Đối tượng có hoạt ảnh (text/shape/ẢNH): composite PER-FRAME bằng MỘT chuỗi PNG
@@ -5912,7 +5963,7 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
     // Biểu thức dùng token LOCALT (thời gian cục bộ từ đầu item); sidecar thay
     // LOCALT = (t - timeline_start).
     let animVideoFields = null;
-    const av = (type === 'media' && !animOverlay && item.animation_video
+    const av = ((type === 'media' || type === 'geocode') && !animOverlay && item.animation_video
       && typeof item.animation_video === 'object' && item.animation_video.x_expr)
       ? item.animation_video : null;
     if (av) {
@@ -6221,6 +6272,15 @@ function createApp() {
     immutable: true,
     maxAge: '365d',
   }));
+  /* Khung GeoCode cho preview. Thư mục theo KHOÁ nội dung (sha256 của mã + cỡ…), khung ghi một
+   * lần rồi đổi tên cả thư mục -> URL bất biến, cache vĩnh viễn được. Đọc lại thư mục mỗi lượt
+   * (không chốt lúc khởi động) để test/bản cài đổi CRAB_GEOCODE_CACHE_DIR vẫn đúng. */
+  app.use('/geocode_cache', (req, res, next) => express.static(GeocodeCache.geocodeCacheDir(), {
+    immutable: true,
+    maxAge: '365d',
+    index: false,
+    fallthrough: false,
+  })(req, res, next));
 
   app.get('/', async (_req, res) => {
     try {

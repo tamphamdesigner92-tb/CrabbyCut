@@ -27,7 +27,7 @@ const HTTP_TIMEOUT_MS = 35_000;
 // Lệnh chạy lâu (nhập cả loạt tệp, lệnh gộp): app chờ renderer chừng này, HTTP chờ thêm 5 s.
 // PHẢI khớp LONG_RPC_TIMEOUT_MS ở electron/automation-bridge.js.
 const LONG_TIMEOUT_MS = 300_000;
-const LONG_METHODS = new Set(['batch', 'add_media_batch', 'import_media']);
+const LONG_METHODS = new Set(['batch', 'add_media_batch', 'import_media', 'add_geocode']);
 
 /* ---- Tìm app ---- */
 
@@ -345,10 +345,10 @@ const TOOLS = [
   },
   {
     name: 'crabbycut_catalog',
-    description: 'Look up valid ids/values before editing: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories.',
+    description: 'Look up valid ids/values before editing: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories, geocode (languages, size presets, limits).',
     inputSchema: {
       type: 'object',
-      properties: { kind: { type: 'string', enum: ['transitions', 'animations', 'text_styles', 'text_effects', 'luts', 'color_params', 'export_options', 'subtitle', 'library_categories'] } },
+      properties: { kind: { type: 'string', enum: ['transitions', 'animations', 'text_styles', 'text_effects', 'luts', 'color_params', 'export_options', 'subtitle', 'library_categories', 'geocode'] } },
       required: ['kind'],
       additionalProperties: false,
     },
@@ -489,7 +489,7 @@ const TOOLS = [
   },
   {
     name: 'crabbycut_batch',
-    description: 'Editing step only. Run many EDIT commands in one call and ONE undo step, in order. ops: [{tool, args}] where tool is one of add_text, update_block, apply_text_preset, set_animation, set_transition, set_color, split, select, delete_selected, seek, add_asset, import_media, add_media_batch (with or without the crabbycut_ prefix) and args are the arguments of that tool. Reference an earlier result with a string "$<index>.<path>", e.g. {"tool": "add_text", "args": {"text": "Hi"}} then {"tool": "update_block", "args": {"item_id": "$0.item_id", "keyframes": {...}}}. UI tools, screenshots and jobs are not allowed. on_error "abort" (default) rolls back everything on the first failure; "continue" rolls back only the failed op.',
+    description: 'Editing step only. Run many EDIT commands in one call and ONE undo step, in order. ops: [{tool, args}] where tool is one of add_text, update_block, apply_text_preset, set_animation, set_transition, set_color, split, select, delete_selected, seek, add_asset, import_media, add_media_batch, add_geocode (waits for the render; with or without the crabbycut_ prefix) and args are the arguments of that tool. Reference an earlier result with a string "$<index>.<path>", e.g. {"tool": "add_text", "args": {"text": "Hi"}} then {"tool": "update_block", "args": {"item_id": "$0.item_id", "keyframes": {...}}}. UI tools, screenshots and jobs are not allowed. on_error "abort" (default) rolls back everything on the first failure; "continue" rolls back only the failed op.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -511,14 +511,46 @@ const TOOLS = [
     run: async (args) => json(await rpc('batch', args)),
   },
 
-  /* ---- Job chạy lâu ---- */
+  /* ---- GeoCode: dựng ảnh/video từ mã ---- */
   {
-    name: 'crabbycut_start_job',
-    description: 'Start a long-running task and return a job immediately; then poll crabbycut_job_status. kinds: "auto_subtitle" (options: scope all|main|overlay, language vi|en|zh|ja|ko|auto), "magic_fill" (needs a script loaded), "export" (options: output_path REQUIRED absolute file path, video bool, audio bool, resolution, fps, codec, bitrate, bitrate_mbps, audio_bitrate, audio_format, audio_file_bitrate — values from crabbycut_catalog export_options). Editing step only.',
+    name: 'crabbycut_add_geocode',
+    description: 'Editing step only. Render an image or a video from CODE at an exact pixel size and place it as a GeoCode block on a shape track (scale 100% = exactly width x height px; transparent background by default). lang: "html" (HTML/CSS/JS page, CSS animations and timers run on a virtual clock), "canvas" (define function draw(ctx, t, width, height, frame)) or "python" (define def frame(t, width, height) returning a PIL.Image / numpy array / matplotlib Figure; runs with the machine\'s real Python and FULL user permissions — the user sees a notification). Size: width + height, or preset (crabbycut_catalog geocode). kind "video" needs duration (s) and fps (default: sequence fps, max 3600 frames). Rendering can take a while, so this returns a job: poll crabbycut_job_status; the finished job result has item_id. Also usable inside crabbycut_batch as tool "add_geocode" (waits for the render there).',
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', enum: ['auto_subtitle', 'magic_fill', 'export'] },
+        lang: { type: 'string', enum: ['html', 'canvas', 'python'] },
+        code: { type: 'string', minLength: 1 },
+        preset: { type: 'string' },
+        width: { type: 'integer', minimum: 16, maximum: 4096 },
+        height: { type: 'integer', minimum: 16, maximum: 4096 },
+        kind: { type: 'string', enum: ['image', 'video'], default: 'image' },
+        duration: { type: 'number', exclusiveMinimum: 0, description: 'Video length in seconds (kind video).' },
+        fps: { type: 'integer', minimum: 1, maximum: 60 },
+        bg: { type: 'string', description: '"transparent" (default) or #rrggbb.' },
+        loop: { type: 'boolean', default: true, description: 'Loop the video when the block is longer than it (otherwise hold the last frame).' },
+        start: { type: 'number', minimum: 0 },
+        block_duration: { type: 'number', exclusiveMinimum: 0, description: 'Block length on the timeline (default: video length, or 5 s for an image).' },
+        track_id: { type: 'string' },
+        transform: TRANSFORM_SCHEMA,
+        keyframes: KEYFRAMES_SCHEMA,
+        keyframe_mode: KEYFRAME_MODE,
+        keyframe_time: KEYFRAME_TIME,
+        animation: { type: 'object', properties: { combo: { type: 'string' }, combo_duration: { type: 'number' }, in: ANIM_SIDE, out: ANIM_SIDE } },
+      },
+      required: ['lang', 'code'],
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('start_job', { kind: 'geocode', options: args })),
+  },
+
+  /* ---- Job chạy lâu ---- */
+  {
+    name: 'crabbycut_start_job',
+    description: 'Start a long-running task and return a job immediately; then poll crabbycut_job_status. kinds: "geocode" (same options as crabbycut_add_geocode), "auto_subtitle" (options: scope all|main|overlay, language vi|en|zh|ja|ko|auto), "magic_fill" (needs a script loaded), "export" (options: output_path REQUIRED absolute file path, video bool, audio bool, resolution, fps, codec, bitrate, bitrate_mbps, audio_bitrate, audio_format, audio_file_bitrate — values from crabbycut_catalog export_options). Editing step only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['auto_subtitle', 'magic_fill', 'export', 'geocode'] },
         options: { type: 'object' },
       },
       required: ['kind'],
@@ -722,6 +754,8 @@ async function handle(message) {
           + 'Prefer the feature tools (update_block, set_transition, set_color, import_media, start_job…); '
           + 'for several edits at once use crabbycut_add_media_batch (many files + keyframes/animation) or '
           + 'crabbycut_batch (any edit commands) — one call, one undo step. '
+          + 'To draw graphics (buttons, lower thirds, animated badges, charts) at an exact pixel size, write code '
+          + 'with crabbycut_add_geocode (HTML/CSS/JS, canvas or Python). '
           + 'look up valid ids with crabbycut_catalog. For anything without a dedicated tool, drive the UI '
           + 'like a user: crabbycut_screenshot + crabbycut_ui_snapshot, then crabbycut_ui_click / ui_type / '
           + 'ui_key / ui_drag / ui_scroll, and screenshot again to verify. Native OS dialogs (file pickers) '

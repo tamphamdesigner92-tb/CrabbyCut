@@ -902,6 +902,8 @@
     const BATCHABLE = new Set([
         'add_text', 'update_block', 'apply_text_preset', 'set_animation', 'set_transition', 'set_color',
         'split', 'select', 'delete_selected', 'seek', 'add_asset', 'import_media', 'add_media_batch',
+        // GeoCode trong lô: dựng XONG rồi mới sang bước sau (lệnh lẻ thì đi job — xem startGeocodeJob).
+        'add_geocode',
     ]);
 
     function resolveRefs(value, results) {
@@ -1049,8 +1051,23 @@
                 };
             case 'library_categories':
                 return ['video', 'elements', 'sfxs', 'music'];
+            case 'geocode': {
+                const G = window.GeoCode;
+                return {
+                    available: !!G?.available?.(),
+                    languages: {
+                        html: 'Full HTML document or fragment (CSS/JS allowed, https CDNs allowed, no file:// or localhost). CSS animations, transitions, element.animate(), requestAnimationFrame, setTimeout and Date/performance.now run on a virtual clock, so frames are exact. window.geocode = { t, frame, fps, duration, width, height, onFrame(cb) }.',
+                        canvas: 'JavaScript that defines function draw(ctx, t, width, height, frame); called once per frame on a cleared canvas of exactly width x height.',
+                        python: 'Python 3 run with the machine\'s real Python (needs Pillow). Define def frame(t, width, height) returning a PIL.Image (RGBA), a numpy HxWx3/HxWx4 array or a matplotlib Figure, or set a variable image. print() goes to the log. Runs with full user permissions.',
+                    },
+                    presets: (G?.PRESETS || []).map((p) => ({ id: p.id, label: p.label, ...(G.presetSize(p.id) || {}) })),
+                    limits: { side_px: [16, 4096], fps: [1, 60], max_frames: 3600, note: 'kind video: duration * fps <= 3600 (60 s @60fps, 120 s @30fps)' },
+                    default_fps: G?.defaultFps?.() || 30,
+                    scale_note: 'Block scale 100% = exactly width x height pixels on the sequence.',
+                };
+            }
             default:
-                throw new Error('"kind" là một trong: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories');
+                throw new Error('"kind" là một trong: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories, geocode');
         }
     }
 
@@ -1184,12 +1201,90 @@
         return job;
     }
 
+    /* =====================================================================
+     * GEOCODE (static/js/geocode.js) — dựng ảnh/video từ mã rồi đặt block lên lane Hình khối.
+     * Dựng có thể mất vài chục giây nên lệnh lẻ đi JOB (start_job kind "geocode"); trong
+     * crabbycut_batch thì chờ dựng xong ngay trong bước đó. Dựng nằm NGOÀI bước Hoàn tác (không
+     * treo giao diện lúc dựng); đặt block + biến đổi + keyframe + hoạt ảnh = MỘT bước.
+     * Mọi ngôn ngữ kể cả Python THẬT của máy (quyết định 2026-10-17) — cầu nối vốn chỉ chạy khi
+     * người dùng tự bật; mỗi lần MCP chạy Python thì báo toast + ghi log.
+     * ===================================================================== */
+
+    function geocodeSpecFrom(params) {
+        const G = window.GeoCode;
+        if (!G?.available?.()) throw new Error('GeoCode cần bản desktop của CrabbyCut');
+        let width = params.width;
+        let height = params.height;
+        if (params.preset) {
+            const size = G.presetSize(String(params.preset));
+            if (!size) throw new Error(`Không có preset "${params.preset}" (xem catalog geocode)`);
+            if (width === undefined) width = size.width;
+            if (height === undefined) height = size.height;
+        }
+        if (width === undefined || height === undefined) throw new Error('Cần "width" + "height" (px) hoặc "preset"');
+        if (!['html', 'canvas', 'python'].includes(params.lang)) throw new Error('"lang" là html | canvas | python');
+        return {
+            lang: params.lang,
+            code: String(params.code || ''),
+            width: Number(width),
+            height: Number(height),
+            kind: params.kind === 'video' ? 'video' : 'image',
+            fps: params.fps,
+            duration: params.duration,
+            bg: params.bg || 'transparent',
+        };
+    }
+
+    async function addGeocodeNow(params = {}) {
+        requireEditing();
+        const spec = geocodeSpecFrom(params);
+        if (spec.lang === 'python') {
+            window.showToast?.(_t('MCP đang chạy mã Python (GeoCode)'), { type: 'info' });
+            console.info('[automation] MCP chạy mã Python của GeoCode', { width: spec.width, height: spec.height, kind: spec.kind });
+        }
+        const logs = [];
+        const geocode = await window.GeoCode.buildGeocode(spec, {
+            loop: params.loop !== false,
+            onLog: (entry) => { logs.push(`${entry.level || 'info'}: ${entry.message}`); },
+        });
+        const added = await asOneUndoStep(async () => {
+            const placement = {
+                start: Number.isFinite(Number(params.start)) ? Number(params.start) : undefined,
+                trackId: params.track_id || undefined,
+                duration: Number(params.block_duration) > 0 ? Number(params.block_duration) : undefined,
+            };
+            const item = api().addGeocodeItem(geocode, placement);
+            if (!item) throw new Error('Không đặt được block GeoCode');
+            const extra = {};
+            BLOCK_EXTRA_KEYS.forEach((k) => { if (params[k] !== undefined && k !== 'volume' && k !== 'muted') extra[k] = params[k]; });
+            if (Object.keys(extra).length) await updateBlock({ item_id: item.id, ...extra });
+            if (params.animation) await setAnimation({ item_id: item.id, ...params.animation });
+            return itemResult(api().findItem(item.id));
+        });
+        return {
+            ...added,
+            geocode: { render_key: geocode.render_key, frame_count: geocode.frame_count, width: geocode.width, height: geocode.height, kind: geocode.kind },
+            logs: logs.slice(-60),
+        };
+    }
+
+    async function startGeocodeJob(options) {
+        requireEditing();
+        geocodeSpecFrom(options);   // báo lỗi đặc tả NGAY, không đợi tới job
+        const job = newJob('geocode', { options: { lang: options.lang, kind: options.kind || 'image', width: options.width, height: options.height, preset: options.preset } });
+        addGeocodeNow(options)
+            .then((result) => finish(job, 'complete', { progress: 100, message: 'Đã đặt block GeoCode', result }))
+            .catch((error) => finish(job, 'failed', { error: error?.message || String(error) }));
+        return job;
+    }
+
     async function startJob({ kind, options = {} } = {}) {
         let job;
         if (kind === 'auto_subtitle') job = await startAutoSubtitle(options);
         else if (kind === 'magic_fill') job = await startMagicFill(options);
         else if (kind === 'export') job = await startExport(options);
-        else throw new Error('"kind" là auto_subtitle | magic_fill | export');
+        else if (kind === 'geocode') job = await startGeocodeJob(options);
+        else throw new Error('"kind" là auto_subtitle | magic_fill | export | geocode');
         return publicJob(job);
     }
 
@@ -1308,6 +1403,7 @@
         add_asset: addAsset,
         add_media_batch: addMediaBatch,
         batch: runBatch,
+        add_geocode: addGeocodeNow,
         list_assets: listAssets,
         add_main_videos: addMainVideos,
         new_project: newProject,

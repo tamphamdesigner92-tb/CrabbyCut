@@ -77,7 +77,7 @@ Mặc định server dùng bản nào bật cầu nối gần nhất. Muốn ch�
 
 `crabbycut_status` liệt kê mọi bản đang chạy.
 
-## Tool (34)
+## Tool (35)
 
 Claude có hai cách làm việc. **Tool theo tính năng** gọi thẳng hàm của app: nhanh, chính xác, mỗi lệnh là một bước hoàn tác. **Tool giao diện** bấm, gõ và kéo như người dùng thật, dùng cho mọi thứ chưa có tool riêng.
 
@@ -174,6 +174,14 @@ Mục không có `start` nối ngay sau mục trước (+ `gap`); mục đầu b
 ```
 
 `on_error`: `abort` (mặc định) — một bước lỗi là hoàn nguyên cả lô, không để lại bước Hoàn tác nào; `continue` — chỉ bước lỗi bị quay lui, kết quả ghi `error` cho bước đó. Lệnh giao diện (`ui_*`), chụp màn hình và job không chạy trong lô.
+
+### GeoCode — dựng hình từ mã
+
+| Tool | Việc nó làm |
+|---|---|
+| `crabbycut_add_geocode` | Viết mã (`html` / `canvas` / `python`) → ảnh hoặc video đúng `width`×`height` px (hoặc `preset`), nền trong suốt, đặt thành block trên lane Hình khối; kèm `transform`, `keyframes`, `animation`. Chạy dạng **job** (`crabbycut_job_status`); trong `crabbycut_batch` dùng tool `add_geocode` (chờ dựng xong). Tra ngôn ngữ/preset/giới hạn bằng `crabbycut_catalog geocode` |
+
+> ⚠️ `lang: "python"` chạy bằng **Python thật của máy với toàn quyền người dùng** (HTML/JS thì chạy trong sandbox: không đọc tệp, không gọi localhost). App hiện thông báo mỗi lần MCP chạy Python. Chỉ bật cầu nối MCP khi bạn tin chương trình đang điều khiển nó.
 
 ### Việc chạy lâu (job)
 
