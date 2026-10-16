@@ -3602,7 +3602,10 @@
             if (event.shiftKey && pts.length) p = penConstrain(pts[pts.length - 1], p);
             if (pts.length >= MAX_PATH_POINTS) return;
             pts.push({ x: p.x, y: p.y, ix: 0, iy: 0, ox: 0, oy: 0, r: 0 });
-            penSession.drag = { index: pts.length - 1, startX: event.clientX, startY: event.clientY, moved: false };
+            penSession.drag = {
+                index: pts.length - 1, startX: event.clientX, startY: event.clientY, moved: false,
+                lastPointer: { clientX: event.clientX, clientY: event.clientY, shiftKey: event.shiftKey },
+            };
         }
         window.addEventListener('mousemove', onPenDragMove, true);
         window.addEventListener('mouseup', onPenDragEnd, true);
@@ -3615,7 +3618,19 @@
         const metrics = previewFrameMetrics();
         if (!metrics) return;
         const drag = penSession.drag;
+        const prevPointer = drag.lastPointer;
         drag.lastPointer = { clientX: event.clientX, clientY: event.clientY, shiftKey: event.shiftKey };
+        if (drag.spaceMove) {
+            // Đang giữ Space: dời cả đỉnh (kèm tay cầm) theo chuột, như Illustrator.
+            if (prevPointer) {
+                const v0 = penSession.points[drag.index];
+                const ps = Math.max(0.01, metrics.previewScale);
+                v0.x += (event.clientX - prevPointer.clientX) / ps;
+                v0.y += (event.clientY - prevPointer.clientY) / ps;
+            }
+            drawPenOverlay(metrics);
+            return;
+        }
         if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 3) return;
         drag.moved = true;
         const v = penSession.points[drag.index];
@@ -3648,6 +3663,17 @@
         penSession.drag = null;
         if (penSession.closing) { finishPenTool(true); return; }
         drawPenOverlay();
+    }
+
+    // keyup của Pen: nhả Space -> thôi dời đỉnh, cú kéo tiếp tục chỉnh tay cầm từ chỗ mới.
+    function handlePenToolKeyUp(event) {
+        if (!penSession) return false;
+        if (event.key !== ' ' && event.code !== 'Space') return false;
+        if (penSession.drag) penSession.drag.spaceMove = false;
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+        return true;
     }
 
     function penRemoveLastPoint() {
@@ -3737,6 +3763,12 @@
         if (key === 'Enter' || key === 'Escape') { finishPenTool(false); return swallow(); }
         if (key === 'Backspace' || key === 'Delete') { penRemoveLastPoint(); return swallow(); }
         if ((event.ctrlKey || event.metaKey) && key.toLowerCase() === 'z') { penRemoveLastPoint(); return swallow(); }
+        if (key === ' ' || event.code === 'Space') {
+            // Giữ Space giữa cú kéo tay cầm: chuyển sang dời đỉnh; nhả Space (keyup) là quay lại.
+            const drag = penSession.drag;
+            if (drag && !drag.handle && !drag.spaceMove) drag.spaceMove = true;
+            return swallow();
+        }
         if (key === 'Alt') {
             // Không để Alt đưa focus lên thanh menu; nhấn Alt giữa cú kéo tay cầm -> tách ngay.
             event.preventDefault();
@@ -16097,6 +16129,63 @@
      * Thoát: bấm đúp lần nữa, Esc/Enter, hoặc chọn block khác. */
     let pathEditItemId = null;
 
+    /* Alt + BẤM ĐÚP vào một đỉnh: góc nhọn <-> góc trơn (như Convert Anchor Point của
+     * Illustrator). Tự đếm bấm đúp ở mousedown chứ không dùng sự kiện `dblclick`: mỗi lần
+     * nhả chuột khung chọn được dựng lại, phần tử tay cầm của cú bấm thứ hai đã là phần tử
+     * mới nên trình duyệt không bắn `dblclick` cho nó. */
+    let lastPathVertexPress = null;
+    function isPathVertexDoubleClick(item, mode) {
+        const now = performance.now();
+        const prev = lastPathVertexPress;
+        lastPathVertexPress = { itemId: item.id, mode, time: now };
+        if (prev && prev.itemId === item.id && prev.mode === mode && now - prev.time <= 400) {
+            lastPathVertexPress = null;
+            return true;
+        }
+        return false;
+    }
+
+    function togglePathVertexSmooth(item, index) {
+        const style = normalizeShapeStyle(item.style);
+        if (style.shape_type !== 'path' || !style.path_points[index]) return;
+        const local = pathPointsToLocalPx(style);
+        const v = local[index];
+        const n = local.length;
+        recordHistory();
+        if (v.ix || v.iy || v.ox || v.oy) {
+            // Đang có tay cầm -> góc nhọn.
+            v.ix = 0; v.iy = 0; v.ox = 0; v.oy = 0;
+        } else {
+            // Góc nhọn -> góc trơn: hai tay cầm thẳng hàng theo hướng (đỉnh sau - đỉnh trước),
+            // mỗi bên dài 1/3 khoảng cách tới đỉnh kề phía đó (đầu mút đường hở chỉ có 1 bên).
+            const hasPrev = style.path_closed || index > 0;
+            const hasNext = style.path_closed || index < n - 1;
+            const prev = hasPrev ? local[(index - 1 + n) % n] : null;
+            const next = hasNext ? local[(index + 1) % n] : null;
+            const from = prev || v;
+            const to = next || v;
+            let dx = to.x - from.x;
+            let dy = to.y - from.y;
+            const len = Math.hypot(dx, dy);
+            if (len < 0.001) return;
+            dx /= len; dy /= len;
+            if (next) {
+                const d = Math.hypot(next.x - v.x, next.y - v.y) / 3;
+                v.ox = dx * d; v.oy = dy * d;
+            }
+            if (prev) {
+                const d = Math.hypot(prev.x - v.x, prev.y - v.y) / 3;
+                v.ix = -dx * d; v.iy = -dy * d;
+            }
+        }
+        const fit = fitPathToBox(local, style.path_closed);
+        item.style = normalizeShapeStyle({ ...style, width: fit.width, height: fit.height, path_points: fit.points });
+        // Box đo lại có thể lệch tâm -> bù vị trí để các đỉnh khác đứng yên trên khung hình.
+        applyLocalCenterShift(item, { startTransform: normalizeTransform(item.transform) }, fit.cx, fit.cy);
+        renderAll();
+        syncOverlayInspector(item);
+    }
+
     // Shape dựng sẵn -> đỉnh pixel cục bộ (tâm box ở 0,0), tay cầm tương đối.
     function shapeToLocalPathPoints(style) {
         const W = style.width;
@@ -16245,6 +16334,10 @@
         // Row lane chính không có `track_id` -> khoá lane của nó nằm ở track 'track_main'
         // (mainLaneBoxClip đã chặn, kiểm lại ở đây cho đường gọi trực tiếp).
         if (isTrackLocked(isMainClip ? findTrack('track_main') : itemTrack(item))) return;
+        if (String(mode).startsWith('path-vertex:') && event.altKey && isPathVertexDoubleClick(item, mode)) {
+            togglePathVertexSmooth(item, Number(String(mode).split(':')[1]));
+            return;
+        }
         const metrics = previewFrameMetrics();
         if (!metrics) return;
         /* Mốc xuất phát phải là transform ĐANG THẤY (hiệu dụng tại playhead), KHÔNG phải
@@ -24517,6 +24610,7 @@
         };
         window.addEventListener('keydown', replayPreviewBoxDragForShift);
         window.addEventListener('keyup', replayPreviewBoxDragForShift);
+        window.addEventListener('keyup', handlePenToolKeyUp, true);
         // MẶT NẠ: nghe ở window (không setPointerCapture) vì mỗi lần vẽ lại preview là tay
         // cầm được dựng lại — bám vào phần tử thì cú kéo đứt ngay giữa đường.
         window.addEventListener('pointermove', handleMaskDrag, { passive: false });
