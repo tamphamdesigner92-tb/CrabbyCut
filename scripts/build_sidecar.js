@@ -10,6 +10,16 @@ const isWindows = process.platform === 'win32';
 const output = path.join(buildDir, isWindows ? 'core_process.exe' : 'core_process');
 
 fs.mkdirSync(buildDir, { recursive: true });
+/* XOÁ BINARY CŨ TRƯỚC KHI BIÊN DỊCH. Build hỏng mà file cũ còn nằm đó thì mọi test và cả app chạy
+ * tiếp bằng sidecar CŨ, không ai biết (đã mắc 2026-10-05: `main` không biên dịch được trên clang,
+ * test vẫn chạy — bằng binary của hôm trước). Không có file thì chỗ gọi báo "chưa build" rõ ràng. */
+try {
+  fs.rmSync(output, { force: true });
+} catch (error) {
+  // Windows khoá exe đang chạy: trình liên kết cũng sẽ không ghi đè được, nói thẳng nguyên nhân.
+  console.error(`Không xoá được ${output} (${error.code}) — app/backend đang chạy sidecar? Tắt rồi build lại.`);
+  process.exit(1);
+}
 
 function onPath(exe) {
   // `where`/`which` là cách duy nhất đáng tin: spawnSync một compiler không tồn tại chỉ

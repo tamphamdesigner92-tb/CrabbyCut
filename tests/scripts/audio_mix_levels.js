@@ -21,7 +21,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..', '..');
-const SIDECAR = path.join(ROOT, 'native', 'sidecar', 'build', 'core_process');
+const SIDECAR = path.join(ROOT, 'native', 'sidecar', 'build', process.platform === 'win32' ? 'core_process.exe' : 'core_process');
 const SEQ_W = 160;
 const SEQ_H = 90;
 const FPS = 24;

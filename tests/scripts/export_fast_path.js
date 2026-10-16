@@ -15,7 +15,7 @@
  *   2. CÙNG SỐ KHUNG ở cả ba bản.
  *   3. ĐÚNG CHỖ RƠI VỀ ĐƯỜNG CŨ: clip lật hình, nguồn BT.601, nguồn SD không nhãn; nguồn HD
  *      không nhãn thì ĐƯỢC đi đường nhanh. Đếm bằng `fast_clips` trong sự kiện `timing`.
- *   4. ProRes (yuv422p10le): đường nhanh cho cùng hình với đường cũ (PSNR ≥ 45 dB).
+ *   4. ProRes (yuv422p10le): so với bản chuẩn, đường nhanh không kém đường cũ ở mặt phẳng nào.
  *
  * Chạy: npm run test:export-fast-path
  * ================================================================== */
@@ -233,10 +233,24 @@ function main() {
   assert.strictEqual(pNew.fastClips, proresClips.length, `ProRes: ${pNew.fastClips} clip đi đường nhanh`);
   const pOldLossless = renderFromCommands(pOld.runDir);
   const pNewLossless = renderFromCommands(pNew.runDir);
-  const pFrames = psnrFrames(pNewLossless, pOldLossless, 'prores');
-  const pY = rangePsnr(pFrames, 0, pFrames.length, 'y');
-  assert.ok(pY >= 45, `ProRes: luma mới/cũ ${pY.toFixed(2)} dB < 45`);
-  console.log(`  ok  ProRes: ${pNew.fastClips} clip đường nhanh, luma mới/cũ ${pY === Infinity ? '∞' : pY.toFixed(1)} dB`);
+  /* SO VỚI BẢN CHUẨN, không đòi mới/cũ ≥ 45 dB (người dùng duyệt 2026-10-05). Ngưỡng tuyệt đối đó
+   * chỉ đạt nhờ cách làm tròn SIMD của x86: cùng đồ thị, cùng nguồn FFmpeg, x86 bật SIMD 45,52 dB,
+   * còn x86 tắt SIMD và Apple Silicon đều 44,59 dB (docs/DONG_BO_WIN_MAC.md mục 6). Tiêu chí của
+   * phần 1–2: so với bản chuẩn 4:4:4 10-bit, bản mới không kém bản cũ ở mặt phẳng nào. */
+  const pGold = renderFromCommands(pOld.runDir, { gold: true });
+  const pOldGold = psnrFrames(pOldLossless, pGold, 'prores_old_gold');
+  const pNewGold = psnrFrames(pNewLossless, pGold, 'prores_new_gold');
+  const fmt = (v) => (v === Infinity ? '∞' : v.toFixed(1));
+  const pRow = {};
+  for (const plane of ['y', 'u', 'v']) {
+    const a = rangePsnr(pOldGold, 0, pOldGold.length, plane);
+    const b = rangePsnr(pNewGold, 0, pNewGold.length, plane);
+    pRow[plane] = `${fmt(a)}→${fmt(b)}`;
+    assert.ok(b >= a - 0.1, `ProRes mặt phẳng ${plane}: mới ${b.toFixed(2)} dB < cũ ${a.toFixed(2)} dB so với bản chuẩn`);
+  }
+  const pY = rangePsnr(psnrFrames(pNewLossless, pOldLossless, 'prores'), 0, pOldGold.length, 'y');
+  console.log(`  ok  ProRes: ${pNew.fastClips} clip đường nhanh; so bản chuẩn cũ→mới Y ${pRow.y} U ${pRow.u} V ${pRow.v} dB`
+    + ` (luma mới/cũ ${fmt(pY)} dB, chỉ để tham khảo)`);
 
   fs.rmSync(TEST_DIR, { recursive: true, force: true });
   console.log('export fast path ok');

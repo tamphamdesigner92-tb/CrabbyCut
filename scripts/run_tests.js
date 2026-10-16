@@ -1,0 +1,173 @@
+#!/usr/bin/env node
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Tam Pham <tampham.designer92@gmail.com>
+
+/* =====================================================================
+ * CHẠY TOÀN BỘ TEST — CÙNG MỘT LỆNH TRÊN WINDOWS, macOS VÀ CI
+ *   npm run test:all                     (mọi test của `npm test` + `test:export-all`)
+ *   npm run test:all -- --skip-python    (bỏ các test cần môi trường Python AI torch/whisper — CI dùng;
+ *                                         xem PYTHON_ENV_TESTS, env CRABBYCUT_TEST_SKIP_PYTHON=1)
+ *   npm run test:all -- --only=test:seam,test:export
+ *
+ * VÌ SAO KHÔNG CHỈ `npm test`: chuỗi `a && b && c` DỪNG ở test đỏ đầu tiên, nên một máy
+ * (Mac hay Windows) có 20 test hỏng chỉ thấy cái đầu, sửa xong mới lộ cái thứ hai. Ở đây mỗi
+ * test chạy riêng, có giới hạn thời gian (macOS không có lệnh `timeout`), log riêng ở
+ * test_temp/test-logs/, và cuối cùng in bảng tổng.
+ *
+ * LỖ HỔNG NỀN TẢNG ĐÃ BIẾT (tests/known-platform-gaps.json): test đỏ vì MÔI TRƯỜNG của một nền
+ * tảng (vd. ffmpeg Homebrew thiếu zscale), có ghi lý do và việc cần làm để gỡ. Chúng được báo
+ * riêng và không làm lệnh thoát lỗi — nhưng nếu một test trong danh sách lại XANH thì lệnh báo
+ * để xoá nó khỏi danh sách (lỗ hổng đã được vá thì không được nằm đó che lỗi mới).
+ *
+ * FFMPEG: test chạy CÙNG ffmpeg với backend — thư mục bin của bản ghim (npm run ffmpeg:install)
+ * được nối vào đầu PATH đúng như backend/server.js làm. Dòng đầu của bảng ghi bản đang dùng; không
+ * phải bản ghim của nền tảng này (scripts/ffmpeg_pin.js) thì có cảnh báo — kết quả khi đó không so
+ * được với máy kia.
+ *
+ * Mã thoát: 0 = mọi test xanh (trừ lỗ hổng đã biết), 1 = có test đỏ.
+ * ===================================================================== */
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const { spawnSync } = require('child_process');
+
+const ROOT = path.resolve(__dirname, '..');
+const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+const RuntimePaths = require('./runtime_paths.js');
+const { pinFor } = require('./ffmpeg_pin.js');
+
+/* Test chạy bằng `node` nhưng cần môi trường Python AI (core_logic.py import torch + whisper ở
+ * đầu tệp; mlx-whisper trên Mac). --skip-python bỏ chúng như 3 test scripts/run_python.js. Test chỉ
+ * có MỘT phần cần Python (test:backend gọi /api/filter) thì không nằm ở đây: nó đọc
+ * CRABBYCUT_TEST_SKIP_PYTHON=1 và bỏ đúng phần đó. */
+const PYTHON_ENV_TESTS = new Set(['test:asr-engine']);
+/* Ngược lại: test đi qua scripts/run_python.js nhưng CHỈ cần thư viện chuẩn của Python (không
+ * torch/whisper/numpy) — --skip-python vẫn chạy, để CI macOS + Windows kiểm được chúng bằng
+ * python của máy chạy. test:tts-model-store giả lập huggingface_hub bằng module tự viết. */
+const PYTHON_STDLIB_TESTS = new Set(['test:tts-model-store']);
+
+function parseArgs(argv) {
+  const opts = { skipPython: false, only: null, timeoutS: 900, build: false };
+  for (const arg of argv) {
+    const [key, ...rest] = arg.replace(/^--/, '').split('=');
+    const value = rest.join('=');
+    if (key === 'skip-python') opts.skipPython = true;
+    else if (key === 'only') opts.only = value.split(',').filter(Boolean);
+    else if (key === 'timeout') opts.timeoutS = Math.max(10, Number(value) || 900);
+    else if (key === 'build') opts.build = true;
+    else throw new Error(`tuỳ chọn lạ: ${arg}`);
+  }
+  return opts;
+}
+
+// Tên các script trong một chuỗi `npm run a && npm run b …`.
+function chain(scriptName) {
+  return String(pkg.scripts[scriptName] || '')
+    .split('&&').map((s) => s.trim())
+    .filter((s) => s.startsWith('npm run '))
+    .map((s) => s.slice('npm run '.length).trim());
+}
+
+function testList(opts) {
+  if (opts.only) return opts.only;
+  const seen = new Set();
+  const out = [];
+  for (const name of [...chain('test'), ...chain('test:export-all')]) {
+    if (name === 'build:native' || !name.startsWith('test:') || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  return out;
+}
+
+/* Chạy THẲNG lệnh `node …` của script (không qua npm): khỏi phụ thuộc shell của từng nền tảng
+ * (npm.cmd trên Windows cần shell, Node >= 20 từ chối spawn .cmd không shell) và nhanh hơn. */
+function commandOf(name) {
+  const cmd = String(pkg.scripts[name] || '').trim();
+  if (!cmd.startsWith('node ')) return null;
+  return cmd.slice('node '.length).split(/\s+/).filter(Boolean);
+}
+
+function loadKnownGaps() {
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(ROOT, 'tests', 'known-platform-gaps.json'), 'utf8'));
+    return data[process.platform] || {};
+  } catch (_) {
+    return {};
+  }
+}
+
+/* Nối bin của bản ghim vào đầu PATH (cùng quy tắc với backend/server.js) rồi báo ffmpeg nào sẽ chạy. */
+function useRuntimeFfmpeg() {
+  const dir = RuntimePaths.ffmpegDir();
+  if (fs.existsSync(dir)) process.env.PATH = [dir, process.env.PATH].join(path.delimiter);
+  const probe = spawnSync('ffmpeg', ['-hide_banner', '-version'], { encoding: 'utf8' });
+  const version = probe.status === 0 ? String(probe.stdout).split(/\r?\n/)[0].trim() : null;
+  const pin = pinFor();
+  console.log(`ffmpeg: ${version || 'KHÔNG CHẠY ĐƯỢC'}`);
+  if (pin && !version?.startsWith(pin.versionPrefix)) {
+    console.log(`  CẢNH BÁO: không phải bản ghim ${pin.id} — kết quả không so được với máy kia. `
+      + 'Chạy: npm run ffmpeg:install');
+  }
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  useRuntimeFfmpeg();
+  const logDir = path.join(ROOT, 'test_temp', 'test-logs');
+  fs.mkdirSync(logDir, { recursive: true });
+  if (opts.build) {
+    const b = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build:native'],
+      { cwd: ROOT, stdio: 'inherit', shell: process.platform === 'win32' });
+    if (b.status !== 0) process.exit(1);
+  }
+  const gaps = loadKnownGaps();
+  const results = [];
+  for (const name of testList(opts)) {
+    const args = commandOf(name);
+    if (!args) { results.push({ name, status: 'BỎ', note: 'không phải lệnh node' }); continue; }
+    if (opts.skipPython && !PYTHON_STDLIB_TESTS.has(name)
+        && (PYTHON_ENV_TESTS.has(name) || args[0].replace(/\\/g, '/').endsWith('scripts/run_python.js'))) {
+      results.push({ name, status: 'BỎ', note: '--skip-python' });
+      continue;
+    }
+    const t0 = Date.now();
+    /* stdout/stderr của test ghi THẲNG vào tệp log, không qua ống: trên Windows Node ghi ống BẤT
+     * ĐỒNG BỘ, tiến trình chết native (vd. 0xC0000409) là mất sạch phần đang chờ ghi -> log trống,
+     * không biết chết ở đâu (test:project-package trên CI 2026-10-05). Ghi tệp là đồng bộ. */
+    const logFile = path.join(logDir, `${name.replace(/[:]/g, '_')}.log`);
+    const fd = fs.openSync(logFile, 'w');
+    let r;
+    try {
+      r = spawnSync(process.execPath, args, {
+        cwd: ROOT, stdio: ['ignore', fd, fd], timeout: opts.timeoutS * 1000,
+        env: { ...process.env, FORCE_COLOR: '0', ...(opts.skipPython ? { CRABBYCUT_TEST_SKIP_PYTHON: '1' } : {}) },
+      });
+    } finally {
+      fs.closeSync(fd);
+    }
+    const seconds = (Date.now() - t0) / 1000;
+    // Mã thoát luôn ghi lại: test chết không in gì (crash, exit sớm) thì log trống trơn.
+    fs.appendFileSync(logFile, `${r.error ? `\n${r.error}` : ''}`
+      + `\n[run_tests] exit=${r.status} signal=${r.signal || '-'} ${seconds.toFixed(1)}s\n`);
+    let status = r.error?.code === 'ETIMEDOUT' ? 'QUÁ GIỜ' : (r.status === 0 ? 'XANH' : 'ĐỎ');
+    let note = '';
+    if (gaps[name]) {
+      if (status === 'XANH') note = 'đã XANH — xoá khỏi tests/known-platform-gaps.json';
+      else { status = 'LỖ HỔNG'; note = gaps[name]; }
+    }
+    results.push({ name, status, seconds, note });
+    console.log(`${status.padEnd(8)} ${name.padEnd(36)} ${seconds.toFixed(0).padStart(4)}s${note ? `  — ${note}` : ''}`);
+  }
+  const count = (s) => results.filter((r) => r.status === s).length;
+  const failed = results.filter((r) => r.status === 'ĐỎ' || r.status === 'QUÁ GIỜ');
+  const staleGaps = results.filter((r) => r.status === 'XANH' && gaps[r.name]);
+  console.log(`\n${process.platform}/${process.arch} · ${results.length} test: ${count('XANH')} xanh, ${failed.length} đỏ, `
+    + `${count('LỖ HỔNG')} lỗ hổng đã biết, ${count('BỎ')} bỏ qua · log: ${path.relative(ROOT, logDir)}`);
+  if (failed.length) console.log(`ĐỎ: ${failed.map((r) => r.name).join(', ')}`);
+  if (staleGaps.length) console.log(`Lỗ hổng đã được vá (xoá khỏi danh sách): ${staleGaps.map((r) => r.name).join(', ')}`);
+  process.exit(failed.length || staleGaps.length ? 1 : 0);
+}
+
+main();

@@ -12,7 +12,7 @@ Test 1 - Whisper/
 │   ├── mac_mlx_sidecar.py              # ASR macOS (mlx_whisper)
 │   ├── windows_faster_whisper_sidecar.py # ASR Windows (faster-whisper/CTranslate2)
 │   ├── auto_reframe_sidecar.py         # Nhận diện người/mặt cho Auto-Reframe
-│   ├── logo_inpaint_sidecar.py         # Xoá logo bằng AI (MI-GAN/onnxruntime) -> miếng vá PNG theo PTS từng khung
+│   ├── logo_inpaint_sidecar.py         # Xoá vật thể bằng AI (LaMa/onnxruntime + lan truyền nền + bám vật thể) -> miếng vá PNG theo PTS từng khung
 │   ├── python_filter_sidecar.py        # Cầu nối backend -> pipeline so khớp trong core_logic.py
 │   └── python_reorder_sidecar.py       # Cầu nối backend -> align_blocks_to_script (sắp timeline theo kịch bản)
 ├── backend/

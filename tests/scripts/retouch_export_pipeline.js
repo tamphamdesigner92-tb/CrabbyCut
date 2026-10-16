@@ -483,17 +483,15 @@ async function testPatchEdgeIsFeathered() {
             fs.rmSync(path.join(tmp, name), { force: true });
         }
     }
-    /* CHỐT ĐỘ NHẠY: mép cứng phải còn LỘ bậc nhảy, nếu không thì hai phép kiểm dưới
-     * thành vô nghĩa (0 <= 1 luôn đúng). Ngưỡng là 1 chứ không phải 2: chênh lệch
-     * fixture là 2/255 nhưng nó phải đi qua prores 10-bit + lut3d + eq + vòng về
-     * rgb24, và LÀM TRÒN của từng bản ffmpeg khác nhau — bản Windows đo được 1/255
-     * (mép mềm 0/255) trong khi bản macOS đo 2/255. Nâng chênh lệch fixture lên KHÔNG
-     * cứu được: đo thử với 16/255 thì mép mềm còn 7/255, tức phải chỉnh luôn cả ngưỡng
-     * `steps[6] <= 1` — hai hằng số này gắn với nhau. Giữ fixture, hạ ĐÚNG chốt này:
-     * cặp `steps[6] < steps[0]` + `steps[6] <= 1` vẫn buộc mép mềm về 0. */
-    assert.ok(steps[0] >= 1, 'mép CỨNG lẽ ra phải lộ bậc nhảy (đo ' + steps[0] + '/255) — test mất khả năng phát hiện');
-    assert.ok(steps[6] < steps[0], 'mép mềm không làm giảm bậc nhảy (' + steps[0] + ' -> ' + steps[6] + ')');
-    assert.ok(steps[6] <= 1, 'mép mềm vẫn còn bậc nhảy ' + steps[6] + '/255 tại mép miếng vá');
+    /* SO TỈ LỆ, không đòi mép mềm ≤ 1/255 (người dùng duyệt 2026-10-05). Bậc nhảy tuyệt đối sau
+     * prores 10-bit + lut3d + eq + vòng về rgb24 phụ thuộc cách làm tròn của từng kiến trúc CPU:
+     * Windows x86 đo mép cứng 4 -> mép mềm 1/255, Apple Silicon 8 -> 2/255 (ép prores_ks, tắt SIMD,
+     * bản x86 không AVX2 cũng 8 -> 2) — docs/DONG_BO_WIN_MAC.md mục 6. Cả hai đều giảm 4 lần; đòi
+     * giảm ít nhất 3 lần là đo đúng việc mép mềm có tác dụng, ở máy nào cũng vậy.
+     * CHỐT ĐỘ NHẠY: mép cứng phải lộ bậc nhảy đủ lớn để tỉ lệ còn nghĩa — fixture +4/255 mỗi kênh. */
+    assert.ok(steps[0] >= 3, 'mép CỨNG lẽ ra phải lộ bậc nhảy ≥ 3/255 (đo ' + steps[0] + '/255) — test mất khả năng phát hiện');
+    assert.ok(steps[6] * 3 <= steps[0],
+        'mép mềm không giảm bậc nhảy đủ 3 lần: ' + steps[0] + ' -> ' + steps[6] + '/255');
     console.log('  ok  mép miếng vá: bậc nhảy ' + steps[0] + '/255 (mép cứng) -> ' + steps[6] + '/255 (mép mềm)');
 }
 

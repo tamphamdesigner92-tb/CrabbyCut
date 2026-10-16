@@ -7,16 +7,19 @@ Nhận danh sách câu phụ đề có mốc thời gian, đọc từng câu b�
 rồi trộn thành file WAV đặt lên timeline. Backend Node (backend/tts-service.js) bật server này
 khi cần, và nói chuyện qua HTTP 127.0.0.1.
 
-VÌ SAO LÀ SERVER THƯỜNG TRÚ chứ không phải sidecar mỗi lượt một tiến trình như ASR: nạp model
-mất 7-30 giây (F5-TTS ~1,3 GB, VieNeu ~0,9 GB). Người dùng nghe thử giọng, đổi câu, lồng lại —
-nạp lại mỗi lượt là mỗi lượt chờ nửa phút. Server giữ model ấm và TỰ NHẢ sau
-IDLE_UNLOAD_SECONDS để trả RAM cho việc dựng phim.
+VÌ SAO LÀ SERVER THƯỜNG TRÚ chứ không phải sidecar mỗi lượt một tiến trình như ASR: nạp model mất
+10-50 giây. Người dùng chốt 2026-10-11: model được GIỮ trong VRAM sau mỗi lượt để tạo giọng tiếp
+không phải nạp lại; chỉ nhả khi (1) chọn model khác rồi bấm tạo, (2) một tính năng khác cần GPU bắt
+đầu (xuất video, bóc băng…), hoặc (3) rảnh IDLE_UNLOAD_SECONDS (15 phút). (1)(2) và phần "tắt hẳn
+tiến trình" do backend/tts-service.js lo; ở đây chỉ còn nhả engine khác khi lượt mới chọn engine khác,
+và mốc rảnh làm chốt chặn cuối. CRAB_TTS_UNLOAD_AFTER_JOB=1: nhả ngay sau mỗi lượt (để đo).
 
-BA ENGINE:
-  f5      Vi-F5-TTS (port từ Vi-TTS Studio / repo TTS-App): NHÂN BẢN GIỌNG từ một đoạn mẫu
-          3-12 giây + lời của đoạn mẫu. Chạy được CPU, nhanh hơn nhiều nếu torch có CUDA.
+BA ENGINE (F5-TTS đã gỡ ở v1.1.17 — giấy phép weights tiếng Việt phi thương mại, không có giọng
+mặc định; xem docs/KE_HOACH_V1_1_17.md):
+  vieneu3 VieNeu-TTS v3 Turbo — MẶC ĐỊNH: 25 giọng Việt dựng sẵn + nhân bản giọng từ mẫu 3-8 s
+          (không cần lời của mẫu). GPU (CUDA/MPS) bằng PyTorch, không có GPU thì ONNX trên CPU.
   vieneu  VieNeu-TTS v2 (port từ server TTS của CrabbyCut_Private): 7 giọng Việt dựng sẵn,
-          chạy CPU tốt.
+          backbone lên GPU khi có (CUDA/MPS).
   voxcpm  VoxCPM2 8-bit qua MLX — CHỈ macOS Apple Silicon (MLX không có trên Windows).
           Giọng tả bằng lời ("giọng nữ trẻ, ấm").
 
@@ -27,6 +30,7 @@ Chạy tay:  npm run tts:serve   (= <python của .venv-tts> tts/server.py [--po
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import os
 import sys
@@ -51,7 +55,7 @@ import dubbing_core as core  # noqa: E402
 import model_store  # noqa: E402
 
 DEFAULT_PORT = 4124
-IDLE_UNLOAD_SECONDS = int(os.environ.get("CRAB_TTS_IDLE_UNLOAD", "300"))
+IDLE_UNLOAD_SECONDS = int(os.environ.get("CRAB_TTS_IDLE_UNLOAD", "900"))   # 15 phút — người dùng chốt 2026-10-11
 PREVIEW_TEXT = "Xin chào, đây là giọng đọc thử cho video của bạn."
 
 
@@ -81,6 +85,92 @@ def _torch_device() -> str:
     return "cpu"
 
 
+def _release_accelerator_memory() -> None:
+    """Trả bộ nhớ GPU về hệ điều hành sau khi bỏ tham chiếu model.
+
+    `_model = None` chỉ làm tensor thành rác; allocator của torch (CUDA lẫn MPS) và MLX vẫn GIỮ
+    các khối đã cấp để dùng lại, nên nvidia-smi / Activity Monitor vẫn thấy chiếm chỗ cho tới khi
+    xoá cache. Mỗi nhánh tự bọc try: máy không có torch (chỉ MLX) hay ngược lại đều phải chạy."""
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        mps = getattr(torch, "mps", None)
+        if mps is not None and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            mps.empty_cache()
+    except Exception:
+        pass
+    if "mlx.core" in sys.modules:
+        try:
+            import mlx.core as mx
+            clear = getattr(mx, "clear_cache", None) or getattr(getattr(mx, "metal", None), "clear_cache", None)
+            if clear:
+                clear()
+        except Exception:
+            pass
+
+
+@contextlib.contextmanager
+def _hub_offline():
+    """Tạm bật chế độ offline của huggingface_hub trong lúc NẠP model.
+
+    Mọi tệp đã nằm sẵn trong kho model (model_store tải trước), nhưng thư viện vẫn gọi Hub để
+    "chạm" config.json/voices.json theo repo id — trỏ đường dẫn local thì lượt gọi đó hỏng sau
+    vài lần thử lại mạng. Đo trên VieNeu v2 (GTX 1060): nạp 109 s -> ~42 s khi offline.
+    Cờ được đọc LÚC GỌI (huggingface_hub.is_offline_mode trả biến cấp module) nên bật tạm được.
+    Không bật khi model_store đang tải dở một model khác: lượt tải đó cần mạng."""
+    if any(d.get("state") in ("downloading", "preparing") for d in model_store.downloads_snapshot()):
+        yield
+        return
+    saved = []
+    try:
+        import huggingface_hub
+        from huggingface_hub import constants
+        holder = sys.modules.get(huggingface_hub.is_offline_mode.__module__)
+        for mod in {id(m): m for m in (constants, holder) if m is not None}.values():
+            if hasattr(mod, "HF_HUB_OFFLINE"):
+                saved.append((mod, mod.HF_HUB_OFFLINE))
+                mod.HF_HUB_OFFLINE = True
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        for mod, value in saved:
+            mod.HF_HUB_OFFLINE = value
+
+
+def _append_error_log(job: "DubJob", exc: BaseException) -> None:
+    """Lỗi không phải do người dùng -> ghi kèm traceback vào `<kho model>/../logs/tts_errors.log`
+    (bản cài: %LOCALAPPDATA%/CrabbyCut/logs, macOS: ~/Library/Application Support/CrabbyCut/logs).
+    stdout của server chỉ còn trong terminal của backend — người dùng cuối không thấy được. Giữ
+    tối đa ~512 KB: quá thì cắt nửa cũ."""
+    try:
+        folder = model_store.model_root().parent / "logs"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / "tts_errors.log"
+        if path.is_file() and path.stat().st_size > 512 * 1024:
+            data = path.read_bytes()
+            path.write_bytes(data[len(data) // 2:])
+        engine = ENGINES.get(str(job.params.get("engine") or ""))
+        head = (f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} · engine={job.params.get('engine')} "
+                f"· device={getattr(engine, 'device', '')} · python={sys.version.split()[0]} · {sys.platform}\n")
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(head + "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+    except Exception:
+        pass
+
+
+def _unload_after_job() -> bool:
+    """Mặc định GIỮ model sau mỗi lượt (người dùng chốt 2026-10-11 — xem đầu tệp). Đặt
+    CRAB_TTS_UNLOAD_AFTER_JOB=1 để nhả ngay sau mỗi lượt như bản đầu của v1.1.17 (tiện khi đo VRAM)."""
+    return os.environ.get("CRAB_TTS_UNLOAD_AFTER_JOB", "").strip().lower() in {"1", "true", "yes"}
+
+
 class UserError(RuntimeError):
     """Lỗi do dữ liệu người dùng đưa vào (thiếu giọng mẫu, câu rỗng…) -> HTTP 400."""
 
@@ -95,6 +185,8 @@ class Engine:
     module = ""             # gói Python bắt buộc
     platforms: Optional[List[str]] = None
     chunked = True          # cắt đoạn dài + canh chunk câm ở dubbing_core
+    clone = False           # nhận giọng mẫu (hồ sơ giọng trong Cài đặt)
+    clone_needs_text = False  # nhân bản cần cả lời nói trong mẫu
 
     def __init__(self) -> None:
         self._model: Any = None
@@ -106,6 +198,14 @@ class Engine:
     @property
     def loaded(self) -> bool:
         return self._model is not None
+
+    def configure(self, params: dict) -> None:
+        """Gọi ĐẦU mỗi lượt, trước khi tải/nạp model: engine nhiều checkpoint (Qwen3-TTS) chọn
+        checkpoint theo tuỳ chọn của lượt ở đây. Mặc định không làm gì."""
+
+    def extras(self) -> dict:
+        """Thông tin riêng của engine cho giao diện (ngôn ngữ, chế độ…)."""
+        return {}
 
     def availability(self) -> tuple[bool, str]:
         if self.platforms and sys.platform not in self.platforms:
@@ -126,7 +226,8 @@ class Engine:
                 paths = self.ensure_models()
                 started = time.time()
                 log(f"đang nạp {self.name}…")
-                self._model = self._build(paths)
+                with _hub_offline():
+                    self._model = self._build(paths)
                 self.load_seconds = time.time() - started
                 log(f"nạp {self.name} xong sau {self.load_seconds:.1f}s (thiết bị: {self.device or 'cpu'})")
             self.last_used = time.time()
@@ -137,19 +238,15 @@ class Engine:
             if self._model is None:
                 return False
             self._model = None
-            try:
-                import gc
-                gc.collect()
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
+            _release_accelerator_memory()
             log(f"đã nhả {self.name}")
             return True
 
     def voices(self) -> List[str]:
         return []
+
+    def voice_details(self) -> List[dict]:
+        return [{"id": v, "label": v, "description": ""} for v in self.voices()]
 
     def prepare(self, opts: dict) -> dict:
         """Chuẩn bị một lượt (kiểm giọng mẫu…). Trả opts đã chuẩn hoá."""
@@ -200,93 +297,133 @@ class Engine:
             return joined, rate, {"chunks": len(chunks), "retries": retries, "suspects": suspects}
 
 
-def _patch_torchaudio_load() -> None:
-    """torchaudio >= 2.9 chuyển `torchaudio.load` sang torchcodec, mà torchcodec trên Windows
-    đòi bộ DLL FFmpeg "shared" (bản ffmpeg.exe tĩnh app đang dùng không có) -> F5-TTS chết ngay
-    ở bước đọc giọng mẫu. F5 chỉ cần đọc WAV nên thay bằng soundfile là đủ và chạy mọi bản."""
+def _cuda_capability() -> tuple:
     try:
-        import soundfile as sf
         import torch
-        import torchaudio
+        if torch.cuda.is_available():
+            return tuple(torch.cuda.get_device_capability(0))
     except Exception:
-        return
-    if getattr(torchaudio, "_crab_patched", False):
-        return
-
-    def _load(path, *args, **kwargs):
-        data, rate = sf.read(str(path), dtype="float32", always_2d=True)
-        return torch.from_numpy(np.ascontiguousarray(data.T)), int(rate)
-
-    torchaudio.load = _load
-    torchaudio._crab_patched = True
+        pass
+    return ()
 
 
-class F5Engine(Engine):
-    """Vi-F5-TTS — nhân bản giọng. Cấu hình kiến trúc khớp F5TTS_Base (dim 1024, depth 22…,
-    xem vi-fine-tuned-f5-tts.yaml trong repo model) nên dùng thẳng config có sẵn của f5_tts."""
+class VieNeu3Engine(Engine):
+    """VieNeu-TTS v3 Turbo — engine mặc định từ v1.1.17 (thay F5-TTS, xem docs/KE_HOACH_V1_1_17.md).
 
-    name = "f5"
-    label = "F5-TTS tiếng Việt"
-    sample_rate = 24000
-    models = ["f5-vi", "vocos"]
-    module = "f5_tts"
-    chunked = False         # F5 tự cắt đoạn theo độ dài giọng mẫu và tự nối có cross-fade
+    25 giọng Việt dựng sẵn (Bắc/Trung/Nam, nhiều phong cách đọc) + NHÂN BẢN GIỌNG từ một mẫu 3-8 s,
+    KHÔNG cần gõ lời của mẫu. Ra 48 kHz. Apache-2.0 (cả model lẫn codec MOSS).
 
-    # Số bước giải ODE: 32 là mặc định của F5 (Vi-TTS Studio chế độ "fast"). ĐO THẬT trên CPU
-    # (torch bản CPU, máy dựng tính năng): ~3 phút MỘT câu ở 32 bước — không dùng nổi. Trên CPU hạ
-    # xuống 16 (nhanh gấp đôi, giọng hơi kém mịn); GPU giữ 32. Ghi đè: CRAB_TTS_F5_NFE.
-    NFE_STEP = 32
-    NFE_STEP_CPU = 16
-    CFG_STRENGTH = 2.0
+    Hai đường, chọn theo máy — mỗi đường một bộ tệp riêng (model_store) nên chỉ tải đúng thứ cần:
+      · GPU (CUDA trên Windows, MPS trên macOS): PyTorch, `vieneu3-torch` + `moss-nano`.
+      · CPU (không có GPU dùng được):            ONNX Runtime, `vieneu3-onnx` + `moss-nano-onnx`.
+    Người dùng yêu cầu macOS PHẢI chạy GPU -> trên Mac có MPS là dùng MPS, không rơi về ONNX/CPU."""
 
-    def nfe_step(self) -> int:
-        forced = os.environ.get("CRAB_TTS_F5_NFE", "").strip()
-        if forced.isdigit():
-            return max(4, min(64, int(forced)))
-        return self.NFE_STEP if self.device in ("cuda", "mps") else self.NFE_STEP_CPU
+    name = "vieneu3"
+    label = "VieNeu-TTS v3 Turbo"
+    sample_rate = 48000
+    module = "vieneu"
+    chunked = False          # SDK tự cắt câu (max_chars) + tự sinh lại chunk "nói lảm nhảm"
+    clone = True
+    clone_needs_text = False
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._planned = ""
+
+    def planned_device(self) -> str:
+        if not self._planned:
+            forced = os.environ.get("CRAB_TTS_DEVICE", "").strip().lower()
+            self._planned = forced if forced in {"cpu", "cuda", "mps"} else _torch_device()
+        return self._planned
+
+    @property
+    def models(self) -> List[str]:  # type: ignore[override]
+        if self.planned_device() == "cpu":
+            return ["vieneu3-onnx", "moss-nano-onnx"]
+        return ["vieneu3-torch", "moss-nano"]
+
+    def _dtype(self, device: str) -> str:
+        # SDK để "auto" thì CUDA nào cũng nhận bf16 — GTX 10xx (Pascal, sm_6x) chỉ GIẢ LẬP bf16 và
+        # fp16 của nó chạy ở 1/64 tốc độ fp32, nên dưới Volta phải ép fp32.
+        if device == "cuda":
+            cap = _cuda_capability()
+            if cap and cap >= (8, 0):
+                return "bfloat16"
+            if cap and cap >= (7, 0):
+                return "float16"
+            return "float32"
+        return "float32"
 
     def _build(self, paths: Dict[str, Path]) -> Any:
-        _patch_torchaudio_load()
-        from f5_tts.api import F5TTS
+        from vieneu.v3turbo import V3TurboVieNeuTTS
 
-        self.device = _torch_device()
-        ckpt = paths["f5-vi"] / "Vi_F5_TTS_ckpts" / "pruning_model.pt"
-        vocab = paths["f5-vi"] / "vocab.txt"
-        return F5TTS(model="F5TTS_Base", ckpt_file=str(ckpt), vocab_file=str(vocab),
-                     vocoder_local_path=str(paths["vocos"]), device=self.device)
+        device = self.planned_device()
+        if device == "cpu":
+            from vieneu._v3_turbo_engine import onnx_runtime_lite as lite
+
+            root = paths["vieneu3-onnx"]
+            codec_dir = paths["moss-nano-onnx"]
+            # SDK không chuyển `codec_dir` xuống engine ONNX mà tự tải codec từ Hub vào
+            # ~/.cache/huggingface (ngoài kho model của app, không có tiến trình). Chặn đúng lượt
+            # tải codec đó và trỏ về bản model_store đã tải.
+            original = lite.OnnxV3LiteEngine._fetch
+            if not getattr(original, "_crab_local", False):
+                def _fetch(repo: str, files: List[str], subfolder: Optional[str]) -> Path:
+                    if repo == lite._CODEC_REPO:
+                        return codec_dir
+                    return original(repo, files, subfolder)
+                _fetch._crab_local = True  # type: ignore[attr-defined]
+                lite.OnnxV3LiteEngine._fetch = staticmethod(_fetch)
+            self.device = "cpu"
+            return V3TurboVieNeuTTS(backbone_repo=str(root), backend="onnx",
+                                    onnx_dir=str(root / "onnx_update"))
+        root = paths["vieneu3-torch"]
+        self.device = device
+        return V3TurboVieNeuTTS(backbone_repo=str(root), model_subfolder="update",
+                                moss_tokenizer=str(paths["moss-nano"]), device=device,
+                                dtype=self._dtype(device), backend="pytorch")
+
+    def voice_details(self) -> List[dict]:
+        """Giọng dựng sẵn, đọc thẳng từ tệp JSON của SDK — không cần nạp model để hiện danh sách."""
+        try:
+            spec = importlib.util.find_spec("vieneu")
+            base = Path(list(spec.submodule_search_locations)[0]) if spec else None
+            import json
+            data = json.loads((base / "assets" / "voices_v3_turbo.json").read_text(encoding="utf-8"))
+            presets = data.get("presets") or {}
+            names = sorted(presets, key=lambda n: (presets[n].get("featured") is None,
+                                                   presets[n].get("featured") or 0))
+            return [{"id": n, "label": n, "description": str(presets[n].get("description") or "")}
+                    for n in names]
+        except Exception:
+            return []
+
+    def voices(self) -> List[str]:
+        return [v["id"] for v in self.voice_details()]
 
     def prepare(self, opts: dict) -> dict:
         ref_audio = str(opts.get("ref_audio") or "").strip()
-        ref_text = " ".join(str(opts.get("ref_text") or "").split())
-        if not ref_audio or not Path(ref_audio).is_file():
-            raise UserError("F5-TTS cần một tệp giọng mẫu (3-12 giây, một người nói, không nhạc nền).")
-        if not ref_text:
-            # Để trống thì F5 tự bóc băng giọng mẫu bằng Whisper large-v3-turbo — thêm 1,6 GB
-            # tải ngầm KHÔNG có tiến trình. Bắt người dùng gõ lời thì rẻ hơn nhiều.
-            raise UserError("Nhập đúng lời nói trong tệp giọng mẫu — F5-TTS cần nó để bắt chước giọng.")
-        self.ensure()
-        from f5_tts.infer.utils_infer import preprocess_ref_audio_text
-
-        # Cắt giọng mẫu về <= 12 giây + chuẩn hoá lời; kết quả được f5 cache theo hash nên
-        # các lượt infer sau không làm lại. Cần độ dài THẬT của mẫu vì `fix_duration` của F5
-        # là tổng (mẫu + câu mới), không phải riêng câu mới.
-        processed_audio, processed_text = preprocess_ref_audio_text(ref_audio, ref_text, show_info=lambda *_a, **_k: None)
-        import soundfile as sf
-        info = sf.info(processed_audio)
-        return {**opts, "ref_audio": processed_audio, "ref_text": processed_text,
-                "ref_seconds": float(info.frames) / float(info.samplerate or 1)}
+        if ref_audio and not Path(ref_audio).is_file():
+            raise UserError("Không tìm thấy tệp giọng mẫu của hồ sơ giọng — hãy tạo lại hồ sơ trong Cài đặt.")
+        return opts
 
     def _synth_once(self, text: str, opts: dict, target: Optional[float]) -> tuple[np.ndarray, int]:
         model = self.ensure()
-        fix = None
-        if target and opts.get("timing_mode") == "fixed_duration":
-            fix = float(opts.get("ref_seconds") or 0) + max(0.3, float(target))
-        wav, rate, _spec = model.infer(
-            ref_file=opts["ref_audio"], ref_text=opts["ref_text"], gen_text=text,
-            show_info=lambda *_a, **_k: None, nfe_step=self.nfe_step(), cfg_strength=self.CFG_STRENGTH,
-            speed=float(opts.get("speed") or 1.0), fix_duration=fix, remove_silence=False,
-        )
-        return np.asarray(wav, dtype=np.float32), int(rate)
+        ref_audio = str(opts.get("ref_audio") or "").strip()
+        if ref_audio:
+            audio = model.infer(text, ref_audio=ref_audio)
+        else:
+            name = str(opts.get("voice") or "").strip() or None
+            try:
+                audio = model.infer(text, voice=name) if name else model.infer(text)
+            except ValueError as exc:
+                raise UserError(f"Giọng '{name}' không có trong VieNeu-TTS v3.") from exc
+        rate = int(getattr(model, "sample_rate", self.sample_rate) or self.sample_rate)
+        audio = core.to_mono(audio)
+        speed = float(opts.get("speed") or 1.0)
+        if abs(speed - 1.0) > 1e-3:
+            audio, _ = core.change_speed(audio, rate, speed)
+        return audio, rate
 
 
 class VieNeuEngine(Engine):
@@ -316,10 +453,12 @@ class VieNeuEngine(Engine):
                     return
                 super()._load_codec(codec_repo, codec_device)
 
-        self.device = "cpu"
+        # Backbone (transformers, fp32) lên GPU khi có — v1.1.17 yêu cầu lồng tiếng chạy GPU. Đo trên
+        # GTX 1060 trước đây: ghim CPU thì nạp 68 s + một câu 112 s. Codec ONNX vẫn ở CPU (nhẹ).
+        self.device = _torch_device()
         codec = paths["neucodec-onnx"] / "model.onnx"
         return LocalCodecVieNeuTTS(backbone_repo=str(paths["vieneu-tts"]), codec_repo=str(codec),
-                                   gguf_filename=None, backbone_device="cpu")
+                                   gguf_filename=None, backbone_device=self.device)
 
     def voices(self) -> List[str]:
         if self._model is not None:
@@ -347,7 +486,20 @@ class VieNeuEngine(Engine):
 
 
 class VoxCPMEngine(Engine):
-    """VoxCPM2-8bit qua MLX (GPU Metal), ra 48 kHz, đa ngôn ngữ. `voice` = MÔ TẢ giọng."""
+    """VoxCPM2-8bit qua MLX (GPU Metal), ra 48 kHz, đa ngôn ngữ. `voice` = MÔ TẢ giọng.
+
+    v1.1.17 — người dùng báo "không tạo được giọng" trên macOS (chưa có log). Mã gọi đúng API
+    mlx-audio hiện hành, nên sửa theo các nguyên nhân khả dĩ nhất (docs/KE_HOACH_V1_1_17.md):
+
+    1. MỘT LUỒNG MLX CỐ ĐỊNH. Từ mlx 0.31.2, GPU stream gắn với luồng tạo ra nó: mảng/stream tạo
+       ở luồng A mà dùng ở luồng B thì nổ "There is no Stream(gpu, 0) in current thread"
+       (ml-explore/mlx#3727, Blaizzy/mlx-audio#744). Server mở một threading.Thread MỚI cho mỗi
+       job -> lượt nạp và lượt sinh chạy ở hai luồng khác nhau. Nên mọi lệnh MLX (import, nạp,
+       sinh, chuyển sang numpy, xoá cache) đi qua `_MLX` — executor đúng một luồng.
+    2. CHỈ Apple Silicon + macOS 14: MLX chỉ có wheel arm64 macosx_14_0 trở lên. Mac Intel / macOS
+       13 trước đây vẫn được báo "có sẵn" rồi chết lúc cài hoặc lúc nạp.
+    3. Ghi rõ tham số sinh (inference_timesteps, cfg_value) thay vì phụ thuộc mặc định đổi theo bản.
+    CHƯA KIỂM TRÊN MAC THẬT — máy dựng tính năng là Windows."""
 
     name = "voxcpm"
     label = "VoxCPM2"
@@ -355,29 +507,436 @@ class VoxCPMEngine(Engine):
     models = ["voxcpm2-8bit"]
     module = "mlx_audio"
     platforms = ["darwin"]
+    INFERENCE_TIMESTEPS = 10
+    CFG_VALUE = 2.0
+
+    def availability(self) -> tuple[bool, str]:
+        ok, reason = super().availability()
+        if sys.platform != "darwin":
+            return ok, reason
+        import platform
+        if platform.machine() != "arm64":
+            return False, f"{self.label} cần máy Mac chip Apple (M1 trở lên) — MLX không chạy trên Mac Intel."
+        try:
+            major = int((platform.mac_ver()[0] or "0").split(".")[0])
+        except ValueError:
+            major = 0
+        if major and major < 14:
+            return False, f"{self.label} cần macOS 14 (Sonoma) trở lên."
+        return ok, reason
 
     def _build(self, paths: Dict[str, Path]) -> Any:
-        from mlx_audio.tts import load_model
+        def load():
+            from mlx_audio.tts import load_model
+            return load_model(str(paths["voxcpm2-8bit"]))
         self.device = "mps"
-        return load_model(str(paths["voxcpm2-8bit"]))
+        return _mlx_run(load)
+
+    def unload(self) -> bool:
+        with self._lock:
+            if self._model is None:
+                return False
+            self._model = None
+        # Xoá cache Metal trên CHÍNH luồng MLX (cache gắn với stream của luồng đó).
+        try:
+            _mlx_run(_release_accelerator_memory)
+        except Exception:
+            pass
+        log(f"đã nhả {self.name}")
+        return True
 
     def _synth_once(self, text: str, opts: dict, target: Optional[float]) -> tuple[np.ndarray, int]:
         model = self.ensure()
         instruct = str(opts.get("voice") or "").strip() or None
-        chunks, rate = [], self.sample_rate
-        for result in model.generate(text=text, instruct=instruct):
-            chunks.append(core.to_mono(result.audio))
-            rate = int(getattr(result, "sample_rate", None) or rate)
-        if not chunks:
+
+        def generate() -> tuple[np.ndarray, int]:
+            import mlx.core as mx
+            chunks, rate = [], self.sample_rate
+            for result in model.generate(text=text, instruct=instruct,
+                                         inference_timesteps=self.INFERENCE_TIMESTEPS, cfg_value=self.CFG_VALUE):
+                audio = result.audio
+                mx.eval(audio)
+                # float32 TƯỜNG MINH: np.asarray(mx.array bfloat16) không chuyển được.
+                chunks.append(core.to_mono(np.array(audio.astype(mx.float32))))
+                rate = int(getattr(result, "sample_rate", None) or rate)
+            return (np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)), rate
+
+        audio, rate = _mlx_run(generate)
+        if not audio.size:
             raise RuntimeError("VoxCPM2 không sinh ra âm thanh nào")
-        audio = np.concatenate(chunks)
         speed = float(opts.get("speed") or 1.0)
         if abs(speed - 1.0) > 1e-3:
             audio, _ = core.change_speed(audio, rate, speed)
         return audio, rate
 
 
-ENGINES: Dict[str, Engine] = {e.name: e for e in (F5Engine(), VieNeuEngine(), VoxCPMEngine())}
+_MLX_EXEC = None   # ThreadPoolExecutor(max_workers=1) — xem VoxCPMEngine (MLX gắn GPU stream với luồng)
+
+
+def _mlx_run(fn, *args, **kwargs):
+    """Chạy một việc MLX trên ĐÚNG MỘT luồng cố định cho cả server (mọi engine MLX dùng chung)."""
+    global _MLX_EXEC
+    if _MLX_EXEC is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _MLX_EXEC = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
+    return _MLX_EXEC.submit(fn, *args, **kwargs).result()
+
+
+def _mlx_audio_array(audio) -> np.ndarray:
+    """mx.array (có thể bf16) -> numpy float32 mono. Gọi TRONG luồng MLX."""
+    import mlx.core as mx
+    mx.eval(audio)
+    return core.to_mono(np.array(audio.astype(mx.float32)))
+
+
+def _cuda_total_gib() -> float:
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return torch.cuda.get_device_properties(0).total_memory / float(1 << 30)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _torch_dtype_for(device: str):
+    """fp32 trên CPU/MPS và GPU trước Volta (GTX 10xx: bf16 chỉ giả lập, fp16 chạy 1/64 tốc độ);
+    fp16 từ Volta; bf16 từ Ampere."""
+    import torch
+    if device == "cuda":
+        cap = _cuda_capability()
+        if cap and cap >= (8, 0):
+            return torch.bfloat16
+        if cap and cap >= (7, 0):
+            return torch.float16
+    return torch.float32
+
+
+class Qwen3Engine(Engine):
+    """Qwen3-TTS (Alibaba, Apache-2.0) — v1.1.17, người dùng chốt 2026-10-11.
+
+    Ba CHẾ ĐỘ, mỗi chế độ một checkpoint riêng (tải theo nhu cầu):
+      custom  0.6B CustomVoice — 9 giọng dựng sẵn, `instruct` chỉnh cảm xúc/phong cách bằng lời.
+      clone   0.6B Base — nhân bản từ hồ sơ giọng; có lời mẫu thì dùng (tốt hơn), không có thì chỉ
+              lấy đặc trưng giọng (x-vector).
+      design  1.7B VoiceDesign — tạo giọng từ MÔ TẢ. Chỉ mở khi đủ sức: Mac (MLX) hoặc GPU NVIDIA
+              từ Volta (fp16/bf16) có >= 7,5 GiB VRAM — fp32 trên GTX 10xx cần ~7,7 GB (không vừa 6 GB).
+    10 ngôn ngữ (zh en ja ko de fr ru pt es it), KHÔNG có tiếng Việt chính thức.
+
+    Windows/Linux: gói `qwen-tts` trong môi trường RIÊNG .venv-tts-qwen (ghim transformers 4.57 — xem
+    scripts/setup_tts.js ENVS). macOS: mlx-audio trong môi trường chính (GPU Metal).
+    Server mở mỗi job một luồng mới -> lệnh MLX đi qua _mlx_run (xem VoxCPMEngine)."""
+
+    name = "qwen3"
+    label = "Qwen3-TTS"
+    sample_rate = 24000
+    chunked = False
+    clone = True
+    clone_needs_text = False
+    SPEAKERS = [
+        ("Vivian", "Nữ · tiếng Trung · trẻ, sáng"),
+        ("Serena", "Nữ · tiếng Trung · dịu dàng"),
+        ("Uncle_Fu", "Nam · tiếng Trung · trầm, từng trải"),
+        ("Dylan", "Nam · tiếng Trung (Bắc Kinh)"),
+        ("Eric", "Nam · tiếng Trung (Tứ Xuyên)"),
+        ("Ryan", "Nam · tiếng Anh · khoẻ, nhịp nhanh"),
+        ("Aiden", "Nam · tiếng Anh · trẻ, tươi"),
+        ("Ono_Anna", "Nữ · tiếng Nhật"),
+        ("Sohee", "Nữ · tiếng Hàn · ấm"),
+    ]
+    LANGUAGES = ["Auto", "Chinese", "English", "Japanese", "Korean", "German", "French", "Russian",
+                 "Portuguese", "Spanish", "Italian"]
+    MODES = ("custom", "clone", "design")
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._mode = "custom"
+        self._loaded_key = ""
+
+    @property
+    def mlx(self) -> bool:
+        return sys.platform == "darwin"
+
+    @property
+    def module(self) -> str:  # type: ignore[override]
+        return "mlx_audio" if self.mlx else "qwen_tts"
+
+    def _key(self, mode: str) -> str:
+        base = {"custom": "qwen3-0.6b-custom", "clone": "qwen3-0.6b-base", "design": "qwen3-1.7b-design"}[mode]
+        return f"{base}-mlx" if self.mlx else base
+
+    @property
+    def models(self) -> List[str]:  # type: ignore[override]
+        return [self._key(self._mode)]
+
+    def design_available(self) -> tuple[bool, str]:
+        if self.mlx:
+            return True, ""
+        cap = _cuda_capability()
+        if cap and cap >= (7, 0) and _cuda_total_gib() >= 7.5:
+            return True, ""
+        return False, "Thiết kế giọng (Qwen3-TTS 1.7B) cần GPU NVIDIA RTX 20 trở lên có từ 8 GB VRAM, hoặc máy Mac chip Apple."
+
+    def configure(self, params: dict) -> None:
+        options = params.get("engine_options") or {}
+        mode = str(options.get("mode") or "").strip()
+        if not mode:
+            mode = "clone" if params.get("ref_audio") else "custom"
+        if mode not in self.MODES:
+            raise UserError(f"Chế độ Qwen3-TTS không hợp lệ: {mode}")
+        if mode == "design":
+            ok, reason = self.design_available()
+            if not ok:
+                raise UserError(reason)
+        if mode == "clone" and not params.get("ref_audio"):
+            raise UserError("Chế độ nhân bản cần một hồ sơ giọng — tạo trong Cài đặt → Hồ sơ giọng.")
+        if mode != self._mode and self.loaded:
+            self.unload()   # mỗi chế độ một checkpoint; đổi chế độ là nạp model khác
+        self._mode = mode
+
+    def _build(self, paths: Dict[str, Path]) -> Any:
+        path = paths[self._key(self._mode)]
+        self._loaded_key = self._key(self._mode)
+        if self.mlx:
+            def load():
+                from mlx_audio.tts import load_model
+                return load_model(str(path))
+            self.device = "mps"
+            return _mlx_run(load)
+        from qwen_tts import Qwen3TTSModel
+        self.device = _torch_device()
+        device_map = "cuda:0" if self.device == "cuda" else self.device
+        return Qwen3TTSModel.from_pretrained(str(path), device_map=device_map,
+                                             dtype=_torch_dtype_for(self.device), attn_implementation="sdpa")
+
+    def unload(self) -> bool:
+        if not self.mlx:
+            return super().unload()
+        with self._lock:
+            if self._model is None:
+                return False
+            self._model = None
+        try:
+            _mlx_run(_release_accelerator_memory)
+        except Exception:
+            pass
+        log(f"đã nhả {self.name}")
+        return True
+
+    def voices(self) -> List[str]:
+        return [name for name, _ in self.SPEAKERS]
+
+    def voice_details(self) -> List[dict]:
+        return [{"id": name, "label": name.replace("_", " "), "description": desc} for name, desc in self.SPEAKERS]
+
+    def extras(self) -> dict:
+        design_ok, design_reason = self.design_available()
+        return {
+            "languages": [{"id": code, "label": code} for code in self.LANGUAGES],
+            "modes": [
+                {"id": "custom", "available": True, "reason": "", "model": model_store.status([self._key("custom")])[0]},
+                {"id": "clone", "available": True, "reason": "", "model": model_store.status([self._key("clone")])[0]},
+                {"id": "design", "available": design_ok, "reason": design_reason,
+                 "model": model_store.status([self._key("design")])[0]},
+            ],
+            "instruct": True,
+        }
+
+    def prepare(self, opts: dict) -> dict:
+        ref_audio = str(opts.get("ref_audio") or "").strip()
+        if ref_audio and not Path(ref_audio).is_file():
+            raise UserError("Không tìm thấy tệp giọng mẫu của hồ sơ giọng — hãy tạo lại hồ sơ trong Cài đặt.")
+        return opts
+
+    def _synth_once(self, text: str, opts: dict, target: Optional[float]) -> tuple[np.ndarray, int]:
+        model = self.ensure()
+        options = opts.get("engine_options") or {}
+        language = str(options.get("language") or "Auto")
+        if language not in self.LANGUAGES:
+            language = "Auto"
+        instruct = str(options.get("instruct") or "").strip() or None
+        speaker = str(opts.get("voice") or "").strip() or "Ryan"
+        ref_audio = str(opts.get("ref_audio") or "").strip()
+        ref_text = " ".join(str(opts.get("ref_text") or "").split())
+        mode = self._mode
+        if mode == "design" and not instruct:
+            raise UserError("Thiết kế giọng cần một câu mô tả giọng (ví dụ: giọng nữ trẻ, ấm, đọc chậm).")
+        if self.mlx:
+            def generate() -> tuple[np.ndarray, int]:
+                kwargs = {"text": text, "lang_code": language.lower()}
+                if mode == "custom":
+                    kwargs.update(voice=speaker, instruct=instruct)
+                elif mode == "design":
+                    kwargs.update(instruct=instruct)
+                else:
+                    kwargs.update(ref_audio=ref_audio, ref_text=ref_text or None)
+                chunks, rate = [], self.sample_rate
+                for result in model.generate(**kwargs):
+                    chunks.append(_mlx_audio_array(result.audio))
+                    rate = int(getattr(result, "sample_rate", None) or rate)
+                return (np.concatenate(chunks) if chunks else np.zeros(0, np.float32)), rate
+            audio, rate = _mlx_run(generate)
+        else:
+            if mode == "custom":
+                wavs, rate = model.generate_custom_voice(text=text, language=language, speaker=speaker, instruct=instruct)
+            elif mode == "design":
+                wavs, rate = model.generate_voice_design(text=text, language=language, instruct=instruct)
+            else:
+                wavs, rate = model.generate_voice_clone(text=text, language=language, ref_audio=ref_audio,
+                                                         ref_text=ref_text or None, x_vector_only_mode=not ref_text)
+            audio = core.to_mono(np.asarray(wavs[0] if isinstance(wavs, (list, tuple)) else wavs, dtype=np.float32))
+        if not audio.size:
+            raise RuntimeError("Qwen3-TTS không sinh ra âm thanh nào")
+        speed = float(opts.get("speed") or 1.0)
+        if abs(speed - 1.0) > 1e-3:
+            audio, _ = core.change_speed(audio, int(rate), speed)
+        return audio, int(rate)
+
+
+class ChatterboxEngine(Engine):
+    """Chatterbox Multilingual (Resemble AI, MIT) — v1.1.17, người dùng chốt 2026-10-11: chỉ bản
+    CHÍNH THỨC (bản tiếng Việt cộng đồng "Viterbox" là CC BY-NC nên không đưa vào).
+
+    23 ngôn ngữ, KHÔNG có tiếng Việt. Một giọng mặc định + nhân bản từ hồ sơ giọng (chỉ cần audio
+    mẫu). Hai núm: `exaggeration` (độ cảm xúc, 0,25-2) và `cfg_weight` (bám giọng mẫu / nhịp, 0-1).
+    MỌI tệp ra đều mang watermark Perth không nghe thấy (thư viện tự gắn).
+
+    Windows/Linux: gói `chatterbox-tts` trong .venv-tts-chatterbox (ghim torch 2.6 + numpy<2).
+    macOS: mlx-audio trong môi trường chính."""
+
+    name = "chatterbox"
+    label = "Chatterbox Multilingual"
+    sample_rate = 24000
+    chunked = False
+    clone = True
+    clone_needs_text = False
+    LANGUAGES = [
+        ("ar", "Tiếng Ả Rập"), ("da", "Tiếng Đan Mạch"), ("de", "Tiếng Đức"), ("el", "Tiếng Hy Lạp"),
+        ("en", "Tiếng Anh"), ("es", "Tiếng Tây Ban Nha"), ("fi", "Tiếng Phần Lan"), ("fr", "Tiếng Pháp"),
+        ("he", "Tiếng Do Thái"), ("hi", "Tiếng Hindi"), ("it", "Tiếng Ý"), ("ja", "Tiếng Nhật"),
+        ("ko", "Tiếng Hàn"), ("ms", "Tiếng Mã Lai"), ("nl", "Tiếng Hà Lan"), ("no", "Tiếng Na Uy"),
+        ("pl", "Tiếng Ba Lan"), ("pt", "Tiếng Bồ Đào Nha"), ("ru", "Tiếng Nga"), ("sv", "Tiếng Thụy Điển"),
+        ("sw", "Tiếng Swahili"), ("tr", "Tiếng Thổ Nhĩ Kỳ"), ("zh", "Tiếng Trung"),
+    ]
+
+    @property
+    def mlx(self) -> bool:
+        return sys.platform == "darwin"
+
+    @property
+    def module(self) -> str:  # type: ignore[override]
+        return "mlx_audio" if self.mlx else "chatterbox"
+
+    @property
+    def models(self) -> List[str]:  # type: ignore[override]
+        return ["chatterbox-mtl-v3-mlx" if self.mlx else "chatterbox-mtl"]
+
+    def _build(self, paths: Dict[str, Path]) -> Any:
+        path = paths[self.models[0]]
+        if self.mlx:
+            def load():
+                from mlx_audio.tts import load_model
+                return load_model(str(path))
+            self.device = "mps"
+            return _mlx_run(load)
+        from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+        from chatterbox.models.tokenizers import tokenizer as cb_tokenizer
+
+        # Bộ chuyển chữ Hán (Cangjie) tự tải Cangjie5_TC.json bằng hf_hub_download vào cache HF — ngoài
+        # kho model của app, và hỏng khi đang nạp ở chế độ offline (_hub_offline). Tệp đó đã có trong
+        # kho (CHATTERBOX_MTL_FILES): trỏ về đó.
+        original = cb_tokenizer.hf_hub_download
+        if not getattr(original, "_crab_local", False):
+            def _local(*args, **kwargs):
+                name = kwargs.get("filename") or (args[1] if len(args) > 1 else "")
+                local = path / str(name)
+                return str(local) if name and local.is_file() else original(*args, **kwargs)
+            _local._crab_local = True  # type: ignore[attr-defined]
+            cb_tokenizer.hf_hub_download = _local
+        self.device = _torch_device()
+        # Gói 0.1.7 (PyPI) nạp Multilingual V2; bản Mac (mlx-audio) là V3.
+        return ChatterboxMultilingualTTS.from_local(str(path), self.device)
+
+    def unload(self) -> bool:
+        if not self.mlx:
+            return super().unload()
+        with self._lock:
+            if self._model is None:
+                return False
+            self._model = None
+        try:
+            _mlx_run(_release_accelerator_memory)
+        except Exception:
+            pass
+        log(f"đã nhả {self.name}")
+        return True
+
+    def voice_details(self) -> List[dict]:
+        # Một giọng mặc định duy nhất; giọng khác là hồ sơ nhân bản (panel tự thêm nhóm hồ sơ).
+        return [{"id": "default", "label": "Giọng mặc định", "description": ""}]
+
+    def extras(self) -> dict:
+        return {
+            "languages": [{"id": code, "label": label} for code, label in self.LANGUAGES],
+            "emotion": True,
+            "watermark": True,
+        }
+
+    def prepare(self, opts: dict) -> dict:
+        ref_audio = str(opts.get("ref_audio") or "").strip()
+        if ref_audio and not Path(ref_audio).is_file():
+            raise UserError("Không tìm thấy tệp giọng mẫu của hồ sơ giọng — hãy tạo lại hồ sơ trong Cài đặt.")
+        return opts
+
+    def _synth_once(self, text: str, opts: dict, target: Optional[float]) -> tuple[np.ndarray, int]:
+        model = self.ensure()
+        options = opts.get("engine_options") or {}
+        language = str(options.get("language") or "en").lower()
+        if language not in {code for code, _ in self.LANGUAGES}:
+            raise UserError(f"Chatterbox không có ngôn ngữ '{language}'.")
+        exaggeration = max(0.25, min(2.0, float(options.get("exaggeration") or 0.5)))
+        cfg_weight = max(0.0, min(1.0, float(options.get("cfg_weight") if options.get("cfg_weight") is not None else 0.5)))
+        ref_audio = str(opts.get("ref_audio") or "").strip() or None
+        if self.mlx:
+            def generate() -> tuple[np.ndarray, int]:
+                chunks, rate = [], self.sample_rate
+                for result in model.generate(text=text, ref_audio=ref_audio, lang_code=language,
+                                             exaggeration=exaggeration, cfg_weight=cfg_weight, verbose=False):
+                    chunks.append(_mlx_audio_array(result.audio))
+                    rate = int(getattr(result, "sample_rate", None) or rate)
+                return (np.concatenate(chunks) if chunks else np.zeros(0, np.float32)), rate
+            audio, rate = _mlx_run(generate)
+        else:
+            wav = model.generate(text, language_id=language, audio_prompt_path=ref_audio,
+                                 exaggeration=exaggeration, cfg_weight=cfg_weight)
+            rate = int(getattr(model, "sr", self.sample_rate) or self.sample_rate)
+            audio = core.to_mono(np.asarray(wav.detach().cpu().numpy() if hasattr(wav, "detach") else wav, dtype=np.float32))
+        if not audio.size:
+            raise RuntimeError("Chatterbox không sinh ra âm thanh nào")
+        speed = float(opts.get("speed") or 1.0)
+        if abs(speed - 1.0) > 1e-3:
+            audio, _ = core.change_speed(audio, int(rate), speed)
+        return audio, int(rate)
+
+
+# ── Engine nào sống ở server nào ──────────────────────────────────────────────
+# Mỗi môi trường Python chạy CHÍNH tệp này và chỉ mở engine của mình (CRAB_TTS_ENV, do
+# backend/tts-service.js đặt khi bật server) — xem ENVS ở scripts/setup_tts.js. Trên Mac, Qwen3-TTS và
+# Chatterbox chạy bằng mlx-audio nên ở luôn môi trường chính.
+SERVER_ENV = os.environ.get("CRAB_TTS_ENV", "main").strip() or "main"
+
+
+def engine_home(name: str) -> str:
+    if name in ("qwen3", "chatterbox") and sys.platform != "darwin":
+        return "qwen" if name == "qwen3" else "chatterbox"
+    return "main"
+
+
+ENGINES: Dict[str, Engine] = {
+    e.name: e
+    for e in (VieNeu3Engine(), VieNeuEngine(), VoxCPMEngine(), Qwen3Engine(), ChatterboxEngine())
+    if engine_home(e.name) == SERVER_ENV
+}
 
 
 def engine_info(engine: Engine) -> dict:
@@ -391,8 +950,12 @@ def engine_info(engine: Engine) -> dict:
         "device": engine.device,
         "sample_rate": engine.sample_rate,
         "voices": engine.voices(),
+        "voice_details": engine.voice_details(),
+        "clone": bool(engine.clone),
+        "clone_needs_text": bool(engine.clone_needs_text),
         "models": model_store.status(engine.models),
         "idle_seconds": round(time.time() - engine.last_used, 1) if engine.last_used else None,
+        **engine.extras(),
     }
 
 
@@ -437,7 +1000,13 @@ class DubJob:
         self.state = "running"
         try:
             with _synth_gate:
-                self._run()
+                try:
+                    self._run()
+                finally:
+                    # (Chỉ khi CRAB_TTS_UNLOAD_AFTER_JOB=1.) Nhả khi CÒN giữ cổng và job còn
+                    # "running": không lượt mới nào kịp nạp model rồi bị lượt này nhả mất giữa chừng.
+                    if _unload_after_job():
+                        self._release_engine()
             self.state = "done"
             self.stage = "done"
         except Cancelled:
@@ -448,8 +1017,18 @@ class DubJob:
             self.error = str(exc) or exc.__class__.__name__
             if not isinstance(exc, UserError):
                 traceback.print_exc()
+                _append_error_log(self, exc)
         finally:
             self.finished = time.time()
+
+    def _release_engine(self) -> None:
+        engine = ENGINES.get(str(self.params.get("engine") or ""))
+        if engine is None:
+            return
+        try:
+            engine.unload()
+        except Exception as exc:  # noqa: BLE001 — nhả lỗi không được che kết quả lượt sinh
+            log(f"nhả {engine.name} lỗi: {exc}")
 
     def _run(self) -> None:
         import soundfile as sf
@@ -471,6 +1050,13 @@ class DubJob:
         if not cues:
             raise UserError("Không có câu nào đọc được (câu rỗng, chỉ ký hiệu hoặc chú thích nhạc).")
         self.total = len(cues)
+        # Lượt này dùng engine KHÁC lượt trước -> nhả engine cũ trước khi nạp (chỉ giữ MỘT model
+        # trong VRAM). Backend thường đã tắt hẳn server khi đổi model (sạch hơn); đây là chốt chặn
+        # cho server chạy tay / đổi engine cùng môi trường.
+        for other in ENGINES.values():
+            if other is not engine and other.loaded:
+                other.unload()
+        engine.configure(params)
 
         self.stage = "models"
         pending = [key for key in engine.models if not model_store.is_ready(key)]
@@ -490,6 +1076,7 @@ class DubJob:
             "ref_text": params.get("ref_text"),
             "speed": max(0.5, min(2.0, float(params.get("speed") or 1.0))),
             "timing_mode": params.get("timing_mode") or "auto_fit",
+            "engine_options": params.get("engine_options") if isinstance(params.get("engine_options"), dict) else {},
         }
         opts = engine.prepare(opts)
         planner = core.TimelinePlanner(
@@ -615,6 +1202,7 @@ def ensure_models(payload: dict = Body(default={})) -> dict:
     ok, reason = engine.availability()
     if not ok:
         raise UserError(reason)
+    engine.configure(payload)   # Qwen3-TTS: tải checkpoint của chế độ đang chọn
 
     def work() -> None:
         try:

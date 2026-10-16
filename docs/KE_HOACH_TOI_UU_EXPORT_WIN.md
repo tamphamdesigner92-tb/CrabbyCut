@@ -1,6 +1,8 @@
 # Kế hoạch: Xuất video CrabbyCut nhanh ≥ 2× trên Windows và macOS — sửa lệnh ffmpeg + tự build ffmpeg
 
-> **Bàn giao 2026-10-04 (chiều):** đã push `4630a05` (Lồng tiếng: watchdog 5 phút của `scripts/setup_tts.js` giết pip giữa pha "Installing collected packages" -> `tts-site` trống; pha cài nay ngưỡng 60 phút) + `fdb0fb3` (thanh tiến độ render ngay dưới nút "Xuất video ngay" trong popup Xuất; sửa `compactStatusMessage` báo nhầm "Đang dựng timeline"). Đã đóng gói lại `dist/CrabbyCut-Setup-1.1.13.exe` (cùng số 1.1.13) + bổ sung `dist/RELEASE_NOTES_v1.1.13.md`. **CÒN CHỜ NGƯỜI DÙNG:** (1) thay exe + `.blockmap` + `latest.yml` và notes trên Release v1.1.13 bằng tay (máy không có `gh`); (2) ĐÃ dời tag `v1.1.13` từ `aab6474` sang `fdb0fb3` và force-push theo yêu cầu người dùng; (3) có chép bộ thư viện lồng tiếng đã cài thử (scratchpad phiên) vào `%LOCALAPPDATA%CrabbyCutuntime	ts-site` không — chưa làm.
+> **Bàn giao 2026-10-05 (máy Mac) — Một `main` cho cả Windows và macOS:** `main` không biên dịch được trên Mac (clang) và 24 test đỏ; nay **102/104 xanh, 0 đỏ** trên M1 Pro với CÙNG mã. Mac chạy ffmpeg ghim `n8.1.1-crabbycut.2` (cùng nguồn với Windows, `build-macos.sh`, Release `n8.1.1-crabbycut.2-macos`); 1.8 có nhánh POSIX; VideoToolbox `-realtime 0` (Bin Tom trên Mac 30,0 -> 10,2 s). Tất cả nằm trên nhánh `sync/main-mac-win`, **PR #2 chưa gộp — CI Windows là lần đầu phần sửa C++ qua MSVC.** **Đọc "BÀN GIAO PHIÊN 15 (Mac) -> 16" ở mục 26** và `docs/DONG_BO_WIN_MAC.md` mục 7 (file bàn giao đợt đồng bộ đã xoá 2026-10-10 sau khi Windows chạy xanh 109/109).
+>
+> **Bàn giao 2026-10-04 (chiều):** đã push `4630a05` (Lồng tiếng: watchdog 5 phút của `scripts/setup_tts.js` giết pip giữa pha "Installing collected packages" -> `tts-site` trống; pha cài nay ngưỡng 60 phút) + `fdb0fb3` (thanh tiến độ render ngay dưới nút "Xuất video ngay" trong popup Xuất; sửa `compactStatusMessage` báo nhầm "Đang dựng timeline"). Đã đóng gói lại `dist/CrabbyCut-Setup-1.1.13.exe` (cùng số 1.1.13) + bổ sung `dist/RELEASE_NOTES_v1.1.13.md`. **CÒN CHỜ NGƯỜI DÙNG:** (1) thay exe + `.blockmap` + `latest.yml` và notes trên Release v1.1.13 bằng tay (máy không có `gh`); (2) ĐÃ dời tag `v1.1.13` từ `aab6474` sang `fdb0fb3` và force-push theo yêu cầu người dùng; (3) có chép bộ thư viện lồng tiếng đã cài thử (scratchpad phiên) vào `%LOCALAPPDATA%\CrabbyCut\runtime\tts-site` không — chưa làm.
 >
 > **Phiên 14 (2026-10-04):** **bộ nhớ đệm khung vẽ trước** (miếng vá Retouch + chuỗi khung chữ/hình/ảnh động không dựng lại khi xuất lại; khoá gồm vân tay mã nguồn của trang) + kết quả dò GPU cất ngoài temp + nạp LUT không trùng lượt + nội dung .cube gửi một lần + cache chuyển cảnh lane chính + **cắt batch xuyên qua chuỗi khung** (dự án có chuyển cảnh ở mọi biên clip không còn là một batch). **Xuất lại "Yêu Con" trong Electron thật: 37,9 s -> 2,25 s** (lượt đầu 52,9 s); có thêm 9 chuyển cảnh: ~58 s -> 3,2 s; sửa một khối Retouch 15 s, sửa chữ một phụ đề 9,5 s. **Đã phát hành bản Windows v1.1.13** (tag `v1.1.13` = `aab6474`, Release do người dùng tạo 2026-10-04, `latest.yml` khớp bản build) — mọi tối ưu export từ phiên 1 tới 14 đã tới người dùng. **Đọc "BÀN GIAO PHIÊN 14 -> 15" ở mục 25.**
 >
@@ -83,6 +85,19 @@
 17. **Phiên 7 (2026-10-01): 1.6 + 1.4 — xong.** Fixture `test_temp/bench_export/test_crab` (bản sao Test.crab ở `test_temp/testcrab_src/`): **55,6 → 14,2 s (3,9×)** — `geq` độ mờ keyframe −43 s, cắt trước khi phóng to −2,6 s. "Yêu Con 1": mép mềm Retouch −3 s. 1.7: sửa lỗi cắt batch qua chuỗi màu có LOCALT/sendcmd (phần tối ưu còn lại chờ 1.11). 1.10: các dự án mẫu chỉ có `lut3d` đã gộp sẵn ở frontend (HSL + LUT bake thành một .cube) — không có gì để gộp, bỏ. **Nhánh 1B (Retouch) xong**: dựng khung miếng vá 28,3 → 18,0 s trên Yêu Con. Việc kế tiếp: 1.10 → 1.12 pha 2 → 1.2 → phần còn lại của 1.8 → 1.9 → 1.13 → 1.14; Retouch vẽ trước ở renderer (27–42 s trên Yêu Con) đáng đo riêng.
 18. **Phiên 8 (2026-10-01): 1.12 pha 2 (dựng đồ thị ở cỡ xuất khi co nhỏ) — đã viết mã + test; BẬT mặc định từ phiên 9 (người dùng chốt 2026-10-02)** (`CRABBYCUT_EXPORT_OUTSCALE=0` để tắt): 4K → 1080p −17%, 1080p → 720p −10..−23%; bộ so 0.3 (b) đạt, (a) trượt 2,6 dB vì bản chuẩn là đồ thị pha 1 (chi tiết mục 1.12). Bộ đo có `--resolution <preset>` để phát lại payload sẵn có ở cỡ xuất khác.
 19. **Phiên 8: 1.8 xuất song song nhiều tiến trình — xong, BẬT mặc định** (`CRABBYCUT_EXPORT_PARALLEL=1` để tắt). Bin Tom −35%, Yêu Con −13%, phim 4K AV1 không đổi (đã bão hoà CPU). Bản chia batch trùng từng khung + từng mẫu với bản một lượt sau khi chữa 6 lỗi có sẵn của đường nhiều batch (chi tiết mục 1.8) — trong đó **chuỗi khung chữ động ở mọi bản xuất từng chạy sớm 1 khung và mất khung đầu**: nay đúng khung như preview, nên bản một lượt cũng đổi ở các khung hoạt ảnh. 1.2 tạm bỏ qua: trên máy này không lợi (HEVC 10-bit NVDEC 50,2 so với 50,4 s; GTX 1060 không giải mã AV1) và không có máy để kiểm ca có lợi (AV1 trên RTX 30+). Việc kế tiếp: 1.9 → 1.13 → 1.14; hướng mở: ở lượt một batch chỉ đổi RGBA trong cửa sổ của lớp phủ RGBA (xem cuối mục 1.8); bake chữ ở mật độ cỡ xuất nếu 1.12 pha 2 được bật.
+26. **Phiên 15 (2026-10-05, máy Mac): Một `main` cho Windows + macOS — XONG phía Mac; chờ CI Windows của PR #2.**
+    **BÀN GIAO PHIÊN 15 (Mac) -> 16:**
+    - **Nhánh `sync/main-mac-win`** (tách từ `main` `c31311e`), PR [#2](https://github.com/tamphamdesigner92-tb/CrabbyCut/pull/2), commit `ad7d679`…`aba04d1`. Việc còn mở + nhật ký kết quả: `docs/DONG_BO_WIN_MAC.md` mục 7 (file bàn giao riêng của đợt đã xoá 2026-10-10); quy trình + bẫy nền tảng: `docs/DONG_BO_WIN_MAC.md`.
+    - **Sidecar (`ad7d679`) — các nhánh `#else` POSIX từng thiếu hoặc sai:** `RunIn` bỏ qua thư mục làm việc (mọi lượt xuất có lớp phủ/tiếng chết "No such file") -> `posix_spawn` + `cd`; **1.8 chỉ có nhánh Windows** -> nhánh POSIX trong `RunBatchJobs` (`waitpid(-1)`, RAM qua `sysconf`); `RunQuiet` POSIX không có hạn giờ; mtime `std::to_string(__int128)` không biên dịch trên libc++. **macOS trần 4096 luồng/tiến trình**: `scale` của ffmpeg 8 mở ~10 luồng mỗi cái, 131 phụ đề -> chạm trần, VideoToolbox treo 600 s -> `threads=1` cho `scale` nhánh lớp phủ (`kOverlayScaleThreads`) + `-threads 1/2` cho bộ giải mã ảnh. Windows không đổi hành vi (MSVC vẫn đi nhánh cũ) — CẦN CI xác nhận.
+    - **Bước M:** M.5 `-realtime 0` (trần 66 -> ~194 khung/s); env `CRABBYCUT_VT_REALTIME=1` để quay lại. Bin Tom trên Mac: 30,0 -> **10,2 s** (sàn encoder ~9,5 s). M.1 **XONG**: ffmpeg ghim cho Mac (`694ca41`, repo ffmpeg-for-CrabbyCut `8532671`), cài bằng `npm run ffmpeg:install`; `scripts/ffmpeg_pin.js` có `pinFor()` theo nền tảng, `FFMPEG_PIN` của bộ cài Windows giữ nguyên.
+    - **CI** (`.github/workflows/ci.yml`): macos-14 + windows-2022, `node scripts/install_ffmpeg.js --ci` rồi `run_tests.js --skip-python`. `npm run test:all` = mọi test của `test` + `test:export-all`, mỗi test riêng, bảng tổng; lỗ hổng nền tảng ghi ở `tests/known-platform-gaps.json`.
+    - **Hai test đỏ chỉ trên Mac — do kiến trúc CPU, không phải mã:** `test:export-fast-path` (ProRes luma mới/cũ 44,59 dB < 45) và `test:retouch-export` (mép mềm 2/255 > 1). Đo cùng đồ thị, cùng nguồn FFmpeg: arm64 44,59; x86_64 tắt SIMD 44,59; x86_64 bật SIMD (Rosetta) 45,52 dB — ngưỡng 45 chỉ đạt nhờ cách làm tròn SIMD x86. **Người dùng đã duyệt (2026-10-05), đã sửa:** ProRes so bản chuẩn (mới không kém cũ; Mac luma 44,6 -> 66,4 dB), miếng vá so tỉ lệ mép mềm/mép cứng ≥ 3 lần; `known-platform-gaps.json` trống.
+    - **Việc kế tiếp:**
+      1. Đọc CI PR #2; job Windows đỏ ở bước build -> sửa `core_process.cpp` trước.
+      2. Gộp PR #2 khi cả hai job xanh (không đẩy thẳng `main`; nên bật branch protection).
+      3. Máy Windows: `git pull` -> `npm run ffmpeg:install` -> `npm run build:native` -> `npm run test:all`; ghi kết quả vào `docs/DONG_BO_WIN_MAC.md` mục 7 — **XONG 2026-10-10: Windows 109/109 xanh**. `git status` báo đổi mà `diff` trống thì `git add --renormalize .`.
+      4. M.4 (VideoToolbox giải mã HEVC 10-bit: 8,4 -> 4,95 s; H.264 thì chậm hơn) — chưa gắn vào `main`.
+      5. Bộ cài macOS (`setup_runtime.js` mới chỉ Windows) — ngoài phạm vi đợt này.
 25. **Phiên 14 (2026-10-04): bộ nhớ đệm khung vẽ trước (việc kế tiếp số 1 của phiên 13) — XONG; xuất lại Yêu Con 37,9 -> 2,25 s.**
     **BÀN GIAO PHIÊN 14 -> 15:**
     - **Bộ nhớ đệm khung vẽ trước** (commit `795a10d`; cách làm + khoá chi tiết: APP_INTERNALS "Xuất lại không dựng lại khung vẽ trước"). Renderer tính khoá (JSON ổn định của khối + sequence + fps + `faces_id` + **vân tay mã nguồn** = băm index.html + mọi script của trang lúc nạp + userAgent + GPU WebGL), hỏi `POST /api/prebake/lookup`; trúng thì gửi khoá thay khung, trượt thì dựng rồi gửi khung kèm khoá. Backend (`backend/prebake-cache.js`) cộng danh tính tệp nguồn + dòng đầu `ffmpeg -version`, cất ở `<USER_DATA_ROOT>/prebake_cache` (10 GB, 30 ngày), trỏ overlay vào bản trong cache (đường dẫn đứng yên -> cache render cũng trúng). Chung công tắc "Dùng lại phần đã render" + nút dọn "Bản render để xuất lại" (không thêm chuỗi giao diện nào). Áp cho: Retouch lane chính đường miếng vá; chữ / hình / mẫu văn bản động; ảnh động không màu/LUT/lớp Điều chỉnh/Retouch/xoá logo. CHƯA áp: Retouch bake cả khung, overlay video có Retouch, chuyển cảnh (Yêu Con không có, đo được 0 s).
@@ -645,7 +660,7 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
 **1.16 (mới) Bỏ vòng tải file qua HTTP sau khi xuất.** — **xong** (phiên 3, người dùng chọn hỏi chỗ lưu trước).
 - Hiện nay: backend ghi `final_cut.mp4` → trình duyệt tải về thành Blob (`response.blob()`) → `<a download>` → Electron (không có handler `will-download`) hỏi chỗ lưu → ghi thêm một bản nữa.
 - Đo: tải vào Blob mất 4,4–8,8 s cho ~1,5 GB (bản cắt 300 s 4K); bản 39 phút 11,5 GB mất **63,6 s**. Bước ghi sau hộp thoại lưu **chưa đo** (bộ đo chặn cú click).
-- ⚠️ **Rò đĩa:** `performVideoExport` không bao giờ `URL.revokeObjectURL` Blob của bản xuất, nên Chromium giữ nó trong `<userData>/blob_storage` suốt phiên — đo trong profile của bộ đo sau lượt xuất 39 phút: **11 GB**. Trên máy người dùng: mỗi lượt xuất thêm một bản sao cỡ file xuất trong AppData tới khi tắt app. Chưa sửa: thu hồi URL khi hộp thoại lưu của Electron còn mở có thể làm hỏng lượt lưu, cần thử tay; bỏ hẳn vòng HTTP (hướng trên) thì hết luôn.
+- ⚠️ **Rò đĩa:** `performVideoExport` không bao giờ `URL.revokeObjectURL` Blob của bản xuất, nên Chromium giữ nó trong `<userData>/blob_storage` suốt phiên — đo trong profile của bộ đo sau lượt xuất 39 phút: **11 GB**. Trên máy người dùng: mỗi lượt xuất thêm một bản sao cỡ file xuất trong AppData tới khi tắt app. Đường chính đã bỏ Blob (1.16, ngay dưới). **Đường dự phòng (backend ngoài, hộp thoại lỗi, bản web, bench) SỬA 2026-10-10:** main nghe `will-download` (`watchBlobDownloads`), DownloadItem `done` thì báo renderer thu hồi đúng URL đó (`releaseExportBlobUrlWhenSaved`); bản web thu hồi sau 60 s. Kiểm trong Electron thật, tệp 700 MB tải từ backend: đối chứng giữ 728 MB trong `blob_storage` sau GC, bản sửa về 0. Test `test:export-blob-release`.
 - Hướng: renderer xin đường dẫn lưu qua hộp thoại của main process rồi main process `rename`/`copyFile` thẳng `final_cut.mp4`. Đổi thời điểm hiện hộp thoại lưu, nên hỏi trước.
 - **ĐÃ LÀM (2026-09-29, người dùng chọn "hỏi chỗ lưu trước khi xuất", như Premiere):**
   - Bấm "Xuất video ngay" → hộp thoại lưu gốc (`export-pick-output` ở `electron/main.js`, nhớ thư mục lần trước trong phiên, mặc định cạnh tệp .crab) → render → ffmpeg ghi **thẳng** ra `<tên>.exporting.mp4` cạnh đích rồi đổi tên khi xong (hỏng giữa chừng không để lại tệp dở, tệp cũ còn nguyên tới lúc xong). Server trả JSON `{ path }`, renderer báo toast "Đã xuất video". Không còn tải file vào Blob, không còn bản sao trong `blob_storage`.
@@ -896,6 +911,72 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
 ---
 
 # BƯỚC M — macOS (chạy song song từ Bước 1; đã chốt 2026-09-27)
+
+> **Cập nhật 2026-10-05 — Mac nay chạy CHÍNH `main` này** (repo công khai, không còn nhánh riêng; quy
+> trình: `docs/DONG_BO_WIN_MAC.md`). Đo trên MacBook Pro M1 Pro 16 GB, ffmpeg Homebrew 8.1:
+> - `main` lúc đó KHÔNG biên dịch được trên clang và 24/102 test đỏ trên Mac; đã sửa (xem bảng bẫy trong
+>   `DONG_BO_WIN_MAC.md`) — khi đó còn 3 test đỏ với ffmpeg Homebrew (nay 2 — xem M.1 dưới).
+> - M.2: xong theo nghĩa mạnh nhất — chung một mã, không port.
+> - M.5: `h264_videotoolbox -realtime 1` là TRẦN ~66 khung/s (1838 khung 1080x1920: 28,0 s; `-realtime 0`
+>   9,45 s; hevc 18,3 -> 6,75 s), chất lượng còn nhỉnh hơn -> xuất nay `-realtime 0`. M1 Pro chỉ một bộ mã
+>   hoá: hai phiên song song đạt TỔNG ~194 khung/s, vẫn đáng chạy song song (1.8) vì lượt này lấp chỗ encoder
+>   chờ giải mã của lượt kia -> 1.8 có nhánh POSIX (`RunBatchJobs`), số lượt theo RAM như Windows.
+> - Fixture "Bin Tom" (20 clip, 19 lớp phủ, 1838 khung): `main` nguyên trạng trên Mac 30,0 s; + song song
+>   POSIX + `-realtime 0` -> **10,2 s** (sàn của encoder ~9,5 s).
+> - M.4: VideoToolbox giải mã HEVC 10-bit nhanh hơn CPU (4,95 s so với 8,4 s, CPU 48 -> 5,5 giây-CPU) nhưng
+>   H.264 đã chuẩn hoá thì CHẬM hơn (21,3 so với 6,0 s). **XONG 2026-10-09 trên `main`**
+>   (`SourceHwDecodeArgs`): `-hwaccel videotoolbox` cho nguồn chính HEVC hoặc > 8-bit, chỉ macOS, chỉ đồ thị
+>   CPU; H.264 8-bit giữ CPU; `CRABBYCUT_EXPORT_HWDEC=0` tắt. Fixture `rotated` (HEVC Main10 xoay 90°, 773 khung
+>   ra): cả lượt 5,53 -> 4,97 s, **36 -> 14,5 giây-CPU**; bản xuất trùng từng điểm ảnh với giải mã CPU. Thời
+>   gian lợi ít vì lượt này nghẽn ở encoder — phần CPU rảnh ra có ích nhất khi xuất song song (1.8). Bin Tom
+>   (H.264) không đổi (10,2 s). Test `test:export-hw-decode`. Chưa làm: ProRes (media engine M1 Pro/Max) và
+>   video lớp phủ HEVC — chưa có số đo.
+> - **M.7 — đo trên dự án thật của người dùng (2026-10-10, M1 Pro 16 GB, ffmpeg ghim `.2`, `npm run bench:export`):**
+>
+>   | Dự án | Nguồn -> khung xuất | Lượt đầu trong app | Phát lại | Nghẽn |
+>   |---|---|---|---|---|
+>   | Yêu Con 1 ver 6 (47 s) | HEVC 10-bit 1728×3072 60p -> 1080×1920 | 62,5 s (vẽ trước 27,8: Retouch 25,9, trong đó bám mặt 14,1) | ~24 s | chia đều: giải mã ~40%, filter ~30%, encode ~30%; CPU 87% |
+>   | Thanh Hạnh 4 (65 s) | HEVC 10-bit 1728×3072 -> 1080×1920 | 26,0 s | ~16 s | giải mã |
+>   | Sữa 16 Test 2 (65 s) | HEVC **4:2:2** 10-bit 4K 50p -> 1080×1920 | 146 s | 55–129 s (dao động lớn) | CPU 97–100%; mỗi ffmpeg 1,2–2,3 GB RAM, swap 1,8 GB |
+>   | Forever Inside (cắt 300 s) | AV1 4K -> 3840×1646 | 122 s | ~120 s | encoder H.264 4K (CPU 35–50%) |
+>   | Shop Yêu Con 1 | HEVC 10-bit | lỗi -> sửa ở PR #4 (asset .svg của dự án cũ), sau sửa 52,7 s | 16,1 s | — |
+>
+>   - **M.4 trên dự án thật:** Yêu Con 37,2 -> 24,0 s (−35%, `CRABBYCUT_EXPORT_HWDEC=0` để so). VideoToolbox giải mã
+>     được cả HEVC 4:2:2 của Sữa 16 (85 so với 59 khung/s, 24 so với 52 giây-CPU).
+>   - **Trần encoder VideoToolbox 4K trên M1 Pro (một engine):** H.264 ~45 khung/s, hai lượt song song TỔNG ~50;
+>     HEVC ~60 (×1,35). Forever Inside đã ở sàn này. **Người dùng chốt 2026-10-10: tự chọn H.265 khi khung xuất 4K, trên macOS và Windows có HEVC phần cứng; tay chọn giữ theo từng dự án (máy chỉ có CPU giữ suốt phiên như trước)** (`syncExportCodecForFrame`, cạnh dài khung xuất >= 3840; hỏi `/api/export-encoder` = SelectEncoderPlan của sidecar — máy chỉ có libx265 thì giữ H.264; ProRes không đổi). Windows NVENC chưa đo tốc độ H.265 so với H.264. Lưu ý bench: fixture 4K trên máy có HEVC phần cứng nay mặc định xuất H.265 (ép H.264 bằng `--eval-before`) — số đo không so thẳng với các lần đo H.264 trước. Đo Forever Inside cắt 300 s: **120,6 -> 89,2 s (−26%)**; 30 s cùng đồ thị: H.265 33,5 Mbps so với H.264 39,6 Mbps — hai bản 51 dB với nhau, cách bản chuẩn FFV1 như nhau (32,03 / 32,04 dB, SSIM 0,9731 / 0,9738), file H.265 nhỏ hơn 15%. Test `test:export-auto-hevc`.
+>   - **Co nhỏ nguồn lớn là phần CPU lớn nhất sau M.4:** 10 s Yêu Con -> 1080×1920: giải mã VT + chép về 0,8
+>     giây-CPU; + swscale bicubic 9,3; + `scale_vt` trên GPU 0,65. **M.4b (co nhỏ bằng `scale_vt` trước
+>     `hwdownload`) — NGƯỜI DÙNG KHÔNG LÀM (2026-10-10):** so bản chuẩn lanczos, `scale_vt` 39,5 dB (SSIM 0,992)
+>     còn swscale 55,9 dB; nhìn gần như không khác nhưng người dùng giữ chất lượng. Không đề xuất lại đường co
+>     nhỏ giảm chất lượng. (Nếu làm lại: mặt nạ video/lớp Điều chỉnh, xoá logo, vá logo AI tính theo điểm ảnh
+>     NGUỒN; clip keyframe không biết trước mức phóng to; nguồn xoay có thể mất autorotate với khung GPU.)
+>   - Bộ đo: `--split` nay chép `-hwaccel` sang lệnh "chỉ giải mã" (trước đó số tách khâu sai sau M.4).
+>   - **Số lượt song song (1.8) cho Sữa 16 — đo 2026-10-10, mỗi mức 3 lượt phát lại, `CRABBYCUT_EXPORT_PARALLEL=N`:**
+>     1 lượt 117,0 s (115–119, CPU 63–72%); **2 lượt (mặc định trên M1 Pro 10 luồng) 54,3 s (54,1–54,5, CPU 95%,
+>     không swap)**; 3 lượt 53,0 s (−2%, CPU 97%, bắt đầu đẩy ra swap ~5.300 trang). Mặc định đúng — KHÔNG đổi.
+>     Giả thuyết "song song quá nhiều làm tràn RAM" sai. Các lượt 77–129 s đo trước đó không tái hiện được (lần này
+>     9/9 lượt dao động < 1 s) — nhiều khả năng máy đang bận việc khác lúc ấy. Sữa 16 thật: ~54 s cho 65 s video,
+>     nghẽn CPU; phần CPU lớn nhất là co nhỏ nguồn 4K bằng swscale (M.4b — người dùng không làm).
+>   - **Retouch ở lượt xuất ĐẦU — đo theo trạng thái cache (2026-10-10, Yêu Con ver 6, 6 block Retouch, mỗi dòng
+>     một lượt mở dự án + xuất trong Electron; `CRAB_RETOUCH_CACHE_DIR` / `CRAB_PREBAKE_CACHE_DIR` cho bench):**
+>
+>     | Trạng thái | Tổng | Vẽ trước | Chờ bám mặt | Dựng miếng vá Retouch (gồm chờ) | Server |
+>     |---|---|---|---|---|---|
+>     | Lạnh hoàn toàn (chưa từng bám mặt) | 69,4 s | 27,9 | 14,0 | 26,0 | 40,6 |
+>     | Đã chỉnh trước, xuất lần đầu (×2) | 58,6 / 56,0 s | 14,3 / 14,6 | 0,1 | 12,3 / 12,6 | 43,5 / 40,7 |
+>     | Xuất lại (đủ cache) | 43,2 s | 0,4 | 0,1 | 0,1 | 42,0 |
+>
+>     Bám mặt (14 s) người dùng thật hầu như không chờ: preview tự gọi `ensureRetouchFaces` khi vẽ clip có Retouch
+>     và cache bám mặt sống qua lần mở lại. Con số 25,9 s đo trước đó là ca xấu nhất (bench hồ sơ trống). Khoản
+>     THẬT còn lại ở lượt xuất đầu: **dựng miếng vá Retouch ở renderer ~12–14 s (~22% lượt đầu)**, chạy TUẦN TỰ
+>     trước khi gửi server; xuất lại thì vẽ trước 0,4 s. Server ~41–45 s ở cả ba ca (bench tắt cache render — app
+>     thật xuất lại không đổi gì còn nhanh hơn). Hướng mở (chưa làm, cần profile khâu dựng miếng vá trước): chạy
+>     dựng miếng vá song song với server render, hoặc tăng tốc chính khâu dựng.
+> - M.1 (bản ffmpeg ghim cho Mac): **XONG 2026-10-05** — `n8.1.1-crabbycut.2` macOS arm64, cùng nguồn với bản
+>   Windows (`build-macos.sh` của ffmpeg-for-CrabbyCut, Release `n8.1.1-crabbycut.2-macos`), `npm run ffmpeg:install`.
+>   Với bản ghim: 102/104 xanh; `test:export-hdr-asset-usage` hết đỏ; 2 test còn lại đỏ vì làm tròn SIMD x86 ≠ ARM
+>   (mục 26, `DONG_BO_WIN_MAC.md` mục 6), không phải vì ffmpeg.
 
 **Hiện trạng nhánh macOS** (`CrabbyCut_Private`, dòng `CrabbyCut_v2.0.x`, cùng khung sidecar):
 - ffmpeg lấy từ hệ thống (Homebrew), gọi bằng tên trần (`backend/hdr-tonemap.js:10-11`), không ghim phiên bản. Homebrew lên FFmpeg 9 là `-filter_complex_script` hỏng (`core_process.cpp:3001`, `server.js:3890`, `subtitle-jobs.js:259`).

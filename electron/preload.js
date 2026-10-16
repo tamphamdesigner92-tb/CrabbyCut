@@ -40,6 +40,10 @@ contextBridge.exposeInMainWorld('desktopEnv', {
     ipcRenderer.invoke('save-frame-image', { dataBase64, suggestedName }),
   // Xuất video: chọn chỗ lưu TRƯỚC khi render, trả { path, ticket } | { canceled } | { unsupported }.
   pickExportOutput: async (opts) => ipcRenderer.invoke('export-pick-output', opts || {}),
+  // Lượt tải blob: URL đã xong/huỷ (electron/main.js, watchBlobDownloads) -> renderer thu hồi URL.
+  onBlobDownloadDone: (callback) => {
+    ipcRenderer.on('blob-download-done', (_event, url) => callback(url));
+  },
   readProjectFile: async (filePath) => ipcRenderer.invoke('project-read', filePath),
   statMedia: async (entries) => ipcRenderer.invoke('media-stat', entries),
   // "Mở vị trí tệp" của menu chuột phải ở panel Tệp phương tiện: mở Explorer/Finder và

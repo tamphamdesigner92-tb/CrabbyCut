@@ -1,0 +1,30 @@
+# MỘT MÃ NGUỒN CHO CẢ WINDOWS LẪN macOS — kết thúc dòng LUÔN là LF.
+#
+# Không có tệp này thì kết thúc dòng tuỳ vào `core.autocrlf` của từng máy: máy Windows bật
+# autocrlf=true nhận CRLF, máy Mac nhận LF, và một lần commit từ máy cấu hình khác là cả tệp
+# hiện thành "đổi hết" trong diff — che mất thay đổi thật, sinh xung đột gộp vô nghĩa. Đến
+# 2026-10-05 repo vẫn sạch (mọi tệp văn bản đều LF trong index), tệp này giữ cho nó sạch.
+# Mọi công cụ của dự án (Node, Python, MSVC/clang, NSIS) đọc LF bình thường trên Windows.
+* text=auto eol=lf
+
+# Nhị phân — git tự nhận, ghi rõ để không bao giờ bị "chuẩn hoá" nhầm.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.mp3 binary
+*.wav binary
+*.mp4 binary
+*.mov binary
+*.zip binary
+*.exe binary
+*.dll binary
+*.node binary
+*.onnx binary

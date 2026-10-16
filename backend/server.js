@@ -388,6 +388,7 @@ const subtitleJobs = require('./subtitle-jobs.js');
 /* LỒNG TIẾNG (tab Âm thanh) + SỔ TẢI MODEL AI cho thanh trạng thái — xem đầu hai tệp. */
 const ttsService = require('./tts-service.js');
 const modelDownloads = require('./model-downloads.js');
+const { createVoiceProfiles } = require('./voice-profiles.js');
 const { createLogoAi } = require('./logo-ai.js');
 const { createRetouchFramesHandler } = require('./retouch-frames.js');
 const { createPrebakeCache } = require('./prebake-cache.js');
@@ -463,6 +464,10 @@ subtitleJobs.init({
   resolveSourcePath: (raw) => resolveSubtitleSourcePath(raw),
   transcribe: (audioPath, opts) => transcribeSubtitleMix(audioPath, opts),
 });
+
+/* Hồ sơ giọng (Cài đặt → Hồ sơ giọng): nằm ở gốc dữ liệu người dùng để sống qua cài lại/nâng cấp
+ * — xem đầu backend/voice-profiles.js. */
+const voiceProfiles = createVoiceProfiles({ rootDir: path.join(USER_DATA_ROOT, 'voice_profiles') });
 
 ttsService.init({
   tempDir: TEMP_DIR,
@@ -1801,6 +1806,17 @@ function registerSourceAccess(rawPath) {
   else sourceAccessFiles.add(resolved);
 }
 
+/* `resolved` (ĐÃ realpath) có nằm trong `dir` không — `dir` cũng phải qua realpath trước khi so.
+ * macOS: os.tmpdir() là /var/folders/… — một SYMLINK tới /private/var/folders/…; realpath của tệp
+ * ra /private/var/… còn thư mục gốc chỉ path.resolve thì vẫn /var/… -> mọi tệp trong thư mục tạm bị
+ * coi là "ngoài" (test:export-prebake-cache đỏ chỉ trên Mac; Windows không có symlink kiểu này). Thư
+ * mục gốc không tồn tại thì so theo path.resolve như cũ. */
+function pathIsInsideDir(resolved, dir) {
+  let base = path.resolve(dir);
+  try { base = fs.realpathSync(base); } catch (_) { /* chưa có thư mục: so như cũ */ }
+  return (resolved + path.sep).startsWith(base + path.sep);
+}
+
 function isSourceAccessAllowed(rawPath) {
   if (!rawPath) return false;
   let resolved = path.resolve(String(rawPath));
@@ -2858,9 +2874,14 @@ function concatCacheLookup(key) {
  * được vẫn lệch ~1ms sau một vòng làm tròn — mà peaks_cache/proxy_cache khoá theo mtime và
  * `video_version` CHÍNH LÀ mtime, nên lệch 1ms là trượt sạch cache và preview phải tải lại.
  * Chuẩn hoá về mốc chẵn rồi áp CÙNG MỘT phép cho cả bản gốc lẫn bản trong cache thì mọi lượt
- * chép sau đều ra đúng một giá trị. */
+ * chép sau đều ra đúng một giá trị.
+ * Đặt ở GIỮA mili giây đó (+0,5 ms), không đặt đúng mép: giây số thực `…666.088` không biểu diễn
+ * chính xác được, libuv cắt cụt phần nano giây, và trên APFS (macOS, độ phân giải ns) nó thành
+ * `…666.0879998` -> Math.trunc(mtimeMs) ra …087, lệch 1 ms so với bản gốc (test:concat-cache đỏ
+ * chỉ trên Mac; NTFS làm tròn theo bước 100 ns nên không lộ). Giữa khoảng thì cắt cụt kiểu nào
+ * cũng rơi đúng mili giây. */
 function applyMtimeMs(filePath, mtimeMs) {
-  const seconds = Math.floor(mtimeMs) / 1000;
+  const seconds = (Math.floor(mtimeMs) + 0.5) / 1000;
   try { fs.utimesSync(filePath, seconds, seconds); } catch (_) { /* không đặt được thì chỉ mất cache */ }
   return fs.statSync(filePath).mtimeMs;
 }
@@ -3780,6 +3801,9 @@ async function ensureFeatureInstalled(featureId) {
 
 async function runPythonSidecar(scriptPath, inputPath, outputPath, options = {}) {
   await ensureFeatureInstalled(options.feature);
+  /* Mọi sidecar Python (bóc băng, lọc/sắp kịch bản, Auto-Reframe, xoá logo AI…) là "tính năng khác cần
+   * GPU": nhả model lồng tiếng đang giữ trong VRAM trước (người dùng chốt 2026-10-11, xem tts-service). */
+  await ttsService.releaseAll(options.feature || path.basename(scriptPath)).catch(() => {});
   return spawnPythonSidecar(scriptPath, inputPath, outputPath, options);
 }
 
@@ -4299,10 +4323,7 @@ function resolveSubtitleSourcePath(raw) {
   if (!text) return null;
   let resolved;
   try { resolved = fs.realpathSync(path.resolve(text)); } catch (_) { return null; }
-  const inside = (dir) => {
-    const base = path.resolve(dir) + path.sep;
-    return (resolved + path.sep).startsWith(base);
-  };
+  const inside = (dir) => pathIsInsideDir(resolved, dir);
   if (inside(TEMP_DIR) || inside(LIBRARY_DIR)) return resolved;
   if (isSourceAccessAllowed(resolved)) return resolved;
   return null;
@@ -4686,10 +4707,7 @@ function resolveRetouchSource(raw) {
   } catch (_) {
     return null;
   }
-  const inside = (dir) => {
-    const base = path.resolve(dir) + path.sep;
-    return (resolved + path.sep).startsWith(base);
-  };
+  const inside = (dir) => pathIsInsideDir(resolved, dir);
   // Ngoài 2 thư mục của ứng dụng, chấp nhận nguồn NGƯỜI DÙNG ĐÃ ĐĂNG KÝ qua panel (thư
   // mục thêm vào "Tệp phương tiện"). Vẫn là danh sách trắng, không phải mở toang.
   if (!inside(TEMP_DIR) && !inside(LIBRARY_DIR) && !isSourceAccessAllowed(resolved)) return null;
@@ -4697,7 +4715,7 @@ function resolveRetouchSource(raw) {
   return resolved;
 }
 
-/* Model MI-GAN nằm cạnh runtime (%LOCALAPPDATA%\CrabbyCut\models) ở CẢ HAI đường chạy: tải một
+/* Model LaMa (Xoá vật thể AI) nằm cạnh runtime (%LOCALAPPDATA%\CrabbyCut\models) ở CẢ HAI đường chạy: tải một
  * lần cho mọi dự án, và chạy từ mã nguồn cũng không làm bẩn thư mục repo bằng 28 MB nhị phân. */
 function logoAiModelDir() {
   if (process.env.CRAB_LOGO_AI_MODEL_DIR) return path.resolve(process.env.CRAB_LOGO_AI_MODEL_DIR);
@@ -4837,6 +4855,9 @@ const RATE_MODE_FROM_QUALITY = { high: 'recommended', balanced: 'lower', small: 
 // Chiều ngược lại cho `quality` (preset CPU, báo cáo): Thấp hơn là Cân bằng cũ.
 const QUALITY_FROM_RATE_MODE = { lower: 'balanced', recommended: 'high', higher: 'high', custom: 'high' };
 const EXPORT_AUDIO_VALUES = new Set(['128k', '192k', '320k']);
+/* Ô "Audio" của hộp Xuất (v1.1.17, kiểu CapCut — người dùng chốt 2026-10-11): định dạng -> đuôi tệp.
+ * AAC đóng trong .m4a (container MP4 chỉ có tiếng) như CapCut/Premiere. */
+const EXPORT_AUDIO_FORMATS = { mp3: '.mp3', wav: '.wav', aac: '.m4a', flac: '.flac' };
 
 function evenDimension(value, fallback) {
   const parsed = Math.round(Number(value));
@@ -4888,8 +4909,29 @@ function normalizeExportSettings(body = {}) {
   if (rateMode === 'custom' && rateMbps === null) rateMode = 'recommended';
   if (EXPORT_RATE_MODES.has(String(raw.rate_mode || ''))) quality = QUALITY_FROM_RATE_MODE[rateMode];
   const audioBitrate = EXPORT_AUDIO_VALUES.has(String(raw.audio_bitrate || '192k')) ? String(raw.audio_bitrate || '192k') : '192k';
+  /* Hai ô Video / Audio (kiểu CapCut). Video mặc định bật — khách cũ không gửi gì thì xuất như
+   * trước. Audio bật = thêm một tệp âm thanh riêng (cạnh video, hoặc là tệp duy nhất khi tắt Video).
+   * Tên khoá CỐ Ý không phải `audio_format`: sidecar dò khoá đó trong cả tệp timeline, và lượt
+   * export-video mà thấy nó là lượt tiếng trung gian đổi bộ mã hoá — chỉ lượt export-audio được ghi
+   * `audio_format` (xem /api/export-video). */
+  const exportVideo = raw.export_video !== false && raw.export_video !== 'false';
+  const audioFormatRaw = String(raw.audio_file_format || '').toLowerCase();
+  const audioFileFormat = raw.export_audio === true || raw.export_audio === 'true'
+    ? (EXPORT_AUDIO_FORMATS[audioFormatRaw] ? audioFormatRaw : 'mp3')
+    : null;
+  if (!exportVideo && !audioFileFormat) {
+    const error = new Error(_t('Hãy chọn ít nhất một trong hai: Video hoặc Audio.'));
+    error.status = 400;
+    throw error;
+  }
+
+  // Bitrate RIÊNG của tệp âm thanh (MP3/AAC); ô "Âm thanh" của nhóm Video vẫn là bitrate tiếng trong video.
+  const audioFileBitrate = EXPORT_AUDIO_VALUES.has(String(raw.audio_file_bitrate || '')) ? String(raw.audio_file_bitrate) : audioBitrate;
 
   return {
+    export_video: exportVideo,
+    audio_file_format: audioFileFormat,
+    audio_file_bitrate: audioFileBitrate,
     resolution,
     width,
     height,
@@ -5306,22 +5348,29 @@ function normalizeVideoMaskFields(raw) {
   }
 }
 
-/* XOÁ LOGO của block -> hai field phẳng cho sidecar: `logo_mode` và `logo_rects`
- * ("x:y:w:h:p|..." — pixel NGUYÊN của stream mà chuỗi filter chạy trên đó, p = bán kính mờ
- * hoặc cạnh ô khảm). Frontend đã quy đổi bằng LogoRemoval.exportRects; ở đây chỉ DỰNG LẠI
- * chuỗi từ số đã kẹp, không nhận chuỗi nào của client — field này đổ thẳng vào filter script.
+/* XOÁ VẬT THỂ của block -> field phẳng cho sidecar:
+ *   - `logo_mode` + `logo_rects` ("x:y:w:h:p|..." — pixel NGUYÊN của stream mà chuỗi filter
+ *     chạy trên đó, p = bán kính mờ hoặc cạnh ô khảm) cho vùng CỐ ĐỊNH xoá bằng công thức.
+ *     Frontend đã quy đổi bằng LogoRemoval.exportRects; ở đây chỉ DỰNG LẠI chuỗi từ số đã kẹp,
+ *     không nhận chuỗi nào của client — field này đổ thẳng vào filter script.
+ *   - `logo_ai_*` khi có lượt AI `{ key, run }`: miếng vá của vùng cố định chế độ 'ai' VÀ/HOẶC
+ *     của vật thể chuyển động (vật thể luôn đi AI). Hai loại cùng có được: logo xoá bằng
+ *     delogo + vật thể xoá bằng AI -> sidecar chạy công thức trước rồi dán miếng vá.
  * Sidecar tự kẹp thêm theo kích thước thật của stream. */
 const LOGO_MODES = new Set(['delogo', 'blur', 'pixelate']);
 function normalizeLogoRemovalFields(raw) {
   if (!raw || typeof raw !== 'object') return {};
-  /* CHẾ ĐỘ AI: dán miếng vá của lượt `{ key, run }` — dir/vị trí/mốc đọc từ index TRÊN ĐĨA
-   * (logoAi.exportFields), không nhận đường dẫn nào của client. Lượt không dùng được (đã bị
-   * dọn, chưa xong) -> delogo trên cùng các hình chữ nhật frontend gửi kèm: thà logo được
-   * nội suy còn hơn bản xuất lộ nguyên logo mà không báo gì. */
+  /* LƯỢT AI: dir/vị trí/mốc đọc từ index TRÊN ĐĨA (logoAi.exportFields), không nhận đường dẫn
+   * nào của client. Lượt không dùng được (đã bị dọn, chưa xong) ở chế độ 'ai' -> delogo trên
+   * cùng các hình chữ nhật frontend gửi kèm: thà logo được nội suy còn hơn bản xuất lộ nguyên
+   * logo mà không báo gì. Vật thể chuyển động thì không có đường lùi công thức (hộp đổi mỗi
+   * khung) -> chỉ ghi log. */
+  const ai = raw.key && raw.run ? logoAi.exportFields({ ...raw, mode: 'ai' }) : null;
   if (raw.mode === 'ai') {
-    const ai = logoAi.exportFields(raw);
     if (ai) return ai;
     logStatus('[logo-ai] không dùng được miếng vá AI khi xuất — rơi về delogo');
+  } else if (raw.objects && !ai) {
+    logStatus('[logo-ai] vật thể chuyển động chưa có miếng vá AI dùng được — bản xuất KHÔNG xoá vật thể');
   }
   const mode = LOGO_MODES.has(raw.mode) ? raw.mode : 'delogo';
   const toInt = (v, lo, hi) => {
@@ -5337,8 +5386,9 @@ function normalizeLogoRemovalFields(raw) {
     if ([x, y, w, h, p].some((v) => v === null) || w < 6 || h < 6) return null;
     return `${x}:${y}:${w}:${h}:${p}`;
   }).filter(Boolean);
-  if (!rects.length) return {};
-  return { logo_mode: mode, logo_rects: rects.join('|') };
+  const out = rects.length ? { logo_mode: mode, logo_rects: rects.join('|') } : {};
+  if (ai && raw.mode !== 'ai') Object.assign(out, ai);
+  return out;
 }
 
 // Biểu thức keyframe -> FFmpeg do frontend sinh (chỉ số/hàm toán). Whitelist ký tự để
@@ -5938,6 +5988,10 @@ function exportOutputName(settings) {
   return settings.codec === 'prores' ? 'final_cut.mov' : 'final_cut.mp4';
 }
 
+function exportAudioExt(format) {
+  return EXPORT_AUDIO_FORMATS[format] || '.mp3';
+}
+
 async function resolveAsrRequest(asrEngine, asrModel) {
   if (process.platform !== 'win32') {
     return {
@@ -6196,6 +6250,29 @@ function createApp() {
 
   app.get('/api/hardware-info', (_req, res) => {
     res.json(collectHardwareInfo());
+  });
+
+  /* Bộ mã hoá mà lượt xuất SẼ dùng cho một codec (sidecar `export-encoder` = SelectEncoderPlan).
+   * Hộp thoại xuất hỏi `hevc` để tự chọn H.265 khi xuất 4K chỉ khi máy có HEVC phần cứng
+   * (VideoToolbox / NVENC / QSV / AMF); bộ mã hoá CPU (libx265) -> `hardware: false`. Windows dò
+   * bằng phép mã hoá thử (vài giây lần đầu, sidecar nhớ 3 ngày) — ở đây nhớ thêm 10 phút trong
+   * tiến trình để mỗi lần tải trang không phải chạy lại sidecar. */
+  const exportEncoderMemo = new Map();
+  app.get('/api/export-encoder', async (req, res) => {
+    const codec = ['h264', 'hevc', 'prores'].includes(req.query?.codec) ? req.query.codec : 'h264';
+    try {
+      const cached = exportEncoderMemo.get(codec);
+      if (cached && Date.now() - cached.at < 10 * 60 * 1000) return res.json(await cached.promise);
+      const promise = runSidecar(['export-encoder', codec], { forwardStatus: false }).then((events) => {
+        const encoder = String(events.find((evt) => evt.type === 'result')?.message || '');
+        return { codec, encoder, hardware: Boolean(encoder) && !encoder.startsWith('lib') && encoder !== 'prores_ks' };
+      });
+      exportEncoderMemo.set(codec, { at: Date.now(), promise });
+      promise.catch(() => exportEncoderMemo.delete(codec));
+      res.json(await promise);
+    } catch (error) {
+      httpError(res, 500, error);
+    }
   });
 
   app.get('/api/asr-models', async (req, res) => {
@@ -7408,9 +7485,10 @@ function createApp() {
     }
   });
 
-  app.post('/api/tts/setup', (_req, res) => {
+  app.post('/api/tts/setup', (req, res) => {
     try {
-      res.json({ status: 'success', ...ttsService.startSetup() });
+      // body.env: 'main' (mặc định) | 'qwen' | 'chatterbox' — môi trường riêng của từng engine nặng.
+      res.json({ status: 'success', ...ttsService.startSetup(String(req.body?.env || 'main')) });
     } catch (error) {
       httpError(res, 500, error);
     }
@@ -7418,7 +7496,48 @@ function createApp() {
 
   app.post('/api/tts/models/ensure', async (req, res) => {
     try {
-      res.json({ status: 'success', ...(await ttsService.ensureModels(String(req.body?.engine || ''))) });
+      res.json({ status: 'success', ...(await ttsService.ensureModels(String(req.body?.engine || ''), req.body?.engine_options)) });
+    } catch (error) {
+      httpError(res, error?.status || 500, error);
+    }
+  });
+
+  /* ===== HỒ SƠ GIỌNG (Cài đặt → Hồ sơ giọng) ===== */
+  app.get('/api/voice-profiles', (_req, res) => {
+    try {
+      res.json({ status: 'success', dir: voiceProfiles.root(), profiles: voiceProfiles.list() });
+    } catch (error) {
+      httpError(res, error?.status || 500, error);
+    }
+  });
+
+  app.post('/api/voice-profiles', async (req, res) => {
+    try {
+      res.json({ status: 'success', profile: await voiceProfiles.create(req.body || {}) });
+    } catch (error) {
+      httpError(res, error?.status || 500, error);
+    }
+  });
+
+  app.patch('/api/voice-profiles/:id', (req, res) => {
+    try {
+      res.json({ status: 'success', profile: voiceProfiles.update(req.params.id, req.body || {}) });
+    } catch (error) {
+      httpError(res, error?.status || 500, error);
+    }
+  });
+
+  app.delete('/api/voice-profiles/:id', (req, res) => {
+    try {
+      res.json({ status: 'success', ...voiceProfiles.remove(req.params.id) });
+    } catch (error) {
+      httpError(res, error?.status || 500, error);
+    }
+  });
+
+  app.get('/api/voice-profiles/:id/audio', (req, res) => {
+    try {
+      res.sendFile(voiceProfiles.audioPath(req.params.id), { headers: { 'Cache-Control': 'no-store' } });
     } catch (error) {
       httpError(res, error?.status || 500, error);
     }
@@ -7427,6 +7546,12 @@ function createApp() {
   app.post('/api/dubbing/jobs', async (req, res) => {
     try {
       const body = req.body || {};
+      // Hồ sơ giọng thắng tệp mẫu rời: panel chỉ gửi id, đường dẫn thật do backend tra.
+      if (body.voice_profile) {
+        const ref = voiceProfiles.resolveForDubbing(String(body.voice_profile));
+        body.ref_audio = ref.ref_audio;
+        body.ref_text = ref.ref_text;
+      }
       if (body.ref_audio) {
         const resolved = path.resolve(String(body.ref_audio));
         if (!fs.existsSync(resolved)) return httpError(res, 400, _t('Không tìm thấy tệp giọng mẫu: {path}', { path: resolved }));
@@ -7477,7 +7602,7 @@ function createApp() {
   }
 
   // null = không có đường dẫn (đi đường tải về). Có mà sai chữ ký/sai đuôi -> ném lỗi 400.
-  function trustedExportOutputPath(body, codec) {
+  function trustedExportOutputPath(body, wantExt) {
     const target = String(body?.output_path || '');
     if (!target || !EXPORT_OUTPUT_SECRET) return null;
     const ticket = Buffer.from(String(body?.output_ticket || ''), 'utf8');
@@ -7487,7 +7612,6 @@ function createApp() {
       error.status = 400;
       throw error;
     }
-    const wantExt = codec === 'prores' ? '.mov' : '.mp4';
     if (!path.isAbsolute(target) || path.extname(target).toLowerCase() !== wantExt
       || !fs.existsSync(path.dirname(target))) {
       const error = new Error(_t('Đường dẫn lưu video không hợp lệ.'));
@@ -7633,6 +7757,8 @@ function createApp() {
       prebakeCache.release();   // khung vẽ trước renderer hỏi trúng đã được dùng xong
     };
     res.on('close', releaseExportLock);
+    // Xuất video dùng GPU (NVENC/CUDA): nhả model lồng tiếng đang giữ trong VRAM trước.
+    await ttsService.releaseAll('xuất video').catch(() => {});
     let exportSettingsForError = null;
     let userOutputPath = null;   // chỗ người dùng chọn (mục 1.16); null = đường tải về cũ
     // Khung vùng chuyển cảnh đã được multer ghi ra đĩa trước khi vào handler; tra theo TÊN
@@ -7728,7 +7854,11 @@ function createApp() {
           [{ start: padded.sourceDuration, end: padded.sourceDuration + tailPadSeconds }], sequenceSettings);
         exportIntervals.push({ ...tailInterval, index: exportIntervals.length });
       }
-      userOutputPath = trustedExportOutputPath(req.body, exportSettings.codec);
+      /* Đuôi đích theo LOẠI XUẤT: có Video -> đuôi video (tệp âm thanh riêng, nếu chọn, nằm cạnh
+       * nó cùng tên); chỉ Audio -> đuôi của định dạng âm thanh. main.js ký đúng đuôi đó. */
+      userOutputPath = trustedExportOutputPath(req.body, exportSettings.export_video
+        ? path.extname(exportOutputName(exportSettings))
+        : exportAudioExt(exportSettings.audio_file_format));
       // Chốt màu asset overlay TRƯỚC khi dựng payload: xem sdrOverridesForEditingAssets.
       // Khâu này có thể mã hoá lại TOÀN BỘ một video HDR làm lớp phủ ngay trong lượt xuất
       // (chưa có trong cache) — đo riêng để không bị đổ oan cho ffmpeg của sidecar.
@@ -7755,9 +7885,19 @@ function createApp() {
         overlays: editingPayload.overlays,
         settings: exportSettings,
       })), 'utf8');
-      const outputName = exportOutputName(exportSettings);
+      const audioFormat = exportSettings.audio_file_format;
+      const audioOnly = !exportSettings.export_video;
+      const outputName = audioOnly ? `final_cut${exportAudioExt(audioFormat)}` : exportOutputName(exportSettings);
       const outputPath = userOutputPath ? exportPartPath(userOutputPath) : path.join(TEMP_DIR, outputName);
       if (userOutputPath) await fsp.rm(outputPath, { force: true });
+      /* Tệp âm thanh: chỉ Audio -> chính là tệp đích; Video + Audio -> CẠNH video, cùng tên, đuôi của
+       * định dạng âm thanh (như CapCut). Ghi đè tệp cùng tên: người dùng đã đồng ý ghi đè ở hộp lưu. */
+      const audioTarget = !audioFormat ? null
+        : audioOnly ? (userOutputPath || outputPath)
+          : (userOutputPath
+            ? path.join(path.dirname(userOutputPath), `${path.basename(userOutputPath, path.extname(userOutputPath))}${exportAudioExt(audioFormat)}`)
+            : path.join(TEMP_DIR, `final_cut${exportAudioExt(audioFormat)}`));
+      const audioPart = audioTarget ? (audioOnly ? outputPath : exportPartPath(audioTarget)) : null;
       const clientStartedAt = parseClientStartedAtMs(req.body.client_started_at_ms);
       const renderStartedAt = clientStartedAt || Date.now();
       const serverRenderStartedAt = Date.now();
@@ -7772,7 +7912,7 @@ function createApp() {
       if (!process.env.CRAB_TEMP_DIR) {
         renderCacheEnv.CRABBYCUT_EXPORT_GPU_PROBE_FILE = path.join(USER_DATA_ROOT, 'gpu_probe_cache.txt');
       }
-      const sidecarEvents = await timeStage('sidecar_ms', () => runSidecar([
+      const sidecarEvents = audioOnly ? [] : await timeStage('sidecar_ms', () => runSidecar([
         'export-video',
         sourceVideoPath,
         outputPath,
@@ -7793,14 +7933,40 @@ function createApp() {
        * Ngưỡng rộng tay (nửa giây hoặc 2%) vì lưới khung và phần đệm của bộ mã hoá luôn làm
        * lệch vài khung; chỉ báo lỗi khi THIẾU, dài hơn thì không có gì để mất. */
       const expectedDuration = timelineDurationFromIntervals(exportIntervals);
-      const actualDuration = await timeStage('verify_ms', () => mediaDurationSeconds(outputPath));
       const allowedShortfall = Math.max(0.5, expectedDuration * 0.02);
-      if (Number.isFinite(actualDuration) && expectedDuration > 0
-        && actualDuration < expectedDuration - allowedShortfall) {
-        throw new Error(
-          _t('Video xuất ra bị thiếu: chỉ dài {actual}s trong khi timeline là {expected}s. Nhiều khả năng các video nguồn khác thông số nhau nên bản nối bị đứt giữa chừng — hãy thử "Dự án mới" rồi thêm lại video, hoặc báo lỗi kèm tệp .crab.',
-          { actual: actualDuration.toFixed(2), expected: expectedDuration.toFixed(2) }),
-        );
+      let actualDuration = null;
+      if (!audioOnly) {
+        actualDuration = await timeStage('verify_ms', () => mediaDurationSeconds(outputPath));
+        if (Number.isFinite(actualDuration) && expectedDuration > 0
+          && actualDuration < expectedDuration - allowedShortfall) {
+          throw new Error(
+            _t('Video xuất ra bị thiếu: chỉ dài {actual}s trong khi timeline là {expected}s. Nhiều khả năng các video nguồn khác thông số nhau nên bản nối bị đứt giữa chừng — hãy thử "Dự án mới" rồi thêm lại video, hoặc báo lỗi kèm tệp .crab.',
+            { actual: actualDuration.toFixed(2), expected: expectedDuration.toFixed(2) }),
+          );
+        }
+      }
+      /* TỆP ÂM THANH (ô "Audio"): một lượt sidecar `export-audio` — cùng bộ trộn với lượt tiếng của
+       * export-video (xem CommandExportAudio), nên nghe y hệt tiếng trong video. `audio_format` chỉ
+       * ghi vào tệp timeline RIÊNG của lượt này (xem normalizeExportSettings). */
+      let audioDuration = null;
+      if (audioFormat) {
+        if (!audioOnly) setStatus(_t('Đang xuất tệp âm thanh riêng...'));
+        const audioTimelineFile = path.join(TEMP_DIR, 'export_audio_timeline.json');
+        const timelineDoc = JSON.parse(await fsp.readFile(timelineFile, 'utf8'));
+        timelineDoc.settings = { ...timelineDoc.settings, audio_format: audioFormat, audio_bitrate: exportSettings.audio_file_bitrate };
+        await fsp.writeFile(audioTimelineFile, JSON.stringify(timelineDoc), 'utf8');
+        await fsp.rm(audioPart, { force: true });
+        await timeStage('audio_ms', () => runSidecar([
+          'export-audio', sourceVideoPath, audioPart, audioTimelineFile, TEMP_DIR,
+          exportSettings.resolution, exportSettings.fps,
+        ]));
+        audioDuration = await mediaDurationSeconds(audioPart);
+        if (Number.isFinite(audioDuration) && expectedDuration > 0
+          && audioDuration < expectedDuration - allowedShortfall) {
+          throw new Error(_t('Tệp âm thanh xuất ra bị thiếu: chỉ dài {actual}s trong khi timeline là {expected}s.',
+            { actual: audioDuration.toFixed(2), expected: expectedDuration.toFixed(2) }));
+        }
+        if (audioOnly) actualDuration = audioDuration;
       }
       const encoderEvent = sidecarEvents.find((evt) => String(evt?.message || '').startsWith('Export encoder:'));
       // Sự kiện `timing` của sidecar (xem ExportTimingJson trong core_process.cpp). Sidecar
@@ -7830,10 +7996,15 @@ function createApp() {
         duration_ms: Math.max(0, Date.now() - renderStartedAt),
         server_duration_ms: Math.max(0, Date.now() - serverRenderStartedAt),
         output_path: userOutputPath || outputPath,
+        export_video: !audioOnly,
+        audio_file_format: audioFormat,
+        audio_output_path: audioTarget,
+        audio_duration_sec: audioDuration,
         ended_at: new Date().toISOString(),
       };
       // Tệp tạm cạnh đích -> đúng tên người dùng chọn (fs.rename ghi đè tệp cũ nếu có).
       if (userOutputPath) await fsp.rename(outputPath, userOutputPath);
+      if (audioTarget && !audioOnly) await fsp.rename(audioPart, audioTarget);
       projectMetrics.activity = true;
       const reportPath = await writeProjectReport('export_success');
       setStatus(_t('Đã hoàn tất cắt dựng video.'));
@@ -7842,7 +8013,13 @@ function createApp() {
       // ASCII nên an toàn làm giá trị header.
       res.setHeader('X-Export-Timing', JSON.stringify({ ...serverTiming, sidecar: sidecarTiming }));
       if (userOutputPath) {
-        res.json({ status: 'success', path: userOutputPath, name: path.basename(userOutputPath) });
+        res.json({
+          status: 'success',
+          path: userOutputPath,
+          name: path.basename(userOutputPath),
+          // Video + Audio: tệp âm thanh riêng nằm cạnh video. Chỉ Audio: trùng `path`.
+          ...(audioTarget ? { audio_path: audioTarget, audio_name: path.basename(audioTarget) } : {}),
+        });
       } else {
         res.download(outputPath, outputName);
       }
@@ -7850,6 +8027,11 @@ function createApp() {
       recordProjectError('export', error, { endpoint: '/api/export-video', exportSettings: exportSettingsForError });
       setStatus(_t('Lỗi khi xuất video hoàn chỉnh!'));
       if (userOutputPath) await fsp.rm(exportPartPath(userOutputPath), { force: true }).catch(() => {});
+      if (userOutputPath && exportSettingsForError?.audio_file_format && exportSettingsForError.export_video) {
+        const sibling = path.join(path.dirname(userOutputPath),
+          `${path.basename(userOutputPath, path.extname(userOutputPath))}${exportAudioExt(exportSettingsForError.audio_file_format)}`);
+        await fsp.rm(exportPartPath(sibling), { force: true }).catch(() => {});
+      }
       httpError(res, Number(error?.status) || 500, error);
     } finally {
       // Khung đã materialize thì đã được RENAME đi; đây là dọn phần còn sót (chuỗi bị bỏ).

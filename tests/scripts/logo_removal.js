@@ -42,7 +42,7 @@ function ffmpegRaw(args) {
 // ------------------------------------------------------------------ 1. dữ liệu
 function testModel() {
     const d = LogoRemoval.normalize(null);
-    assert.deepStrictEqual(d, { enabled: false, mode: 'delogo', strength: 50, regions: [] });
+    assert.deepStrictEqual(d, { enabled: false, mode: 'delogo', strength: 50, regions: [], objects: [] });
     const n = LogoRemoval.normalize({
         enabled: true, mode: 'weird', strength: 180,
         regions: [

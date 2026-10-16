@@ -4,7 +4,7 @@
 """Kho model của "Lồng tiếng": biết engine nào cần những file nào, tải về lần đầu và BÁO TIẾN
 TRÌNH TẢI theo byte để thanh trạng thái hiện được "Đang tải … 45% (600 MB / 1,3 GB)".
 
-VÌ SAO KHÔNG ĐỂ THƯ VIỆN TỰ TẢI (như F5-TTS/VieNeu vẫn làm khi nhận repo id):
+VÌ SAO KHÔNG ĐỂ THƯ VIỆN TỰ TẢI (như VieNeu vẫn làm khi nhận repo id):
   · nó tải vào ~/.cache/huggingface — ngoài tầm mục "Bộ nhớ đệm" của app, người dùng không
     biết mấy GB đó nằm đâu;
   · nó không báo tiến trình cho ai cả: lượt lồng tiếng đầu tiên đứng im 10-30 phút ở "Đang nạp
@@ -23,6 +23,7 @@ AI Hub tải — máy người dùng không có nó, và đường tải phải 
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -35,27 +36,64 @@ from typing import Callable, Dict, List, Optional
 
 MARKER = ".crab-model.json"
 
-# TẮT ĐƯỜNG TẢI hf_xet — đo thật (Vi-F5-TTS 1,35 GB): với xet, ~20 giây đầu KHÔNG một byte nào
+# TẮT ĐƯỜNG TẢI hf_xet — đo thật (Vi-F5-TTS 1,35 GB, engine đã gỡ ở v1.1.17): với xet, ~20 giây đầu KHÔNG một byte nào
 # xuất hiện trong thư mục đích (xet gom mảnh vào cache riêng ~/.cache/huggingface/xet rồi mới
 # ghép tệp), sau đó nhảy thẳng 0% -> 50% -> xong. Thanh tiến trình đứng im 20 giây là đúng thứ
 # người dùng đã phàn nàn. Đường HTTP thường ghi dần vào tệp `.incomplete` nên thanh chạy đều.
 # Phải đặt TRƯỚC khi huggingface_hub được import lần đầu (nó đọc cờ lúc import).
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
+# Tệp của đường đa ngôn ngữ trong repo ResembleAI/chatterbox — ĐÚNG danh sách `allow_patterns` của
+# ChatterboxMultilingualTTS.from_pretrained ở gói chatterbox-tts 0.1.7 (bản PyPI mới nhất). Bản này nạp
+# V2 (t3_mtl23ls_v2 + s3gen.pt + ve.pt); V3 chỉ có ở nhánh main trên GitHub, chưa phát hành.
+CHATTERBOX_MTL_FILES = [
+    "ve.pt", "t3_mtl23ls_v2.safetensors", "s3gen.pt", "grapheme_mtl_merged_expanded_v1.json",
+    "conds.pt", "Cangjie5_TC.json",
+]
+
 # Mỗi khoá là MỘT repo HuggingFace. `files` = danh sách file cần (None = cả repo trừ `ignore`).
 MODELS: Dict[str, dict] = {
-    "f5-vi": {
-        "label": "Vi-F5-TTS",
-        "repo": "danhtran2mind/Vi-F5-TTS",
-        # pruning_model.pt (1,35 GB) CHỈ có trọng số EMA — đúng thứ suy luận cần. model_last.pt
-        # 5,4 GB mang thêm trạng thái optimizer của lúc huấn luyện, tải về là phí 4 GB.
-        # (Đã kiểm: torch.load -> {'ema_model_state_dict': 364 tensor}.)
-        "files": ["Vi_F5_TTS_ckpts/pruning_model.pt", "vocab.txt"],
+    # VieNeu-TTS v3 Turbo (Apache-2.0, 48 kHz, 25 giọng có sẵn + clone từ mẫu 3-8 s). Repo gộp
+    # cả đường PyTorch (GPU) lẫn ONNX (CPU) + 2 bản GGUF; mỗi máy chỉ cần MỘT đường nên tách hai
+    # khoá — tải cả repo là 2,2 GB, tải đúng đường là ~0,4 GB (GPU) hoặc ~0,6 GB (CPU).
+    # denoiser.onnx + speaker_encoder.onnx (gốc repo) là phần CLONE, cả hai đường đều đọc.
+    "vieneu3-torch": {
+        "label": "VieNeu-TTS v3 Turbo (GPU)",
+        "repo": "pnnbao-ump/VieNeu-TTS-v3-Turbo",
+        "files": [
+            "config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
+            "denoiser.onnx", "speaker_encoder.onnx",
+            "update/config.json", "update/model.safetensors", "update/special_tokens_map.json",
+            "update/tokenizer.json", "update/tokenizer_config.json",
+        ],
     },
-    "vocos": {
-        "label": "Vocos vocoder",
-        "repo": "charactr/vocos-mel-24khz",
-        "files": ["config.yaml", "pytorch_model.bin"],
+    "vieneu3-onnx": {
+        "label": "VieNeu-TTS v3 Turbo (CPU)",
+        "repo": "pnnbao-ump/VieNeu-TTS-v3-Turbo",
+        "files": [
+            "config.json", "denoiser.onnx", "speaker_encoder.onnx",
+            "onnx_update/config.json", "onnx_update/tokenizer.json",
+            "onnx_update/vieneu_prefill.onnx", "onnx_update/vieneu_decode_step.onnx",
+            "onnx_update/vieneu_acoustic_cached.onnx", "onnx_update/vieneu_backbone_shared.data",
+            "onnx_update/vieneu_v3_heads.npz",
+        ],
+    },
+    # Codec MOSS-Audio-Tokenizer-Nano (Apache-2.0) — repo PyTorch có mã trust_remote_code nên
+    # tải cả repo; bản ONNX chỉ lấy đúng các tệp mà vieneu/_v3_turbo_engine/onnx_runtime_lite đọc.
+    "moss-nano": {
+        "label": "MOSS Audio Tokenizer Nano",
+        "repo": "OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    "moss-nano-onnx": {
+        "label": "MOSS Audio Tokenizer Nano (ONNX)",
+        "repo": "OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX",
+        "files": [
+            "moss_audio_tokenizer_decode_full.onnx", "moss_audio_tokenizer_decode_shared.data",
+            "moss_audio_tokenizer_decode_step.onnx", "codec_browser_onnx_meta.json",
+            "moss_audio_tokenizer_encode.onnx", "moss_audio_tokenizer_encode.data",
+        ],
     },
     "vieneu-tts": {
         "label": "VieNeu-TTS v2",
@@ -70,15 +108,83 @@ MODELS: Dict[str, dict] = {
     },
     "neucodec-onnx": {
         "label": "NeuCodec decoder",
+        # Repo gốc bật `gated: auto` từ 26/08/2026: không đăng nhập + đồng ý điều khoản là 401.
+        # Model là Apache-2.0 nên được phân phối lại -> tải từ mirror công khai trước, repo gốc
+        # chỉ còn là đường cuối (cho máy có token đã được duyệt). Xem docs/SUA_LOI_TAI_NEUCODEC_GATED.md.
         "repo": "neuphonic/neucodec-onnx-decoder-int8",
+        "mirrors": [
+            # Bản sao nguyên vẹn do tác giả CrabbyCut giữ (công khai, không khoá, có LICENSE +
+            # README ghi nguồn Neuphonic) — tạo 09/10/2026 từ file tải ở repo gốc.
+            "TamPham92/neucodec-onnx-decoder-int8",
+            # Dự phòng: bản sao của người khác, cùng hash — có thể bị sửa/xoá bất cứ lúc nào.
+            "aoiandroid/neuphonic-neucodec-onnx-decoder-int8-mirror",
+        ],
+        # Hash LFS mà chính repo gốc công bố (HfApi.model_info(files_metadata=True)), đã đối
+        # chiếu với bản tải từ repo gốc 09/10/2026. Mirror nằm ngoài tầm kiểm soát của repo
+        # gốc -> hash là thứ bảo đảm file không bị tráo.
+        "sha256": {"model.onnx": "3ddd9e56396e6029e0e948ac0255c89c803f981f23dcf4c154f50820bd74a6b3"},
         "files": ["model.onnx"],
         "aihub": "neucodec-onnx",
+    },
+    # ── Qwen3-TTS (Apache-2.0) — v1.1.17. Mỗi repo tự đủ (kèm speech_tokenizer/), nên không cần repo
+    # Qwen3-TTS-Tokenizer-12Hz riêng. 0.6B chạy fp32 vừa GPU 6 GB; 1.7B VoiceDesign chỉ mở khi đủ VRAM.
+    # Windows/Linux đọc bản PyTorch của Qwen; Mac đọc bản MLX của mlx-community (cùng nội dung).
+    "qwen3-0.6b-custom": {
+        "label": "Qwen3-TTS 0.6B (giọng có sẵn)",
+        "repo": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    "qwen3-0.6b-base": {
+        "label": "Qwen3-TTS 0.6B (nhân bản)",
+        "repo": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    "qwen3-1.7b-design": {
+        "label": "Qwen3-TTS 1.7B (thiết kế giọng)",
+        "repo": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    "qwen3-0.6b-custom-mlx": {
+        "label": "Qwen3-TTS 0.6B (giọng có sẵn, MLX)",
+        "repo": "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    "qwen3-0.6b-base-mlx": {
+        "label": "Qwen3-TTS 0.6B (nhân bản, MLX)",
+        "repo": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    "qwen3-1.7b-design-mlx": {
+        "label": "Qwen3-TTS 1.7B (thiết kế giọng, MLX)",
+        "repo": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
+    },
+    # ── Chatterbox Multilingual (MIT, Resemble AI) — v1.1.17. Repo gốc gộp cả bản tiếng Anh, V2, V3
+    # và tệp .pt trùng .safetensors (13,9 GB); chỉ lấy đúng tệp mà gói chatterbox-tts đọc (~3,2 GB).
+    # Mac dùng bản V3 của mlx-community (mlx-audio đã có V3).
+    "chatterbox-mtl": {
+        "label": "Chatterbox Multilingual",
+        "repo": "ResembleAI/chatterbox",
+        "files": CHATTERBOX_MTL_FILES,
+    },
+    "chatterbox-mtl-v3-mlx": {
+        "label": "Chatterbox Multilingual V3 (MLX)",
+        "repo": "mlx-community/chatterbox-multilingual-v3",
+        "files": None,
+        "ignore": [".gitattributes", "README.md"],
     },
     "voxcpm2-8bit": {
         "label": "VoxCPM2 (MLX 8-bit)",
         "repo": "mlx-community/VoxCPM2-8bit",
         "files": None,
-        "ignore": [".gitattributes", "README.md"],
+        # test_*.wav: hai tệp nghe thử của repo, ~1,1 MB tải thừa.
+        "ignore": [".gitattributes", "README.md", "test_en.wav", "test_id.wav"],
         "aihub": "voxcpm2-8bit",
     },
 }
@@ -200,14 +306,34 @@ def _folder_bytes(folder: Path) -> int:
     return total
 
 
-def _remote_files(spec: dict) -> Dict[str, int]:
+def _sources(spec: dict) -> List[str]:
+    """Các repo để thử, theo thứ tự: mirror trước, repo gốc sau cùng."""
+    return [*(spec.get("mirrors") or []), spec["repo"]]
+
+
+def _token_for(spec: dict, repo: str):
+    # Mirror là repo công khai: KHÔNG gửi token. Token cũ hết hạn/bị thu hồi trên máy người dùng
+    # sẽ làm hỏng cả lượt tải vốn không cần đăng nhập (tương đương HF_HUB_DISABLE_IMPLICIT_TOKEN,
+    # nhưng theo từng lượt gọi — cờ môi trường chỉ được đọc một lần lúc import hub).
+    return False if repo != spec["repo"] else None
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _remote_files(spec: dict, repo: str) -> Dict[str, int]:
     """{đường dẫn trong repo: số byte} của những file cần tải."""
     from huggingface_hub import HfApi
 
     wanted = spec["files"]
     ignore = set(spec.get("ignore") or [])
     sizes: Dict[str, int] = {}
-    for entry in HfApi().list_repo_tree(spec["repo"], recursive=True):
+    for entry in HfApi().list_repo_tree(repo, recursive=True, token=_token_for(spec, repo)):
         path = getattr(entry, "path", "")
         size = getattr(entry, "size", None)
         if size is None:   # thư mục
@@ -219,7 +345,7 @@ def _remote_files(spec: dict) -> Dict[str, int]:
         sizes[path] = int(size)
     missing = [name for name in (wanted or []) if name not in sizes]
     if missing:
-        raise RuntimeError(f"Repo {spec['repo']} không còn tệp: {', '.join(missing)}")
+        raise RuntimeError(f"Repo {repo} không còn tệp: {', '.join(missing)}")
     return sizes
 
 
@@ -244,53 +370,86 @@ def _download(key: str, on_progress: Optional[Callable[[dict], None]]) -> Path:
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     _set_download(key, state="preparing", downloaded=0, total=0, started_at=time.time(),
                   finished_at=None, error="")
-    try:
-        from huggingface_hub import hf_hub_download
-
-        sizes = _remote_files(spec)
-        total = sum(sizes.values())
-        baseline = _folder_bytes(folder)   # phần đã tải của lượt trước bị ngắt — hub tải tiếp
-        _set_download(key, state="downloading", total=total, downloaded=min(total, baseline))
-        stop = threading.Event()
-
-        def watch() -> None:
-            while not stop.wait(0.5):
-                current = min(total, _folder_bytes(folder))
-                _set_download(key, downloaded=current)
-                if on_progress:
-                    on_progress({"key": key, "downloaded": current, "total": total})
-
-        watcher = threading.Thread(target=watch, name=f"watch-{key}", daemon=True)
-        watcher.start()
+    failures: List[str] = []
+    last_exc: Optional[Exception] = None
+    # Nguồn hỏng (401, 404, mất mạng, sai hash) -> ghi lại rồi thử nguồn kế; chỉ báo lỗi khi
+    # MỌI nguồn đều hỏng.
+    for repo in _sources(spec):
         try:
-            # Tệp lớn nhất sau cùng: tệp nhỏ xong ngay nên thanh nhích ngay từ đầu, người dùng
-            # thấy nó CHẠY thay vì đứng ở 0% suốt lúc tải tệp 1 GB đầu tiên.
-            for name in sorted(sizes, key=lambda n: sizes[n]):
-                hf_hub_download(spec["repo"], name, local_dir=str(folder))
-        finally:
-            stop.set()
-            watcher.join(timeout=2)
+            sizes = _download_from(key, repo, folder, on_progress)
+        except Exception as exc:
+            last_exc = exc
+            failures.append(f"{repo}: {str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__}")
+            continue
         (folder / MARKER).write_text(json.dumps({
-            "repo": spec["repo"], "files": sizes, "downloaded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "repo": repo, "files": sizes, "downloaded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }, ensure_ascii=False, indent=2), encoding="utf-8")
         shutil.rmtree(folder / ".cache", ignore_errors=True)   # siêu dữ liệu tải của hub
-        _set_download(key, state="done", downloaded=total, finished_at=time.time())
+        _set_download(key, state="done", downloaded=sum(sizes.values()), finished_at=time.time())
         return folder
-    except Exception as exc:
-        _set_download(key, state="error", error=_friendly_error(spec, exc), finished_at=time.time())
-        raise RuntimeError(_friendly_error(spec, exc)) from exc
+    message = _friendly_error(spec, last_exc or RuntimeError("không có nguồn tải"), failures)
+    _set_download(key, state="error", error=message, finished_at=time.time())
+    raise RuntimeError(message) from last_exc
 
 
-def _friendly_error(spec: dict, exc: Exception) -> str:
-    text = str(exc)
+def _download_from(key: str, repo: str, folder: Path,
+                   on_progress: Optional[Callable[[dict], None]]) -> Dict[str, int]:
+    """Tải đủ file của `key` từ một repo vào `folder`, kiểm SHA256 nếu spec có. Trả {file: byte}."""
+    from huggingface_hub import hf_hub_download
+
+    spec = MODELS[key]
+    token = _token_for(spec, repo)
+    sizes = _remote_files(spec, repo)
+    total = sum(sizes.values())
+    baseline = _folder_bytes(folder)   # phần đã tải của lượt trước bị ngắt — hub tải tiếp
+    _set_download(key, state="downloading", total=total, downloaded=min(total, baseline))
+    stop = threading.Event()
+
+    def watch() -> None:
+        while not stop.wait(0.5):
+            current = min(total, _folder_bytes(folder))
+            _set_download(key, downloaded=current)
+            if on_progress:
+                on_progress({"key": key, "downloaded": current, "total": total})
+
+    watcher = threading.Thread(target=watch, name=f"watch-{key}", daemon=True)
+    watcher.start()
+    try:
+        # Tệp lớn nhất sau cùng: tệp nhỏ xong ngay nên thanh nhích ngay từ đầu, người dùng
+        # thấy nó CHẠY thay vì đứng ở 0% suốt lúc tải tệp 1 GB đầu tiên.
+        for name in sorted(sizes, key=lambda n: sizes[n]):
+            hf_hub_download(repo, name, local_dir=str(folder), token=token)
+    finally:
+        stop.set()
+        watcher.join(timeout=2)
+    for name, expected in (spec.get("sha256") or {}).items():
+        path = folder / name
+        actual = _sha256(path) if path.is_file() else ""
+        if actual.lower() != expected.lower():
+            # Xoá cả file lẫn siêu dữ liệu tải: để nguyên thì nguồn kế (cùng etag) tưởng đã có
+            # file và bỏ qua không tải lại.
+            path.unlink(missing_ok=True)
+            shutil.rmtree(folder / ".cache", ignore_errors=True)
+            raise RuntimeError(f"Sai SHA256 ở {name} (nhận {actual[:12] or 'không có file'}…, "
+                               f"cần {expected[:12]}…) — đã xoá file")
+    return sizes
+
+
+def _friendly_error(spec: dict, exc: Exception, failures: Optional[List[str]] = None) -> str:
+    text = " | ".join(failures) if failures else str(exc)
     low = text.lower()
-    if "gated" in low or "restricted" in low or "401" in low:
-        return (f"Repo {spec['repo']} yêu cầu đăng nhập HuggingFace / chấp nhận điều khoản. "
-                f"Chạy `hf auth login` rồi thử lại. ({text[-200:]})")
-    if any(word in low for word in ("connection", "timed out", "timeout", "name resolution", "offline")):
-        return f"Không tải được {spec['label']}: mất kết nối mạng tới huggingface.co. ({text[-200:]})"
     if "no space" in low or "errno 28" in low:
         return f"Không đủ dung lượng đĩa để tải {spec['label']} vào {model_root()}."
+    refused = any(word in low for word in ("gated", "restricted", "401", "403", "404", "sha256",
+                                          "not found", "không còn tệp"))
+    if not refused and any(word in low for word in ("connection", "timed out", "timeout",
+                                                    "name resolution", "offline")):
+        return f"Không tải được {spec['label']}: mất kết nối mạng tới huggingface.co. ({text[-200:]})"
+    if refused or len(_sources(spec)) > 1:
+        # KHÔNG khuyên "hf auth login": người dùng cuối không làm được, và mỗi máy lại phải làm
+        # lại từ đầu. Sửa đúng là ở phía app (thêm/đổi mirror) -> bảo họ cập nhật.
+        return (f"Không tải được {spec['label']} từ mọi nguồn. Hãy cập nhật CrabbyCut lên bản mới "
+                f"nhất hoặc báo cho tác giả. ({text[-200:]})")
     return f"Tải {spec['label']} thất bại: {text[-300:]}"
 
 

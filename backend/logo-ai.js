@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Tam Pham <tampham.designer92@gmail.com>
 
-/* XOÁ LOGO BẰNG AI — hàng đợi job, cache miếng vá và phần xuất của chế độ 'ai'.
+/* XOÁ VẬT THỂ BẰNG AI — hàng đợi job, cache miếng vá và phần xuất của chế độ 'ai' và của
+ * VẬT THỂ CHUYỂN ĐỘNG (tab Retouch > Xoá vật thể).
  *
- * Chế độ 'ai' (tab Retouch > Xoá logo) không phải công thức pixel như delogo/làm mờ/khảm: nó
- * là MỘT LƯỢT XỬ LÝ TRƯỚC do asr/logo_inpaint_sidecar.py chạy (mô hình MI-GAN), ra các miếng
- * vá PNG theo đúng PTS từng khung của đoạn nguồn. Module này:
- *   - nhận yêu cầu từ frontend, kiểm nguồn/vùng, băm thành KHOÁ (nguồn + mtime/size + vùng +
- *     khổ khung + phiên bản mô hình),
+ * Không phải công thức pixel như delogo/làm mờ/khảm: nó là MỘT LƯỢT XỬ LÝ TRƯỚC do
+ * asr/logo_inpaint_sidecar.py chạy (LaMa + lan truyền nền theo thời gian + bám vật thể), ra các
+ * miếng vá PNG theo đúng PTS từng khung của đoạn nguồn. Module này:
+ *   - nhận yêu cầu từ frontend, kiểm nguồn/vùng/mốc vật thể, băm thành KHOÁ (nguồn + mtime/size
+ *     + vùng + mốc vật thể + khổ khung + phiên bản mô hình),
  *   - xếp hàng MỘT job tại một thời điểm (mô hình ăn hết CPU; hai job song song chỉ chậm cả hai),
  *   - lưu kết quả ở `<cacheDir>/<khoá>/<run>/` và trả lại lượt đã có nếu nó PHỦ được khoảng xin,
  *   - dựng field cho sidecar xuất (`logo_ai_dir/rects/t0`) — từ index trên đĩa, không tin số
@@ -27,23 +28,30 @@ const fsp = fs.promises;
 const path = require('path');
 const crypto = require('crypto');
 
-const LOGO_AI_VERSION = 1;
-// MI-GAN (Picsart AI Research, MIT). Ghim theo COMMIT của repo và mã băm: tải lại đúng từng
-// byte đã đo, không phải "bản mới nhất" mà ai đó đẩy lên sau.
+// 2: LaMa + lan truyền thay MI-GAN từng khung; index có `kind`/`track` cho vật thể.
+const LOGO_AI_VERSION = 2;
+// LaMa (Samsung AI "big-lama", Apache-2.0), bản ONNX fp32 512×512 của Carve/LaMa-ONNX. Thay
+// MI-GAN (2026-09-30): MI-GAN vẽ lại TỪNG khung độc lập -> vùng xoá "sôi", trông còn tệ hơn
+// delogo, và nhoè ở vùng lớn. Ghim theo COMMIT của repo và mã băm: tải lại đúng từng byte đã
+// đo, không phải "bản mới nhất" mà ai đó đẩy lên sau.
 const MODEL = {
-  name: 'migan-pipeline-v2',
-  file: 'migan_pipeline_v2.onnx',
-  url: 'https://huggingface.co/andraniksargsyan/migan/resolve/406830d0fa60666da0071c342ad2fbc8f30c5c64/migan_pipeline_v2.onnx',
-  sha256: '6f1f3530a1a2324b19752018ce756088b07973cda8d7d890034ace5c8a48c40b',
-  bytes: 28079181,
+  name: 'lama-fp32',
+  file: 'lama_fp32.onnx',
+  url: 'https://huggingface.co/Carve/LaMa-ONNX/resolve/c3c0c9e468934d62e79c329e35d82dd09ff8c444/lama_fp32.onnx',
+  sha256: '1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6',
+  bytes: 208044816,
 };
 const MAX_RECTS = 4;
+const MAX_OBJECTS = 4;
+const MAX_OBJECT_KEYS = 64;
+// Tổng số miếng vá mỗi lượt: vùng cố định trước, vật thể sau (r0..r7).
+const MAX_PATCHES = MAX_RECTS + MAX_OBJECTS;
 const RANGE_MERGE_GAP = 2.0;
 const KEEP_JOB_MS = 10 * 60 * 1000;
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const KEY_RE = /^[0-9a-f]{24}$/;
 const RUN_RE = /^run_[0-9a-z]{6,24}$/;
-const FILE_RE = /^r[0-3]_\d{6}\.png$/;
+const FILE_RE = /^r[0-7]_\d{6}\.png$/;
 
 function finite(v, fallback = 0) {
   const n = Number(v);
@@ -81,18 +89,18 @@ function createLogoAi(options) {
     const still = b.still === true;
     const sourcePath = resolveSource(b.source_path);
     if (!sourcePath) {
-      const err = new Error(t('Nguồn cho Xoá logo AI không hợp lệ hoặc nằm ngoài thư mục dự án.'));
+      const err = new Error(t('Nguồn cho Xoá vật thể AI không hợp lệ hoặc nằm ngoài thư mục dự án.'));
       err.status = 400;
       throw err;
     }
     const frameW = toInt(b.frame_w, 16, 16384);
     const frameH = toInt(b.frame_h, 16, 16384);
     if (frameW === null || frameH === null) {
-      const err = new Error(t('Thiếu kích thước khung cho Xoá logo AI.'));
+      const err = new Error(t('Thiếu kích thước khung cho Xoá vật thể AI.'));
       err.status = 400;
       throw err;
     }
-    const rects = (Array.isArray(b.rects) ? b.rects : []).slice(0, MAX_RECTS).map((r) => {
+    const clampRect = (r) => {
       const x = toInt(r?.x, 0, frameW - 2);
       const y = toInt(r?.y, 0, frameH - 2);
       if (x === null || y === null) return null;
@@ -100,9 +108,26 @@ function createLogoAi(options) {
       const h = toInt(r?.h, 0, frameH - y);
       if (w === null || h === null || w < 6 || h < 6) return null;
       return { x, y, w, h };
+    };
+    const rects = (Array.isArray(b.rects) ? b.rects : []).slice(0, MAX_RECTS).map(clampRect).filter(Boolean);
+    // VẬT THỂ CHUYỂN ĐỘNG (chỉ video): mỗi vật là các MỐC {t, x, y, w, h} — t giây trục xuất.
+    // Sắp theo t, bỏ mốc trùng (cách nhau < 1 ms, giữ mốc sau), kẹp số mốc.
+    const objects = still ? [] : (Array.isArray(b.objects) ? b.objects : []).slice(0, MAX_OBJECTS).map((o) => {
+      const keys = [];
+      (Array.isArray(o?.keys) ? o.keys : []).slice(0, MAX_OBJECT_KEYS).forEach((k) => {
+        const r = clampRect(k);
+        const tk = Number(k?.t);
+        if (!r || !Number.isFinite(tk) || tk < 0) return;
+        const t0 = Math.round(tk * 1000) / 1000;
+        const same = keys.findIndex((q) => Math.abs(q.t - t0) < 1e-3);
+        if (same >= 0) keys.splice(same, 1);
+        keys.push({ t: t0, ...r });
+      });
+      keys.sort((a, c) => a.t - c.t);
+      return keys.length ? { keys } : null;
     }).filter(Boolean);
-    if (!rects.length) {
-      const err = new Error(t('Chưa có vùng logo hợp lệ để xử lý AI.'));
+    if (!rects.length && !objects.length) {
+      const err = new Error(t('Chưa có vùng logo hay vật thể hợp lệ để xử lý AI.'));
       err.status = 400;
       throw err;
     }
@@ -112,12 +137,12 @@ function createLogoAi(options) {
       start = Math.max(0, finite(b.start));
       end = finite(b.end);
       if (!(end > start + 0.01)) {
-        const err = new Error(t('Khoảng thời gian cho Xoá logo AI không hợp lệ.'));
+        const err = new Error(t('Khoảng thời gian cho Xoá vật thể AI không hợp lệ.'));
         err.status = 400;
         throw err;
       }
     }
-    return { sourcePath, still, frameW, frameH, rects, start, end };
+    return { sourcePath, still, frameW, frameH, rects, objects, start, end };
   }
 
   function keyFor(req) {
@@ -134,6 +159,7 @@ function createLogoAi(options) {
       still: req.still,
       frame: [req.frameW, req.frameH],
       rects: req.rects.map((r) => [r.x, r.y, r.w, r.h]),
+      objects: req.objects.map((o) => o.keys.map((k) => [k.t, k.x, k.y, k.w, k.h])),
     });
     return crypto.createHash('sha1').update(text).digest('hex').slice(0, 24);
   }
@@ -274,7 +300,7 @@ function createLogoAi(options) {
     const job = queue.shift();
     running = job;
     job.state = 'running';
-    job.message = t('Đang chuẩn bị xoá logo bằng AI...');
+    job.message = t('Đang chuẩn bị xoá vật thể bằng AI...');
     const runId = `run_${Date.now().toString(36)}${crypto.randomBytes(2).toString('hex')}`;
     const outDir = path.join(cacheDir, job.key, runId);
     const inputPath = tempJsonPath('logo_ai_input');
@@ -289,22 +315,23 @@ function createLogoAi(options) {
         frame_w: job.req.frameW,
         frame_h: job.req.frameH,
         rects: job.req.rects,
+        objects: job.req.objects,
         out_dir: outDir,
         model_path: path.join(modelDir, MODEL.file),
         model_url: MODEL.url,
         model_sha256: MODEL.sha256,
       }), 'utf8');
-      setStatus(t('Đang xoá logo bằng AI...'));
+      setStatus(t('Đang xoá vật thể bằng AI...'));
       const payload = await runSidecar(scriptPath, inputPath, outputPath, {
         feature: 'logo_ai',
-        downloadLabel: 'MI-GAN',
+        downloadLabel: 'LaMa',
         onProgress: (ratio) => {
           job.progress = ratio;
           // Thanh trạng thái (/api/status) đọc câu này mỗi giây — kể cả lúc chờ AI trước khi xuất.
           const pct = Math.floor(ratio * 100);
           if (pct !== job.lastPct) {
             job.lastPct = pct;
-            setStatus(t('Đang xoá logo bằng AI… {pct}%', { pct }));
+            setStatus(t('Đang xoá vật thể bằng AI… {pct}%', { pct }));
           }
         },
         onChild: (child) => { job.child = child; },
@@ -326,19 +353,19 @@ function createLogoAi(options) {
       job.run = runId;
       job.progress = 1;
       job.state = 'done';
-      job.message = t('Đã xoá logo bằng AI.');
-      setStatus(t('Đã xoá logo bằng AI ({n} khung).', { n: index.times.length }));
+      job.message = t('Đã xoá vật thể bằng AI.');
+      setStatus(t('Đã xoá vật thể bằng AI ({n} khung).', { n: index.times.length }));
     } catch (error) {
       await fsp.rm(outDir, { recursive: true, force: true }).catch(() => {});
       if (job.canceled || error?.canceled) {
         job.state = 'canceled';
-        job.message = t('Đã huỷ xoá logo bằng AI.');
+        job.message = t('Đã huỷ xoá vật thể bằng AI.');
         setStatus(job.message);
       } else {
         job.state = 'error';
         job.error = String(error?.sidecarPayload?.detail || error?.message || error);
         job.message = job.error;
-        setStatus(t('Lỗi khi xoá logo bằng AI!'));
+        setStatus(t('Lỗi khi xoá vật thể bằng AI!'));
         logStatus(`[logo-ai] ${job.error}`);
       }
     } finally {
@@ -371,7 +398,7 @@ function createLogoAi(options) {
     const W = toInt(index.width, 1, 16384);
     const H = toInt(index.height, 1, 16384);
     const rects = [];
-    for (let k = 0; k < Math.min(MAX_RECTS, index.rects.length); k++) {
+    for (let k = 0; k < Math.min(MAX_PATCHES, index.rects.length); k++) {
       const box = index.rects[k]?.box;
       if (!fs.existsSync(path.join(dir, `r${k}.ffconcat`))) return null;
       const x = toInt(box?.x, 0, W);
@@ -410,4 +437,4 @@ function createLogoAi(options) {
   return { request, jobStatus, cancel, cancelAll, patchPath, exportFields, pruneCache, keyFor, normalizeRequest };
 }
 
-module.exports = { createLogoAi, MODEL, LOGO_AI_VERSION };
+module.exports = { createLogoAi, MODEL, LOGO_AI_VERSION, MAX_PATCHES };

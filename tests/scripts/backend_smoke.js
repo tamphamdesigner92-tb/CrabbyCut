@@ -58,6 +58,11 @@ async function main() {
       bold_ranges: [{ text: 'Xin chào', raw_start: 10, raw_end: 20, clean_start: 0, clean_end: 8, line: 1, column: 10 }],
     }));
     form.append('edited_transcript', '[0.00 - 1.20 | -12.00 dBFS] Xin chào mọi người');
+    /* /api/filter chạy core_logic.py, file đó import torch + whisper ngay đầu -> cần môi trường
+     * Python AI. CI (run_tests --skip-python) không có, bỏ ĐÚNG khối này; mọi endpoint khác vẫn kiểm. */
+    if (process.env.CRABBYCUT_TEST_SKIP_PYTHON === '1') {
+      console.log('  --  CRABBYCUT_TEST_SKIP_PYTHON=1 -> bỏ /api/filter (cần môi trường Python AI)');
+    } else {
     const filterRes = await fetch(`${baseUrl}/api/filter`, {
       method: 'POST',
       body: form,
@@ -78,6 +83,7 @@ async function main() {
     const selectedDuration = selectedChunks.reduce((sum, chunk) => sum + (chunk.end - chunk.start), 0);
     const rowDuration = (filtered.timeline_time_order || []).reduce((sum, row) => sum + (row.end - row.start), 0);
     assert.ok(Math.abs(selectedDuration - rowDuration) < 0.05, 'biên bàn giao lệch biên hàng');
+    }
 
     const finalizeRes = await fetch(`${baseUrl}/api/finalize-timeline`, {
       method: 'POST',

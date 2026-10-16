@@ -26,6 +26,12 @@
  * Bản ghim trước: Gyan 8.1.1 full_build-shared (id `gyan-8.1.1-full_build-shared`) — muốn quay lại
  * thì lấy bốn trường cũ trong lịch sử git của tệp này.
  *
+ * macOS (từ 2026-10-05): CÙNG nguồn FFmpeg n8.1.1 + bản vá, dựng bằng build-macos.sh của cùng repo
+ * (Apple Silicon, macOS 11+, VideoToolbox thay CUDA; không libplacebo -> tonemap HDR đi zscale như
+ * máy Windows không có Vulkan). Cùng chuỗi `ffmpeg -version`, nên mọi phép tính của CrabbyCut cho
+ * cùng kết quả trên hai máy — ffmpeg Homebrew 8.1 thì không (docs/DONG_BO_WIN_MAC.md mục 5). Máy dev
+ * và CI cài bằng `npm run ffmpeg:install` (scripts/install_ffmpeg.js).
+ *
  * ĐỔI BẢN GHIM: sửa mọi trường (build.sh của repo nguồn in sẵn ở cuối bước package), tự tính
  * SHA-256 của file TẢI VỀ từ `url` và so với số build.sh in ra, chạy lại toàn bộ test export
  * trên bản mới. `id` đổi thì `verifyRuntimeQuick()` coi bản đã cài là lỗi thời và cửa sổ thiết
@@ -33,7 +39,7 @@
  */
 'use strict';
 
-const FFMPEG_PIN = {
+const WIN32_PIN = {
   // .2 (2026-10-03): crabgeo_cuda có LUT 3D (lut/lut2/mix) — clip/lớp phủ có LUT xuất được trên GPU.
   id: 'n8.1.1-crabbycut.2-win64-gpl-shared',
   url: 'https://github.com/tamphamdesigner92-tb/ffmpeg-for-CrabbyCut/releases/download/n8.1.1-crabbycut.2/ffmpeg-n8.1.1-crabbycut.2-win64-gpl-shared.zip',
@@ -48,4 +54,31 @@ const FFMPEG_PIN = {
   sourceUrl: 'https://github.com/tamphamdesigner92-tb/ffmpeg-for-CrabbyCut/tree/n8.1.1-crabbycut.2',
 };
 
-module.exports = { FFMPEG_PIN };
+const DARWIN_ARM64_PIN = {
+  // build-macos.sh, 2026-10-05: cùng nguồn với WIN32_PIN; thư viện ngoài tĩnh, chỉ phụ thuộc macOS 11+.
+  id: 'n8.1.1-crabbycut.2-macos-arm64-gpl-shared',
+  url: 'https://github.com/tamphamdesigner92-tb/ffmpeg-for-CrabbyCut/releases/download/n8.1.1-crabbycut.2-macos/ffmpeg-n8.1.1-crabbycut.2-macos-arm64-gpl-shared.zip',
+  fileName: 'ffmpeg-n8.1.1-crabbycut.2-macos-arm64-gpl-shared.zip',
+  sha256: '37feb81dddebd272cb0dd7c9660db2aed3e84080f586587a01ee23849e808a95',
+  sizeBytes: 16958858,
+  versionPrefix: 'ffmpeg version n8.1.1-crabbycut.2 ',
+  sourceUrl: 'https://github.com/tamphamdesigner92-tb/ffmpeg-for-CrabbyCut/tree/n8.1.1-crabbycut.2-macos',
+};
+
+/* Bản ghim theo `${process.platform}-${process.arch}`. Thiếu mục = nền tảng chưa có bản ghim
+ * (Mac Intel): install_ffmpeg.js báo rõ thay vì cài nhầm bản của máy khác. */
+const FFMPEG_PINS = {
+  'win32-x64': WIN32_PIN,
+  'darwin-arm64': DARWIN_ARM64_PIN,
+};
+
+function pinFor(platform = process.platform, arch = process.arch) {
+  return FFMPEG_PINS[`${platform}-${arch}`] || null;
+}
+
+/* `FFMPEG_PIN` = bản của BỘ CÀI Windows (scripts/setup_runtime.js, runtime_paths.js,
+ * THIRD-PARTY-NOTICES). Giữ tên cũ để bộ cài không đổi hành vi; mã chạy trên mọi nền tảng
+ * dùng pinFor(). */
+const FFMPEG_PIN = WIN32_PIN;
+
+module.exports = { FFMPEG_PIN, FFMPEG_PINS, pinFor };

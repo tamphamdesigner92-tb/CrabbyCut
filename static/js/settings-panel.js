@@ -24,6 +24,7 @@
         { id: PANE_ASE, label: _t('Auto Sound Effects'), ready: true },
         { id: 'cache', label: _t('Bộ nhớ đệm'), ready: true },
         { id: 'export', label: _t('Xuất video'), ready: true },
+        { id: 'voices', label: _t('Hồ sơ giọng'), ready: true },
         { id: 'about', label: _t('Về CrabbyCut'), ready: true },
     ];
 
@@ -41,6 +42,15 @@
     let layerMods = new Set(); // bổ trợ đang xem trên bàn phím trực quan
     let pickedKeyCode = '';    // bấm một phím trên bàn phím -> lọc danh sách
     let cacheUsage = null;     // kết quả /api/cache/usage
+
+    /* ---- trạng thái riêng của mục Hồ sơ giọng ----
+     * KHÔNG nằm trong bản nháp: hồ sơ là tệp âm thanh trên đĩa, tạo/xoá/đổi tên ghi NGAY qua
+     * /api/voice-profiles (nút Lưu/Huỷ của modal không áp cho mục này — pane nói rõ điều đó). */
+    let voiceProfiles = null;  // [{id, name, ref_text, duration, …}] — null = chưa đọc
+    let voiceDir = '';
+    let vpForm = { name: '', path: '', text: '' };
+    let vpBusy = false;
+    let vpError = '';
 
     /* ---------- tiện ích ---------- */
 
@@ -555,6 +565,75 @@
         </section>`;
     }
 
+    /* ================= HỒ SƠ GIỌNG (v1.1.17) ================= */
+    const fileNameOf = (p) => String(p || '').replace(/^.*[\\/]/, '');
+
+    function voicesPaneHtml() {
+        if (!voiceProfiles) return `<p class="set-intro">${_t('Đang đọc hồ sơ giọng…')}</p>`;
+        const fileName = fileNameOf(vpForm.path);
+        const rows = voiceProfiles.map((p) => `<div class="set-vp-row">
+            <input type="text" class="set-input set-vp-name" maxlength="60" value="${esc(p.name)}" data-set-act="vp-rename" data-vp="${esc(p.id)}" aria-label="${esc(_t('Tên hồ sơ giọng'))}">
+            <span class="set-cache-size">${esc(_t('{s} giây', { s: String(Math.round(p.duration * 10) / 10).replace('.', ',') }))}</span>
+            <button type="button" class="set-btn" data-set-act="vp-play" data-vp="${esc(p.id)}">${_t('Nghe')}</button>
+            <button type="button" class="set-btn" data-set-act="vp-delete" data-vp="${esc(p.id)}">${_t('Xoá')}</button>
+            <input type="text" class="set-input set-vp-text" maxlength="1000" value="${esc(p.ref_text)}" placeholder="${esc(_t('Lời nói trong mẫu (không bắt buộc)'))}" data-set-act="vp-retext" data-vp="${esc(p.id)}" aria-label="${esc(_t('Lời nói trong mẫu'))}">
+        </div>`).join('');
+        return `<p class="set-intro">${_t('Giọng mẫu để nhân bản (clone) trong Lồng tiếng. Thay đổi ở mục này được lưu ngay, không cần bấm Lưu.')}</p>
+        <section class="set-sec"><h4>${_t('Tạo hồ sơ mới')}</h4>
+            <div class="set-vp-form">
+                <label>${_t('Tên')}
+                    <input type="text" class="set-input set-name" maxlength="60" value="${esc(vpForm.name)}" placeholder="${esc(_t('Ví dụ: Giọng tôi, MC Lan…'))}" data-set-act="vp-form-name">
+                </label>
+                <div class="set-vp-pick">
+                    <button type="button" class="set-btn" data-set-act="vp-pick" ${vpBusy ? 'disabled' : ''}>${vpForm.path ? _t('Đổi tệp giọng mẫu…') : _t('Chọn tệp giọng mẫu…')}</button>
+                    <span class="set-vp-file" title="${esc(vpForm.path)}">${fileName ? esc(fileName) : esc(_t('Chưa chọn tệp'))}</span>
+                </div>
+                <label>${_t('Lời nói trong mẫu (không bắt buộc)')}
+                    <input type="text" class="set-input set-name" maxlength="1000" value="${esc(vpForm.text)}" placeholder="${esc(_t('Gõ đúng những gì người trong tệp mẫu nói'))}" data-set-act="vp-form-text">
+                </label>
+                <div><button type="button" class="set-btn set-btn-primary" data-set-act="vp-create" ${vpBusy ? 'disabled' : ''}>${vpBusy ? _t('Đang tạo…') : _t('Tạo hồ sơ')}</button></div>
+                ${vpError ? `<p class="set-vp-error">${esc(vpError)}</p>` : ''}
+            </div>
+            <p class="set-note">${_t('Mẫu tốt: 3-10 giây, một người nói, thu rõ, không nhạc nền hay tiếng vọng. Nhận cả tệp video — chỉ lấy phần âm thanh, tối đa 20 giây đầu. VieNeu-TTS v3 không cần lời nói trong mẫu.')}</p>
+        </section>
+        <section class="set-sec"><h4>${_t('Hồ sơ đã có')}</h4>
+            <div class="set-card">${rows || `<p class="set-note">${_t('Chưa có hồ sơ giọng nào.')}</p>`}</div>
+            <div class="set-about-actions">
+                <button type="button" class="set-btn" data-set-act="vp-open-dir">${_t('Mở thư mục hồ sơ giọng')}</button>
+            </div>
+            <p class="set-note">${_t('Lưu tại {dir} — không bị xoá khi cài lại hoặc nâng cấp CrabbyCut.', { dir: `<code>${esc(voiceDir)}</code>` })}</p>
+        </section>`;
+    }
+
+    async function loadVoiceProfiles() {
+        try {
+            const resp = await fetch(`${API_BASE}/voice-profiles`);
+            const data = resp.ok ? await resp.json() : null;
+            voiceProfiles = Array.isArray(data?.profiles) ? data.profiles : [];
+            voiceDir = String(data?.dir || '');
+        } catch (_) {
+            voiceProfiles = [];
+        }
+        if (activeSection === 'voices') render();
+    }
+
+    async function voiceApi(method, path, body) {
+        const resp = await fetch(`${API_BASE}/voice-profiles${path}`, {
+            method,
+            headers: body ? { 'Content-Type': 'application/json' } : undefined,
+            body: body ? JSON.stringify(body) : undefined,
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.detail || _t('Lỗi máy chủ ({status})', { status: resp.status }));
+        return data;
+    }
+
+    // Panel Lồng tiếng đang mở thì danh sách giọng ở đó phải khớp ngay.
+    function voicesChanged() {
+        window.DubbingPanel?.refreshProfiles?.();
+        loadVoiceProfiles();
+    }
+
     /* ================= VỀ CRABBYCUT ================= */
     /* Mọi con số / tên ở đây đến từ package.json qua window.AppInfo (xem static/js/app-info.js):
      * nâng version hay đổi giấy phép ở package.json là mục này tự đúng, không có chỗ ghi cứng
@@ -609,6 +688,7 @@
             preview: previewPaneHtml,
             cache: cachePaneHtml,
             export: exportPaneHtml,
+            voices: voicesPaneHtml,
             about: aboutPaneHtml,
             [PANE_ASE]: asePaneHtml,
         };
@@ -759,6 +839,53 @@
             return false;
         },
 
+        /* ---- Hồ sơ giọng ---- */
+        'vp-pick': () => {
+            const pick = window.desktopEnv?.pickEditingAssets;
+            if (typeof pick !== 'function') { vpError = _t('Chọn tệp chỉ có trong ứng dụng máy tính.'); return true; }
+            pick('audio').then((paths) => {
+                if (!Array.isArray(paths) || !paths[0]) return;
+                vpForm.path = paths[0];
+                // Chưa đặt tên thì gợi ý theo tên tệp — đổi được ngay trong ô.
+                if (!vpForm.name.trim()) vpForm.name = fileNameOf(paths[0]).replace(/\.[^.]+$/, '');
+                vpError = '';
+                render();
+            }).catch((err) => { vpError = err.message || String(err); render(); });
+            return false;
+        },
+        'vp-create': () => {
+            if (vpBusy) return false;
+            if (!vpForm.name.trim()) { vpError = _t('Hãy đặt tên cho hồ sơ giọng.'); return true; }
+            if (!vpForm.path) { vpError = _t('Chọn một tệp âm thanh có giọng mẫu.'); return true; }
+            vpBusy = true;
+            vpError = '';
+            voiceApi('POST', '', { name: vpForm.name, source_path: vpForm.path, ref_text: vpForm.text })
+                .then(() => { vpForm = { name: '', path: '', text: '' }; })
+                .catch((err) => { vpError = err.message || String(err); })
+                .finally(() => { vpBusy = false; voicesChanged(); render(); });
+            return true;
+        },
+        'vp-play': (el) => {
+            if (previewAudio) { previewAudio.pause(); previewAudio = null; }
+            previewAudio = new Audio(`${API_BASE}/voice-profiles/${encodeURIComponent(el.dataset.vp)}/audio?t=${Date.now()}`);
+            previewAudio.play().catch(() => {});
+            return false;
+        },
+        'vp-delete': (el) => {
+            const profile = (voiceProfiles || []).find((p) => p.id === el.dataset.vp);
+            if (!profile || !window.confirm(_t('Xoá hồ sơ giọng "{name}"?\n\nTệp giọng mẫu đã chép vào hồ sơ cũng bị xoá; tệp gốc của bạn không bị đụng tới.', { name: profile.name }))) return false;
+            voiceApi('DELETE', `/${encodeURIComponent(profile.id)}`)
+                .catch((err) => alert(err.message || String(err)))
+                .finally(voicesChanged);
+            return false;
+        },
+        'vp-open-dir': () => {
+            const first = (voiceProfiles || [])[0];
+            const target = first ? first.dir : voiceDir;
+            if (window.desktopEnv?.showItemInFolder && target) window.desktopEnv.showItemInFolder(target);
+            return false;
+        },
+
         /* ---- Về CrabbyCut ---- */
         'about-update': () => {
             window.desktopEnv?.checkForUpdates?.().catch((err) => alert(err.message || String(err)));
@@ -830,6 +957,27 @@
         'renderDevice': (el) => { draft.export.renderDevice = el.value; return false; },
         'renderCache': (el) => { draft.export.renderCache = el.checked; return false; },
         'sc-search': (el) => { keyFilter = el.value; return false; },
+
+        /* ---- Hồ sơ giọng: ô của form tạo mới chỉ ghi vào bộ nhớ; ô của hồ sơ đã có ghi NGAY
+           xuống đĩa ở sự kiện change (rời ô / Enter), không ghi theo từng phím. ---- */
+        'vp-form-name': (el) => { vpForm.name = el.value; return false; },
+        'vp-form-text': (el) => { vpForm.text = el.value; return false; },
+        'vp-rename': (el) => {
+            const profile = (voiceProfiles || []).find((p) => p.id === el.dataset.vp);
+            if (!profile || el.value.trim() === profile.name) return false;
+            voiceApi('PATCH', `/${encodeURIComponent(profile.id)}`, { name: el.value })
+                .catch((err) => alert(err.message || String(err)))
+                .finally(voicesChanged);
+            return false;
+        },
+        'vp-retext': (el) => {
+            const profile = (voiceProfiles || []).find((p) => p.id === el.dataset.vp);
+            if (!profile || el.value.trim() === profile.ref_text) return false;
+            voiceApi('PATCH', `/${encodeURIComponent(profile.id)}`, { ref_text: el.value })
+                .catch((err) => alert(err.message || String(err)))
+                .finally(voicesChanged);
+            return false;
+        },
     };
 
     async function loadCacheUsage() {
@@ -892,6 +1040,7 @@
             if (nav && !nav.disabled) {
                 activeSection = nav.dataset.setNav;
                 if (activeSection === 'cache' && !cacheUsage) loadCacheUsage();
+                if (activeSection === 'voices' && !voiceProfiles) loadVoiceProfiles();
                 render();
                 return;
             }
@@ -955,8 +1104,10 @@
 
     /* ---------- mở / đóng ---------- */
 
-    async function open() {
+    /* `section`: mở thẳng vào một mục (panel Lồng tiếng mở "Hồ sơ giọng"). */
+    async function open(section) {
         if (!window.AppSettings) return;
+        if (section && SECTIONS.some((s) => s.id === section)) activeSection = section;
         const current = await AppSettings.ready();
         // Bản nháp là BẢN SAO SÂU: sửa thoải mái, huỷ thì cấu hình đang chạy còn nguyên.
         draft = JSON.parse(JSON.stringify(current));
@@ -968,8 +1119,11 @@
         pickedKeyCode = '';
         layerMods = new Set();
         cacheUsage = null;
+        voiceProfiles = null;
+        vpError = '';
         await Promise.all(['sfxs', 'music', 'elements'].map(ensureLibrary));
         if (activeSection === 'cache') loadCacheUsage();
+        if (activeSection === 'voices') loadVoiceProfiles();
         document.body.classList.add('settings-modal-open');
         const panel = document.getElementById('settingsModalPanel');
         panel?.classList.add('active');

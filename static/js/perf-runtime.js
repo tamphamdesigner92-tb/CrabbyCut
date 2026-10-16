@@ -425,10 +425,12 @@
          * -> khung sau càng chậm -> tự khuếch đại. So VỊ TRÍ thì đúng ở mọi nhịp khung.
          * Đọc ngược lại thay vì lưu `nextScrollLeft`: trình duyệt kẹp và làm tròn theo DPI. */
         lastProgrammaticScrollLeft = timelineOuter.scrollLeft;
-        window.clearTimeout(timelineScrollStopTimer);
-        timelineScrollStopTimer = window.setTimeout(() => {
-            isProgrammaticScroll = false;
-        }, 50);
+        /* releaseProgrammaticScroll, KHÔNG phải timer riêng: trước đây ở đây dùng
+         * `timelineScrollStopTimer` (timer của handler 'scroll' để tắt isUserScrollingTimeline),
+         * nên có HAI timer cùng xoá một cờ. Timer 50 ms của lượt này xoá luôn cờ mà đường zoom
+         * bánh xe vừa bật ở khung sau -> lượt cuộn của zoom bị nhận là người dùng kéo -> tua
+         * video mỗi nấc zoom. Một cờ phải có một timer: lượt ghi sau cùng quyết định. */
+        releaseProgrammaticScroll(50);
     };
 
     scrollToPlayhead = function () {
@@ -447,10 +449,7 @@
          * phép so vị trí và rơi về cờ thời gian (180 ms), vốn đủ vì lúc đó video đang DỪNG:
          * một lệnh tua thừa ở đó không kéo theo vòng xả-bộ-giải-mã như lúc phát. */
         lastProgrammaticScrollLeft = tucThi ? timelineOuter.scrollLeft : -1;
-        window.clearTimeout(timelineScrollStopTimer);
-        timelineScrollStopTimer = window.setTimeout(() => {
-            isProgrammaticScroll = false;
-        }, video && !video.paused ? 60 : 180);
+        releaseProgrammaticScroll(tucThi ? 60 : 180);   // cùng timer với mọi lượt cuộn theo lệnh, xem trên
     };
 
     // -----------------------------

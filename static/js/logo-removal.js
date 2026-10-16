@@ -1,5 +1,5 @@
 /* =============================================================================
- * LOGO REMOVAL ENGINE — xoá logo / watermark CỐ ĐỊNH trên khung hình (CrabbyCut)
+ * LOGO REMOVAL ENGINE — xoá logo / watermark CỐ ĐỊNH và VẬT THỂ CHUYỂN ĐỘNG (CrabbyCut)
  *
  * File RIÊNG và là NGUỒN SỰ THẬT DUY NHẤT cho preview lẫn export, cùng khuôn với
  * retouch.js / color-adjust.js: dữ liệu, chuẩn hoá, quy đổi pixel và công thức xử lý
@@ -14,11 +14,17 @@
  *   'blur'     — làm mờ hộp 2 lượt (= `boxblur` power 2 của FFmpeg), mép phản xạ.
  *   'pixelate' — khảm: thu nhỏ trung bình theo ô rồi phóng lại kiểu láng giềng gần
  *                (= `scale=flags=area` rồi `scale=flags=neighbor`).
- *   'ai'       — mô hình inpainting MI-GAN VẼ LẠI nền phía sau logo. Quá nặng để chạy theo
- *                từng khung lúc xem/xuất nên là một LƯỢT XỬ LÝ TRƯỚC (asr/logo_inpaint_sidecar.py)
- *                ra các miếng vá PNG theo đúng PTS từng khung nguồn; preview và sidecar xuất
- *                cùng dán các miếng vá đó. Chưa xử lý xong thì mọi nơi rơi về 'delogo' trên
- *                CÙNG hình chữ nhật (`fallbackMode`) — module này không biết gì về miếng vá.
+ *   'ai'       — LaMa + lan truyền nền theo thời gian VẼ LẠI nền phía sau logo. Quá nặng để
+ *                chạy theo từng khung lúc xem/xuất nên là một LƯỢT XỬ LÝ TRƯỚC
+ *                (asr/logo_inpaint_sidecar.py) ra các miếng vá PNG theo đúng PTS từng khung
+ *                nguồn; preview và sidecar xuất cùng dán các miếng vá đó. Chưa xử lý xong thì mọi
+ *                nơi rơi về 'delogo' trên CÙNG hình chữ nhật (`fallbackMode`) — module này
+ *                không biết gì về miếng vá.
+ *
+ * VẬT THỂ CHUYỂN ĐỘNG (`objects`): mỗi vật là các MỐC khung { t, x, y, w, h } — t là giây
+ * NGUỒN của block (cùng trục với sourceTime của preview và `start/end` của lượt AI), khung theo
+ * tỉ lệ như vùng. Luôn xoá bằng AI (lượt xử lý trước còn BÁM THEO vật giữa các mốc); chưa có
+ * miếng vá thì preview tạm delogo trên hộp nội suy giữa các mốc (`objectBoxAt`).
  *
  * TOẠ ĐỘ VÙNG: tỉ lệ 0..1, gốc TRÊN-TRÁI, theo VÙNG ẢNH THẬT của block (lane chính:
  * vùng ảnh của clip trong khung nối; overlay: cả asset). Lưu tỉ lệ nên độc lập độ phân
@@ -41,6 +47,10 @@
 
     const MODES = ['delogo', 'blur', 'pixelate', 'ai'];
     const MAX_REGIONS = 4;
+    const MAX_OBJECTS = 4;
+    const MAX_OBJECT_KEYS = 64;
+    // Hai mốc cách nhau dưới chừng này giây là CÙNG một mốc (sửa khung ở đúng chỗ đang đứng).
+    const KEY_EPS = 0.02;
     // Cạnh nhỏ nhất của một vùng (tỉ lệ). Nhỏ hơn thì delogo không còn pixel bên trong.
     const MIN_REGION = 0.005;
     // Lề an toàn (pixel) giữa vùng và mép khung khi XUẤT: `delogo` từ chối hình chữ nhật
@@ -64,6 +74,7 @@
             // 0..100 — chỉ có nghĩa với 'blur' / 'pixelate'.
             strength: 50,
             regions: [],
+            objects: [],
         };
     }
 
@@ -82,6 +93,48 @@
         return { x: round5(x), y: round5(y), w: round5(w), h: round5(h) };
     }
 
+    function normalizeObject(raw) {
+        if (!raw || typeof raw !== 'object') return null;
+        const keys = [];
+        (Array.isArray(raw.keys) ? raw.keys : []).forEach((k) => {
+            const r = normalizeRegion(k);
+            const t = Number(k && k.t);
+            if (!r || !Number.isFinite(t) || t < 0) return;
+            const tt = Math.round(t * 1000) / 1000;
+            const same = keys.findIndex((q) => Math.abs(q.t - tt) < KEY_EPS);
+            if (same >= 0) keys.splice(same, 1);
+            keys.push({ t: tt, ...r });
+        });
+        keys.sort((a, b) => a.t - b.t);
+        return keys.length ? { keys: keys.slice(0, MAX_OBJECT_KEYS) } : null;
+    }
+
+    /* Hộp của vật thể tại giây nguồn `t`: nội suy TUYẾN TÍNH giữa hai mốc kề, giữ nguyên mốc
+     * ngoài cùng khi t nằm ngoài. Chỉ để XEM TẠM trước khi lượt AI bám xong (lượt AI bám theo
+     * hình thật chứ không nội suy). */
+    function objectBoxAt(obj, t) {
+        const keys = obj && Array.isArray(obj.keys) ? obj.keys : [];
+        if (!keys.length) return null;
+        const x = Number(t) || 0;
+        if (x <= keys[0].t) return { x: keys[0].x, y: keys[0].y, w: keys[0].w, h: keys[0].h };
+        const last = keys[keys.length - 1];
+        if (x >= last.t) return { x: last.x, y: last.y, w: last.w, h: last.h };
+        let i = 0;
+        while (i + 1 < keys.length && keys[i + 1].t <= x) i++;
+        const a = keys[i];
+        const b = keys[i + 1];
+        const f = (x - a.t) / Math.max(1e-6, b.t - a.t);
+        const mix = (p, q) => p + (q - p) * f;
+        return { x: mix(a.x, b.x), y: mix(a.y, b.y), w: mix(a.w, b.w), h: mix(a.h, b.h) };
+    }
+
+    // Đặt/ghi đè mốc tại giây `t` (trả object MỚI, đã chuẩn hoá).
+    function upsertObjectKey(obj, t, rect) {
+        const keys = (obj && Array.isArray(obj.keys) ? obj.keys : []).filter((k) => Math.abs(k.t - t) >= KEY_EPS);
+        keys.push({ t, ...rect });
+        return normalizeObject({ keys });
+    }
+
     function normalize(raw) {
         const out = defaultLogoRemoval();
         if (!raw || typeof raw !== 'object') return out;
@@ -93,22 +146,32 @@
             .map(normalizeRegion)
             .filter(Boolean)
             .slice(0, MAX_REGIONS);
+        out.objects = (Array.isArray(raw.objects) ? raw.objects : [])
+            .map(normalizeObject)
+            .filter(Boolean)
+            .slice(0, MAX_OBJECTS);
         return out;
     }
 
-    // Có THẬT SỰ xử lý gì không (bật + có ít nhất một vùng). Dùng ở mọi đường vẽ/xuất.
+    // Có THẬT SỰ xử lý gì không (bật + có ít nhất một vùng/vật thể). Dùng ở mọi đường vẽ/xuất.
     function isActive(cfg) {
         if (!cfg) return false;
         const c = normalize(cfg);
-        return c.enabled && c.regions.length > 0;
+        return c.enabled && (c.regions.length > 0 || c.objects.length > 0);
     }
 
-    // Field RỖNG hẳn (tắt VÀ không còn vùng) -> xoá khỏi dữ liệu dự án. KHÁC isActive:
+    // Field RỖNG hẳn (tắt VÀ không còn vùng/vật thể) -> xoá khỏi dữ liệu dự án. KHÁC isActive:
     // tắt công tắc nhưng còn vùng thì GIỮ, để bật lại không phải vẽ lại từ đầu.
     function isEmpty(cfg) {
         if (!cfg) return true;
         const c = normalize(cfg);
-        return !c.enabled && c.regions.length === 0;
+        return !c.enabled && c.regions.length === 0 && c.objects.length === 0;
+    }
+
+    // Lượt AI có việc không: vùng cố định ở chế độ 'ai', hoặc có vật thể chuyển động.
+    function needsAi(cfg) {
+        const c = normalize(cfg);
+        return c.enabled && ((c.mode === 'ai' && c.regions.length > 0) || c.objects.length > 0);
     }
 
     // ---------------------------------------------------------------------
@@ -199,25 +262,43 @@
         const y2 = ry + rh;
         if (x1 < 0 || y1 < 0 || x2 >= stride || (y2 + 1) * stride * 4 > data.length) return;
         if (x2 - x1 < 2 || y2 - y1 < 2) return;
-        const at = (x, y, ch) => data[(y * stride + x) * 4 + ch];
+        // Mẫu cạnh trên/dưới chỉ phụ thuộc CỘT, trái/phải chỉ phụ thuộc HÀNG -> tính trước một
+        // lần (hàng/cột mẫu nằm ngoài vùng, không bị ghi đè nên đọc trước hay sau là như nhau).
+        // Số học giữ NGUYÊN như bản cũ để vẫn khớp từng pixel với FFmpeg; chỉ bớt việc lặp lại
+        // — vùng 554×270 từ 8,3 ms còn ~2 ms, đủ rẻ để chạy mỗi khung lúc phát.
+        const nx = x2 - x1 + 1;
+        const top = new Int32Array(nx);
+        const bot = new Int32Array(nx);
+        const rowT = y1 * stride * 4;
+        const rowB = y2 * stride * 4;
         for (let ch = 0; ch < 3; ch++) {
+            for (let x = x1 + 1; x < x2; x++) {
+                const i = x * 4 + ch;
+                top[x - x1] = data[rowT + i] + data[rowT + i - 4] + data[rowT + i + 4];
+                bot[x - x1] = data[rowB + i] + data[rowB + i - 4] + data[rowB + i + 4];
+            }
             for (let y = y1 + 1; y < y2; y++) {
-                const left = at(x1, y, ch) + at(x1, y - 1, ch) + at(x1, y + 1, ch);
-                const right = at(x2, y, ch) + at(x2, y - 1, ch) + at(x2, y + 1, ch);
+                const row = y * stride * 4;
+                const up = row - stride * 4;
+                const dn = row + stride * 4;
+                const l = x1 * 4 + ch;
+                const r = x2 * 4 + ch;
+                const left = data[row + l] + data[up + l] + data[dn + l];
+                const right = data[row + r] + data[up + r] + data[dn + r];
                 const dyT = y - y1;
                 const dyB = y2 - y;
+                const dyTB = dyT * dyB;
                 for (let x = x1 + 1; x < x2; x++) {
                     const dxL = x - x1;
                     const dxR = x2 - x;
-                    const wl = dxR * dyT * dyB;
-                    const wr = dxL * dyT * dyB;
-                    const wt = dxL * dxR * dyB;
-                    const wb = dxL * dxR * dyT;
-                    const top = at(x, y1, ch) + at(x - 1, y1, ch) + at(x + 1, y1, ch);
-                    const bot = at(x, y2, ch) + at(x - 1, y2, ch) + at(x + 1, y2, ch);
+                    const wl = dxR * dyTB;
+                    const wr = dxL * dyTB;
+                    const dxLR = dxL * dxR;
+                    const wt = dxLR * dyB;
+                    const wb = dxLR * dyT;
                     const weight = (wl + wr + wt + wb) * 3;
-                    const v = (left * wl + right * wr + top * wt + bot * wb) / weight;
-                    data[(y * stride + x) * 4 + ch] = Math.round(v);
+                    const v = (left * wl + right * wr + top[dxL] * wt + bot[dxL] * wb) / weight;
+                    data[row + x * 4 + ch] = Math.round(v);
                 }
             }
         }
@@ -495,8 +576,9 @@
     }
 
     return {
-        MODES, MAX_REGIONS, MIN_REGION, FRAME_MARGIN, MIN_REGION_PX,
-        defaultLogoRemoval, normalize, normalizeRegion, isActive, isEmpty,
+        MODES, MAX_REGIONS, MAX_OBJECTS, MAX_OBJECT_KEYS, KEY_EPS, MIN_REGION, FRAME_MARGIN, MIN_REGION_PX,
+        defaultLogoRemoval, normalize, normalizeRegion, normalizeObject, objectBoxAt, upsertObjectKey,
+        isActive, isEmpty, needsAi,
         regionToPixels, effectParamPx, exportRects, fallbackMode,
         delogoRgba, boxBlurRgba, pixelateRgba, applyRectRgba,
         rgbaToLuma, inCornerZone, detectLogoRegions, dilate,

@@ -4638,7 +4638,7 @@ bọc nó vào IIFE ngày mai là hỏng lại mà không ai nhớ vì sao.
 
 MỘT KỊCH BẢN, BA CHỖ HIỂN THỊ:
   #refScriptInput   nguồn sự thật (ô nhập bước Upload)
-  #editScriptText   ô nhập ở tab "Kịch bản" của Editing — GƯƠNG, sửa được
+  #editScriptText   ô nhập ở tab con "Kịch bản" (tab Văn bản, từ v1.1.17) của Editing — GƯƠNG, sửa được
   #refScriptCompare "Kịch bản chuẩn (Đối chiếu)" ở cột giữa — chỉ đọc
 Mọi đường đổi kịch bản nay đi qua syncReferenceScriptViews(). Trước đây ô Đối chiếu chỉ được
 vẽ ở hai chỗ lẻ (mở .crab, sau khi bấm So khớp) nên gõ/nạp tệp ở Editing không tới được nó.
@@ -5363,6 +5363,8 @@ NỀN KHUNG PREVIEW — đen hay xanh nhấp nháy (isSequenceTransparencyWarnin
   - Hardware info hiển thị GPU (MLX/Metal) khi chạy trên darwin arm64.
   - Timeline (ruler + segment) render bằng PixiJS; sóng âm render bằng canvas 2D riêng (audio-waveform.js), cả hai giới hạn devicePixelRatio tối đa 2 để giảm tải.
   - Export ưu tiên VideoToolbox cho h264/hevc/prores khi FFmpeg hỗ trợ.
+  - Export giải mã nguồn chính bằng VideoToolbox (`-hwaccel videotoolbox`, khung chép về RAM) khi nguồn là HEVC hoặc > 8-bit; H.264 8-bit giữ giải mã CPU vì VideoToolbox chậm hơn với nó (SourceHwDecodeArgs, mục M.4). Tắt: CRABBYCUT_EXPORT_HWDEC=0. Test: test:export-hw-decode.
+  - Hộp thoại xuất tự chọn H.265 khi khung xuất 4K (cạnh dài >= 3840, theo preset hoặc sequence), dưới 4K về H.264 — chỉ khi lượt xuất SẼ dùng HEVC phần cứng: hỏi /api/export-encoder (sidecar `export-encoder` = SelectEncoderPlan; macOS VideoToolbox, Windows NVENC/QSV/AMF qua phép thử thật). Máy chỉ có libx265 thì giữ H.264. Tay chọn codec giữ theo từng dự án (resetExportCodecForProject khi mở/tạo dự án — chỉ máy có HEVC phần cứng; máy chỉ có CPU giữ suốt phiên như trước); ProRes không đổi (index.html, syncExportCodecForFrame). Test: test:export-auto-hevc.
   - Preview proxy ưu tiên h264_videotoolbox và scale_vt nếu FFmpeg hỗ trợ, nhưng chỉ chạy sau ASR để tránh tranh MLX/MPS/unified memory.
   - Playback preview dùng HTML video decoder của Chromium/Electron với proxy all-keyframe để seek mượt hơn.
 - Windows:
@@ -7469,6 +7471,9 @@ xử lý cùng đợt thay lõi.
 
 ## Nạp tệp kịch bản .md ở tab "Kịch bản" (đã sửa 2026-08-21)
 
+> Từ v1.1.17 "Kịch bản" là tab CON của tab Văn bản (`EDIT_PANEL_SUBTABS.text`, id `script`), không
+> còn là tab riêng. `refreshScriptPane` chỉ vẽ khi `editPanelTab === 'text' && editPanelTextSub === 'script'`.
+
 Tab "Kịch bản" là chỗ duy nhất trong Editing chưa đi qua hộp thoại gốc, và là chỗ
 duy nhất có vùng nhận thả nhỏ hơn khu vực người dùng nhắm vào. Hai lỗi độc lập,
 cùng dẫn tới cùng một triệu chứng "không thêm được tệp .md".
@@ -8848,6 +8853,69 @@ Kéo zoom vẫn còn long task ~70–100 ms ở mức zoom thấp (~200 block tr
 cùng lúc → style + layout + paint). Hướng tiếp nếu cần: trong lúc đang kéo thì scaleX bằng
 transform rồi mới dựng thật khi thả.
 
+### Zoom timeline ở Match Script giật lại (2026-10-09)
+
+Người dùng báo zoom in/out ở Match Script giật trở lại sau bản sửa 27/09. Bản sửa đó nhắm vào
+Editing (nhiều block); ở Match Script dự án thật chỉ có 13–14 block nên số block không phải
+nguyên nhân. Đo trong Electron thật (CDP, dự án DJI 1728×3072@59,94, 84 s) ra **hai lỗi độc
+lập**, cả hai đều không hiện trong đồng hồ JS/long task:
+
+**1. Mỗi nấc zoom tua video.** Chụm trackpad 120 nấc → 28–32 lần gán `video.currentTime`,
+playhead trôi 34,2 s → 27,6 s sau 3 lượt; mỗi lần tua xả bộ giải mã nguồn 4K. Ngăn xếp: handler
+'scroll' (index.html) tưởng lượt cuộn của CHÍNH đường zoom bánh xe là người dùng kéo. Ba chỗ
+cùng góp:
+- đường zoom gọi `updateTimelineLayout()` — với `perf_scheduler` đó chỉ là `markDirty`, bề rộng
+  `#timelineTrack` tới khung SAU mới đổi — rồi gán `scrollLeft` ngay, nên bị trình duyệt kẹp
+  theo bề rộng cũ. Nay gọi `applyTimelineTrackWidth()` trước khi gán;
+- đường zoom không ghi `lastProgrammaticScrollLeft` → chốt chặn theo VỊ TRÍ bị tắt. Nay ghi
+  (kèm `pinTimelineTimeToViewportX`, cùng bệnh);
+- `scrollTimelineToCurrentTime`/`scrollToPlayhead` bản perf-runtime xoá `isProgrammaticScroll`
+  bằng timer RIÊNG (`timelineScrollStopTimer`, vốn là timer tắt `isUserScrollingTimeline` của
+  handler 'scroll'). Timer 50 ms của lượt khung trước xoá luôn cờ mà đường zoom vừa bật. Nay cả
+  hai đi qua `releaseProgrammaticScroll` — một cờ, một timer.
+
+**2. GPU nghẹt khi kéo thanh zoom.** Trace `devtools.timeline`: `RasterDecoderImpl::DoRasterCHROMIUM`
+1,85 s / 4,8 s, lệnh dài nhất 63 ms; luồng chính gần như rảnh, 0 long task — khung hình
+100–460 ms. Tắt riêng sóng âm thì GPU còn 0,52 s. Nguyên do: chữ ký đệm dải sóng
+(`paintViewportBuffered`) đổi mỗi nấc zoom → dựng lại cả dải 8192 px, và `drawColumns` gom mọi
+thanh vào MỘT path (`ctx.rect` × nghìn, `fill()` một lần) — với Skia GPU, path nghìn contour là
+đường raster chậm nhất. Sửa (audio-waveform.js):
+- mỗi thanh một `fillRect`, mép trái/phải ghim lưới điểm ảnh thiết bị (`opts.grid` do
+  `paintViewport` truyền). Ghim lưới là bắt buộc: màu sóng có alpha, mép lẻ điểm ảnh thì hai
+  thanh kề nhau chồng phần khử răng cưa → vạch sọc;
+- đang zoom/kéo liên tục (dựng lại < 120 ms sau lượt trước, chữ ký khác) thì chỉ dựng dải HẸP
+  = khung nhìn + ¼ khung mỗi bên; lượt dựng sau khi dừng tay lại rộng như cũ.
+
+| Match Script, 3 lượt mỗi kiểu | Trước | Sau |
+| --- | --- | --- |
+| Kéo thanh zoom | khung p50 16,7–100 ms, p95 33–383, max 467 | p95 16,8, max 17,1, 0 khung > 33 ms |
+| GPU raster lúc kéo thanh (4,8 s) | 1,85 s, lệnh dài nhất 63 ms | 0,37 s, dài nhất 5,2 ms |
+| Chụm trackpad 120 nấc | 28–32 lần tua, p95 33,3 ms | 0 lần tua, p95 16,8 ms |
+| Alt + bánh xe 40 nấc | 0–2 lần tua, max 50 ms | 0 lần tua, max 17,1 ms |
+| Nút −/+ 8 lần | max 83 ms | max 16,8 ms |
+
+Test: `audio_waveform_columns.js` thêm (9b) thanh thẳng lưới + không chồng mép ở dpr 1,5,
+scrollLeft lẻ; và cụm zoom dựng dải hẹp / dừng tay dựng lại rộng (đồng hồ giả). Đột biến bỏ
+ghim lưới hoặc bỏ dải hẹp đều làm test đổ.
+
+**Không đụng render (đo 2026-10-09).** Bản sửa chỉ chạm hiển thị timeline: `drawColumns` /
+`paintViewport*` không có mặt trong đường xuất, và không tệp nào trong `backend/`, `native/`
+đổi. Đo bằng `bench_export.js`, ffmpeg ghim `n8.1.1-crabbycut.2`, RTX + NVENC, xen kẽ A/B:
+
+| Ca | So sánh | Thời gian (trung vị 3 lượt) | Tệp xuất |
+| --- | --- | --- | --- |
+| Yêu Con (phát lại) | trước 1.1.16 (`0b5bf5e`) vs 1.1.16 | 16,0 / 16,0 s | trùng md5 cả 6 lượt |
+| Yêu Con (phát lại) | `main` vs `sync/main-mac-win` | 15,8 / 16,0 s | trùng md5 |
+| Bin Tom tập 3 (phát lại) | `main` vs `sync/main-mac-win` | 9,3 / 9,1 s | trùng md5 |
+| forever inside, cắt 300 s (phát lại) | `main` vs `sync/main-mac-win` | 49,9 / 49,7 s | trùng md5 |
+| Yêu Con trong Electron (mở .crab + vẽ trước + xuất, 2 lượt) | `main` vs `sync/main-mac-win` | 47,8–50,9 / 47,2–48,5 s; vẽ trước 30,6–33,5 / 29,8–30,8 s | trùng md5 |
+
+`sync/main-mac-win` thêm `threads=1` cho các bộ lọc `scale` (để Win và Mac ra cùng số) — không
+đổi một byte đầu ra nào ở ba dự án trên và không chậm đi. Trên Mac: CI `macos-14` (arm64)
+101/101 test xanh với bản sửa này, gồm `test:audio-waveform`; `test:tts-model-store` từ nay chạy
+cả khi `--skip-python` (chỉ cần thư viện chuẩn). Retina (dpr 2) có gấp đôi số cột sóng âm mỗi
+lượt dựng — chính là chỗ dải hẹp lúc zoom giúp nhiều nhất.
+
 ## Auto Subtitle đa ngôn ngữ — menu ngôn ngữ, font CJK, đồng bộ phụ đề (2026-09-14)
 
 Ba việc thêm vào Auto Subtitle, theo yêu cầu người dùng. Đọc mục trên trước.
@@ -9921,13 +9989,45 @@ cú kéo = một undo.
 Test: `npm run test:logo-removal` (mô hình, khớp FFmpeg, nhận diện, backend, sidecar end-to-end cả
 lane chính lẫn overlay).
 
-### Chế độ AI — "AI vẽ lại nền (MI-GAN)" (2026-09-29)
+### Chế độ AI — "AI vẽ lại nền (LaMa)" (2026-09-29, đổi mô hình + lan truyền 2026-09-30)
 
-`mode: 'ai'`: mô hình inpainting **MI-GAN** (Picsart, MIT; ONNX "pipeline v2", 28 MB, ghim theo commit
-+ SHA-256 ở `backend/logo-ai.js` → `MODEL`) VẼ LẠI nền phía sau logo. Đo trên máy dev (CPU,
-onnxruntime 1.29): 0,27 s/khung/vùng; LaMa chất lượng tương đương trên logo nhưng 1,07 s và 208 MB.
-Model tải ở lần đầu vào `%LOCALAPPDATA%\CrabbyCut\models\logo_ai` (có thanh tiến trình ở thanh trạng
-thái), nhóm Python `logo_ai` = onnxruntime + opencv + numpy.
+`mode: 'ai'`: **LaMa** (Samsung AI big-lama, Apache-2.0; ONNX fp32 512×512 của Carve/LaMa-ONNX, 208 MB,
+ghim theo commit + SHA-256 ở `backend/logo-ai.js` → `MODEL`) VẼ LẠI nền phía sau vùng. Thay MI-GAN vì
+người dùng thấy MI-GAN còn TỆ HƠN delogo: nó vẽ lại TỪNG khung độc lập nên vùng xoá "sôi"/nháy, và nhoè ở
+vùng lớn. Đo trên M1 Pro: LaMa 2,0 s/lượt trên CPU (8 luồng lõi hiệu năng — `perf_threads`); **CoreML bị
+loại** (10,7 s/lượt và làm tiến trình văng lúc thoát; cũng là lý do lượt MI-GAN cũ chậm 1,16 s/khung).
+Model tải ở lần đầu vào `<appData>/models/logo_ai` (thanh tiến trình ở thanh trạng thái), nhóm Python
+`logo_ai` = onnxruntime + opencv-contrib + numpy. `LOGO_AI_VERSION` = 2 → mọi cache MI-GAN cũ tự hết hiệu lực.
+
+**LAN TRUYỀN TRƯỚC, BỊA SAU** (`process_video` trong `asr/logo_inpaint_sidecar.py`) — LaMa 2 s/lượt thì
+không chạy từng khung được, và chạy từng khung chính là nguồn gốc của nháy. Mỗi khung, mỗi NHÓM vùng
+(vùng chạm nhau gộp lại; mỗi nhóm có tấm nền và độ lệch màu RIÊNG — dùng chung thì logo nhỏ bị nhuộm theo
+vành của vùng lớn, đã gặp):
+1. **Nền thật từ khung lân cận** (±20 khung, dừng ở chuyển cảnh): căn bằng chuyển động CỤC BỘ quanh vùng
+   (`local_motion`: điểm đặc trưng cách vùng ≥ nửa cửa sổ LK, theo dõi xuôi + ngược, CHỈ DỜI — xem bẫy
+   bên dưới), tinh chỉnh ±2 px trên vành, bỏ nguồn lệch ở vành (> `ALIGN_MAD`). Tham lam theo độ phủ,
+   bỏ dải < 20%. **Tất cả hoặc không:** nền thật phủ < 85% vùng thì BỎ HẲN.
+2. **Tấm nền** (plate) của nhóm: kết quả LaMa ở khung khoá, đi theo chuyển động, bù màu theo vành. Chỉ
+   dùng khi KIỂM được (vành rơi vào phần thật của tấm, lệch ≤ `STALE_MAD`, độ sáng lệch ≤ 40); không thì
+   "cũ" → vẽ lại, không dày hơn mỗi `MIN_REFRESH` = 3 khung. Cảnh tĩnh: một lượt LaMa cho cả đoạn, các
+   khung sau trùng từng byte → dùng lại file miếng vá.
+3. Phần còn lại: mẩu nhỏ → Telea; lớn → LaMa trên khung VUÔNG (~2,2 lần cạnh, đệm phản chiếu chứ không
+   co giãn lệch tỉ lệ), bù màu dự đoán THÔ của mô hình theo vành.
+Bù màu = trường lệch MƯỢT (tích chập chuẩn hoá từ vành, `offset_field`), không phải một hằng số — hằng
+số lộ mép chữ nhật trên mảng chuyển sắc (quầng đèn). Không kẹp biên độ: nguồn test đổi màu mỗi khung
+tới ~200 vẫn phải khớp.
+
+Bẫy đã gặp khi dựng (đừng quay lại):
+- Similarity (xoay + phóng) khớp trên ít điểm dồn cục "bịa" xoay 1,8° + phóng 1,2% → lệch 30 px ở chỗ lỗ;
+  xích qua 20 khung thì trôi tới phóng 10% + xoay 9°. Cả cục bộ lẫn toàn cục nay CHỈ DỜI (trung vị).
+- Điểm sát vật thể có cửa sổ LK trùm lên vật → "chuyển động nền" = đúng vận tốc của vật.
+- Ghép nhiều dải/mảng từ nhiều khung → vệt sọc; và LaMa vẽ tiếp phần thiếu lại NỐI đúng các mép mảng
+  thành một ô vuông nhạt → quy tắc "tất cả hoặc không".
+- Tấm nền mà vành cũng là phần bịa (vật đã đi chỗ khác) → dán không kiểm được → khối lệch sáng.
+Đo trên video của người dùng (1080×1920, 4 s, logo ✦ + vùng lớn 570×250): sạch hơn MI-GAN rõ (hết vệt xám
+của huy hiệu); dao động khung-khung TRONG vùng lớn 4,4–4,8 so với 7,9 của MI-GAN (thấp hơn chuyển động
+thật của cảnh quanh vùng). Tốc độ phụ thuộc số lần vẽ lại: cảnh tĩnh vài giây, máy quay trôi + thị sai
+(video đó) ~30 lượt LaMa ≈ 2 phút.
 
 **Là một LƯỢT XỬ LÝ TRƯỚC, không phải công thức pixel:** `asr/logo_inpaint_sidecar.py` đọc TỪNG khung
 thật của đoạn nguồn (`-fps_mode passthrough`, PTS thật từ `showinfo`, crop sẵn trong ffmpeg), vẽ lại
@@ -9963,7 +10063,53 @@ cả hai) → overlay `eof_action=pass`. Hai cái bẫy đã gặp:
 Test: `npm run test:logo-ai` — backend với bộ chạy giả; sidecar Python `CRAB_LOGO_AI_FAKE=1` (lấp bằng
 màu TB của khung, không cần model) trên nguồn ĐỔI MÀU MỖI KHUNG → dán lệch một khung là lộ ngay (có ca
 đối chứng cố tình lệch 1 khung phải đo ra > 30/255); CFR + VFR, 1x + 1.5x, lane chính + overlay; có model
-thì chạy thêm MI-GAN thật trên một ảnh.
+thì chạy thêm LaMa thật trên một ảnh; VẬT THỂ: hộp trắng chạy 3 px/khung trên nguồn đổi màu mỗi khung,
+một mốc → bám lệch ≤ 2,5 px, xuất kèm delogo cho logo cố định trên cùng block, lệch màu vá/nền ≤ 2,8.
+
+### Xoá vật thể chuyển động — subtab "Xoá vật thể" (2026-09-30)
+
+Subtab "Xoá logo" đổi tên **"Xoá vật thể"**: phần "Logo / watermark cố định" giữ nguyên, thêm phần
+**"Vật thể chuyển động"**. Dữ liệu: `logo_removal.objects = [{ keys: [{ t, x, y, w, h }] }]` (≤ 4 vật,
+≤ 64 mốc) — `t` là giây NGUỒN của block (lane chính: giây file nối; overlay: giây asset — CÙNG trục với
+`sourceTime` của đường vẽ và `start/end` của lượt AI), khung theo tỉ lệ vùng ảnh như vùng logo. Mốc
+cách nhau < `KEY_EPS` (20 ms) là cùng một mốc. Vật thể LUÔN đi AI (`LogoRemoval.needsAi`); vùng cố định
+vẫn xoá theo "Cách xoá" của block — hai loại cùng có được trên một block.
+
+- **UI:** "Chọn vật thể" (dừng phát, kéo khung ở khung đang xem → vật mới + tự chạy AI). Mỗi dòng vật:
+  chọn (tay cầm trên preview — kéo = ghi đè/thêm mốc ở giây hiện tại), ✎ vẽ lại ở khung đang xem (thêm
+  mốc sửa chỗ bám lệch), ✕ xoá. Khung vật màu xanh; nét liền = có mốc ở khung này, nét đứt = khung bám/
+  nội suy. Đang phát thì không có tay cầm vật (kéo lúc khung chạy là đặt mốc vào khung ngẫu nhiên).
+  Panel báo số khung mất dấu từng vật (`rects[k].lost`).
+- **Bám** (lượt 1 của sidecar, `track_objects`): đọc cả khung thu về 640 px (giữ JPEG trong RAM), OpenCV
+  CSRT xuôi từ mỗi mốc tới mốc sau và ngược tới mốc trước, giữa hai mốc trộn tuyến tính (mốc gần tin
+  hơn). Khoảng bám nới ra phủ MỌI mốc (block bị cắt ngắn sau khi vẽ thì mốc có thể nằm ngoài đoạn), rồi
+  tra theo THỜI GIAN cho từng khung của lượt 2. Vùng xoá = hộp bám nới 15% (`OBJECT_MARGIN`; CSRT trễ
+  sau vật chạy, đo tới 10 px với vật 170 px) — preview dùng CÙNG lề (`LOGO_OBJECT_MARGIN`). Lề ngoài là
+  nền thật nên kết quả được hoà dần từ ảnh gốc trong 1/3 lề đó (hết viền chữ nhật).
+- **Miếng vá vật thể** cỡ HỘP BAO cả quãng vật đi (+ viền mềm), ngoài vùng của khung đó alpha 0 (RGB 0 để
+  PNG nén gọn) → vị trí dán CỐ ĐỊNH, sidecar xuất và preview không phải biết hộp đổi mỗi khung. Index v2:
+  `rects[k].kind` ('logo' | 'object'), vật có `track` (vùng xoá từng khung), `core` (hộp bám, preview vẽ
+  khung này), `lost`. Vùng cố định trước, vật thể sau → tối đa 8 miếng vá (`MAX_PATCHES`, `r0..r7`).
+- **Preview:** chưa có miếng vá thì delogo tạm trên vùng xoá của vật (hộp bám nếu lượt AI đã xong, không
+  thì nội suy giữa các mốc — `LogoRemoval.objectBoxAt`).
+- **Xuất:** `logo_removal_px = { mode, rects, key?, run?, objects? }`. Backend: chế độ 'ai' + lượt dùng được
+  → chỉ field AI; chế độ công thức + lượt của vật thể → CẢ `logo_mode/logo_rects` LẪN `logo_ai_*`. Sidecar
+  C++ nay chạy công thức TRƯỚC rồi mới dán miếng vá (trước đây là if/else). Vật thể không có đường lùi
+  công thức — lượt AI hỏng thì bản xuất bỏ qua vật thể và báo ra.
+
+### Preview treo khi bật Xoá logo (2026-09-30)
+
+Triệu chứng: bật Xoá logo (nhất là 2 vùng / sau khi "Vẽ vùng") rồi bấm phát thì thỉnh thoảng preview đứng,
+bấm LQ/HQ (nạp lại video) mới chạy. Đo trong app (nguồn 1080×1920, 2 vùng, HQ): `syncSpriteTexture`
+chạy ~60 lượt/giây × 16 ms = **95% luồng chính** — vòng phát và sự kiện của `<video>` chết đói. Ba nguyên
+nhân cộng dồn: (1) ticker PIXI (120 Hz) VÀ vòng rAF overlay cùng dựng lại canvas fx mỗi nhịp, trong khi
+video chỉ ra 24 khung/giây; (2) mỗi vùng một `getImageData` — đọc ngược GPU buộc đồng bộ, ~4–6 ms CỐ
+ĐỊNH mỗi lần; (3) delogo bằng vòng JS ~6 ms cho vùng 554×270. Sửa: `syncSpriteTexture` lúc phát chỉ dựng
+lại khi `previewFrameClock.seq` đổi (khung video mới); `logoRemovedDrawable` nhớ theo khung
+(`presentedFrameStamp` — rVFC của chính thẻ video); delogo chạy trên **GPU** (`logoGpuDelogo`, WebGL2,
+một lượt vẽ mỗi vùng qua 2 framebuffer để vùng sau thấy kết quả vùng trước; lệch CPU tối đa 1/255 ở 3/6,2
+triệu giá trị); làm mờ/khảm vẫn CPU nhưng MỘT lượt đọc cho mọi vùng; `delogoRgba` tính trước mẫu
+cạnh trên/dưới (vẫn khớp từng pixel với FFmpeg). Sau sửa: 7 ms/giây luồng chính ở HQ, UI 120 fps.
 
 ## "Scale 100%" của media overlay = vừa khung, như lane chính; sóng âm có tầng riêng (2026-09-30)
 
