@@ -21,7 +21,7 @@ const os = require('os');
 const path = require('path');
 const http = require('http');
 
-const SERVER_INFO = { name: 'crabbycut', version: '0.1.0' };
+const SERVER_INFO = { name: 'crabbycut', version: '0.2.0' };
 const SUPPORTED_PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const HTTP_TIMEOUT_MS = 35_000;
 
@@ -139,11 +139,20 @@ const TOOLS = [
   },
   {
     name: 'crabbycut_screenshot',
-    description: 'Capture the CrabbyCut window as an image to see the preview, timeline and panels.',
-    inputSchema: NO_ARGS,
-    run: async () => {
-      const shot = await rpc('screenshot');
-      return { content: [{ type: 'image', data: shot.data, mimeType: shot.mimeType }] };
+    description: 'Capture the CrabbyCut window as an image to see the preview, timeline and panels. If the window is minimized the image is the last frame before minimizing (reported as stale); pass restore: true to un-minimize it without stealing focus.',
+    inputSchema: {
+      type: 'object',
+      properties: { restore: { type: 'boolean', default: false } },
+      additionalProperties: false,
+    },
+    run: async (args) => {
+      const shot = await rpc('screenshot', args);
+      return {
+        content: [
+          { type: 'image', data: shot.data, mimeType: shot.mimeType },
+          { type: 'text', text: `${shot.width}x${shot.height} px — use these pixel coordinates with crabbycut_ui_* tools.${shot.stale ? ' WARNING: the window is minimized, so this image is STALE (last frame before minimizing). Call again with restore: true to see the current state.' : ''}` },
+        ],
+      };
     },
   },
   {
@@ -237,7 +246,351 @@ const TOOLS = [
     },
     run: async (args) => json(await rpc('open_project', args)),
   },
+
+  /* ---- Dự án & media ---- */
+  {
+    name: 'crabbycut_new_project',
+    description: 'Start a new blank project in the Editing step, optionally putting videos (absolute paths) on the main lane. Refuses while the current project has unsaved changes.',
+    inputSchema: {
+      type: 'object',
+      properties: { video_paths: { type: 'array', items: { type: 'string' } } },
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('new_project', args)),
+  },
+  {
+    name: 'crabbycut_add_main_videos',
+    description: 'Append videos (absolute paths) to the main lane of the open project.',
+    inputSchema: {
+      type: 'object',
+      properties: { paths: { type: 'array', items: { type: 'string' }, minItems: 1 } },
+      required: ['paths'],
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('add_main_videos', args)),
+  },
+  {
+    name: 'crabbycut_import_media',
+    description: 'Editing step only. Import files (absolute paths) into the project media panel. kind "media" = video/image, "audio" = audio. mode "copy" copies into the project, "link" references in place (also accepts folders). With add_to_timeline the imported assets are placed one after another on overlay tracks starting at start (default playhead).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        paths: { type: 'array', items: { type: 'string' }, minItems: 1 },
+        kind: { type: 'string', enum: ['media', 'audio'], default: 'media' },
+        mode: { type: 'string', enum: ['copy', 'link'], default: 'copy' },
+        add_to_timeline: { type: 'boolean', default: false },
+        start: { type: 'number', minimum: 0 },
+        track_id: { type: 'string' },
+      },
+      required: ['paths'],
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('import_media', args)),
+  },
+  {
+    name: 'crabbycut_list_assets',
+    description: 'List project media assets (ids for crabbycut_add_asset) and main-lane sources. With library_category (video | elements | sfxs | music) also lists the built-in library.',
+    inputSchema: {
+      type: 'object',
+      properties: { library_category: { type: 'string', enum: ['video', 'elements', 'sfxs', 'music'] } },
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('list_assets', args)),
+  },
+  {
+    name: 'crabbycut_add_asset',
+    description: 'Editing step only. Place a project asset (asset_id) or a library item ({category, name}) on an overlay track at start (default playhead). trim_start/trim_end are source seconds. Undoable.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        asset_id: { type: 'string' },
+        library: { type: 'object', properties: { category: { type: 'string' }, name: { type: 'string' } }, required: ['category', 'name'] },
+        start: { type: 'number', minimum: 0 },
+        track_id: { type: 'string' },
+        trim_start: { type: 'number', minimum: 0 },
+        trim_end: { type: 'number', minimum: 0 },
+      },
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('add_asset', args)),
+  },
+  {
+    name: 'crabbycut_catalog',
+    description: 'Look up valid ids/values before editing: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories.',
+    inputSchema: {
+      type: 'object',
+      properties: { kind: { type: 'string', enum: ['transitions', 'animations', 'text_styles', 'text_effects', 'luts', 'color_params', 'export_options', 'subtitle', 'library_categories'] } },
+      required: ['kind'],
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('catalog', args)),
+  },
+
+  /* ---- Sửa block ---- */
+  {
+    name: 'crabbycut_update_block',
+    description: 'Editing step only. Change properties of ONE block: a main-lane clip (main_index) or an overlay item (item_id). transform: position_x, position_y, scale, rotation, opacity, flip_x, flip_y (fields with keyframes get a keyframe at the playhead). volume is percent (100 = original). speed is a rate (1 = normal). Overlay items also accept timeline_start, duration, muted, text (text blocks) and style (text: font_family, font_size, color, font_weight, letter_spacing, line_height, align, stroke_*, bg_*, shadow_*). One undo step.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        main_index: { type: 'integer', minimum: 0 },
+        item_id: { type: 'string' },
+        transform: { type: 'object', additionalProperties: { type: ['number', 'boolean'] } },
+        volume: { type: 'number', minimum: 0, maximum: 1000 },
+        speed: { type: 'number', minimum: 0.1, maximum: 100 },
+        pitch_correct: { type: 'boolean' },
+        timeline_start: { type: 'number', minimum: 0 },
+        duration: { type: 'number', exclusiveMinimum: 0 },
+        muted: { type: 'boolean' },
+        text: { type: 'string' },
+        style: { type: 'object' },
+      },
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('update_block', args)),
+  },
+  {
+    name: 'crabbycut_apply_text_preset',
+    description: 'Editing step only. Apply a text style preset (style_preset, e.g. "p3") and/or a text effect (effect, e.g. "fx7", or "none" to clear) to a text block. Ids come from crabbycut_catalog text_styles / text_effects.',
+    inputSchema: {
+      type: 'object',
+      properties: { item_id: { type: 'string' }, style_preset: { type: 'string' }, effect: { type: 'string' } },
+      required: ['item_id'],
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('apply_text_preset', args)),
+  },
+  {
+    name: 'crabbycut_set_animation',
+    description: 'Editing step only. Set in/out animation of a block (main_index or item_id). Either combo (e.g. "pop_fade", "none" to clear) with optional combo_duration (total seconds), or in/out objects {type, duration 0.2-2, easing}. Values from crabbycut_catalog animations.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        main_index: { type: 'integer', minimum: 0 },
+        item_id: { type: 'string' },
+        combo: { type: 'string' },
+        combo_duration: { type: 'number' },
+        in: { type: 'object', properties: { type: { type: 'string' }, duration: { type: 'number' }, easing: { type: 'string' } } },
+        out: { type: 'object', properties: { type: { type: 'string' }, duration: { type: 'number' }, easing: { type: 'string' } } },
+      },
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('set_animation', args)),
+  },
+  {
+    name: 'crabbycut_set_transition',
+    description: 'Editing step only. Set the transition AFTER a block: main_index i = between main clips i and i+1; item_id = to the overlay item that touches it on the right on the same track. type from crabbycut_catalog transitions ("none" removes). duration seconds (capped by both blocks, max 2).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        main_index: { type: 'integer', minimum: 0 },
+        item_id: { type: 'string' },
+        type: { type: 'string' },
+        duration: { type: 'number', exclusiveMinimum: 0 },
+      },
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('set_transition', args)),
+  },
+  {
+    name: 'crabbycut_set_color',
+    description: 'Editing step only. Colour-grade a main clip (main_index) or a media / adjustment-layer item (item_id). lut_id from crabbycut_catalog luts ("" removes), lut_intensity 0-100, params like {"basic.exposure": 20, "basic.saturation": -30, "effects.vignette": 40} (paths from crabbycut_catalog color_params).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        main_index: { type: 'integer', minimum: 0 },
+        item_id: { type: 'string' },
+        lut_id: { type: 'string' },
+        lut_intensity: { type: 'number', minimum: 0, maximum: 100 },
+        params: { type: 'object', additionalProperties: { type: 'number' } },
+      },
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('set_color', args)),
+  },
+
+  /* ---- Job chạy lâu ---- */
+  {
+    name: 'crabbycut_start_job',
+    description: 'Start a long-running task and return a job immediately; then poll crabbycut_job_status. kinds: "auto_subtitle" (options: scope all|main|overlay, language vi|en|zh|ja|ko|auto), "magic_fill" (needs a script loaded), "export" (options: output_path REQUIRED absolute file path, video bool, audio bool, resolution, fps, codec, bitrate, bitrate_mbps, audio_bitrate, audio_format, audio_file_bitrate — values from crabbycut_catalog export_options). Editing step only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['auto_subtitle', 'magic_fill', 'export'] },
+        options: { type: 'object' },
+      },
+      required: ['kind'],
+      additionalProperties: false,
+    },
+    run: async ({ kind, options = {} }) => {
+      if (kind === 'export') {
+        if (!options.output_path) throw new Error('options.output_path is required for export');
+        await rpc('export_set_output', { path: options.output_path });
+      }
+      return json(await rpc('start_job', { kind, options }));
+    },
+  },
+  {
+    name: 'crabbycut_job_status',
+    description: 'Get a job\'s state (running | complete | failed | cancelled), progress, message and result. wait_seconds (max 25) waits for the job to finish before answering, to poll less often. Without job_id lists all jobs.',
+    inputSchema: {
+      type: 'object',
+      properties: { job_id: { type: 'string' }, wait_seconds: { type: 'number', minimum: 0, maximum: 25 } },
+      additionalProperties: false,
+    },
+    run: async ({ job_id, wait_seconds = 0 }) => {
+      if (!job_id) return json(await rpc('list_jobs'));
+      const deadline = Date.now() + Math.min(25, Number(wait_seconds) || 0) * 1000;
+      let job = await rpc('job_status', { job_id });
+      while (job.state === 'running' && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 1000));
+        job = await rpc('job_status', { job_id });
+      }
+      return json(job);
+    },
+  },
+  {
+    name: 'crabbycut_cancel_job',
+    description: 'Cancel a running job (auto_subtitle can be cancelled; magic_fill and export cannot).',
+    inputSchema: {
+      type: 'object',
+      properties: { job_id: { type: 'string' } },
+      required: ['job_id'],
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('cancel_job', args)),
+  },
+
+  /* ---- Giao diện: bấm/gõ như người dùng ----
+   * Dùng khi không có tool chuyên biệt. Toạ độ = pixel trên ảnh crabbycut_screenshot. */
+  {
+    name: 'crabbycut_ui_snapshot',
+    description: 'List visible clickable/editable UI elements (buttons, inputs, selects, tabs, timeline blocks, asset cards…) with a ref, role, label, value/state and box {x,y,w,h} in screenshot pixels. Use refs with the other crabbycut_ui_* tools. query filters by label/id text. Elements hidden behind a modal are skipped unless include_covered.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string' },
+        limit: { type: 'integer', minimum: 1, maximum: 500, default: 200 },
+        include_covered: { type: 'boolean', default: false },
+      },
+      additionalProperties: false,
+    },
+    run: async (args) => {
+      const { css_per_pixel: k } = await rpc('ui_scale');
+      const snap = await rpc('ui_snapshot', args);
+      const px = (v) => Math.round(v / (k || 1));
+      const lines = snap.elements.map((e) => {
+        const flags = [e.disabled && 'disabled', e.active && 'active', e.covered && 'covered'].filter(Boolean);
+        return `${e.ref} ${e.role} "${e.label}" @${px(e.x)},${px(e.y)} ${px(e.w)}x${px(e.h)}${e.id ? ` #${e.id}` : ''}${flags.length ? ` [${flags.join(',')}]` : ''}`;
+      });
+      const header = `viewport ${px(snap.viewport.w)}x${px(snap.viewport.h)} (screenshot px), focused: ${snap.focused || '-'}, ${lines.length} elements`;
+      return { content: [{ type: 'text', text: [header, ...lines].join('\n') }] };
+    },
+  },
+  {
+    name: 'crabbycut_ui_click',
+    description: 'Click like a real mouse: by ref (from crabbycut_ui_snapshot) or x,y in screenshot pixels. button left|right|middle, clicks 1-3 (2 = double-click), modifiers e.g. ["shift"], ["alt"], ["cmd"] (= Ctrl on Windows).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref: { type: 'string' },
+        x: { type: 'number' },
+        y: { type: 'number' },
+        button: { type: 'string', enum: ['left', 'right', 'middle'], default: 'left' },
+        clicks: { type: 'integer', minimum: 1, maximum: 3, default: 1 },
+        modifiers: { type: 'array', items: { type: 'string' } },
+      },
+      additionalProperties: false,
+    },
+    run: async (args) => {
+      const at = await pointFor(args.ref, args);
+      const out = await rpc('ui_click', { ...args, ...at });
+      return json({ ...out, ref: args.ref, label: at.label });
+    },
+  },
+  {
+    name: 'crabbycut_ui_drag',
+    description: 'Drag with the left mouse button (move blocks, trim edges, sliders, drop assets onto the timeline). from/to are refs or {x,y} in screenshot pixels.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from_ref: { type: 'string' },
+        from: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } },
+        to_ref: { type: 'string' },
+        to: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } } },
+        steps: { type: 'integer', minimum: 2, maximum: 60, default: 12 },
+        modifiers: { type: 'array', items: { type: 'string' } },
+      },
+      additionalProperties: false,
+    },
+    run: async (args) => {
+      const from = await pointFor(args.from_ref, args.from || {});
+      const to = await pointFor(args.to_ref, args.to || {});
+      return json(await rpc('ui_drag', { from, to, steps: args.steps, modifiers: args.modifiers, space: 'css' }));
+    },
+  },
+  {
+    name: 'crabbycut_ui_scroll',
+    description: 'Scroll the mouse wheel over a ref or x,y (screenshot pixels). dy > 0 scrolls down, dx > 0 scrolls right; ~100 per notch. modifiers e.g. ["cmd"] for zoom where the app supports it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref: { type: 'string' },
+        x: { type: 'number' },
+        y: { type: 'number' },
+        dx: { type: 'number', default: 0 },
+        dy: { type: 'number', default: 0 },
+        modifiers: { type: 'array', items: { type: 'string' } },
+      },
+      additionalProperties: false,
+    },
+    run: async (args) => {
+      const at = await pointFor(args.ref, args);
+      return json(await rpc('ui_scroll', { ...args, ...at }));
+    },
+  },
+  {
+    name: 'crabbycut_ui_key',
+    description: 'Press a key or shortcut on the app, e.g. "Space", "Delete", "Escape", "Enter", "Left", "Cmd+Z", "Cmd+Shift+Z", "Cmd+K", "Alt+[", "S". "Cmd" maps to Ctrl on Windows and ⌘ on macOS. repeat up to 50.',
+    inputSchema: {
+      type: 'object',
+      properties: { keys: { type: 'string' }, repeat: { type: 'integer', minimum: 1, maximum: 50, default: 1 } },
+      required: ['keys'],
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('ui_key', args)),
+  },
+  {
+    name: 'crabbycut_ui_type',
+    description: 'Type text (Unicode, Vietnamese OK) into the focused field, or into ref (focused and its current text selected, so typing replaces it). Press Enter afterwards with crabbycut_ui_key to commit numeric fields.',
+    inputSchema: {
+      type: 'object',
+      properties: { text: { type: 'string' }, ref: { type: 'string' } },
+      required: ['text'],
+      additionalProperties: false,
+    },
+    run: async ({ text, ref }) => {
+      if (ref) {
+        const at = await pointFor(ref, {});
+        await rpc('ui_click', { ...at });
+        await rpc('ui_focus', { ref });
+      }
+      return json(await rpc('ui_type', { text }));
+    },
+  },
 ];
+
+/* ref -> toạ độ CSS (renderer tự cuộn phần tử vào khung nhìn); không có ref thì x,y là toạ
+ * độ ảnh chụp, để main tự đổi. */
+async function pointFor(ref, { x, y } = {}) {
+  if (ref) {
+    const at = await rpc('ui_resolve', { ref });
+    return { x: at.x, y: at.y, space: 'css', label: at.label };
+  }
+  if (!Number.isFinite(Number(x)) || !Number.isFinite(Number(y))) throw new Error('Pass a ref or both x and y');
+  const { css_per_pixel: k } = await rpc('ui_scale');
+  return { x: Math.round(Number(x) * (k || 1)), y: Math.round(Number(y) * (k || 1)), space: 'css' };
+}
 
 function json(value) {
   return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] };
@@ -264,7 +617,13 @@ async function handle(message) {
         serverInfo: SERVER_INFO,
         instructions: 'Controls a running CrabbyCut video editor. Call crabbycut_status first. '
           + 'Editing tools work only in the Editing step (state.editing_ready = true). '
-          + 'Every edit is undoable with crabbycut_undo. Use crabbycut_screenshot to verify visually.',
+          + 'Prefer the feature tools (update_block, set_transition, set_color, import_media, start_job…); '
+          + 'look up valid ids with crabbycut_catalog. For anything without a dedicated tool, drive the UI '
+          + 'like a user: crabbycut_screenshot + crabbycut_ui_snapshot, then crabbycut_ui_click / ui_type / '
+          + 'ui_key / ui_drag / ui_scroll, and screenshot again to verify. Native OS dialogs (file pickers) '
+          + 'cannot be clicked — use the path-based tools instead. Long tasks (subtitles, Magic Fill, export) '
+          + 'run as jobs: crabbycut_start_job then crabbycut_job_status with wait_seconds. '
+          + 'Every edit is undoable with crabbycut_undo.',
       });
       return;
     }

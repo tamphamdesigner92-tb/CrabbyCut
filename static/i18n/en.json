@@ -2275,5 +2275,6 @@
   "Tắt: nền đen như các ứng dụng dựng video thông thường. Bật: vùng không có hình hiện nền xanh nhấp nháy để dễ phát hiện lỗi lọt nền. Chỉ ảnh hưởng khung xem trước, bản xuất luôn là nền đen.": "Off: black background like typical video editors. On: empty areas flash green so background leaks are easy to spot. Only affects the preview; exports always use black.",
   "Cho phép Claude điều khiển (MCP)": "Allow Claude to control the app (MCP)",
   "Mở một cổng cục bộ có mã bảo vệ để MCP server CrabbyCut (thư mục mcp/) xem và chỉnh timeline. Chỉ chương trình trên máy này đọc được mã. Tắt là đóng cổng ngay.": "Opens a token-protected local port so the CrabbyCut MCP server (mcp/ folder) can read and edit the timeline. Only programs on this computer can read the token. Turning it off closes the port immediately.",
-  "Không bật được cầu nối điều khiển: {error}": "Could not start the control bridge: {error}"
+  "Không bật được cầu nối điều khiển: {error}": "Could not start the control bridge: {error}",
+  "Đang tạo phụ đề — đợi lượt hiện tại xong.": "Subtitles are being created — wait for the current run to finish."
 }

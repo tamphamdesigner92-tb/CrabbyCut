@@ -655,6 +655,12 @@ ipcMain.handle('export-pick-output', async (_event, { suggestedName, ext, projec
   try {
     const extension = EXPORT_OUTPUT_KINDS[ext] ? ext : 'mp4';
     const kind = EXPORT_OUTPUT_KINDS[extension];
+    /* Cầu nối tự động hoá (MCP) đã chọn sẵn chỗ lưu qua kênh có token -> bỏ hộp thoại. Vé
+     * vẫn do MAIN ký như mọi lượt khác: renderer không tự chọn được đường dẫn ghi. */
+    const automationPath = automationBridge.takeExportOutput(extension);
+    if (automationPath) {
+      return { path: automationPath, ticket: crypto.createHmac('sha256', EXPORT_OUTPUT_SECRET).update(automationPath).digest('hex') };
+    }
     // CHỈ DÙNG CHO TEST (như CRAB_TEMP_DIR): bỏ hộp thoại gốc — CDP không bấm được nó.
     const testDir = process.env.CRAB_TEST_EXPORT_OUTPUT_DIR;
     if (testDir) {
