@@ -6142,6 +6142,8 @@
          * Timeline đã có ít nhất một block để mà trong suốt. Dự án vừa tạo, chưa có gì,
          * thì nhấp nháy xanh chỉ là nhiễu: lúc đó để nền đen như mọi ứng dụng dựng khác. */
         function isSequenceTransparencyWarningEnabled() {
+            // Cài đặt › Xem trước › "Nền xanh nhấp nháy" — mặc định tắt (nền đen).
+            if (!window.AppSettings?.get?.()?.preview?.transparencyWarning) return false;
             if (currentStepId !== 'step3' && currentStepId !== 'step4') return false;
             if (currentMode !== 'FINAL') return false;
             if (Array.isArray(latestTimeline) && latestTimeline.length > 0) return true;
@@ -8236,6 +8238,8 @@
     window.AppSettings?.onChange((s) => {
         window.Shortcuts?.syncLabels(window.AppSettings.keymapOf(s));
         applyGeneralSettings(s);
+        // Bật/tắt nền xanh nhấp nháy có tác dụng ngay, không đợi khung xem trước vẽ lại lần sau.
+        if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
     });
 
     /* Áp các mục "Chung"/"Xem trước" xuống UI. Gọi mỗi khi cài đặt đổi (kể cả lần nạp đầu).

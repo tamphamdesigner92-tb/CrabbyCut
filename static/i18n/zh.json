@@ -1825,5 +1825,8 @@
   "Kéo để dời đỉnh · Alt+kéo để kéo ra tay cầm cong": "拖动移动顶点 · Alt+拖动拉出曲线手柄",
   "Kéo để uốn cong · Alt+kéo để bẻ góc": "拖动弯曲 · Alt+拖动断开拐角",
   "Không đọc được thời lượng video nguồn để nối phần đuôi.": "无法读取源视频时长以追加黑色尾段。",
-  "Không nối được phần đuôi đen vào video nguồn.": "无法将黑色尾段追加到源视频。"
+  "Không nối được phần đuôi đen vào video nguồn.": "无法将黑色尾段追加到源视频。",
+  "Nền khung xem trước": "预览背景",
+  "Nền xanh nhấp nháy ở vùng trong suốt": "透明区域显示闪烁绿色背景",
+  "Tắt: nền đen như các ứng dụng dựng video thông thường. Bật: vùng không có hình hiện nền xanh nhấp nháy để dễ phát hiện lỗi lọt nền. Chỉ ảnh hưởng khung xem trước, bản xuất luôn là nền đen.": "关闭：与常见视频编辑软件一样使用黑色背景。开启：无画面区域闪烁绿色，便于发现背景漏出。仅影响预览，导出始终为黑色背景。"
 }

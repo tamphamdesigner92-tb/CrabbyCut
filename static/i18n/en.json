@@ -2116,5 +2116,8 @@
   "Kéo để dời đỉnh · Alt+kéo để kéo ra tay cầm cong": "Drag to move vertex · Alt+drag to pull out curve handles",
   "Kéo để uốn cong · Alt+kéo để bẻ góc": "Drag to bend · Alt+drag to break the corner",
   "Không đọc được thời lượng video nguồn để nối phần đuôi.": "Could not read the source video duration to append the black tail.",
-  "Không nối được phần đuôi đen vào video nguồn.": "Could not append the black tail to the source video."
+  "Không nối được phần đuôi đen vào video nguồn.": "Could not append the black tail to the source video.",
+  "Nền khung xem trước": "Preview background",
+  "Nền xanh nhấp nháy ở vùng trong suốt": "Flashing green background in transparent areas",
+  "Tắt: nền đen như các ứng dụng dựng video thông thường. Bật: vùng không có hình hiện nền xanh nhấp nháy để dễ phát hiện lỗi lọt nền. Chỉ ảnh hưởng khung xem trước, bản xuất luôn là nền đen.": "Off: black background like typical video editors. On: empty areas flash green so background leaks are easy to spot. Only affects the preview; exports always use black."
 }

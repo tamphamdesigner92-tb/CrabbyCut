@@ -510,6 +510,9 @@
         </section>
         <section class="set-sec"><h4>${_t('Điều hướng')}</h4>
             <div class="set-nums">${numberRowHtml(_t('Phím ← / → nhảy'), 'frameStep', p.frameStep, 1, 30, 1, _t('khung'), 'frameStep')}</div>
+        </section>
+        <section class="set-sec"><h4>${_t('Nền khung xem trước')}</h4>
+            ${checkboxRowHtml(_t('Nền xanh nhấp nháy ở vùng trong suốt'), 'pvTransparency', p.transparencyWarning, _t('Tắt: nền đen như các ứng dụng dựng video thông thường. Bật: vùng không có hình hiện nền xanh nhấp nháy để dễ phát hiện lỗi lọt nền. Chỉ ảnh hưởng khung xem trước, bản xuất luôn là nền đen.'))}
         </section>`;
     }
 
@@ -823,6 +826,7 @@
         'pvQuality': (el) => { draft.preview.defaultQuality = el.value; return false; },
         'pvTransition': (el) => { draft.preview.transitionQuality = el.value; return false; },
         'frameStep': (el) => { draft.preview.frameStep = Number(el.value); return false; },
+        'pvTransparency': (el) => { draft.preview.transparencyWarning = el.checked; return false; },
         'renderDevice': (el) => { draft.export.renderDevice = el.value; return false; },
         'renderCache': (el) => { draft.export.renderCache = el.checked; return false; },
         'sc-search': (el) => { keyFilter = el.value; return false; },
