@@ -330,7 +330,7 @@
     }
 
     function renderRulerDomLabels() {
-        if (!flags.ruler_dom_overlay || !rulerLabelLayer || videoDuration === 0) {
+        if (!flags.ruler_dom_overlay || !rulerLabelLayer || !(window.timelineClockReady ? window.timelineClockReady() : videoDuration > 0)) {
             hideUnusedRulerLabels(0);
             lastRulerDomSignature = '';
             return;
@@ -383,7 +383,7 @@
     }
 
     drawRuler = function () {
-        if (videoDuration === 0) {
+        if (!(window.timelineClockReady ? window.timelineClockReady() : videoDuration > 0)) {
             hideUnusedRulerLabels(0);
             return;
         }
@@ -405,7 +405,7 @@
      * 56/56 lượt gán scrollLeft trong 8 giây phát đều đi qua đây). Sửa chốt chặn cuộn ở
      * index.html mà quên tệp này thì KHÔNG có tác dụng gì — đã mất một lượt sửa vì chuyện đó. */
     scrollTimelineToCurrentTime = function () {
-        if (videoDuration === 0) return;
+        if (!(window.timelineClockReady ? window.timelineClockReady() : videoDuration > 0)) return;
         const centerOffset = timelineOuter.clientWidth / 2;
         const timelineTime = getCurrentTimelineTime();
         const nextScrollLeft = Math.max(0, timelineTimeToPx(timelineTime) - centerOffset);
@@ -434,7 +434,7 @@
     };
 
     scrollToPlayhead = function () {
-        if (videoDuration === 0) return;
+        if (!(window.timelineClockReady ? window.timelineClockReady() : videoDuration > 0)) return;
         const centerOffset = timelineOuter.clientWidth / 2;
         const timelineTime = getCurrentTimelineTime();
         const targetLeft = timelineTimeToPx(timelineTime) - centerOffset;
@@ -1641,6 +1641,8 @@
                 } else {
                     video.pause();
                     if (isPreviewing) document.getElementById('btnPreviewCuts')?.click();
+                    // Overlay dài hơn video lane chính -> phát tiếp phần đuôi bằng đồng hồ ảo.
+                    else window.continuePastMainVideo?.();
                 }
             }
             return;

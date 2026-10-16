@@ -181,7 +181,9 @@
     const DEFAULT_GENERAL = { undoSteps: 20, devMode: false, snapDefault: true, language: 'auto' };
     // transitionQuality 'auto' = 2 mức (CSS px khi phát, ×dpr khi dừng); 'sharp' = luôn ×dpr,
     // nét hơn khi phát nhưng hiệu ứng Xoắn sẽ giật (xem transitionRenderScale).
-    const DEFAULT_PREVIEW = { defaultQuality: 'proxy', frameStep: 1, transitionQuality: 'auto' };
+    /* transparencyWarning: nền xanh nhấp nháy ở vùng khung hình trong suốt (để soi lỗi lọt nền).
+     * Mặc định TẮT -> nền đen như các ứng dụng dựng khác; ai cần soi thì bật trong Cài đặt. */
+    const DEFAULT_PREVIEW = { defaultQuality: 'proxy', frameStep: 1, transitionQuality: 'auto', transparencyWarning: false };
     /* Xuất video (mục 1.21 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md, người dùng chốt 2026-10-02):
      * render bằng GPU (bộ lọc CUDA của bản ffmpeg riêng + NVDEC/NVENC) hay CPU. Mặc định GPU kể
      * cả khi với một nguồn cụ thể GPU không nhanh hơn; máy không dùng được GPU thì sidecar tự
@@ -515,6 +517,7 @@
             defaultQuality: PREVIEW_QUALITY.includes(s.defaultQuality) ? s.defaultQuality : D.defaultQuality,
             frameStep: Math.round(clampNumber(s.frameStep, LIMITS.frameStep.min, LIMITS.frameStep.max, D.frameStep)),
             transitionQuality: TRANSITION_QUALITY.includes(s.transitionQuality) ? s.transitionQuality : D.transitionQuality,
+            transparencyWarning: typeof s.transparencyWarning === 'boolean' ? s.transparencyWarning : D.transparencyWarning,
         };
     }
 

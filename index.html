@@ -6194,6 +6194,8 @@
          * Timeline đã có ít nhất một block để mà trong suốt. Dự án vừa tạo, chưa có gì,
          * thì nhấp nháy xanh chỉ là nhiễu: lúc đó để nền đen như mọi ứng dụng dựng khác. */
         function isSequenceTransparencyWarningEnabled() {
+            // Cài đặt › Xem trước › "Nền xanh nhấp nháy" — mặc định tắt (nền đen).
+            if (!window.AppSettings?.get?.()?.preview?.transparencyWarning) return false;
             if (currentStepId !== 'step3' && currentStepId !== 'step4') return false;
             if (currentMode !== 'FINAL') return false;
             if (Array.isArray(latestTimeline) && latestTimeline.length > 0) return true;
@@ -6219,7 +6221,7 @@
 	            video.style.height = `${Math.max(1, textureH * displayScale)}px`;
 	            video.style.left = `${frameW / 2 + (transform.position_x * previewScale)}px`;
 	            video.style.top = `${frameH / 2 + (transform.position_y * previewScale)}px`;
-	            video.style.opacity = String(transform.opacity / 100);
+	            video.style.opacity = window.isPastMainVideo?.() ? '0' : String(transform.opacity / 100);
 	            video.style.transform = transformCssForPreview(transform);
 	        }
 
@@ -6508,7 +6510,7 @@
                  * mới vẫn hiện nguyên khung hình cuối của dự án trước. Cũng đúng cho quãng
                  * ngắn video mới gán src mà chưa có metadata: thà trống còn hơn hiện nhầm
                  * hình của nguồn cũ. */
-                this.sprite.visible = Number(this.videoEl?.videoWidth) > 0;
+                this.sprite.visible = Number(this.videoEl?.videoWidth) > 0 && !window.isPastMainVideo?.();
 
                 const payload = getSequencePayload();
 	                const previewScale = Math.min(frameW / payload.width, frameH / payload.height);
@@ -8313,6 +8315,8 @@
     window.AppSettings?.onChange((s) => {
         window.Shortcuts?.syncLabels(window.AppSettings.keymapOf(s));
         applyGeneralSettings(s);
+        // Bật/tắt nền xanh nhấp nháy có tác dụng ngay, không đợi khung xem trước vẽ lại lần sau.
+        if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
     });
 
     /* Áp các mục "Chung"/"Xem trước" xuống UI. Gọi mỗi khi cài đặt đổi (kể cả lần nạp đầu).
@@ -9767,7 +9771,7 @@
 
     // Hàm cuộn timeline để kim thời gian luôn nằm ở giữa màn hình
     function scrollToPlayhead() {
-        if (videoDuration === 0) return;
+        if (!timelineClockReady()) return;
         const outer = document.getElementById('timelineTrackOuter');
         const centerOffset = outer.clientWidth / 2;
         const timelineTime = getCurrentTimelineTime();
@@ -9854,6 +9858,144 @@
     }
     window.applyMainClipPlaybackRate = applyMainClipPlaybackRate;
 
+    /* ===== ĐỒNG HỒ ẢO — vùng timeline KHÔNG có video lane chính =====
+     * Như CapCut: lane chính chỉ nhận video/ảnh như cũ, nhưng độ dài timeline KHÔNG còn do
+     * lane chính quyết định — block lane phụ kéo dài tuỳ ý, timeline dài tới đuôi block xa
+     * nhất (getTimelineDuration). Bình thường thời gian đọc từ video.currentTime; ở vùng
+     * KHÔNG có video lane chính — lane chính trống, hoặc playhead đã qua hết video — thì
+     * không có video nào để đọc: thời gian nằm ở `virtualClock.time` và nút Phát chạy một
+     * vòng requestAnimationFrame tự đẩy nó lên. Khung hình lúc đó là nền + overlay (sprite
+     * lane chính bị ẩn, xem isPastMainVideo). Trong vùng video mọi thứ đi đường cũ y nguyên.
+     *   engaged = có video lane chính nhưng playhead đang ở SAU đuôi video. */
+    const virtualClock = { time: 0, playing: false, raf: 0, timer: 0, lastTs: 0, engaged: false };
+
+    function mainLaneHasVideoRows() {
+        return Array.isArray(latestTimeline) && latestTimeline.length > 0;
+    }
+
+    // Tổng độ dài SEQUENCE của video lane chính (0 khi lane chính trống).
+    function mainVideoSequenceDuration() {
+        if (!mainLaneHasVideoRows()) return 0;
+        return latestTimeline.reduce((acc, block) => acc + clipSequenceDuration(block), 0);
+    }
+
+    function usesVirtualClock() {
+        if (currentMode !== 'FINAL') return false;
+        if (!mainLaneHasVideoRows()) return true;
+        // Lane chính vừa dài ra (thêm/kéo dài clip) tới quá chỗ đang đứng -> lại là vùng video.
+        return virtualClock.engaged && virtualClock.time > mainVideoSequenceDuration();
+    }
+    window.usesVirtualClock = usesVirtualClock;
+
+    // Playhead đang ở SAU đuôi video lane chính -> preview ẩn lớp video lane chính.
+    function isPastMainVideo() {
+        return mainLaneHasVideoRows() && usesVirtualClock();
+    }
+    window.isPastMainVideo = isPastMainVideo;
+
+    // Có trục thời gian để tua/cuộn chưa: có video nguồn, hoặc có block tạo nên timeline.
+    function timelineClockReady() {
+        if (videoDuration > 0) return true;
+        return currentMode === 'FINAL' && getTimelineDuration() > 0;
+    }
+    window.timelineClockReady = timelineClockReady;
+
+    function isVirtualClockPlaying() {
+        return virtualClock.playing && usesVirtualClock();
+    }
+    window.isVirtualClockPlaying = isVirtualClockPlaying;
+
+    function refreshVirtualClockUi() {
+        const clock = document.getElementById('timeDisplay');
+        if (clock) clock.innerText = `${formatTimecode(getDisplayClockTime())} / ${formatTimecode(getTimelineDuration())}`;
+        if (typeof isUserScrollingTimeline !== 'undefined' && !isUserScrollingTimeline
+            && typeof scrollTimelineToCurrentTime === 'function') {
+            scrollTimelineToCurrentTime();
+        }
+        if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
+    }
+
+    /* Nhịp chính là requestAnimationFrame; kèm một hẹn giờ dự phòng vì rAF ĐỨNG HẲN khi cửa
+       sổ bị che/thu nhỏ, trong khi <video> thì vẫn chạy — đồng hồ ảo phải chạy tiếp như nó
+       (âm thanh overlay, và để chỗ chuyển giữa video và vùng ảo không bị lệch). */
+    function scheduleVirtualClockTick() {
+        if (!virtualClock.raf) virtualClock.raf = requestAnimationFrame(() => virtualClockTick());
+        if (!virtualClock.timer) virtualClock.timer = setTimeout(() => virtualClockTick(), 100);
+    }
+
+    function virtualClockTick() {
+        if (virtualClock.raf) cancelAnimationFrame(virtualClock.raf);
+        if (virtualClock.timer) clearTimeout(virtualClock.timer);
+        virtualClock.raf = 0;
+        virtualClock.timer = 0;
+        if (!isVirtualClockPlaying()) { stopVirtualClock(); return; }
+        const now = performance.now();
+        const dt = virtualClock.lastTs ? Math.max(0, (now - virtualClock.lastTs) / 1000) : 0;
+        virtualClock.lastTs = now;
+        const total = getTimelineDuration();
+        virtualClock.time = Math.min(total, virtualClock.time + Math.min(dt, 1));
+        refreshVirtualClockUi();
+        if (virtualClock.time >= total) { stopVirtualClock(); return; }
+        scheduleVirtualClockTick();
+    }
+
+    /* Bắt đầu phát bằng đồng hồ ảo từ `fromTime` (mặc định: chỗ đang đứng). Gọi cả khi video
+       lane chính vừa phát tới đuôi mà overlay còn dài hơn (xem continuePastMainVideo). */
+    function startVirtualClock(fromTime = null) {
+        const total = getTimelineDuration();
+        if (!(total > 0)) {
+            setStatusText(_t("Chưa có video để phát"), false);
+            return false;
+        }
+        if (Number.isFinite(fromTime)) virtualClock.time = fromTime;
+        if (virtualClock.time >= total - 1e-3) {
+            // Hết timeline -> phát lại từ đầu; có video lane chính thì đầu timeline là video.
+            if (mainLaneHasVideoRows()) {
+                virtualClock.engaged = false;
+                setVideoTimeFromTimelineTime(0);
+                safePlay({ retries: 2 });
+                return true;
+            }
+            virtualClock.time = 0;
+        }
+        if (mainLaneHasVideoRows()) {
+            virtualClock.engaged = true;
+            if (!video.paused) video.pause();
+        }
+        virtualClock.playing = true;
+        virtualClock.lastTs = performance.now();
+        scheduleVirtualClockTick();
+        syncPlayPauseButton();
+        return true;
+    }
+
+    function stopVirtualClock() {
+        const was = virtualClock.playing;
+        virtualClock.playing = false;
+        if (virtualClock.raf) cancelAnimationFrame(virtualClock.raf);
+        if (virtualClock.timer) clearTimeout(virtualClock.timer);
+        virtualClock.raf = 0;
+        virtualClock.timer = 0;
+        virtualClock.lastTs = 0;
+        if (was) {
+            syncPlayPauseButton();
+            refreshVirtualClockUi();
+        }
+    }
+    window.stopVirtualClock = stopVirtualClock;
+
+    /* Video lane chính vừa phát tới đuôi. Overlay còn kéo dài quá đó thì phát tiếp bằng
+       đồng hồ ảo thay vì dừng; trả về true nếu đã nhận phát tiếp. */
+    function continuePastMainVideo() {
+        if (currentMode !== 'FINAL' || !mainLaneHasVideoRows()) return false;
+        if (virtualClock.playing) return true;
+        const videoEnd = mainVideoSequenceDuration();
+        if (!(getTimelineDuration() > videoEnd + 1e-3)) return false;
+        if (!video.paused) video.pause();
+        return startVirtualClock(videoEnd + 1e-3);
+    }
+    window.continuePastMainVideo = continuePastMainVideo;
+
     // Vị trí sequence (giây) -> {index, videoTime} theo THỨ TỰ MẢNG hiện tại.
     function sequencePositionAtTimelineTime(timelineTime) {
         if (!Array.isArray(latestTimeline) || latestTimeline.length === 0) {
@@ -9876,6 +10018,10 @@
 
     function getCurrentTimelineTime() {
         if (currentMode !== 'FINAL') return video.currentTime;
+        // `typeof`: test (timeline_click_seek.js) chạy riêng hàm này, không có khối đồng hồ ảo.
+        if (typeof usesVirtualClock === 'function' && usesVirtualClock()) {
+            return Math.max(0, Math.min(getTimelineDuration(), virtualClock.time));
+        }
         const index = resolveSequenceClipIndexAtVideoTime(video.currentTime);
         if (index < 0) {
             const cursor = getActiveSequenceClipIndex();
@@ -9891,7 +10037,12 @@
 
     function getTimelineDuration() {
         if (currentMode !== 'FINAL') return videoDuration;
-        return latestTimeline.reduce((acc, block) => acc + clipSequenceDuration(block), 0);
+        /* Như CapCut: timeline dài tới max(video lane chính, đuôi block lane phụ xa nhất) —
+           block lane phụ không còn bị lane chính chặn độ dài (xem ĐỒNG HỒ ẢO ở trên). */
+        const mainTotal = (Array.isArray(latestTimeline) ? latestTimeline : [])
+            .reduce((acc, block) => acc + clipSequenceDuration(block), 0);
+        const overlayEnd = Math.max(0, Number(window.EditingRuntime?.overlayTimelineEnd?.()) || 0);
+        return Math.max(mainTotal, overlayEnd);
     }
 
     /* Số bên TRÁI ô đồng hồ (vị trí hiện tại) PHẢI cùng hệ quy chiếu với số bên phải
@@ -9949,7 +10100,8 @@
     }
 
     function stepPlayheadByFrames(dir) {
-        if (!(videoDuration > 0)) return; // chưa nạp video -> không có gì để bước
+        if (!timelineClockReady()) return; // chưa nạp video -> không có gì để bước
+        if (usesVirtualClock()) stopVirtualClock();
         if (!video.paused) video.pause(); // dựng phim: bước khung luôn tạm dừng phát
         const fps = resolveSequenceFps();
         const total = getTimelineDuration();
@@ -10076,6 +10228,32 @@
     }
 
     function setVideoTimeFromTimelineTime(timelineTime) {
+        if (currentMode === 'FINAL') {
+            const total = getTimelineDuration();
+            const t = Math.max(0, Math.min(total, Number(timelineTime) || 0));
+            const videoEnd = mainVideoSequenceDuration();
+            // Vùng KHÔNG có video lane chính (trống, hoặc sau đuôi video) -> đồng hồ ảo.
+            if (!mainLaneHasVideoRows() || t > videoEnd + 1e-3) {
+                if (mainLaneHasVideoRows()) {
+                    const wasVideoPlaying = !video.paused;
+                    if (wasVideoPlaying) video.pause();
+                    virtualClock.engaged = true;
+                    virtualClock.time = t;
+                    if (wasVideoPlaying) { startVirtualClock(t); return; }
+                } else {
+                    virtualClock.time = t;
+                }
+                refreshVirtualClockUi();
+                return;
+            }
+            // Quay lại vùng có video: trả quyền cho video.currentTime (đang phát ảo thì phát tiếp bằng video).
+            if (virtualClock.engaged) {
+                const wasVirtualPlaying = virtualClock.playing;
+                stopVirtualClock();
+                virtualClock.engaged = false;
+                if (wasVirtualPlaying) setTimeout(() => safePlay({ retries: 2 }), 0);
+            }
+        }
         if (currentMode === 'FINAL') {
             // Seek theo vị trí SEQUENCE -> ghim luôn con trỏ clip tương ứng, để phát tiếp
             // đúng thứ tự block (không suy lại từ timestamp nguồn nữa).
@@ -10905,7 +11083,8 @@
     function syncPlayPauseButton() {
         const btn = document.getElementById('btnPlayPause');
         if (!btn) return;
-        btn.innerHTML = video.paused
+        const showPlay = usesVirtualClock() ? !isVirtualClockPlaying() : video.paused;
+        btn.innerHTML = showPlay
             ? '<svg class="btn-ico"><use href="#ic-play"/></svg>' + _t('Phát')
             : '<svg class="btn-ico"><use href="#ic-pause"/></svg>' + _t('Tạm dừng');
     }
@@ -10974,6 +11153,12 @@
     }
 
     async function togglePlayPause() {
+        if (usesVirtualClock()) {
+            if (isVirtualClockPlaying()) stopVirtualClock();
+            else startVirtualClock();
+            syncPlayPauseButton();
+            return;
+        }
         if (video.paused) {
             await safePlay({ retries: 2 });
         } else {
@@ -10994,6 +11179,8 @@
         applyPendingPreviewProxy();
     });
     video.addEventListener('ended', syncPlayPauseButton);
+    // File nguồn hết ngay ở đuôi clip cuối: overlay còn dài hơn thì phát tiếp bằng đồng hồ ảo.
+    video.addEventListener('ended', () => { if (currentMode === 'FINAL' && !isPreviewing) continuePastMainVideo(); });
     video.addEventListener('error', syncPlayPauseButton);
     /* ĐỒNG HỒ KHUNG HÌNH ĐANG HIỆN — gắn ở đây vì `video` chỉ tồn tại từ index.html:7976
      * trở đi; định nghĩa hàm nằm cạnh phần logic dùng nó (xem trackPresentedPreviewFrames). */
@@ -11110,7 +11297,7 @@
     }
 
     function updateTimelineLayout() {
-        if (videoDuration === 0) return;
+        if (!timelineClockReady()) return;
         const trackContainer = applyTimelineTrackWidth();
         // Thời lượng hay bề rộng khung nhìn đổi thì mức vừa khung đổi -> thanh zoom phải dời.
         syncZoomReadout();
@@ -11138,7 +11325,7 @@
     }
     
     function drawRuler() {
-        if (videoDuration === 0) return;
+        if (!timelineClockReady()) return;
         if (!timelineRenderer) return;
 
         timelineRenderer.renderRuler({
@@ -11270,6 +11457,7 @@
                     } else {
                         video.pause();
                         if (isPreviewing) document.getElementById('btnPreviewCuts').click();
+                        else window.continuePastMainVideo?.();
                     }
                 }
             }
@@ -11377,7 +11565,7 @@
     }
 
     function scrollTimelineToCurrentTime() {
-        if (videoDuration === 0) return;
+        if (!timelineClockReady()) return;
         const centerOffset = timelineOuter.clientWidth / 2;
         const timelineTime = getCurrentTimelineTime();
         const nextScrollLeft = clampTimelineScrollLeft(timelineTimeToPx(timelineTime) - centerOffset);
@@ -11389,7 +11577,7 @@
         releaseProgrammaticScroll(60);
     }
     timelineOuter.addEventListener('scroll', () => {
-        if (videoDuration === 0 || isProgrammaticScroll) return;
+        if (!timelineClockReady() || isProgrammaticScroll) return;
         /* CHỐT CHẶN THEO VỊ TRÍ, KHÔNG THEO THỜI GIAN.
          *
          * `isProgrammaticScroll` ở trên được xoá bởi một `setTimeout` 60 ms, nhưng Chromium
@@ -11453,7 +11641,7 @@
     }
 
     timelineOuter.addEventListener('wheel', (e) => {
-        if (videoDuration === 0) return;
+        if (!timelineClockReady()) return;
         timelineScrollSnapActive = e.shiftKey;
         const wheelPx = wheelDeltaPx(e);
 
@@ -11517,7 +11705,7 @@
     }, { passive: false });
 
     function updatePlayhead() {
-        if(videoDuration === 0) return;
+        if(!timelineClockReady()) return;
         playhead.style.left = '50%';
         playhead.style.transform = 'translateX(-50%)';
         if (!isUserScrollingTimeline && !timelineViewPinned) {
@@ -11674,7 +11862,7 @@
     const FINE_SCRUB_FACTOR = 0.2;
 
     function seekTimeline(e, { force = false } = {}) {
-        if (videoDuration === 0) return;
+        if (!timelineClockReady()) return;
         const rect = timelineOuter.getBoundingClientRect();
         const pointerXInOuter = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
         const total = getTimelineDuration();
@@ -16212,7 +16400,18 @@
     window.resetExportProgressUi = () => { if (!videoExportInFlight) setExportProgressUi('idle'); };
 
     async function performVideoExport(options = {}) {
-        if (!latestTimeline || latestTimeline.length === 0) return;
+        /* NỀN ĐEN cho phần timeline KHÔNG có video lane chính (như CapCut):
+           - lane chính trống: gửi MỘT khoảng [0, độ dài timeline] kèm cờ blank_base — backend
+             dựng một nền đen đúng khổ/fps/độ dài thay cho temp_input.mp4;
+           - overlay dài hơn video lane chính: gửi tail_pad_seconds — backend nối thêm một
+             đuôi đen vào nguồn và thêm một khoảng cho đuôi đó.
+           Block lane phụ đi đường overlay như thường, không bị cắt theo lane chính nữa. */
+        const blankBase = !(Array.isArray(latestTimeline) && latestTimeline.length > 0);
+        const exportTimelineTotal = getTimelineDuration();
+        const blankBaseDuration = blankBase ? exportTimelineTotal : 0;
+        if (blankBase && !(blankBaseDuration >= 0.05)) return;
+        const tailPadSeconds = blankBase ? 0 : Math.max(0, exportTimelineTotal - mainVideoSequenceDuration());
+        if (isVirtualClockPlaying()) stopVirtualClock();
         if (videoExportInFlight) {
             setStatusText(_t('Đang xuất video — vui lòng đợi lượt hiện tại xong.'), true);
             return;
@@ -16292,7 +16491,7 @@
         // đọc trạng thái đã có. Block chạy hỏng thì rơi về delogo, EditingRuntime báo ra.
         if (!audioOnly) await window.EditingRuntime?.ensureLogoAiForExport?.();
         const concatFrameForExport = mainConcatFrameSize();
-        const timelineForExport = await Promise.all(latestTimeline.map(async (clip, index) => {
+        const timelineForExport = blankBase ? [{ start: 0, end: blankBaseDuration }] : await Promise.all(latestTimeline.map(async (clip, index) => {
             /* VÙNG ẢNH THẬT gửi kèm từng block: backend đổi nó thành `fit_scale` cho sidecar
              * ("scale 100% = vừa khung", xem normalizeExportIntervals). Gửi hình chữ nhật chứ
              * không gửi sẵn hệ số vì khổ sequence do backend chốt lại (normalizeSequenceSettings)
@@ -16367,6 +16566,8 @@
             return out;
         }));
         formData.append("timeline_json", JSON.stringify(timelineForExport));
+        if (blankBase) formData.append("blank_base", "1");
+        if (tailPadSeconds >= 0.05) formData.append("tail_pad_seconds", tailPadSeconds.toFixed(3));
         exportTiming.prebake.main_lane_ms = Math.round(performance.now() - exportClock);
         if (window.EditingRuntime?.exportPayload) {
             // Chuỗi khung của vùng chuyển cảnh đi RIÊNG thành các phần file nhị phân, KHÔNG
