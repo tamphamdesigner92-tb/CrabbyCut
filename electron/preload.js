@@ -102,6 +102,21 @@ contextBridge.exposeInMainWorld('desktopEnv', {
       ipcRenderer.send('renderer-reply', { id, value });
     });
   },
+  /* CẦU NỐI TỰ ĐỘNG HOÁ (MCP) — xem electron/automation-bridge.js. `onAutomationCall` chỉ
+   * đăng ký MỘT handler (gọi lại thì thay handler cũ): renderer có đúng một bộ điều phối,
+   * và tải lại trang không được để handler cũ còn treo trả lời trùng. */
+  setAutomationEnabled: async (enabled) => ipcRenderer.invoke('automation-set-enabled', !!enabled),
+  onAutomationCall: (handler) => {
+    ipcRenderer.removeAllListeners('automation-call');
+    ipcRenderer.on('automation-call', async (_event, { id, method, params }) => {
+      try {
+        const result = await handler(method, params || {});
+        ipcRenderer.send('automation-reply', { id, ok: true, result: result === undefined ? null : result });
+      } catch (error) {
+        ipcRenderer.send('automation-reply', { id, ok: false, error: error?.message || String(error) });
+      }
+    });
+  },
   versions: {
     node: process.versions.node,
     chrome: process.versions.chrome,

@@ -639,9 +639,11 @@
                 return;
             }
             stopPolling();
-            state.busy = false;
+            /* `busy` tắt SAU khi finishJob ghi xong timeline: cầu nối tự động hoá coi
+             * "hết busy" là job đã xong hẳn — tắt trước thì nó báo xong khi phụ đề chưa có. */
             if (data.state === 'complete') await finishJob(data);
-            else if (data.state === 'failed') {
+            state.busy = false;
+            if (data.state === 'failed') {
                 state.lastError = data.error || data.message || _t('Tạo phụ đề thất bại.');
                 toast(state.lastError, 'error');
             }
@@ -1005,6 +1007,16 @@
     }
 
     window.AutoSubtitlePanel = {
+        /* Cầu nối tự động hoá: chạy đúng luồng nút "Tạo phụ đề", không cần mở panel.
+         * Tiến độ đọc ở `state` (busy, job, lastError). */
+        start: async ({ scope, language } = {}) => {
+            if (state.busy) throw new Error(_t('Đang tạo phụ đề — đợi lượt hiện tại xong.'));
+            if (SCOPES.some((s) => s.id === scope)) state.scope = scope;
+            if (LANGUAGES.some((l) => l.id === language)) state.language = language;
+            await createJob();
+            return state.jobId;
+        },
+        cancel: cancelJob,
         renderPaneHtml,
         bindPane,
         resetState,

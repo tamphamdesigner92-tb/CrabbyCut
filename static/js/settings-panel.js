@@ -479,6 +479,7 @@
         </section>
         <section class="set-sec"><h4>${_t('Nâng cao')}</h4>
             ${checkboxRowHtml(_t('Chế độ Nhà phát triển'), 'devMode', g.devMode, _t('Hiện overlay khung xương nhận diện ở bước Editing.'))}
+            ${checkboxRowHtml(_t('Cho phép Claude điều khiển (MCP)'), 'automationBridge', g.automationBridge, _t('Mở một cổng cục bộ có mã bảo vệ để MCP server CrabbyCut (thư mục mcp/) xem và chỉnh timeline. Chỉ chương trình trên máy này đọc được mã. Tắt là đóng cổng ngay.'))}
         </section>`;
     }
 
@@ -945,6 +946,7 @@
         'undoSteps': (el) => { draft.general.undoSteps = Number(el.value); return false; },
         'snapDefault': (el) => { draft.general.snapDefault = el.checked; return false; },
         'devMode': (el) => { draft.general.devMode = el.checked; return false; },
+        'automationBridge': (el) => { draft.general.automationBridge = el.checked; return false; },
         'language': (el) => { draft.general.language = el.value; return false; },
         'asEnabled': (el) => { draft.autoSave.enabled = el.checked; return false; },
         'intervalMin': (el) => { draft.autoSave.intervalMin = Number(el.value); return false; },

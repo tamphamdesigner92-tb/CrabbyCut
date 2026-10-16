@@ -15,6 +15,7 @@ const {
 const { registerRecentProjectIpc } = require('./recent-projects');
 const { runSetupWindow } = require('./setup-window');
 const { initUpdater, checkForUpdates } = require('./updater');
+const { createAutomationBridge } = require('./automation-bridge');
 const RuntimePaths = require('../scripts/runtime_paths.js');
 
 /* CHẾ ĐỘ THIẾT LẬP — bộ cài .exe gọi `CrabbyCut.exe --setup-runtime` rồi CHỜ (xem
@@ -565,6 +566,14 @@ ipcMain.handle('autosave-list', async (_event, { projectPath, suggestedName }) =
  * này. Thân handler nằm ở electron/recent-projects.js để test gọi được đúng mã chạy thật. */
 registerRecentProjectIpc(ipcMain, () => app.getPath('userData'));
 
+/* ---- CẦU NỐI TỰ ĐỘNG HOÁ (MCP) ----
+ * Tắt mặc định; renderer bật theo Cài đặt › Chung. Xem electron/automation-bridge.js. */
+const automationBridge = createAutomationBridge({
+  getWindow: () => mainWindow,
+  discoveryDir: path.join(RuntimePaths.appDataRoot(), 'automation'),
+  appInfo: () => ({ version: app.getVersion(), packaged: app.isPackaged, platform: process.platform }),
+});
+
 /* Kiểm tra bản mới do NGƯỜI DÙNG chủ động bấm (menu Cài đặt). Khác lượt tự kiểm lúc
  * khởi động ở chỗ `silent: false` — đã chủ động hỏi thì phải được trả lời, kể cả khi câu
  * trả lời là 'đang ở bản mới nhất'. */
@@ -646,6 +655,12 @@ ipcMain.handle('export-pick-output', async (_event, { suggestedName, ext, projec
   try {
     const extension = EXPORT_OUTPUT_KINDS[ext] ? ext : 'mp4';
     const kind = EXPORT_OUTPUT_KINDS[extension];
+    /* Cầu nối tự động hoá (MCP) đã chọn sẵn chỗ lưu qua kênh có token -> bỏ hộp thoại. Vé
+     * vẫn do MAIN ký như mọi lượt khác: renderer không tự chọn được đường dẫn ghi. */
+    const automationPath = automationBridge.takeExportOutput(extension);
+    if (automationPath) {
+      return { path: automationPath, ticket: crypto.createHmac('sha256', EXPORT_OUTPUT_SECRET).update(automationPath).digest('hex') };
+    }
     // CHỈ DÙNG CHO TEST (như CRAB_TEMP_DIR): bỏ hộp thoại gốc — CDP không bấm được nó.
     const testDir = process.env.CRAB_TEST_EXPORT_OUTPUT_DIR;
     if (testDir) {
@@ -1017,6 +1032,7 @@ ipcMain.handle('pick-editing-asset-folders', async () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  automationBridge.stop();
 });
 
 app.on('before-quit', (event) => {

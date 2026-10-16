@@ -1972,5 +1972,9 @@
   "Không nối được phần đuôi đen vào video nguồn.": "无法将黑色尾段追加到源视频。",
   "Nền khung xem trước": "预览背景",
   "Nền xanh nhấp nháy ở vùng trong suốt": "透明区域显示闪烁绿色背景",
-  "Tắt: nền đen như các ứng dụng dựng video thông thường. Bật: vùng không có hình hiện nền xanh nhấp nháy để dễ phát hiện lỗi lọt nền. Chỉ ảnh hưởng khung xem trước, bản xuất luôn là nền đen.": "关闭：与常见视频编辑软件一样使用黑色背景。开启：无画面区域闪烁绿色，便于发现背景漏出。仅影响预览，导出始终为黑色背景。"
+  "Tắt: nền đen như các ứng dụng dựng video thông thường. Bật: vùng không có hình hiện nền xanh nhấp nháy để dễ phát hiện lỗi lọt nền. Chỉ ảnh hưởng khung xem trước, bản xuất luôn là nền đen.": "关闭：与常见视频编辑软件一样使用黑色背景。开启：无画面区域闪烁绿色，便于发现背景漏出。仅影响预览，导出始终为黑色背景。",
+  "Cho phép Claude điều khiển (MCP)": "允许 Claude 控制应用 (MCP)",
+  "Mở một cổng cục bộ có mã bảo vệ để MCP server CrabbyCut (thư mục mcp/) xem và chỉnh timeline. Chỉ chương trình trên máy này đọc được mã. Tắt là đóng cổng ngay.": "开启一个受令牌保护的本地端口，让 CrabbyCut MCP 服务器（mcp/ 文件夹）读取并编辑时间线。只有本机上的程序能读取令牌。关闭后端口立即关闭。",
+  "Không bật được cầu nối điều khiển: {error}": "无法启动控制桥：{error}",
+  "Đang tạo phụ đề — đợi lượt hiện tại xong.": "正在生成字幕 — 请等待当前任务完成。"
 }
