@@ -2104,7 +2104,7 @@
   "Hình vẽ Pen": "Pen Path",
   "Khép kín đường vẽ (có màu tô)": "Close path (filled)",
   "Không tìm thấy khung xem trước để vẽ.": "No preview frame to draw on.",
-  "Pen Tool: bấm để thêm đỉnh · kéo để uốn cong · Shift khoá 45° · bấm đỉnh đầu để khép kín · Enter/Esc để kết thúc · Backspace xoá đỉnh vừa thêm": "Pen Tool: click to add vertex · drag to curve · Shift locks 45° · click first vertex to close · Enter/Esc to finish · Backspace removes last vertex",
+  "Pen Tool: bấm để thêm đỉnh · kéo để uốn cong · Alt tách tay cầm · Shift khoá 45° · bấm đỉnh đầu để khép kín · Enter/Esc để kết thúc · Backspace xoá đỉnh vừa thêm": "Pen Tool: click to add vertex · drag to curve · Alt splits handles · Shift locks 45° · click first vertex to close · Enter/Esc to finish · Backspace removes last vertex",
   "Pen Tool đang bật — vẽ trên khung xem trước.": "Pen Tool on — draw on the preview.",
   "Đã thoát Pen Tool.": "Exited Pen Tool.",
   "Đã tạo hình khép kín từ Pen Tool.": "Created a closed shape with Pen Tool.",

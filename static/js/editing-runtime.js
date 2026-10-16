@@ -3448,7 +3448,7 @@
         overlay.id = 'editingPenOverlay';
         overlay.className = 'editing-pen-overlay';
         overlay.innerHTML = `<svg class="editing-pen-svg" xmlns="http://www.w3.org/2000/svg"></svg>
-            <div class="editing-pen-hint">${_t('Pen Tool: bấm để thêm đỉnh · kéo để uốn cong · Shift khoá 45° · bấm đỉnh đầu để khép kín · Enter/Esc để kết thúc · Backspace xoá đỉnh vừa thêm')}</div>`;
+            <div class="editing-pen-hint">${_t('Pen Tool: bấm để thêm đỉnh · kéo để uốn cong · Alt tách tay cầm · Shift khoá 45° · bấm đỉnh đầu để khép kín · Enter/Esc để kết thúc · Backspace xoá đỉnh vừa thêm')}</div>`;
         shell.appendChild(overlay);
         penSession = { points: [], drag: null, hover: null, closing: false, overlay };
         overlay.addEventListener('mousedown', onPenMouseDown);
@@ -3539,6 +3539,25 @@
         return Math.hypot(event.clientX - fx, event.clientY - fy) <= 9;
     }
 
+    function penNearPoint(event, metrics, p, radius = 7) {
+        const x = metrics.originX + metrics.frameW / 2 + p.x * metrics.previewScale;
+        const y = metrics.originY + metrics.frameH / 2 + p.y * metrics.previewScale;
+        return Math.hypot(event.clientX - x, event.clientY - y) <= radius;
+    }
+
+    // Đầu tay cầm (vào/ra) của đỉnh cuối dưới con trỏ, hoặc null.
+    function penHandleHit(event, metrics) {
+        const pts = penSession?.points || [];
+        const index = pts.length - 1;
+        const v = pts[index];
+        if (!v) return null;
+        for (const [kind, hx, hy] of [['out', v.ox, v.oy], ['in', v.ix, v.iy]]) {
+            if (!hx && !hy) continue;
+            if (penNearPoint(event, metrics, { x: v.x + hx, y: v.y + hy })) return { index, kind };
+        }
+        return null;
+    }
+
     function onPenHover(event) {
         if (!penSession || penSession.drag) return;
         const metrics = previewFrameMetrics();
@@ -3558,6 +3577,22 @@
         const metrics = previewFrameMetrics();
         if (!metrics) return;
         const pts = penSession.points;
+        // Alt + bấm vào ĐẦU tay cầm của đỉnh cuối: kéo riêng tay cầm đó (như Illustrator).
+        const handleHit = event.altKey ? penHandleHit(event, metrics) : null;
+        if (handleHit) {
+            penSession.drag = { index: handleHit.index, handle: handleHit.kind, startX: event.clientX, startY: event.clientY, moved: false };
+            window.addEventListener('mousemove', onPenDragMove, true);
+            window.addEventListener('mouseup', onPenDragEnd, true);
+            drawPenOverlay(metrics);
+            return;
+        }
+        // Alt + bấm vào chính đỉnh cuối: bỏ tay cầm ra -> đoạn kế tiếp đi thẳng (góc nhọn).
+        if (event.altKey && pts.length && penNearPoint(event, metrics, pts[pts.length - 1])) {
+            const last = pts[pts.length - 1];
+            last.ox = 0; last.oy = 0;
+            drawPenOverlay(metrics);
+            return;
+        }
         if (penNearFirst(event, metrics)) {
             // Khép kín: kéo tiếp lúc này uốn cong đoạn khép (chỉnh tay cầm của đỉnh đầu).
             penSession.closing = true;
@@ -3580,6 +3615,7 @@
         const metrics = previewFrameMetrics();
         if (!metrics) return;
         const drag = penSession.drag;
+        drag.lastPointer = { clientX: event.clientX, clientY: event.clientY, shiftKey: event.shiftKey };
         if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 3) return;
         drag.moved = true;
         const v = penSession.points[drag.index];
@@ -3587,9 +3623,17 @@
         if (event.shiftKey) h = penConstrain(v, h);
         const dx = h.x - v.x;
         const dy = h.y - v.y;
-        if (penSession.closing && drag.index === 0) {
+        if (drag.handle) {
+            // Alt+kéo một đầu tay cầm: chỉ tay cầm đó đổi, tay bên kia đứng yên.
+            if (drag.handle === 'in') { v.ix = dx; v.iy = dy; } else { v.ox = dx; v.oy = dy; }
+        } else if (penSession.closing && drag.index === 0) {
             // Kéo ở đỉnh đầu khi khép: hướng kéo là hướng ĐI VÀO đỉnh đầu (đoạn khép kết thúc ở đó).
-            v.ix = -dx; v.iy = -dy; v.ox = dx; v.oy = dy;
+            // Giữ Alt: chỉ tay cầm vào (đoạn khép) đổi, đoạn đầu tiên giữ nguyên.
+            v.ix = -dx; v.iy = -dy;
+            if (!event.altKey) { v.ox = dx; v.oy = dy; }
+        } else if (event.altKey) {
+            // Đang kéo ra tay cầm mà nhấn Alt: tách — chỉ tay cầm ra theo chuột, tay vào đứng yên.
+            v.ox = dx; v.oy = dy;
         } else {
             v.ox = dx; v.oy = dy; v.ix = -dx; v.iy = -dy;
         }
@@ -3693,6 +3737,15 @@
         if (key === 'Enter' || key === 'Escape') { finishPenTool(false); return swallow(); }
         if (key === 'Backspace' || key === 'Delete') { penRemoveLastPoint(); return swallow(); }
         if ((event.ctrlKey || event.metaKey) && key.toLowerCase() === 'z') { penRemoveLastPoint(); return swallow(); }
+        if (key === 'Alt') {
+            // Không để Alt đưa focus lên thanh menu; nhấn Alt giữa cú kéo tay cầm -> tách ngay.
+            event.preventDefault();
+            const drag = penSession.drag;
+            if (drag?.moved && drag.lastPointer) {
+                onPenDragMove({ ...drag.lastPointer, altKey: true, preventDefault() {} });
+            }
+            return true;
+        }
         if (key === 'Shift') {
             // Nhấn/nhả Shift khi đang rê: vẽ lại dây cao su theo trạng thái khoá mới.
             return false;
@@ -16021,7 +16074,8 @@
         const ny = sy + delta.y;
         v[kx] = nx;
         v[ky] = ny;
-        if (!previewBoxDrag.convertVertex) {
+        // Alt lúc bấm HOẶC nhấn Alt giữa chừng cú kéo -> tách tay cầm (Illustrator cho cả hai).
+        if (!previewBoxDrag.convertVertex && !event.altKey) {
             const otherLen = Math.hypot(v[ox], v[oy]);
             const startLen = Math.hypot(sx, sy);
             const cross = Math.abs((sx * v[oy]) - (sy * v[ox]));
@@ -22891,7 +22945,7 @@
             .editing-pen-svg .pen-anchor { fill: #fff; stroke: #3b9cff; stroke-width: 1.5; }
             .editing-pen-svg .pen-anchor.is-first { fill: #3b9cff; }
             .editing-pen-svg .pen-anchor.is-hot { fill: #ffd34d; stroke: #1b1b1b; }
-            .editing-pen-hint { position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); width: max-content; max-width: calc(100% - 16px); padding: 3px 8px; border-radius: 5px; background: rgba(0,0,0,0.6); color: #fff; font-size: 10px; line-height: 1.35; text-align: center; pointer-events: none; opacity: 0.85; }
+            .editing-pen-hint { position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); width: max-content; max-width: calc(100% - 16px); padding: 3px 8px; border-radius: 5px; background: rgba(0,0,0,0.6); color: #fff; font-size: 10px; line-height: 1.35; text-align: center; pointer-events: none; opacity: 0.85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             .editing-selection-handle.path-vertex { width: 9px; height: 9px; border-radius: 1px; background: #fff; box-shadow: 0 0 0 1.5px #3b9cff; cursor: move; z-index: 2; }
             .editing-selection-handle.path-bezier-handle { width: 8px; height: 8px; border-radius: 50%; background: #3b9cff; box-shadow: 0 0 0 1.5px #fff; cursor: crosshair; z-index: 3; }
             .editing-selection-box.is-path-editing { border-style: dashed; border-color: rgba(59,156,255,0.55); box-shadow: none; }
@@ -24445,11 +24499,17 @@
         // Nhấn/nhả Shift GIỮA cú kéo phải đổi kết quả ngay tại chỗ (người dùng hay bấm Shift
         // sau khi đã kéo được một đoạn). Phát lại cú kéo bằng toạ độ chuột cuối cùng.
         const replayPreviewBoxDragForShift = (event) => {
-            if (event.key !== 'Shift' || !previewBoxDrag?.lastPointer) return;
+            if (!previewBoxDrag?.lastPointer) return;
+            // Alt chỉ có nghĩa với tay cầm Bezier (tách/ghép lại hai tay cầm giữa cú kéo).
+            const altHandle = event.key === 'Alt' && /^path-(in|out):/.test(previewBoxDrag.mode || '');
+            if (event.key !== 'Shift' && !altHandle) return;
+            // Nhả Alt trên Windows sẽ đưa focus lên thanh menu -> chặn khi đang kéo tay cầm.
+            if (altHandle) event.preventDefault();
             handlePreviewBoxDrag({
                 clientX: previewBoxDrag.lastPointer.clientX,
                 clientY: previewBoxDrag.lastPointer.clientY,
-                shiftKey: event.type === 'keydown',
+                shiftKey: event.key === 'Shift' ? event.type === 'keydown' : !!event.shiftKey,
+                altKey: event.key === 'Alt' ? event.type === 'keydown' : !!event.altKey,
                 preventDefault() {},
                 stopPropagation() {},
                 stopImmediatePropagation() {},

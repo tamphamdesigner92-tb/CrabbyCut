@@ -1813,7 +1813,7 @@
   "Hình vẽ Pen": "钢笔路径",
   "Khép kín đường vẽ (có màu tô)": "闭合路径（填充）",
   "Không tìm thấy khung xem trước để vẽ.": "找不到可绘制的预览画面。",
-  "Pen Tool: bấm để thêm đỉnh · kéo để uốn cong · Shift khoá 45° · bấm đỉnh đầu để khép kín · Enter/Esc để kết thúc · Backspace xoá đỉnh vừa thêm": "钢笔工具：点击添加顶点 · 拖动生成曲线 · Shift 锁定45° · 点击首个顶点闭合 · Enter/Esc 结束 · Backspace 删除上一个顶点",
+  "Pen Tool: bấm để thêm đỉnh · kéo để uốn cong · Alt tách tay cầm · Shift khoá 45° · bấm đỉnh đầu để khép kín · Enter/Esc để kết thúc · Backspace xoá đỉnh vừa thêm": "钢笔工具：点击添加顶点 · 拖动生成曲线 · Alt 拆分手柄 · Shift 锁定45° · 点击首个顶点闭合 · Enter/Esc 结束 · Backspace 删除上一个顶点",
   "Pen Tool đang bật — vẽ trên khung xem trước.": "钢笔工具已开启——在预览画面上绘制。",
   "Đã thoát Pen Tool.": "已退出钢笔工具。",
   "Đã tạo hình khép kín từ Pen Tool.": "已用钢笔工具创建闭合形状。",
