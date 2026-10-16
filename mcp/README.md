@@ -77,7 +77,7 @@ Mặc định server dùng bản nào bật cầu nối gần nhất. Muốn ch�
 
 `crabbycut_status` liệt kê mọi bản đang chạy.
 
-## Tool (32)
+## Tool (34)
 
 Claude có hai cách làm việc. **Tool theo tính năng** gọi thẳng hàm của app: nhanh, chính xác, mỗi lệnh là một bước hoàn tác. **Tool giao diện** bấm, gõ và kéo như người dùng thật, dùng cho mọi thứ chưa có tool riêng.
 
@@ -109,11 +109,71 @@ Claude có hai cách làm việc. **Tool theo tính năng** gọi thẳng hàm c
 
 | Tool | Việc nó làm |
 |---|---|
-| `crabbycut_update_block` | Vị trí, tỉ lệ, xoay, độ mờ, lật, âm lượng, tốc độ, thời điểm, độ dài, nội dung chữ, kiểu chữ |
+| `crabbycut_update_block` | Vị trí, tỉ lệ, xoay, độ mờ, lật, âm lượng, tốc độ, thời điểm, độ dài, nội dung chữ, kiểu chữ, **keyframe** |
 | `crabbycut_apply_text_preset` | Áp kiểu chữ (`p1`…) và/hoặc hiệu ứng chữ (`fx1`…) |
 | `crabbycut_set_animation` | Hoạt ảnh vào/ra, hoặc combo |
 | `crabbycut_set_transition` | Chuyển cảnh giữa hai clip lane chính hoặc hai block overlay liền nhau |
 | `crabbycut_set_color` | LUT, cường độ LUT, thông số màu (`basic.exposure`, `effects.vignette`…) |
+
+#### Keyframe
+
+`crabbycut_update_block` (và từng mục của `crabbycut_add_media_batch`) nhận `keyframes`, cùng mô hình lưu của app:
+
+```json
+{
+  "item_id": "item_…",
+  "keyframes": {
+    "position": [{ "t": 0, "x": -600, "y": 0 }, { "t": 1.5, "x": 0, "y": 0, "e": "ease-out" }],
+    "scale":    [{ "t": 0, "v": 60 }, { "t": 1.5, "v": 100 }],
+    "opacity":  [{ "t": 0, "v": 0, "e": "linear" }, { "t": 0.5, "v": 100 }],
+    "basic.exposure": [{ "t": 0, "v": -30 }, { "t": 3, "v": 0 }]
+  }
+}
+```
+
+- `t`: giây tính từ đầu block (`keyframe_time: "timeline"` để dùng giây trên sequence). Ngoài block là lỗi.
+- `v`: px với `position_x/y`, % với `scale`/`opacity`/`volume`, độ với `rotation`, -100…100 với phần lớn thông số màu. `position` ghi cả hai trục một lần (`x`, `y` hoặc `v: [x, y]`); ghi lẻ một trục thì app tự chèn mốc cho trục kia để X/Y luôn trùng mốc (như nút ◆ Vị trí).
+- `e`: easing của đoạn RỜI mốc này — `linear`, `ease-in`, `ease-out`, `ease-in-out` (mặc định), `back`, `spring`, `bounce`.
+- Thông số màu keyframe được: `basic.exposure/contrast/saturation/temperature/tint`, `wheels.{lift,gamma,gain}.{r,g,b}`, `tone.*`, `lut.intensity`, `effects.blur`, `effects.vignette` (viết `basic.exposure` hay `adj.basic.exposure` đều được).
+- `keyframe_mode`: `merge` (mặc định) chèn/ghi đè từng mốc; `replace` thay trọn danh sách của field được nêu — `[]` là xoá keyframe field đó.
+
+### Lệnh gộp (một lượt gọi, một bước hoàn tác)
+
+Mỗi lệnh lẻ là một lượt HTTP + IPC + một ảnh chụp trạng thái cho Hoàn tác + vài lượt vẽ lại; đưa 20 ảnh kèm keyframe bằng lệnh lẻ là hàng chục lượt gọi và vượt trần Hoàn tác (mặc định 20 bước). Hai lệnh dưới chạy cả lô trong **một bước Hoàn tác và một lượt vẽ**, chờ tới 5 phút.
+
+| Tool | Việc nó làm |
+|---|---|
+| `crabbycut_add_media_batch` | Đặt nhiều ảnh/video/âm thanh lên timeline: nhập mọi đường dẫn trong một lượt (tệp đã có trong dự án thì dùng lại), mỗi mục kèm thời điểm, độ dài, track, cắt nguồn, transform, keyframe, hoạt ảnh, chuyển cảnh, màu, âm lượng |
+| `crabbycut_batch` | Chạy tuần tự nhiều lệnh sửa bất kỳ (`add_text`, `update_block`, `set_animation`, `set_color`, `set_transition`, `split`, `add_asset`, `import_media`, `add_media_batch`…), tham chiếu kết quả bước trước bằng `"$<chỉ số>.<đường dẫn>"` |
+
+```json
+{
+  "mode": "link",
+  "start": 0,
+  "gap": 0,
+  "defaults": { "duration": 3, "animation": { "combo": "pop_fade" }, "transition": { "type": "fade", "duration": 0.5 } },
+  "items": [
+    { "path": "D:/anh/01.jpg", "keyframes": { "scale": [{ "t": 0, "v": 100 }, { "t": 3, "v": 115 }] } },
+    { "path": "D:/anh/02.jpg", "keyframes": { "position": [{ "t": 0, "x": -80, "y": 0 }, { "t": 3, "x": 80, "y": 0 }] } },
+    { "path": "D:/nhac/nen.mp3", "start": 0, "duration": 6, "volume": 60 }
+  ]
+}
+```
+
+Mục không có `start` nối ngay sau mục trước (+ `gap`); mục đầu bắt đầu ở `start` của lô hoặc playhead. `defaults` được gộp vào từng mục (object con gộp một tầng, giá trị của mục thắng). Chuyển cảnh được đặt sau khi mọi block đã vào chỗ, tới block kề phải trên cùng track. Kết quả: `[{ index, item_id, asset_id, track_id, timeline_start, duration, error? }]`.
+
+```json
+{
+  "ops": [
+    { "tool": "add_text", "args": { "text": "Chào mừng", "start": 1, "duration": 4 } },
+    { "tool": "apply_text_preset", "args": { "item_id": "$0.item_id", "style_preset": "p3" } },
+    { "tool": "update_block", "args": { "item_id": "$0.item_id",
+      "keyframes": { "position": [{ "t": 0, "x": 0, "y": 300 }, { "t": 0.8, "x": 0, "y": 0, "e": "back" }] } } }
+  ]
+}
+```
+
+`on_error`: `abort` (mặc định) — một bước lỗi là hoàn nguyên cả lô, không để lại bước Hoàn tác nào; `continue` — chỉ bước lỗi bị quay lui, kết quả ghi `error` cho bước đó. Lệnh giao diện (`ui_*`), chụp màn hình và job không chạy trong lô.
 
 ### Việc chạy lâu (job)
 
@@ -144,10 +204,13 @@ Chuột và phím đi qua `webContents.sendInputEvent`, nên app nhận sự ki�
 - **Cửa sổ thu nhỏ:** thao tác vẫn chạy nhưng ảnh chụp là khung cũ (`stale`). Gọi `crabbycut_screenshot` với `restore: true`.
 - **Magic Fill** cần kịch bản đã nạp; nạp kịch bản bằng tool giao diện. Magic Fill và xuất video không huỷ được giữa chừng.
 - Lệnh chỉnh sửa bị lỗi tự quay lui, không để lại thay đổi dở dang hay bước hoàn tác rỗng.
+- Lệnh gộp: tối đa 500 mục/lệnh mỗi lô, thân yêu cầu tối đa 1 MB.
 
 ## Thêm tool mới
 
 1. Thêm lệnh vào `METHODS` trong `static/js/automation-bridge.js`, gọi hàm sẵn có của app. Hàm nội bộ của `editing-runtime.js` thì mở thêm ở `EditingRuntime.automation`.
 2. Thêm mục vào `TOOLS` trong `mcp/crabbycut-mcp.js`, gọi `rpc('<tên lệnh>', args)`.
+3. Lệnh sửa timeline bọc trong `asOneUndoStep` (một bước hoàn tác + treo vẽ lại, tự quay lui khi lỗi). Muốn dùng được trong `crabbycut_batch` thì thêm tên vào `BATCHABLE`.
+4. Lệnh có thể chạy quá 30 s thì thêm tên vào `LONG_RPC_TIMEOUT_MS` (`electron/automation-bridge.js`) và `LONG_METHODS` (`mcp/crabbycut-mcp.js`).
 
 Lệnh không cần đến timeline (chụp màn hình, chuột/phím) thì đặt ở `MAIN_METHODS` trong `electron/automation-bridge.js`.

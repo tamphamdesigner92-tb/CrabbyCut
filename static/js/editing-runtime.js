@@ -231,6 +231,53 @@
         };
     }
 
+    /* Như beginHistoryBatch nhưng KHÔNG ghi mốc: dùng khi mốc của thao tác đã có sẵn trên
+     * undoStack (cầu nối tự động hoá: nhập tệp đã tự ghi một mốc, phần thêm block theo sau
+     * phải nhập chung vào mốc đó thay vì đẻ thêm bước Hoàn tác thứ hai). */
+    function suspendHistory() {
+        historySuspended += 1;
+        let ended = false;
+        return function resumeHistory() {
+            if (ended) return;
+            ended = true;
+            historySuspended = Math.max(0, historySuspended - 1);
+        };
+    }
+
+    /* ---- TREO VẼ LẠI (cầu nối tự động hoá: lệnh gộp) ----
+     * Mỗi hàm thao tác (addItemForAsset, selectEditingItem, …) tự gọi renderAll() — đúng khi
+     * người dùng bấm từng cái, nhưng một lô 20 block thành 40+ lượt dựng lại timeline + preview.
+     * Trong lúc treo, renderAll / renderEditingTimeline / renderPreviewOverlays /
+     * updateTimelineLayout / updateSequencePreviewTransform / renderEditPanel chỉ ĐÁNH DẤU bẩn;
+     * nhả lượt treo ngoài cùng thì vẽ đúng một lần. Bộ đếm (lồng được), nơi gọi PHẢI
+     * try/finally — quên nhả là app đứng hình. */
+    let renderSuspendDepth = 0;
+    const renderDirty = { all: false, panel: false };
+    // Số lượt renderAll THỰC SỰ chạy — test đếm để chặn hồi quy "một lô = một lượt vẽ".
+    let renderAllRuns = 0;
+
+    function renderGated(kind) {
+        if (renderSuspendDepth <= 0) return false;
+        renderDirty[kind] = true;
+        return true;
+    }
+
+    function suspendRender() {
+        renderSuspendDepth += 1;
+        let released = false;
+        return function releaseRender() {
+            if (released) return;
+            released = true;
+            renderSuspendDepth = Math.max(0, renderSuspendDepth - 1);
+            if (renderSuspendDepth > 0) return;
+            const { all, panel } = renderDirty;
+            renderDirty.all = false;
+            renderDirty.panel = false;
+            if (panel) renderEditPanel();
+            if (all || panel) renderAll();
+        };
+    }
+
     function clamp(value, min, max) {
         const parsed = Number(value);
         if (!Number.isFinite(parsed)) return min;
@@ -1028,7 +1075,19 @@
     function addItemForAsset(asset, preferredType = null, placement = null, trim = null) {
         const type = mediaItemTypeFor(asset, preferredType);
         const trimSpan = trim && trim.end > trim.start ? trim.end - trim.start : 0;
-        const { start, duration, track } = resolveNewItemPlacement(type, trimSpan || defaultItemDuration(type, asset), placement);
+        /* `placement.duration` (cầu nối tự động hoá): thời lượng muốn có ngay lúc chọn lane —
+         * đặt block mặc định 5 s rồi mới kéo dài thì có thể đè block kế bên trên cùng lane.
+         * Video không được dài quá phần nguồn còn lại sau điểm vào. */
+        let wantDuration = trimSpan || defaultItemDuration(type, asset);
+        const askedDuration = Number(placement?.duration);
+        if (Number.isFinite(askedDuration) && askedDuration > 0) {
+            const isVideo = asset?.type === 'video' || asset?.type === 'media_video' || asset?.type === 'audio';
+            const sourceLeft = isVideo && Number(asset?.duration) > 0
+                ? Number(asset.duration) - (trimSpan ? Math.max(0, trim.start) : 0)
+                : Infinity;
+            wantDuration = Math.min(askedDuration, trimSpan || Infinity, Math.max(0.2, sourceLeft));
+        }
+        const { start, duration, track } = resolveNewItemPlacement(type, wantDuration, placement);
         const item = {
             id: nextId('item'),
             type,
@@ -4544,6 +4603,8 @@
     }
 
     function renderAll() {
+        if (renderGated('all')) return;
+        renderAllRuns += 1;
         syncOverlayOnlyExportButton();
         updateEditingStatus();
         refreshAdjustLayerCount();
@@ -5352,6 +5413,7 @@
 
     function renderEditingTimeline() {
         if (currentMode !== 'FINAL' || currentStepId !== 'step4') return;
+        if (renderGated('all')) return;
         // Chốt lề một lần cho cả lượt dựng (xem timelineXPadLock). Chỉ chốt khi hàm của
         // index.html có mặt — không có thì timelineX vốn không đọc DOM.
         const lockPad = timelineXPadLock === null && typeof getTimelineSidePaddingPx === 'function';
@@ -17297,6 +17359,7 @@
     }
 
     function renderPreviewOverlays() {
+        if (renderGated('all')) return;
         const root = ensurePreviewOverlayRoot();
         if (!root) return;
         const active = currentMode === 'FINAL' && currentStepId === 'step4';
@@ -19649,6 +19712,7 @@
     }
 
     function renderEditPanel() {
+        if (renderGated('panel')) return;
         // đặt ở đầu: thân panel dựng lại xong thì gọi lần nữa ở cuối hàm cũng được, nhưng
         // trạng thái cuộn của DẢI TAB không đổi theo nội dung nên một lượt là đủ.
         setTimeout(syncEditTabsOverflow, 0);
@@ -24906,6 +24970,7 @@
         if (!baseUpdateTimelineLayout && typeof updateTimelineLayout === 'function') {
             baseUpdateTimelineLayout = updateTimelineLayout;
             updateTimelineLayout = function patchedUpdateTimelineLayout() {
+                if (renderGated('all')) return;
                 const isEditingTimeline = currentMode === 'FINAL' && currentStepId === 'step4';
                 if (!isEditingTimeline) restoreStandardTimeline();
                 baseUpdateTimelineLayout();
@@ -24917,6 +24982,7 @@
         if (!baseUpdateSequencePreviewTransform && typeof updateSequencePreviewTransform === 'function') {
             baseUpdateSequencePreviewTransform = updateSequencePreviewTransform;
             updateSequencePreviewTransform = function patchedUpdateSequencePreviewTransform() {
+                if (renderGated('all')) return;
                 baseUpdateSequencePreviewTransform();
                 renderPreviewOverlays();
             };
@@ -27416,6 +27482,14 @@
             textEffectPatch,
             textStylePresets: () => TEXT_STYLE_PRESETS,
             textEffectNonePatch: () => ({ ...TEXT_EFFECT_NONE_PATCH }),
+            // Lệnh gộp: một bước Hoàn tác + một lượt vẽ cho cả lô.
+            suspendRender,
+            suspendHistory,
+            renderStats: () => ({ renderAll: renderAllRuns, suspended: renderSuspendDepth }),
+            // Keyframe qua MCP: cùng hàm chèn/gộp mốc mà nút ◆ dùng.
+            upsertKeyframe,
+            normalizeVolumePercent,
+            mainClipSequenceSpans,
         },
         getState: () => ({
             editingTracks,
