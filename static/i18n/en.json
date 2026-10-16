@@ -2100,5 +2100,16 @@
   "Nhóm 7 — Mờ dần / Hoà tan": "Group 7 — Fade / Dissolve",
   "Nhóm 8 — Chớp sáng": "Group 8 — Flash",
   "Nhóm 9 — Lấp lánh": "Group 9 — Sparkle",
-  "Đang mở dự án…": "Opening project…"
+  "Đang mở dự án…": "Opening project…",
+  "Hình vẽ Pen": "Pen Path",
+  "Khép kín đường vẽ (có màu tô)": "Close path (filled)",
+  "Kéo để dời đỉnh · Alt+kéo để uốn cong": "Drag to move vertex · Alt+drag to bend",
+  "Không tìm thấy khung xem trước để vẽ.": "No preview frame to draw on.",
+  "Pen Tool: bấm để thêm đỉnh · kéo để uốn cong · Shift khoá 45° · bấm đỉnh đầu để khép kín · Enter/Esc để kết thúc · Backspace xoá đỉnh vừa thêm": "Pen Tool: click to add vertex · drag to curve · Shift locks 45° · click first vertex to close · Enter/Esc to finish · Backspace removes last vertex",
+  "Pen Tool đang bật — vẽ trên khung xem trước.": "Pen Tool on — draw on the preview.",
+  "Đã thoát Pen Tool.": "Exited Pen Tool.",
+  "Đã tạo hình khép kín từ Pen Tool.": "Created a closed shape with Pen Tool.",
+  "Đã tạo đường vẽ từ Pen Tool.": "Created a path with Pen Tool.",
+  "Pen Tool — vẽ hình tự do trên khung xem trước (như After Effects)": "Pen Tool — draw free-form shapes on the preview (like After Effects)",
+  "Pen Tool": "Pen Tool"
 }

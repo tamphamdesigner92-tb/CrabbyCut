@@ -2059,7 +2059,7 @@
 
     function normalizeShapeStyle(style = {}) {
         const source = { ...defaultShapeStyle(), ...(style || {}) };
-        const allowed = new Set(['rectangle', 'square', 'circle', 'triangle', 'trapezoid', 'polygon', 'star', 'line']);
+        const allowed = new Set(['rectangle', 'square', 'circle', 'triangle', 'trapezoid', 'polygon', 'star', 'line', 'path']);
         return {
             shape_type: allowed.has(source.shape_type) ? source.shape_type : 'rectangle',
             width: clamp(source.width, 20, 4000),
@@ -2073,7 +2073,107 @@
             inner_corner_radius: clamp(source.inner_corner_radius ?? source.corner_radius * 0.5, 0, 500),
             sides: Math.round(clamp(source.sides, 3, MAX_POLYGON_SIDES)),
             points: Math.round(clamp(source.points, 3, MAX_STAR_POINTS)),
+            path_points: normalizePathPoints(source.path_points),
+            path_closed: source.path_closed !== false,
         };
+    }
+
+    /* HÌNH VẼ BẰNG PEN TOOL (shape_type 'path') — kiểu shape layer của After Effects.
+     *
+     * Mỗi đỉnh: { x, y, ix, iy, ox, oy }. (x,y) là vị trí đỉnh theo TỈ LỆ của box W×H
+     * (0..1, đường cong luôn nằm khít trong box); (ix,iy)/(ox,oy) là tay cầm Bezier vào/ra,
+     * tính TƯƠNG ĐỐI so với đỉnh, cùng đơn vị tỉ lệ. Lưu theo tỉ lệ để kéo cạnh / gõ W-H /
+     * đổi cỡ Sequence co giãn hình y như các shape khác mà không phải đụng vào điểm nào. */
+    const MAX_PATH_POINTS = 500;
+    function normalizePathPoints(list) {
+        if (!Array.isArray(list)) return [];
+        const num = (v, lo, hi) => {
+            const n = Number(v);
+            return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : 0;
+        };
+        return list.slice(0, MAX_PATH_POINTS)
+            .filter((p) => p && Number.isFinite(Number(p.x)) && Number.isFinite(Number(p.y)))
+            .map((p) => ({
+                x: num(p.x, -1, 2), y: num(p.y, -1, 2),
+                ix: num(p.ix, -10, 10), iy: num(p.iy, -10, 10),
+                ox: num(p.ox, -10, 10), oy: num(p.oy, -10, 10),
+            }));
+    }
+
+    // Đường hở (Đường kẻ, hoặc path Pen chưa khép) không có ruột để tô và viền chỉ vẽ "ở giữa".
+    function shapeIsOpen(style) {
+        return style.shape_type === 'line' || (style.shape_type === 'path' && !style.path_closed);
+    }
+
+    /* Điểm trên một đoạn Bezier bậc 3 — dùng để đo khung bao THẬT của đường cong (tay cầm
+     * có thể thò ra ngoài, nhưng phần vẽ ra thì không), lấy mẫu là đủ chính xác cho việc
+     * đặt box. */
+    function cubicAt(a, c1, c2, b, t) {
+        const u = 1 - t;
+        return [
+            u * u * u * a[0] + 3 * u * u * t * c1[0] + 3 * u * t * t * c2[0] + t * t * t * b[0],
+            u * u * u * a[1] + 3 * u * u * t * c1[1] + 3 * u * t * t * c2[1] + t * t * t * b[1],
+        ];
+    }
+
+    /* Nhận các đỉnh theo PIXEL TUYỆT ĐỐI ({x,y,ix,iy,ox,oy}, tay cầm tương đối) -> trả box
+     * bao khít đường cong (tối thiểu 20px mỗi chiều như mọi shape) + tâm box + các đỉnh đã
+     * quy về tỉ lệ của box đó. Dùng chung cho lúc vẽ xong và lúc kéo một đỉnh. */
+    function fitPathToBox(points, closed) {
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        const grow = ([x, y]) => {
+            minX = Math.min(minX, x); minY = Math.min(minY, y);
+            maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+        };
+        const segCount = closed ? points.length : points.length - 1;
+        points.forEach((p) => grow([p.x, p.y]));
+        for (let i = 0; i < segCount; i += 1) {
+            const a = points[i];
+            const b = points[(i + 1) % points.length];
+            if (!a.ox && !a.oy && !b.ix && !b.iy) continue;
+            const pa = [a.x, a.y];
+            const c1 = [a.x + a.ox, a.y + a.oy];
+            const c2 = [b.x + b.ix, b.y + b.iy];
+            const pb = [b.x, b.y];
+            for (let k = 1; k < 24; k += 1) grow(cubicAt(pa, c1, c2, pb, k / 24));
+        }
+        const cx = (minX + maxX) / 2;
+        const cy = (minY + maxY) / 2;
+        const width = Math.max(20, maxX - minX);
+        const height = Math.max(20, maxY - minY);
+        return {
+            cx, cy, width, height,
+            points: points.map((p) => ({
+                x: (p.x - cx) / width + 0.5, y: (p.y - cy) / height + 0.5,
+                ix: p.ix / width, iy: p.iy / height, ox: p.ox / width, oy: p.oy / height,
+            })),
+        };
+    }
+
+    // Đỉnh đã chuẩn hoá -> pixel trong box W×H có tâm ở (0,0). Nghịch đảo của fitPathToBox.
+    function pathPointsToLocalPx(style) {
+        const W = style.width;
+        const H = style.height;
+        return style.path_points.map((p) => ({
+            x: (p.x - 0.5) * W, y: (p.y - 0.5) * H,
+            ix: p.ix * W, iy: p.iy * H, ox: p.ox * W, oy: p.oy * H,
+        }));
+    }
+
+    // Chuỗi `d` SVG cho path Pen, đặt trong hình chữ nhật [left,top,rw,rh].
+    function pathShapeD(style, left, top, rw, rh) {
+        const pts = style.path_points;
+        if (pts.length < 2) return '';
+        const X = (v) => (left + v * rw).toFixed(2);
+        const Y = (v) => (top + v * rh).toFixed(2);
+        const seg = (a, b) => {
+            if (!a.ox && !a.oy && !b.ix && !b.iy) return ` L ${X(b.x)} ${Y(b.y)}`;
+            return ` C ${X(a.x + a.ox)} ${Y(a.y + a.oy)} ${X(b.x + b.ix)} ${Y(b.y + b.iy)} ${X(b.x)} ${Y(b.y)}`;
+        };
+        let d = `M ${X(pts[0].x)} ${Y(pts[0].y)}`;
+        for (let i = 1; i < pts.length; i += 1) d += seg(pts[i - 1], pts[i]);
+        if (style.path_closed) d += `${seg(pts[pts.length - 1], pts[0])} Z`;
+        return d;
     }
 
     function hexLabel(color) {
@@ -2134,12 +2234,15 @@
             ['polygon', _t('Đa giác')],
             ['star', _t('Ngôi sao')],
             ['line', _t('Đường thẳng')],
+            ['path', _t('Hình vẽ Pen')],
         ];
         return shapeOptionsCache;
     }
 
     function shapeOptionsHtml(selectedType) {
+        // 'path' chỉ có nghĩa khi block đã mang sẵn các đỉnh do Pen Tool vẽ -> không mời chọn ở hình khác.
         return shapeOptionsList()
+            .filter(([value]) => value !== 'path' || selectedType === 'path')
             .map(([value, label]) => `<option value="${value}" ${value === selectedType ? 'selected' : ''}>${label}</option>`)
             .join('');
     }
@@ -3258,6 +3361,305 @@
         setEditingStatusText(wasTemplate
             ? _t('Đã đổi sang mẫu "{name}".', { name: tpl.name })
             : _t('Đã chuyển block chữ sang mẫu "{name}".', { name: tpl.name }));
+    }
+
+    /* ===================== PEN TOOL (kiểu After Effects) =====================
+     *
+     * Bật từ thẻ "Pen Tool" ở tab Hình học. Trong lúc bật, một lớp phủ trong suốt nằm ĐÈ
+     * khung xem trước và nuốt mọi cú chuột (không chọn/kéo nhầm block bên dưới):
+     *   - Bấm: thêm đỉnh nhọn.           - Bấm + kéo: thêm đỉnh cong (kéo ra 2 tay cầm).
+     *   - Shift: khoá hướng theo 45°.     - Bấm lại ĐỈNH ĐẦU: khép kín hình (có màu tô).
+     *   - Enter / Esc / bấm đúp: kết thúc đường hở.
+     *   - Backspace / Ctrl+Z: bỏ đỉnh vừa thêm.
+     * Điểm lưu theo TOẠ ĐỘ SEQUENCE (gốc ở tâm khung, đơn vị px của Sequence) — cùng hệ với
+     * transform.position_x/y — nên lúc kết thúc chỉ cần fitPathToBox là ra đúng block shape
+     * thường (style.path_points + transform), mọi đường vẽ/xuất video sẵn có dùng lại được.
+     * Không có gì được ghi vào dự án cho tới lúc kết thúc -> hoàn tác chỉ cần một mốc. */
+    let penSession = null;
+
+    function penPointFromEvent(event, metrics) {
+        const ps = Math.max(0.01, metrics.previewScale);
+        return {
+            x: (event.clientX - metrics.originX - metrics.frameW / 2) / ps,
+            y: (event.clientY - metrics.originY - metrics.frameH / 2) / ps,
+        };
+    }
+
+    // Shift: khoá đoạn mới theo bội số 45° tính từ đỉnh trước (như AE/Illustrator).
+    function penConstrain(from, to) {
+        const dx = to.x - from.x;
+        const dy = to.y - from.y;
+        const len = Math.hypot(dx, dy);
+        const ang = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+        return { x: from.x + Math.cos(ang) * len, y: from.y + Math.sin(ang) * len };
+    }
+
+    function isPenToolActive() { return !!penSession; }
+
+    function startPenTool() {
+        if (penSession) { finishPenTool(false); return; }
+        const metrics = previewFrameMetrics();
+        const shell = document.getElementById('sequencePreviewShell');
+        if (!metrics || !shell || !metrics.frame.offsetParent) {
+            setEditingStatusText(_t('Không tìm thấy khung xem trước để vẽ.'));
+            return;
+        }
+        const overlay = document.createElement('div');
+        overlay.id = 'editingPenOverlay';
+        overlay.className = 'editing-pen-overlay';
+        overlay.innerHTML = `<svg class="editing-pen-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+            <div class="editing-pen-hint">${_t('Pen Tool: bấm để thêm đỉnh · kéo để uốn cong · Shift khoá 45° · bấm đỉnh đầu để khép kín · Enter/Esc để kết thúc · Backspace xoá đỉnh vừa thêm')}</div>`;
+        shell.appendChild(overlay);
+        penSession = { points: [], drag: null, hover: null, closing: false, overlay };
+        overlay.addEventListener('mousedown', onPenMouseDown);
+        overlay.addEventListener('mousemove', onPenHover);
+        overlay.addEventListener('mouseleave', () => { if (penSession && !penSession.drag) { penSession.hover = null; drawPenOverlay(); } });
+        overlay.addEventListener('dblclick', (event) => { event.preventDefault(); event.stopPropagation(); finishPenTool(false); });
+        overlay.addEventListener('contextmenu', (event) => { event.preventDefault(); finishPenTool(false); });
+        document.querySelectorAll('[data-edit-pen-tool]').forEach((el) => el.classList.add('is-active'));
+        layoutPenOverlay();
+        setEditingStatusText(_t('Pen Tool đang bật — vẽ trên khung xem trước.'));
+    }
+
+    function layoutPenOverlay() {
+        if (!penSession) return;
+        const { overlay } = penSession;
+        const shell = document.getElementById('sequencePreviewShell');
+        const metrics = previewFrameMetrics();
+        // Rời bước Editing / khung bị gỡ -> tự tắt Pen, không để lớp phủ mồ côi chặn chuột.
+        if (!metrics || !shell || !metrics.frame.offsetParent || currentStepId !== 'step4') {
+            cancelPenTool();
+            return;
+        }
+        if (overlay.parentElement !== shell) shell.appendChild(overlay);
+        const off = previewFrameOffsetIn(shell);
+        overlay.style.left = `${off.x}px`;
+        overlay.style.top = `${off.y}px`;
+        overlay.style.width = `${metrics.frameW}px`;
+        overlay.style.height = `${metrics.frameH}px`;
+        drawPenOverlay(metrics);
+    }
+
+    function drawPenOverlay(metricsInput) {
+        if (!penSession) return;
+        const metrics = metricsInput || previewFrameMetrics();
+        const svg = penSession.overlay.querySelector('svg');
+        if (!metrics || !svg) return;
+        const ps = metrics.previewScale;
+        const W = metrics.frameW;
+        const H = metrics.frameH;
+        svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+        svg.setAttribute('width', String(W));
+        svg.setAttribute('height', String(H));
+        const sx = (x) => (W / 2 + x * ps).toFixed(1);
+        const sy = (y) => (H / 2 + y * ps).toFixed(1);
+        const pts = penSession.points;
+        const seg = (a, b) => ((!a.ox && !a.oy && !b.ix && !b.iy)
+            ? ` L ${sx(b.x)} ${sy(b.y)}`
+            : ` C ${sx(a.x + a.ox)} ${sy(a.y + a.oy)} ${sx(b.x + b.ix)} ${sy(b.y + b.iy)} ${sx(b.x)} ${sy(b.y)}`);
+        let body = '';
+        if (pts.length) {
+            let d = `M ${sx(pts[0].x)} ${sy(pts[0].y)}`;
+            for (let i = 1; i < pts.length; i += 1) d += seg(pts[i - 1], pts[i]);
+            if (penSession.closing) d += `${seg(pts[pts.length - 1], pts[0])} Z`;
+            body += `<path d="${d}" class="pen-path${penSession.closing ? ' is-closed' : ''}"/>`;
+            // Dây cao su từ đỉnh cuối tới con trỏ: cho thấy đoạn kế tiếp trước khi bấm.
+            const last = pts[pts.length - 1];
+            if (penSession.hover && !penSession.drag && !penSession.closing) {
+                const h = penSession.hover;
+                const rubber = (last.ox || last.oy)
+                    ? `M ${sx(last.x)} ${sy(last.y)} Q ${sx(last.x + last.ox)} ${sy(last.y + last.oy)} ${sx(h.x)} ${sy(h.y)}`
+                    : `M ${sx(last.x)} ${sy(last.y)} L ${sx(h.x)} ${sy(h.y)}`;
+                body += `<path d="${rubber}" class="pen-rubber"/>`;
+            }
+            // Tay cầm của đỉnh đang kéo / đỉnh cuối.
+            const active = penSession.drag ? pts[penSession.drag.index] : last;
+            if (active && (active.ox || active.oy)) {
+                const hx1 = sx(active.x + active.ix), hy1 = sy(active.y + active.iy);
+                const hx2 = sx(active.x + active.ox), hy2 = sy(active.y + active.oy);
+                body += `<line x1="${hx1}" y1="${hy1}" x2="${hx2}" y2="${hy2}" class="pen-handle-line"/>`
+                    + `<circle cx="${hx1}" cy="${hy1}" r="3.5" class="pen-handle-dot"/>`
+                    + `<circle cx="${hx2}" cy="${hy2}" r="3.5" class="pen-handle-dot"/>`;
+            }
+            pts.forEach((p, i) => {
+                const hot = i === 0 && pts.length >= 2 && penSession.hoverFirst;
+                const r = hot ? 6 : 4;
+                body += `<rect x="${(W / 2 + p.x * ps - r).toFixed(1)}" y="${(H / 2 + p.y * ps - r).toFixed(1)}" width="${r * 2}" height="${r * 2}" class="pen-anchor${i === 0 ? ' is-first' : ''}${hot ? ' is-hot' : ''}"/>`;
+            });
+        }
+        svg.innerHTML = body;
+        penSession.overlay.classList.toggle('is-near-first', !!penSession.hoverFirst);
+    }
+
+    function penNearFirst(event, metrics) {
+        const pts = penSession?.points || [];
+        if (pts.length < 2) return false;
+        const fx = metrics.originX + metrics.frameW / 2 + pts[0].x * metrics.previewScale;
+        const fy = metrics.originY + metrics.frameH / 2 + pts[0].y * metrics.previewScale;
+        return Math.hypot(event.clientX - fx, event.clientY - fy) <= 9;
+    }
+
+    function onPenHover(event) {
+        if (!penSession || penSession.drag) return;
+        const metrics = previewFrameMetrics();
+        if (!metrics) return;
+        let p = penPointFromEvent(event, metrics);
+        const pts = penSession.points;
+        if (event.shiftKey && pts.length) p = penConstrain(pts[pts.length - 1], p);
+        penSession.hover = p;
+        penSession.hoverFirst = penNearFirst(event, metrics);
+        drawPenOverlay(metrics);
+    }
+
+    function onPenMouseDown(event) {
+        if (!penSession || event.button !== 0) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const metrics = previewFrameMetrics();
+        if (!metrics) return;
+        const pts = penSession.points;
+        if (penNearFirst(event, metrics)) {
+            // Khép kín: kéo tiếp lúc này uốn cong đoạn khép (chỉnh tay cầm của đỉnh đầu).
+            penSession.closing = true;
+            penSession.drag = { index: 0, startX: event.clientX, startY: event.clientY, moved: false };
+        } else {
+            let p = penPointFromEvent(event, metrics);
+            if (event.shiftKey && pts.length) p = penConstrain(pts[pts.length - 1], p);
+            if (pts.length >= MAX_PATH_POINTS) return;
+            pts.push({ x: p.x, y: p.y, ix: 0, iy: 0, ox: 0, oy: 0 });
+            penSession.drag = { index: pts.length - 1, startX: event.clientX, startY: event.clientY, moved: false };
+        }
+        window.addEventListener('mousemove', onPenDragMove, true);
+        window.addEventListener('mouseup', onPenDragEnd, true);
+        drawPenOverlay(metrics);
+    }
+
+    function onPenDragMove(event) {
+        if (!penSession?.drag) return;
+        event.preventDefault();
+        const metrics = previewFrameMetrics();
+        if (!metrics) return;
+        const drag = penSession.drag;
+        if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 3) return;
+        drag.moved = true;
+        const v = penSession.points[drag.index];
+        let h = penPointFromEvent(event, metrics);
+        if (event.shiftKey) h = penConstrain(v, h);
+        const dx = h.x - v.x;
+        const dy = h.y - v.y;
+        if (penSession.closing && drag.index === 0) {
+            // Kéo ở đỉnh đầu khi khép: hướng kéo là hướng ĐI VÀO đỉnh đầu (đoạn khép kết thúc ở đó).
+            v.ix = -dx; v.iy = -dy; v.ox = dx; v.oy = dy;
+        } else {
+            v.ox = dx; v.oy = dy; v.ix = -dx; v.iy = -dy;
+        }
+        drawPenOverlay(metrics);
+    }
+
+    function onPenDragEnd(event) {
+        window.removeEventListener('mousemove', onPenDragMove, true);
+        window.removeEventListener('mouseup', onPenDragEnd, true);
+        if (!penSession) return;
+        event?.preventDefault?.();
+        penSession.drag = null;
+        if (penSession.closing) { finishPenTool(true); return; }
+        drawPenOverlay();
+    }
+
+    function penRemoveLastPoint() {
+        if (!penSession) return;
+        penSession.points.pop();
+        drawPenOverlay();
+    }
+
+    function cancelPenTool() {
+        if (!penSession) return;
+        window.removeEventListener('mousemove', onPenDragMove, true);
+        window.removeEventListener('mouseup', onPenDragEnd, true);
+        penSession.overlay.remove();
+        penSession = null;
+        document.querySelectorAll('[data-edit-pen-tool]').forEach((el) => el.classList.remove('is-active'));
+    }
+
+    // Kết thúc: >= 2 đỉnh thì tạo block shape 'path'; ít hơn thì chỉ thoát Pen.
+    function finishPenTool(closed) {
+        if (!penSession) return;
+        const metrics = previewFrameMetrics();
+        // Bấm đúp = 2 cú bấm cùng chỗ -> 2 đỉnh trùng ở cuối; bỏ các đỉnh trùng đó.
+        const eps = 3 / Math.max(0.01, metrics?.previewScale || 1);
+        const pts = penSession.points.slice();
+        while (pts.length >= 2) {
+            const a = pts[pts.length - 1];
+            const b = pts[pts.length - 2];
+            if (Math.hypot(a.x - b.x, a.y - b.y) > eps || a.ox || a.oy) break;
+            pts.pop();
+        }
+        cancelPenTool();
+        if (pts.length < 2 || (closed && pts.length < 3 && !pts.some((p) => p.ox || p.oy))) {
+            setEditingStatusText(_t('Đã thoát Pen Tool.'));
+            return;
+        }
+        addPenShapeItem(pts, closed);
+    }
+
+    function addPenShapeItem(points, closed) {
+        recordHistory();
+        const fit = fitPathToBox(points, closed);
+        const { start, duration, track } = resolveNewItemPlacement('shape', 5, null);
+        const style = {
+            ...defaultShapeStyle(),
+            shape_type: 'path',
+            width: fit.width,
+            height: fit.height,
+            path_points: fit.points,
+            path_closed: !!closed,
+            corner_radius: 0,
+        };
+        // Đường hở chỉ có nét -> nét phải đủ dày & mang màu chủ đạo, không thì gần như vô hình.
+        if (!closed) {
+            style.stroke_color = style.fill_color;
+            style.stroke_width = 6;
+        }
+        const transform = defaultTransform();
+        transform.position_x = clampTransformValue('position_x', fit.cx);
+        transform.position_y = clampTransformValue('position_y', fit.cy);
+        const item = {
+            id: nextId('item_shape'),
+            type: 'shape',
+            track_id: track.id,
+            timeline_start: start,
+            duration,
+            asset_id: '',
+            source_start: 0,
+            muted: true,
+            volume: 0,
+            transform,
+            text: '',
+            style: normalizeShapeStyle(style),
+        };
+        editingItems.push(item);
+        selectEditingItem(item.id);
+        renderAll();
+        setEditingStatusText(closed ? _t('Đã tạo hình khép kín từ Pen Tool.') : _t('Đã tạo đường vẽ từ Pen Tool.'));
+    }
+
+    // Phím trong lúc Pen bật. Trả true nếu đã nuốt phím.
+    function handlePenToolKey(event) {
+        if (!penSession) return false;
+        const key = event.key;
+        const swallow = () => { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation?.(); return true; };
+        // Đang gõ trong ô nhập (Inspector…) thì để phím cho ô đó, chỉ Esc vẫn thoát Pen.
+        if (key !== 'Escape' && window.Shortcuts && Shortcuts.isTypingTarget(document.activeElement)) return false;
+        if (key === 'Enter' || key === 'Escape') { finishPenTool(false); return swallow(); }
+        if (key === 'Backspace' || key === 'Delete') { penRemoveLastPoint(); return swallow(); }
+        if ((event.ctrlKey || event.metaKey) && key.toLowerCase() === 'z') { penRemoveLastPoint(); return swallow(); }
+        if (key === 'Shift') {
+            // Nhấn/nhả Shift khi đang rê: vẽ lại dây cao su theo trạng thái khoá mới.
+            return false;
+        }
+        // Các phím tắt khác (Space phát video, Delete xoá block…) không được chạy chen giữa lúc vẽ.
+        if (!event.ctrlKey && !event.metaKey && !event.altKey) return swallow();
+        return false;
     }
 
     function addShapeItem(shapeType, placement = null) {
@@ -12023,7 +12425,9 @@
         const shapeStyle = normalizeShapeStyle(item.style);
         const shapeType = shapeStyle.shape_type;
         const isLineShape = shapeType === 'line';
-        const supportsShapeRadius = shapeControls && !['circle', 'star', 'line'].includes(shapeType);
+        const isPathShape = shapeType === 'path';
+        const isOpenShape = shapeIsOpen(shapeStyle);
+        const supportsShapeRadius = shapeControls && !['circle', 'star', 'line', 'path'].includes(shapeType);
         const supportsPolygonSides = shapeControls && shapeType === 'polygon';
         const supportsStarControls = shapeControls && shapeType === 'star';
         const count = selectionCount();
@@ -12227,7 +12631,10 @@
                         <div class="fig-field"><span class="fig-affix">W</span><input id="editingShapeWidth" type="number" min="20" max="4000" step="1" value="${Math.round(shapeStyle.width)}"></div>
                         <div class="fig-field"><span class="fig-affix">H</span><input id="editingShapeHeight" type="number" min="20" max="4000" step="1" value="${Math.round(shapeStyle.height)}"></div>
                     </div>
-                    ${!isLineShape ? `
+                    ${isPathShape ? `
+                    <label class="editing-checkbox-row"><input id="editingShapePathClosed" type="checkbox" ${shapeStyle.path_closed ? 'checked' : ''}> ${_t('Khép kín đường vẽ (có màu tô)')}</label>
+                    ` : ''}
+                    ${!isOpenShape ? `
                     <div class="ins-row">
                         <label for="editingShapeFillColor">${_t('Màu tô')}</label>
                         <div class="fig-field color-row"><input id="editingShapeFillColor" class="color-swatch" type="color" value="${shapeStyle.fill_color}"><input type="text" class="color-hex" value="${hexLabel(shapeStyle.fill_color)}" maxlength="6" spellcheck="false" autocomplete="off" aria-label="${_t('Mã màu (hex)')}"></div>
@@ -12239,7 +12646,7 @@
                     </div>
                     <div class="ins-row-2">
                         <div class="fig-field"><span class="fig-affix">SW</span><input id="editingShapeStrokeWidth" type="number" min="0" max="100" step="1" value="${Math.round(shapeStyle.stroke_width)}"></div>
-                        ${!isLineShape ? `<div class="fig-field"><select id="editingShapeStrokePosition">
+                        ${!isOpenShape ? `<div class="fig-field"><select id="editingShapeStrokePosition">
                             <option value="inside" ${shapeStyle.stroke_position === 'inside' ? 'selected' : ''}>${_t('Bên trong')}</option>
                             <option value="center" ${shapeStyle.stroke_position === 'center' ? 'selected' : ''}>${_t('Ở giữa')}</option>
                             <option value="outside" ${shapeStyle.stroke_position === 'outside' ? 'selected' : ''}>${_t('Bên ngoài')}</option>
@@ -13329,6 +13736,7 @@
             'editingShapeStrokeColor',
             'editingShapeStrokeWidth',
             'editingShapeStrokePosition',
+            'editingShapePathClosed',
             'editingShapeCornerRadius',
             'editingShapeOuterCornerRadius',
             'editingShapeInnerCornerRadius',
@@ -13451,6 +13859,7 @@
             if (target.id === 'editingShapeStrokeColor') current.stroke_color = target.value;
             if (target.id === 'editingShapeStrokeWidth') current.stroke_width = Number(target.value);
             if (target.id === 'editingShapeStrokePosition') current.stroke_position = target.value;
+            if (target.id === 'editingShapePathClosed') current.path_closed = !!target.checked;
             if (target.id === 'editingShapeCornerRadius') current.corner_radius = Number(target.value);
             if (target.id === 'editingShapeOuterCornerRadius') current.outer_corner_radius = Number(target.value);
             if (target.id === 'editingShapeInnerCornerRadius') current.inner_corner_radius = Number(target.value);
@@ -14701,7 +15110,7 @@
     function shapeCanvasSize(styleInput) {
         const style = normalizeShapeStyle(styleInput);
         const stroke = Math.max(0, Number(style.stroke_width) || 0);
-        const pos = style.shape_type === 'line' ? 'center' : style.stroke_position;
+        const pos = shapeIsOpen(style) ? 'center' : style.stroke_position;
         const overhang = pos === 'outside' ? stroke : (pos === 'center' ? stroke / 2 : 0);
         return {
             width: Math.max(2, (Number(style.width) || 360) + 2 * overhang),
@@ -14739,7 +15148,7 @@
             className,
         });
         // Chỉ HIỂN THỊ MỘT chấm bo góc duy nhất cho mỗi hình (đỡ rối). Sao: 1 góc ngoài + 1 góc trong.
-        if (style.shape_type === 'circle' || style.shape_type === 'line') return [];
+        if (style.shape_type === 'circle' || style.shape_type === 'line' || style.shape_type === 'path') return [];
         if (style.shape_type === 'star') {
             const pts = shapeOutlinePoints(style, left, top, rw, rh);
             const out = [];
@@ -14801,7 +15210,8 @@
         const W = Math.max(2, Number(style.width) || 360);
         const H = Math.max(2, Number(style.height) || 180);
         const stroke = Math.max(0, Number(style.stroke_width) || 0);
-        const strokePosition = style.shape_type === 'line' ? 'center' : (style.stroke_position || 'center');
+        const openShape = shapeIsOpen(style);
+        const strokePosition = openShape ? 'center' : (style.stroke_position || 'center');
         // Stroke tràn ra ngoài path đúng kiểu Figma: outside = cả stroke, center = nửa stroke, inside = 0.
         // Canvas to hơn box phần tràn này, hình (= box W×H) nằm CHÍNH GIỮA → không bao giờ bị xén & 3 chế độ khác nhau rõ.
         const overhang = strokePosition === 'outside' ? stroke : (strokePosition === 'center' ? stroke / 2 : 0);
@@ -14820,6 +15230,9 @@
             if (style.shape_type === 'line') {
                 return `<line x1="${left}" y1="${cy}" x2="${left + rw}" y2="${cy}" ${attrs} stroke-linecap="${style.corner_radius > 0 ? 'round' : 'butt'}"/>`;
             }
+            if (style.shape_type === 'path') {
+                return `<path d="${pathShapeD(style, left, top, rw, rh)}" ${attrs} stroke-linejoin="round" stroke-linecap="round"/>`;
+            }
             const outline = shapeOutlinePoints(style, left, top, rw, rh);
             if (outline) {
                 const radiusFn = style.shape_type === 'star'
@@ -14831,18 +15244,18 @@
             const radius = Math.min(style.corner_radius, rw / 2, rh / 2);
             return `<rect x="${left}" y="${top}" width="${rw}" height="${rh}" rx="${radius}" ry="${radius}" ${attrs}/>`;
         };
-        const fill = style.shape_type === 'line' ? 'none' : style.fill_color;
+        const fill = openShape ? 'none' : style.fill_color;
         const fillAttrs = `fill="${fill}" stroke="none"`;
         const strokeAttrs = (width) => `fill="none" stroke="${style.stroke_color}" stroke-width="${width}"`;
         let body = '';
         if (stroke <= 0) {
             body = shapeElement(fillAttrs);
-        } else if (strokePosition === 'inside' && style.shape_type !== 'line') {
+        } else if (strokePosition === 'inside' && !openShape) {
             // Stroke chỉ phía trong viền: vẽ stroke dày gấp đôi rồi clip vào chính hình → còn lại nửa trong
             shapeClipSeq += 1;
             const clipId = `shapeClip_${shapeClipSeq}`;
             body = `<defs><clipPath id="${clipId}">${shapeElement('fill="#fff" stroke="none"')}</clipPath></defs>${shapeElement(fillAttrs)}<g clip-path="url(#${clipId})">${shapeElement(strokeAttrs(stroke * 2))}</g>`;
-        } else if (strokePosition === 'outside' && style.shape_type !== 'line') {
+        } else if (strokePosition === 'outside' && !openShape) {
             // Stroke chỉ phía ngoài: vẽ stroke dày gấp đôi (tràn ra overhang) rồi phủ fill lên che nửa trong
             body = `${shapeElement(strokeAttrs(stroke * 2))}${shapeElement(fillAttrs)}`;
         } else {
@@ -15154,6 +15567,21 @@
                 shapeCornerWidgetPoints(shapeStyle).forEach((widget) => {
                     box.appendChild(createSelectionHandleAt(widget));
                 });
+                if (shapeStyle.shape_type === 'path') {
+                    // Đỉnh của path Pen: kéo để dời đỉnh, Alt+kéo để kéo lại tay cầm cong (như AE).
+                    box.classList.add('is-path-shape');
+                    const canvas = shapeCanvasSize(shapeStyle);
+                    shapeStyle.path_points.forEach((pt, index) => {
+                        const handle = createSelectionHandleAt({
+                            mode: `path-vertex:${index}`,
+                            className: 'path-vertex',
+                            x: ((canvas.overhang + pt.x * shapeStyle.width) / canvas.width) * 100,
+                            y: ((canvas.overhang + pt.y * shapeStyle.height) / canvas.height) * 100,
+                        });
+                        handle.title = _t('Kéo để dời đỉnh · Alt+kéo để uốn cong');
+                        box.appendChild(handle);
+                    });
+                }
             } else {
                 CORNERS.forEach((pos) => box.appendChild(createSelectionHandle('scale', pos)));
             }
@@ -15484,6 +15912,31 @@
         item.transform.position_y = drag.startTransform.position_y + (((localX * sin) + (localY * cos)) * scaleRatio);
     }
 
+    /* Kéo MỘT đỉnh của path Pen. Các đỉnh khác phải đứng yên TRÊN KHUNG HÌNH, nhưng box
+     * của shape luôn bao khít đường cong — nên mỗi bước kéo: quy mọi đỉnh về pixel cục bộ,
+     * dời đỉnh đang kéo, đo lại box (fitPathToBox) rồi bù tâm box đúng bằng độ lệch vừa
+     * sinh ra (applyLocalCenterShift, đã tính xoay + scale của block). Luôn tính từ
+     * startStyle nên kéo qua lại không tích sai số. Alt lúc bấm = kéo ra tay cầm đối xứng
+     * từ đỉnh đó (biến góc nhọn thành điểm cong), giống Convert Vertex của After Effects. */
+    function movePathVertex(item, event) {
+        const index = Number(String(previewBoxDrag.mode).split(':')[1]);
+        const start = normalizeShapeStyle(previewBoxDrag.startStyle);
+        if (start.shape_type !== 'path' || !start.path_points[index]) return;
+        const delta = localPointerDelta(event, previewBoxDrag);
+        const local = pathPointsToLocalPx(start);
+        const v = local[index];
+        if (previewBoxDrag.convertVertex) {
+            v.ox = delta.x; v.oy = delta.y;
+            v.ix = -delta.x; v.iy = -delta.y;
+        } else {
+            v.x += delta.x;
+            v.y += delta.y;
+        }
+        const fit = fitPathToBox(local, start.path_closed);
+        item.style = normalizeShapeStyle({ ...start, width: fit.width, height: fit.height, path_points: fit.points });
+        applyLocalCenterShift(item, previewBoxDrag, fit.cx, fit.cy);
+    }
+
     function resizeShapeEdge(item, event) {
         if (!previewBoxDrag?.mode?.startsWith('shape-edge-')) return false;
         const edge = previewBoxDrag.mode.replace('shape-edge-', '');
@@ -15563,6 +16016,7 @@
                 : 0,
             previewScale: metrics.previewScale,
             historySaved: false,
+            convertVertex: !!event.altKey,
         };
         if (mode === 'line-a' || mode === 'line-b') {
             const st = previewBoxDrag.startTransform;
@@ -15726,6 +16180,8 @@
             item.style = normalizeShapeStyle(ns);
         } else if (previewBoxDrag.mode?.startsWith('shape-edge-')) {
             resizeShapeEdge(item, event);
+        } else if (previewBoxDrag.mode?.startsWith('path-vertex:') && item.type === 'shape') {
+            movePathVertex(item, event);
         } else if (previewBoxDrag.mode === 'text-left' || previewBoxDrag.mode === 'text-right') {
             const style = { ...defaultTextStyle(), ...(previewBoxDrag.startStyle || {}) };
             const transformScale = Math.max(0.01, previewBoxDrag.startTransform.scale / 100);
@@ -15761,6 +16217,7 @@
             'line-a': ['position_x', 'position_y', 'rotation'],
             'line-b': ['position_x', 'position_y', 'rotation'],
         };
+        if (previewBoxDrag.mode?.startsWith('path-vertex:')) DRAG_MODE_FIELDS[previewBoxDrag.mode] = ['position_x', 'position_y'];
         mirrorTransformToKeyframes(item, DRAG_MODE_FIELDS[previewBoxDrag.mode], isMainClip ? mainClipLocalTime(item) : null);
         syncInspectorControls(item.transform);
         showPreviewHud(item, previewBoxDrag.mode, event);
@@ -16027,6 +16484,7 @@
             stopOverlayPreviewLoop();
             root.querySelectorAll('video,audio').forEach((el) => el.pause());
             document.getElementById('editingSelectionBox')?.remove();
+            cancelPenTool();
             if (video) video.muted = false;
             return;
         }
@@ -16041,6 +16499,7 @@
         const previewScale = Math.min(frameW / Math.max(1, seq.width), frameH / Math.max(1, seq.height));
         const seqTime = currentSequenceTime();
         const activeIds = new Set();
+        if (penSession) layoutPenOverlay();
         // GĐ3: điểm cắt overlay đang trong vùng chuyển cảnh -> ẩn 2 item, vẽ composite thay thế.
         const overlayTrans = activeOverlayTransition(seqTime);
         suppressedTransitionItemIds = overlayTrans ? new Set([overlayTrans.A.id, overlayTrans.B.id]) : new Set();
@@ -18063,7 +18522,14 @@
     }
 
     function renderShapePaneHtml() {
-        const cards = BASIC_SHAPES.map((s) => `
+        const penCard = `
+            <button class="edit-shape-card edit-pen-card${penSession ? ' is-active' : ''}" type="button" data-edit-pen-tool title="${_t('Pen Tool — vẽ hình tự do trên khung xem trước (như After Effects)')}">
+                <svg class="edit-pen-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/>
+                </svg>
+                <span class="edit-asset-name">${_t('Pen Tool')}</span>
+            </button>`;
+        const cards = penCard + BASIC_SHAPES.map((s) => `
             <button class="edit-shape-card" type="button" draggable="true" data-edit-add-shape="${s.type}" data-edit-drag-kind="shape" title="${s.label}">
                 <span class="edit-shape-glyph shape-${s.type}"></span>
                 <span class="edit-asset-name">${s.label}</span>
@@ -18534,6 +19000,7 @@
         const fxCard = event.target.closest('[data-edit-add-text-effect]');
         if (fxCard) { addTextEffectItem(fxCard.dataset.editAddTextEffect); return; }
         if (event.target.closest('[data-edit-add-text]')) { addTextItem(); return; }
+        if (event.target.closest('[data-edit-pen-tool]')) { startPenTool(); return; }
         const shapeBtn = event.target.closest('[data-edit-add-shape]');
         if (shapeBtn) { addShapeItem(shapeBtn.dataset.editAddShape); return; }
         /* Ô tick "nguồn lọc" ĐÃ BỎ (2026-08-16): nguồn của luồng bóc băng nay CHÍNH LÀ
@@ -22197,6 +22664,22 @@
             .edit-shape-card { width: 100%; margin: 0; padding: 8px 4px; background: var(--panel-bg-light); border: 1px solid var(--border-color); border-radius: var(--r-sm); box-shadow: none; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 6px; }
             .edit-shape-card:hover { border-color: var(--primary); }
             .edit-shape-glyph { width: 34px; height: 34px; background: #cfd6e0; display: block; }
+            .edit-pen-glyph { width: 34px; height: 34px; color: #cfd6e0; display: block; }
+            .edit-pen-card.is-active { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 18%, var(--panel-bg-light)); }
+            .edit-pen-card.is-active .edit-pen-glyph, .edit-pen-card.is-active .edit-asset-name { color: var(--primary); }
+            .editing-pen-overlay { position: absolute; z-index: 60; cursor: crosshair; user-select: none; }
+            .editing-pen-overlay.is-near-first { cursor: pointer; }
+            .editing-pen-svg { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+            .editing-pen-svg .pen-path { fill: none; stroke: #3b9cff; stroke-width: 1.5; }
+            .editing-pen-svg .pen-path.is-closed { fill: rgba(59,156,255,0.18); }
+            .editing-pen-svg .pen-rubber { fill: none; stroke: #3b9cff; stroke-width: 1; stroke-dasharray: 4 3; opacity: 0.85; }
+            .editing-pen-svg .pen-handle-line { stroke: #3b9cff; stroke-width: 1; }
+            .editing-pen-svg .pen-handle-dot { fill: #3b9cff; stroke: #fff; stroke-width: 1; }
+            .editing-pen-svg .pen-anchor { fill: #fff; stroke: #3b9cff; stroke-width: 1.5; }
+            .editing-pen-svg .pen-anchor.is-first { fill: #3b9cff; }
+            .editing-pen-svg .pen-anchor.is-hot { fill: #ffd34d; stroke: #1b1b1b; }
+            .editing-pen-hint { position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); width: max-content; max-width: calc(100% - 16px); padding: 3px 8px; border-radius: 5px; background: rgba(0,0,0,0.6); color: #fff; font-size: 10px; line-height: 1.35; text-align: center; pointer-events: none; opacity: 0.85; }
+            .editing-selection-handle.path-vertex { width: 9px; height: 9px; border-radius: 1px; background: #fff; box-shadow: 0 0 0 1.5px #3b9cff; cursor: move; }
             .edit-shape-glyph.shape-rectangle { border-radius: 4px; height: 24px; }
             .edit-shape-glyph.shape-square { border-radius: 4px; }
             .edit-shape-glyph.shape-circle { border-radius: 50%; }
@@ -23778,7 +24261,10 @@
             video.addEventListener('seeked', renderPreviewOverlays);
             video.addEventListener('ended', renderPreviewOverlays);
         }
+        window.addEventListener('resize', () => { if (penSession) layoutPenOverlay(); });
         window.addEventListener('keydown', (event) => {
+            // Pen Tool đang vẽ: Enter/Esc/Backspace/Ctrl+Z thuộc về nét vẽ, không về timeline.
+            if (handlePenToolKey(event)) return;
             if (isEditingPreviewText()) {
                 if (event.key === 'Escape') return;
                 event.stopPropagation();
