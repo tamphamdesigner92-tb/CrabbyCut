@@ -2103,7 +2103,6 @@
   "Đang mở dự án…": "Opening project…",
   "Hình vẽ Pen": "Pen Path",
   "Khép kín đường vẽ (có màu tô)": "Close path (filled)",
-  "Kéo để dời đỉnh · Alt+kéo để uốn cong": "Drag to move vertex · Alt+drag to bend",
   "Không tìm thấy khung xem trước để vẽ.": "No preview frame to draw on.",
   "Pen Tool: bấm để thêm đỉnh · kéo để uốn cong · Shift khoá 45° · bấm đỉnh đầu để khép kín · Enter/Esc để kết thúc · Backspace xoá đỉnh vừa thêm": "Pen Tool: click to add vertex · drag to curve · Shift locks 45° · click first vertex to close · Enter/Esc to finish · Backspace removes last vertex",
   "Pen Tool đang bật — vẽ trên khung xem trước.": "Pen Tool on — draw on the preview.",
@@ -2111,5 +2110,9 @@
   "Đã tạo hình khép kín từ Pen Tool.": "Created a closed shape with Pen Tool.",
   "Đã tạo đường vẽ từ Pen Tool.": "Created a path with Pen Tool.",
   "Pen Tool — vẽ hình tự do trên khung xem trước (như After Effects)": "Pen Tool — draw free-form shapes on the preview (like After Effects)",
-  "Pen Tool": "Pen Tool"
+  "Pen Tool": "Pen Tool",
+  "Đã chuyển hình sang đường Bezier để sửa đỉnh (Ctrl+Z để hoàn tác).": "Converted shape to a Bezier path for vertex editing (Ctrl+Z to undo).",
+  "Sửa đỉnh: kéo đỉnh để dời · kéo tay cầm để uốn · Alt+kéo để bẻ góc · Esc để thoát.": "Vertex edit: drag vertex to move · drag handle to bend · Alt+drag to break · Esc to exit.",
+  "Kéo để dời đỉnh · Alt+kéo để kéo ra tay cầm cong": "Drag to move vertex · Alt+drag to pull out curve handles",
+  "Kéo để uốn cong · Alt+kéo để bẻ góc": "Drag to bend · Alt+drag to break the corner"
 }
