@@ -1823,5 +1823,7 @@
   "Đã chuyển hình sang đường Bezier để sửa đỉnh (Ctrl+Z để hoàn tác).": "已将形状转换为贝塞尔路径以编辑顶点（Ctrl+Z 撤销）。",
   "Sửa đỉnh: kéo đỉnh để dời · kéo tay cầm để uốn · Alt+kéo để bẻ góc · Esc để thoát.": "编辑顶点：拖动顶点移动 · 拖动手柄弯曲 · Alt+拖动断开 · Esc 退出。",
   "Kéo để dời đỉnh · Alt+kéo để kéo ra tay cầm cong": "拖动移动顶点 · Alt+拖动拉出曲线手柄",
-  "Kéo để uốn cong · Alt+kéo để bẻ góc": "拖动弯曲 · Alt+拖动断开拐角"
+  "Kéo để uốn cong · Alt+kéo để bẻ góc": "拖动弯曲 · Alt+拖动断开拐角",
+  "Không đọc được thời lượng video nguồn để nối phần đuôi.": "无法读取源视频时长以追加黑色尾段。",
+  "Không nối được phần đuôi đen vào video nguồn.": "无法将黑色尾段追加到源视频。"
 }

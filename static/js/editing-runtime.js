@@ -300,6 +300,10 @@
     }
 
     function isMainPreviewPlaying() {
+        // Vùng không có video lane chính: "đang phát" là đồng hồ ảo của index.html đang chạy.
+        if (typeof window.usesVirtualClock === 'function' && window.usesVirtualClock()) {
+            return !!window.isVirtualClockPlaying?.();
+        }
         return !!(video && !video.paused && !video.ended);
     }
 
@@ -2415,12 +2419,12 @@
        chỉ định chỉ được dùng khi ĐÚNG loại, không khoá và không chồng block khác — sai
        điều kiện nào thì rơi về cách chọn lane cũ. */
     function resolveNewItemPlacement(type, wantDuration, placement) {
-        const total = timelineDuration();
         const startRaw = (placement && Number.isFinite(Number(placement.start)))
             ? Number(placement.start)
             : currentSequenceTime();
-        const start = clamp(startRaw, 0, Math.max(0, total - 0.05));
-        const duration = Math.max(0.2, Math.min(Number(wantDuration) || 1, Math.max(0.2, total - start)));
+        // Không kẹp theo lane chính nữa: block mới giữ đúng độ dài mặc định, timeline tự dài theo.
+        const start = Math.max(0, startRaw);
+        const duration = Math.max(0.2, Number(wantDuration) || 1);
         let track = (placement && placement.trackId) ? findTrack(placement.trackId) : null;
         if (track && (track.type !== trackTypeForItemType(type)
             || isTrackLocked(track)
@@ -3920,10 +3924,23 @@
         return specs.length ? specs : null;
     }
 
+    /* Như CapCut: block lane phụ KHÔNG bị lane chính chặn độ dài/vị trí — timeline tự dài
+       theo block xa nhất (overlayTimelineEnd, getTimelineDuration ở index.html). Chỉ giữ sàn
+       0.2s và không lùi ra trước mốc 0; video overlay vẫn kẹp theo nguồn ở tay cầm trim /
+       ô Thời lượng (itemSourceDurationLimit). */
     function clampItemTiming(item) {
-        const total = timelineDuration();
-        item.duration = clamp(item.duration, 0.2, Math.max(0.2, total || 0.2));
-        item.timeline_start = clamp(item.timeline_start, 0, Math.max(0, total - item.duration));
+        item.duration = Math.max(0.2, Number(item.duration) || 0.2);
+        item.timeline_start = Math.max(0, Number(item.timeline_start) || 0);
+    }
+
+    // Đuôi xa nhất của mọi block lane phụ (giây timeline) — một vế của độ dài timeline.
+    function overlayTimelineEnd() {
+        let end = 0;
+        for (const item of editingItems) {
+            const itemEndTime = (Number(item.timeline_start) || 0) + (Number(item.duration) || 0);
+            if (itemEndTime > end) end = itemEndTime;
+        }
+        return end;
     }
 
     function itemEnd(item) {
@@ -4442,11 +4459,23 @@
     }
 
     function renderAll() {
+        syncOverlayOnlyExportButton();
         updateEditingStatus();
         refreshAdjustLayerCount();
         if (typeof updateTimelineLayout === 'function') updateTimelineLayout();
         if (typeof updateInspectorState === 'function') updateInspectorState();
         if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
+    }
+
+    /* Lane chính trống: nút Xuất video bật theo việc timeline có block hay không (bản xuất
+       dựng trên nền đen — xem blank_base ở performVideoExport). Có video lane chính thì để
+       các chỗ cũ ở index.html lo như trước. */
+    function syncOverlayOnlyExportButton() {
+        if (currentMode !== 'FINAL' || (Array.isArray(latestTimeline) && latestTimeline.length > 0)) return;
+        const btn = document.getElementById('btnExportVideo');
+        if (btn && !(typeof videoExportInFlight !== 'undefined' && videoExportInFlight)) {
+            btn.disabled = !(overlayTimelineEnd() > 0);
+        }
     }
 
     function updateEditingStatus() {
@@ -7729,7 +7758,6 @@
         }
         if (editingDrag.mode === 'move' && editingDrag.group) {
             // Kéo nhiều block: dịch cùng một lượng (snap theo block đang nắm).
-            const total = timelineDuration();
             // Nhóm ĐỒNG NHẤT (cùng loại, cùng lane) thì cả nhóm nhảy lane cùng nhau —
             // sang lane cùng loại khác, hoặc thả ở vùng trống để runtime tạo lane mới
             // (trackForItemDrop lo cả hai, dùng chung với đường kéo 1 block).
@@ -7743,8 +7771,7 @@
             const snappedStart = snapMoveStart(item, editingDrag.startTime + delta, item.track_id);
             const appliedDelta = snappedStart - editingDrag.startTime;
             editingDrag.group.forEach((entry) => {
-                const dur = Math.max(0.2, Number(entry.item.duration) || 0);
-                entry.item.timeline_start = clamp(entry.startTime + appliedDelta, 0, Math.max(0, total - dur));
+                entry.item.timeline_start = Math.max(0, entry.startTime + appliedDelta);
             });
         } else if (editingDrag.mode === 'move') {
             const targetTrack = trackForItemDrop(item, event.clientY);
@@ -14155,8 +14182,8 @@
 
     function editingScrubConfig(input) {
         const configs = {
-            editingItemStart: { step: 0.01, min: 0, max: timelineDuration() },
-            editingItemDuration: { step: 0.01, min: 0.2, max: timelineDuration() || 9999 },
+            editingItemStart: { step: 0.01, min: 0, max: 86400 },
+            editingItemDuration: { step: 0.01, min: 0.2, max: 86400 },
             editingItemVolumeDb: { step: 0.1, min: -60, max: 20 },
             editingMainVolumeDb: { step: 0.1, min: -60, max: 20 },
             editingItemSpeedRate: { step: 0.05, min: 0.1, max: 100 },
@@ -26603,6 +26630,8 @@
         // MỖI FRAME để quyết định nền đen hay nền cảnh báo trong suốt — getState() chép
         // mảng nên không dùng được ở chỗ đó.
         hasTimelineBlocks: () => editingItems.length > 0,
+        // Đuôi block lane phụ xa nhất — getTimelineDuration (index.html) lấy max với lane chính.
+        overlayTimelineEnd,
         // Thước thời gian: showStep() gọi khi vào step4 để thước có mặt ngay, không phải
         // đợi lượt renderEditingTimeline đầu tiên (dự án trống có thể chưa có lượt nào).
         scheduleRulerRender: scheduleEditingRulerRender,

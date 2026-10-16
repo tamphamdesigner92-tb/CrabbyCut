@@ -2114,5 +2114,7 @@
   "Đã chuyển hình sang đường Bezier để sửa đỉnh (Ctrl+Z để hoàn tác).": "Converted shape to a Bezier path for vertex editing (Ctrl+Z to undo).",
   "Sửa đỉnh: kéo đỉnh để dời · kéo tay cầm để uốn · Alt+kéo để bẻ góc · Esc để thoát.": "Vertex edit: drag vertex to move · drag handle to bend · Alt+drag to break · Esc to exit.",
   "Kéo để dời đỉnh · Alt+kéo để kéo ra tay cầm cong": "Drag to move vertex · Alt+drag to pull out curve handles",
-  "Kéo để uốn cong · Alt+kéo để bẻ góc": "Drag to bend · Alt+drag to break the corner"
+  "Kéo để uốn cong · Alt+kéo để bẻ góc": "Drag to bend · Alt+drag to break the corner",
+  "Không đọc được thời lượng video nguồn để nối phần đuôi.": "Could not read the source video duration to append the black tail.",
+  "Không nối được phần đuôi đen vào video nguồn.": "Could not append the black tail to the source video."
 }

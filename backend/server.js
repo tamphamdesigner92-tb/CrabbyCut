@@ -7505,6 +7505,111 @@ function createApp() {
     return path.join(path.dirname(target), `${path.basename(target, ext)}.exporting${ext}`);
   }
 
+  /* Nền đen + tiếng câm (stereo 48 kHz) dùng làm "nguồn lane chính" khi timeline không có
+   * video (xem blank_base ở /api/export-video). Cùng định dạng với bản chuẩn hoá của lane
+   * chính (H.264 yuv420p + AAC) để sidecar đi đúng đường quen thuộc. Mã hoá màu đen tĩnh
+   * gần như không tốn gì (vài trăm KB cho cả phút). Dư 1 giây để đuôi không bị hụt khung. */
+  async function buildBlankBaseVideo(outputPath, { width, height, fps, duration }) {
+    const w = evenDimension(width, 1920);
+    const h = evenDimension(height, 1080);
+    const rate = canonicalFpsText(fps, '30');
+    const seconds = Math.max(0.1, Number(duration) || 0) + 1;
+    await fsp.rm(outputPath, { force: true });
+    await runProcess('ffmpeg', [
+      '-y', '-hide_banner', '-v', 'error',
+      '-f', 'lavfi', '-i', `color=c=black:s=${w}x${h}:r=${rate}:d=${seconds.toFixed(3)}`,
+      '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
+      '-map', '0:v:0', '-map', '1:a:0',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
+      ...PREVIEW_FRIENDLY_GOP_ARGS,
+      '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
+      '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709',
+      '-shortest', '-movflags', '+faststart', outputPath,
+    ]);
+    return outputPath;
+  }
+
+  function probeStreamFields(filePath, selector, fields) {
+    const text = commandText('ffprobe', [
+      '-v', 'error', '-select_streams', selector,
+      '-show_entries', `stream=${fields}`, '-of', 'json', filePath,
+    ], 5000);
+    try {
+      const payload = JSON.parse(text || '{}');
+      return Array.isArray(payload.streams) && payload.streams[0] ? payload.streams[0] : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /* ĐUÔI ĐEN cho nguồn lane chính (tail_pad_seconds ở /api/export-video): overlay kéo dài quá
+   * đuôi video lane chính (như CapCut) thì phần sau đó phải là nền đen + overlay. Sidecar chỉ
+   * nhận MỘT nguồn, nên ta dựng một bản nguồn có thêm `padSeconds` giây đen (+ tiếng câm) ở
+   * cuối, rồi thêm một khoảng trỏ vào phần đuôi đó.
+   *   - Đường nhanh: nguồn là H.264 yuv420p (+ AAC) — đúng định dạng bản chuẩn hoá của lane
+   *     chính — thì chỉ mã hoá ĐUÔI cùng thông số rồi nối bằng concat demuxer `-c copy`: không
+   *     mã hoá lại cả phim.
+   *   - Đường chắc chắn: mọi trường hợp khác (hoặc đường nhanh ra sai độ dài) mã hoá lại cả
+   *     nguồn với tpad/apad.
+   * Trả về { path, sourceDuration } — sourceDuration là chỗ đuôi đen bắt đầu. */
+  async function buildTailPaddedSource(sourcePath, padSeconds) {
+    const sourceDuration = Number(mediaDurationSeconds(sourcePath));
+    if (!Number.isFinite(sourceDuration) || sourceDuration <= 0) {
+      throw new Error(_t('Không đọc được thời lượng video nguồn để nối phần đuôi.'));
+    }
+    const pad = Math.max(0.05, Number(padSeconds) || 0) + 1;   // dư 1s để đuôi không hụt khung
+    const outputPath = path.join(TEMP_DIR, 'export_padded_source.mp4');
+    await fsp.rm(outputPath, { force: true });
+    const v = probeStreamFields(sourcePath, 'v:0', 'codec_name,pix_fmt,width,height,avg_frame_rate,sample_aspect_ratio');
+    const a = probeStreamFields(sourcePath, 'a:0', 'codec_name,sample_rate,channels');
+    const info = mediaVideoInfo(sourcePath);
+    const okLength = () => {
+      const got = Number(mediaDurationSeconds(outputPath));
+      return Number.isFinite(got) && got >= sourceDuration + pad - 1.5;
+    };
+    const fastPath = v && v.codec_name === 'h264' && v.pix_fmt === 'yuv420p'
+      && Number(v.width) > 0 && Number(v.height) > 0 && info.fps && !info.rotation
+      && (!a || a.codec_name === 'aac');
+    if (fastPath) {
+      const tailPath = path.join(TEMP_DIR, 'export_tail_black.mp4');
+      const listPath = path.join(TEMP_DIR, 'export_tail_concat.txt');
+      try {
+        const args = ['-y', '-hide_banner', '-v', 'error',
+          '-f', 'lavfi', '-i', `color=c=black:s=${v.width}x${v.height}:r=${info.fps}:d=${pad.toFixed(3)}`];
+        if (a) {
+          const layout = Number(a.channels) === 1 ? 'mono' : 'stereo';
+          args.push('-f', 'lavfi', '-i', `anullsrc=channel_layout=${layout}:sample_rate=${Number(a.sample_rate) || 48000}`);
+        }
+        args.push('-map', '0:v:0');
+        if (a) args.push('-map', '1:a:0');
+        if (v.sample_aspect_ratio && v.sample_aspect_ratio !== '0:1') args.push('-vf', `setsar=${v.sample_aspect_ratio.replace(':', '/')}`);
+        args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', ...PREVIEW_FRIENDLY_GOP_ARGS);
+        if (a) args.push('-c:a', 'aac', '-b:a', '128k', '-shortest');
+        args.push('-t', pad.toFixed(3), tailPath);
+        await runProcess('ffmpeg', args);
+        const esc = (p) => p.replace(/\\/g, '/').replace(/'/g, "'\\''");
+        await fsp.writeFile(listPath, `file '${esc(sourcePath)}'\nfile '${esc(tailPath)}'\n`, 'utf8');
+        await runProcess('ffmpeg', ['-y', '-hide_banner', '-v', 'error', '-f', 'concat', '-safe', '0',
+          '-i', listPath, '-c', 'copy', '-movflags', '+faststart', outputPath]);
+        if (okLength()) return { path: outputPath, sourceDuration };
+      } catch (error) {
+        console.warn('[export] tail pad fast path failed, re-encoding:', error?.message || error);
+      } finally {
+        await fsp.rm(tailPath, { force: true }).catch(() => {});
+        await fsp.rm(listPath, { force: true }).catch(() => {});
+      }
+    }
+    const args = ['-y', '-hide_banner', '-v', 'error', '-i', sourcePath,
+      '-map', '0:v:0', '-vf', `tpad=stop_mode=add:stop_duration=${pad.toFixed(3)}:color=black`];
+    if (a) args.push('-map', '0:a:0', '-af', `apad=pad_dur=${pad.toFixed(3)}`);
+    args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '16', '-pix_fmt', 'yuv420p', ...PREVIEW_FRIENDLY_GOP_ARGS);
+    if (a) args.push('-c:a', 'aac', '-b:a', '192k');
+    args.push('-movflags', '+faststart', outputPath);
+    await runProcess('ffmpeg', args);
+    if (!okLength()) throw new Error(_t('Không nối được phần đuôi đen vào video nguồn.'));
+    return { path: outputPath, sourceDuration };
+  }
+
   app.post('/api/export-video', transitionFrameUpload.array('transition_frames', TRANSITION_FRAME_LIMIT), async (req, res) => {
     // KHOÁ MỘT LƯỢT XUẤT: mọi lượt xuất đều ghi vào CÙNG một đường dẫn
     // (TEMP_DIR/final_cut.mp4). Hai lượt chạy song song sẽ ghi đè nhau giữa lúc đang viết ->
@@ -7549,8 +7654,15 @@ function createApp() {
         await timeStage('capture_ms', () => captureExportRequest(req, process.env.CRABBYCUT_EXPORT_CAPTURE_DIR));
       }
       setStatus(_t('Đang chuẩn bị cắt video theo timeline đã lọc...'));
-      const sourceVideoPath = path.join(TEMP_DIR, 'temp_input.mp4');
-      if (!fs.existsSync(sourceVideoPath)) {
+      /* NỀN ĐEN (blank_base=1): lane chính không có video — chỉ có hình khối/văn bản/ảnh
+       * (hoặc chỉ block ở lane phụ). Không có temp_input.mp4 nào để làm nền, nên dựng một
+       * video đen + tiếng câm đúng khổ/fps/độ dài sequence (buildBlankBaseVideo, ngay dưới
+       * khi đã chốt fps) và cho nó đóng vai nguồn lane chính; mọi block đi đường overlay. */
+      const blankBase = String(req.body.blank_base || '') === '1';
+      let sourceVideoPath = blankBase
+        ? path.join(TEMP_DIR, 'blank_base.mp4')
+        : path.join(TEMP_DIR, 'temp_input.mp4');
+      if (!blankBase && !fs.existsSync(sourceVideoPath)) {
         return httpError(res, 400, _t('Không tìm thấy video nguồn. Hãy chạy bước bóc băng trước.'));
       }
       const timeline = JSON.parse(req.body.timeline_json || '[]');
@@ -7599,6 +7711,23 @@ function createApp() {
         '30',
       );
       exportSettingsForError = exportSettings;
+      if (blankBase) {
+        sourceVideoPath = await timeStage('blank_base_ms', () => buildBlankBaseVideo(sourceVideoPath, {
+          width: sequenceSettings.width,
+          height: sequenceSettings.height,
+          fps: exportSettings.render_fps,
+          duration: timelineDurationFromIntervals(exportIntervals),
+        }));
+      }
+      // Overlay dài hơn video lane chính: nối đuôi đen vào nguồn + thêm một khoảng cho đuôi đó.
+      const tailPadSeconds = blankBase ? 0 : Math.min(86400, Math.max(0, Number(req.body.tail_pad_seconds) || 0));
+      if (tailPadSeconds >= 0.05) {
+        const padded = await timeStage('tail_pad_ms', () => buildTailPaddedSource(sourceVideoPath, tailPadSeconds));
+        sourceVideoPath = padded.path;
+        const [tailInterval] = normalizeExportIntervals(
+          [{ start: padded.sourceDuration, end: padded.sourceDuration + tailPadSeconds }], sequenceSettings);
+        exportIntervals.push({ ...tailInterval, index: exportIntervals.length });
+      }
       userOutputPath = trustedExportOutputPath(req.body, exportSettings.codec);
       // Chốt màu asset overlay TRƯỚC khi dựng payload: xem sdrOverridesForEditingAssets.
       // Khâu này có thể mã hoá lại TOÀN BỘ một video HDR làm lớp phủ ngay trong lượt xuất
