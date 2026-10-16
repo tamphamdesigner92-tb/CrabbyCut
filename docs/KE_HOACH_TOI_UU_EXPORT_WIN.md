@@ -1,5 +1,7 @@
 # Kế hoạch: Xuất video CrabbyCut nhanh ≥ 2× trên Windows và macOS — sửa lệnh ffmpeg + tự build ffmpeg
 
+> **Lưu ý 2026-10-16 — `CrabbyCut_Private` đã đổi tên thành CrabbyStudio, là dự án TÁCH BIỆT với CrabbyCut.** Mọi chỗ dưới đây nói "nhánh macOS", "Private" hay "port sang `CrabbyCut_Private`" là ghi chép lịch sử; các việc port sang đó (Bước 0A mục 6, A.3, M.2, M.3, danh sách file Bước M) **đã bỏ**. macOS nay chạy chung `main` của CrabbyCut (PR #2, xem `docs/DONG_BO_WIN_MAC.md`). Không chép code qua lại giữa hai dự án khi người dùng chưa đồng ý.
+>
 > **Bàn giao 2026-10-05 (máy Mac) — Một `main` cho cả Windows và macOS:** `main` không biên dịch được trên Mac (clang) và 24 test đỏ; nay **102/104 xanh, 0 đỏ** trên M1 Pro với CÙNG mã. Mac chạy ffmpeg ghim `n8.1.1-crabbycut.2` (cùng nguồn với Windows, `build-macos.sh`, Release `n8.1.1-crabbycut.2-macos`); 1.8 có nhánh POSIX; VideoToolbox `-realtime 0` (Bin Tom trên Mac 30,0 -> 10,2 s). Tất cả nằm trên nhánh `sync/main-mac-win`, **PR #2 chưa gộp — CI Windows là lần đầu phần sửa C++ qua MSVC.** **Đọc "BÀN GIAO PHIÊN 15 (Mac) -> 16" ở mục 26** và `docs/DONG_BO_WIN_MAC.md` mục 7 (file bàn giao đợt đồng bộ đã xoá 2026-10-10 sau khi Windows chạy xanh 109/109).
 >
 > **Bàn giao 2026-10-04 (chiều):** đã push `4630a05` (Lồng tiếng: watchdog 5 phút của `scripts/setup_tts.js` giết pip giữa pha "Installing collected packages" -> `tts-site` trống; pha cài nay ngưỡng 60 phút) + `fdb0fb3` (thanh tiến độ render ngay dưới nút "Xuất video ngay" trong popup Xuất; sửa `compactStatusMessage` báo nhầm "Đang dựng timeline"). Đã đóng gói lại `dist/CrabbyCut-Setup-1.1.13.exe` (cùng số 1.1.13) + bổ sung `dist/RELEASE_NOTES_v1.1.13.md`. **CÒN CHỜ NGƯỜI DÙNG:** (1) thay exe + `.blockmap` + `latest.yml` và notes trên Release v1.1.13 bằng tay (máy không có `gh`); (2) ĐÃ dời tag `v1.1.13` từ `aab6474` sang `fdb0fb3` và force-push theo yêu cầu người dùng; (3) có chép bộ thư viện lồng tiếng đã cài thử (scratchpad phiên) vào `%LOCALAPPDATA%\CrabbyCut\runtime\tts-site` không — chưa làm.
@@ -56,11 +58,11 @@
    - chạy `npm run dist:win`; người dùng tự đăng lên GitHub Releases vì máy không có `gh`.
    - Ghi chú phát hành: hai hồi quy của BtbN `latest` (không nhận `-filter_complex_script`, NVENC đòi driver ≥ 610) và lỗi treo khi có video lớp phủ. Số đo ở mục 0A.4.
    - Bộ cài mới sẽ mở cửa sổ thiết lập **một lần** trên máy đã cài bản cũ, để tải FFmpeg ghim (~96 MB); thư viện AI giữ nguyên.
-3. `CrabbyCut_Private`: người dùng test bản port **trên Mac**: `npm run test:export-concat-video-overlay`, `test:export`, `test:video-anim`, rồi commit ("Port từ CrabbyCut public 0508bd0").
+3. (**bỏ 2026-10-16:** `CrabbyCut_Private` nay là CrabbyStudio, dự án riêng — không port sang.) ~~`CrabbyCut_Private`: người dùng test bản port **trên Mac**: `npm run test:export-concat-video-overlay`, `test:export`, `test:video-anim`, rồi commit ("Port từ CrabbyCut public 0508bd0").~~ Các ý con dưới đây là ghi chép lịch sử.
    - Build sidecar Private trên Windows phải chạy trong `vcvars64.bat`, vì script bên đó không tự tìm `cl`.
    - Trên Windows, Private có sẵn 2 test đỏ **không liên quan 0A**: `export-many-overlays` ("The command line is too long", vì chưa có đường `CreateProcessW` của bản public) và `video-mask`. Đỏ cả ở HEAD chưa vá.
    - **Phát hiện khi port:** sidecar macOS cũ (xuất hai pha) không treo nhưng **làm mất hình lớp phủ sau chỗ file đổi thông số màu**, không báo lỗi. Bản port sửa được (test đo màu xanh).
-4. macOS M.3 (bỏ lượt xuất hai pha): chỉ làm sau khi test treo xanh trên Mac.
+4. (**bỏ 2026-10-16:** `CrabbyCut_Private` nay là CrabbyStudio, dự án riêng — không port sang.) ~~macOS M.3 (bỏ lượt xuất hai pha): chỉ làm sau khi test treo xanh trên Mac.~~
 
 **B. Bước 0 — XONG (phiên 2).** Dụng cụ, bộ so chất lượng, số nền và kết luận ở mục "Kết quả Bước 0". Tóm tắt: filter là nút thắt (58–77% thời gian ffmpeg), 1B không cần làm.
 
@@ -215,7 +217,7 @@
     - **Công cụ trên máy:** MSYS2 `D:\msys64` (UCRT64: gcc 16.2, clang 22 có NVPTX, nasm, các thư viện); build: `MSYSTEM=UCRT64 /d/msys64/usr/bin/bash.exe -lc "bash /d/CrabbyCut_ffmpeg/rebuild_bg.sh [configure] && bash /d/CrabbyCut_ffmpeg/devbin.sh"` (log `D:\CrabbyCut_ffmpeg\dl\rebuild.log`); thêm bộ lọc mới: `register_filters.py <tên>` rồi `rebuild_bg.sh configure`. **Sửa header ffnvcodec (`/ucrt64/include`) thì phải `make clean`** (make không theo dõi header hệ thống -> segfault). Đo A/B phải xem exit code từng lượt (lượt sập chạy "nhanh"). Công cụ đo (đã chép khỏi scratchpad): `D:/CrabbyCut_ffmpeg/tools/` — threadprof.exe (CPU từng luồng ffmpeg: `threadprof.exe <tiền tố> <lệnh...>`), fx.js (chạy danh sách lệnh JSON, in CPU-giây/khung), runjobs.js (chạy jobs.json GPU/CPU song song, báo lượt lỗi); kịch bản đo/kiểm ở `D:/CrabbyCut_ffmpeg/tests/` (blend_exact.js, geo_check.js, to_crab.js, par4.js, steps.json, tc_gpu.txt).
 
 - **Câu hỏi 1.12 pha 2 — người dùng trả lời 2026-10-02: BẬT** (miễn tiêu chí (a) cho mục đổi thứ tự lấy mẫu vì (b) đạt). 36/36 test export xanh với pha 2 mặc định. Các câu trước: (a)–(e) trả lời 2026-09-29, khổ lệch của 1.12 trả lời 2026-09-30, ô Bitrate của 1.20 trả lời 2026-10-01 (xem bảng "Quyết định đã chốt").
-- `CrabbyCut_Private`: chưa port gì của phiên 2–3. Mục trung lập để port (M.2): phần đo (sidecar + backend + renderer), 1.15, 1.1a, 1.17, 1.3, 1.5, ảnh tĩnh một lần.
+- (**bỏ 2026-10-16:** `CrabbyCut_Private` nay là CrabbyStudio, dự án riêng — không port sang.) ~~`CrabbyCut_Private`: chưa port gì của phiên 2–3. Mục trung lập để port (M.2): phần đo (sidecar + backend + renderer), 1.15, 1.1a, 1.17, 1.3, 1.5, ảnh tĩnh một lần.~~
 
 **Công cụ và dữ liệu có sẵn trên máy dev:**
 - Gyan 8.1.1 shared đã giải nén: `%TEMP%\claude\E--Dev-Windows-App-ffmpeg\30de9403-…\scratchpad\dl\gyan\ffmpeg-8.1.1-full_build-shared\bin`. Thư mục scratch có thể đã bị dọn; nếu mất thì tải lại theo `scripts/ffmpeg_pin.js` và kiểm SHA-256.
@@ -256,7 +258,7 @@
 | Chất lượng | Giống bằng mắt. Kiểm tự động bằng cách so với **bản chuẩn độ chính xác cao**: bản mới phải gần bản chuẩn ít nhất bằng bản cũ; cộng thêm VMAF(mới so với cũ) ≥ 95, PSNR ≥ 45 dB, và ngưỡng cho khung tệ nhất. Thay cho ngưỡng SSIM ≥ 0,995 ban đầu, vì số đo cho thấy ngưỡng đó đánh trượt cả thay đổi chính xác hơn |
 | Bước vẽ trước trong Electron | Đo trước. Nếu chiếm ≥ 30% tổng thời gian trên dự án thật thì làm nhánh 1B |
 | Bản ffmpeg dùng | Luôn dùng bản ghim phiên bản. ffmpeg hệ thống chỉ dùng khi bản ghim hỏng |
-| Hai hồi quy do ffmpeg "latest" | Phát hành **bản vá riêng ngay** (ví dụ v1.1.13), trước mọi tối ưu; port sang `CrabbyCut_Private` |
+| Hai hồi quy do ffmpeg "latest" | Phát hành **bản vá riêng ngay** (ví dụ v1.1.13), trước mọi tối ưu; ~~port sang `CrabbyCut_Private`~~ (**bỏ 2026-10-16:** `CrabbyCut_Private` nay là CrabbyStudio, dự án riêng — không port sang) |
 | Nền tảng (2026-09-27) | Tối ưu cho **cả Windows lẫn macOS**. Tận dụng tối đa GPU (giải mã, mã hoá, và ghép khi được); máy không có GPU vẫn phải được tối ưu |
 | Cách xuất phụ đề (2026-09-27) | **Gom mỗi track phụ đề/chữ tĩnh thành MỘT luồng ảnh** từ chính các PNG do trình duyệt bake (giữ đúng hình như preview), thay cho hàng trăm lớp `overlay`. Không dùng libass (mục 1.11) |
 | Độ phân giải xuất (2026-09-27) | Ô "Độ phân giải" trong hộp thoại xuất **có tác dụng thật** (Theo sequence / 1080p / 720p), không còn bị sequence đè (mục 1.12) |
@@ -336,7 +338,7 @@ Các số "Đo" là đo vi mô ngày 2026-09-26 trên máy này, ≥ 3 lượt, 
   - Các cách **không** chữa được: bỏ tiếng lớp phủ, chuỗi filtergraph, `[0:v]split` (1.0), mỗi clip một input `-itsoffset/-ss` (1.1), đưa mọi input về trục thời gian timeline.
   - **Cách chữa đã ship:** `-reinit_filter:v 0` trước `-i` của video lớp phủ. Xong trong vài giây trên cả 3 bản ffmpeg, màu đoạn sau chỗ đổi vẫn đúng (test đo).
     - `movie=` cũng chữa được, nhưng không cần nữa: nó mất pipeline giải mã và khác `-i` ở mốc `start_time` lẫn autorotate.
-    - Nhánh macOS đã gặp lỗi này và vòng bằng cách xuất **hai lượt** (`CrabbyCut_Private/native/sidecar/core_process.cpp:3397-3432`); M.3 nay chỉ cần port cờ này.
+    - Nhánh macOS đã gặp lỗi này và vòng bằng cách xuất **hai lượt** (`CrabbyCut_Private/native/sidecar/core_process.cpp:3397-3432`); ~~M.3 nay chỉ cần port cờ này.~~ (**bỏ 2026-10-16:** `CrabbyCut_Private` nay là CrabbyStudio, dự án riêng — không port sang.)
   - Phần còn lại cho upstream (2.4): fftools không nên kẹt khi dựng lại graph giữa `concat`. Nên gửi báo lỗi kèm repro, nhưng hết gấp.
 - **Export có thể đang hỏng trên máy cài mới.**
   - FFmpeg master đã xoá `-filter_complex_script`: commit `07407fff61`, vào master 2026-06-23, có trong `release/9.0`, không có trong 8.0/8.1; `ffmpeg_opt.c:1758-1766`.
@@ -404,7 +406,7 @@ Các số "Đo" là đo vi mô ngày 2026-09-26 trên máy này, ≥ 3 lượt, 
    - **Vá (khác kế hoạch ban đầu):** `-reinit_filter:v 0` trước `-i` của video lớp phủ, cùng lý do với input lane chính. Không dùng `movie=` (xem "Rủi ro đang xảy ra").
      - Chỉ luồng hình: với tiếng, buffersrc trả EINVAL cho khung đổi thông số khi không được dựng lại (`buffersrc.c:98-106`), nên tiếng giữ hành vi cũ.
      - Không thêm cờ cho ảnh: ảnh không đổi thông số, và mỗi cờ tốn ~20 ký tự dòng lệnh × hàng trăm phụ đề.
-6. Thử bộ cài trên runtime sạch (`CRAB_RUNTIME_DIR` mới) → `npm run dist:win` → phát hành → port sang `CrabbyCut_Private` (`core_process.cpp:3001`, `server.js:3890`, `subtitle-jobs.js:259`).
+6. Thử bộ cài trên runtime sạch (`CRAB_RUNTIME_DIR` mới) → `npm run dist:win` → phát hành → ~~port sang `CrabbyCut_Private`~~ (**bỏ 2026-10-16:** `CrabbyCut_Private` nay là CrabbyStudio, dự án riêng — không port sang) (`core_process.cpp:3001`, `server.js:3890`, `subtitle-jobs.js:259`).
    - Runtime sạch: **đã thử** (xem mục 4).
    - Commit: **xong**, `0508bd0` trên `main`, chưa push (người dùng chọn 2026-09-27).
    - Phát hành: **chưa**, người dùng chọn để sau. `main` đang có 12 commit từ `v1.1.12`, trong đó có lồng tiếng "chưa test xong". Xem "VIỆC TIẾP THEO" mục A.2.
@@ -888,7 +890,7 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
   - **G5 — phát hành:** nơi đặt bản ffmpeg tự build — **người dùng chốt 2026-10-02: repo riêng `tamphamdesigner92-tb/ffmpeg-for-CrabbyCut`**, nội dung = bản vá + kịch bản (chốt 2026-10-03). Phiên 11: repo + zip `n8.1.1-crabbycut.1` + `ffmpeg_pin.js` xong, hồi quy trên zip, Release đã tạo và kiểm (mục 22). macOS giữ đường hiện tại (Bước M).
   - Mỗi bước: test export xanh ở cả hai chế độ, bộ so 0.3, A/B ≥ 3 lượt.
 
-**Tương thích nhánh macOS:** phần riêng Windows (`-hwaccel cuda/d3d11va`, `CreateProcessW`) gói sau `#ifdef _WIN32` hoặc sau phép dò; phần trung lập viết để `git apply` sang `CrabbyCut_Private` được. Chi tiết macOS ở **Bước M**.
+**Tương thích nhánh macOS:** phần riêng Windows (`-hwaccel cuda/d3d11va`, `CreateProcessW`) gói sau `#ifdef _WIN32` hoặc sau phép dò; ~~phần trung lập viết để `git apply` sang `CrabbyCut_Private` được.~~ (**bỏ 2026-10-16:** `CrabbyCut_Private` nay là CrabbyStudio, dự án riêng — không port sang.) Chi tiết macOS ở **Bước M**.
 
 **Điều kiện chuyển tiếp:** có bảng A/B từng mục; mọi fixture qua 0.3; toàn bộ test export xanh.
 
@@ -978,7 +980,7 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
 >   Với bản ghim: 102/104 xanh; `test:export-hdr-asset-usage` hết đỏ; 2 test còn lại đỏ vì làm tròn SIMD x86 ≠ ARM
 >   (mục 26, `DONG_BO_WIN_MAC.md` mục 6), không phải vì ffmpeg.
 
-**Hiện trạng nhánh macOS** (`CrabbyCut_Private`, dòng `CrabbyCut_v2.0.x`, cùng khung sidecar):
+**Hiện trạng nhánh macOS** (`CrabbyCut_Private` (nay là CrabbyStudio, dự án riêng); ghi chép lịch sử, dòng `CrabbyCut_v2.0.x`, cùng khung sidecar):
 - ffmpeg lấy từ hệ thống (Homebrew), gọi bằng tên trần (`backend/hdr-tonemap.js:10-11`), không ghim phiên bản. Homebrew lên FFmpeg 9 là `-filter_complex_script` hỏng (`core_process.cpp:3001`, `server.js:3890`, `subtitle-jobs.js:259`).
   - Việc đầu tiên trên Mac của người dùng: chạy `ffmpeg -version` để biết đã hỏng chưa.
 - Encode: `h264_videotoolbox`/`hevc_videotoolbox` (`core_process.cpp:904-914, 2733`), proxy preview dùng `scale_vt` (`:3154-3180`). Export **chưa** có `-hwaccel videotoolbox`.
@@ -991,8 +993,8 @@ Việc tải ffmpeg và việc đăng bản phát hành đều sẽ hỏi ngư�
   - Tạm thời: một bản static đáng tin, có ghim SHA-256. Chọn nguồn cụ thể lúc thi công và hỏi người dùng.
   - Ký mã (codesign, hardened runtime) và notarize cùng app. Nếu tải lúc chạy thì phải xử lý thuộc tính quarantine của Gatekeeper.
   - Resolver và verify bằng export tí hon, theo khuôn Bước 0A.
-- **M.2 Port** bản vá 0A (`-/filter_complex`) và mọi mục trung lập của Bước 1 (1.0, 1.1, 1.3, 1.5, 1.6, 1.11, 1.12, 1.13) sang `CrabbyCut_Private`, theo cách port quen dùng.
-- **M.3 Bỏ lượt xuất thứ hai** — nay chỉ cần port cờ `-reinit_filter:v 0` cho video lớp phủ (0A mục 5), vì nguyên nhân treo đã rõ:
+- ~~**M.2 Port** bản vá 0A (`-/filter_complex`) và mọi mục trung lập của Bước 1 (1.0, 1.1, 1.3, 1.5, 1.6, 1.11, 1.12, 1.13) sang `CrabbyCut_Private`, theo cách port quen dùng.~~ (**Xong 2026-10-05 theo cách khác:** macOS chạy chung `main` của CrabbyCut, không port — xem đoạn bàn giao 2026-10-05 ở trên. `CrabbyCut_Private` nay là CrabbyStudio, dự án riêng — không port sang.)
+- (**bỏ 2026-10-16:** `CrabbyCut_Private` nay là CrabbyStudio, dự án riêng — không port sang.) ~~**M.3 Bỏ lượt xuất thứ hai** — nay chỉ cần port cờ `-reinit_filter:v 0` cho video lớp phủ (0A mục 5), vì nguyên nhân treo đã rõ:~~ Lượt xuất hai pha chỉ có ở sidecar bên Private; các ý con dưới đây là ghi chép lịch sử.
   - ảnh/chữ tĩnh đã đi 1.11, nên không còn là input `-i` đổ vào `overlay`;
   - video lớp phủ mang `-reinit_filter:v 0` như bản Windows (đã đo: hết treo trên cả 3 bản ffmpeg).
   - Đã port cờ này sang Private (chưa commit, 2026-09-27). Lượt xuất hai pha cũ còn một lỗi riêng: lớp phủ **mất hình** sau chỗ file đổi thông số màu. Đó thêm một lý do để bỏ nó sau khi test trên Mac.
@@ -1168,7 +1170,7 @@ Nguồn:
   - mới: `export_fidelity.js`, `export_concat_video_overlay.js` (0A), `export_hdr_asset_usage.js` (1.15), `export_batch_seek.js` (1.1a);
   - sửa: `overlay_placement_contract.js`.
 - (1B) `CrabbyCut/static/js/editing-runtime.js`.
-- (Bước M) `CrabbyCut_Private`: cùng các file trên, cộng resolver ffmpeg cho macOS, và bỏ nhánh xuất hai pha (`core_process.cpp:3397-3432`) khi đủ điều kiện.
+- (**bỏ 2026-10-16:** `CrabbyCut_Private` nay là CrabbyStudio, dự án riêng — không port sang.) ~~(Bước M) `CrabbyCut_Private`: cùng các file trên, cộng resolver ffmpeg cho macOS, và bỏ nhánh xuất hai pha (`core_process.cpp:3397-3432`) khi đủ điều kiện.~~
 - ffmpeg, nhánh `crabbycut/perf`:
   - `fftools/ffmpeg_opt.c` (bí danh `-filter_complex_script`, mục 2.1b);
   - `fftools/ffmpeg_filter.c` / `ffmpeg_sched.c` (treo khi dựng lại graph, hết gấp);
