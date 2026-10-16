@@ -8665,7 +8665,7 @@ số mốc chỉ quyết định mỗi pha chiếm bao nhiêu của thanh. Sau k
 Còn đúng một quãng ~33 giây không có nhịp nào (đuôi tiền xử lý + nạp model + VAD) vì phần đó
 nằm trong `faster_whisper` và không hook được.
 
-> **BẪY ĐÃ TRẢ GIÁ (nhánh macOS):** ở đó không có kênh NDJSON, phải đọc thanh tqdm của
+> **BẪY ĐÃ TRẢ GIÁ (nhánh macOS cũ = `CrabbyCut_Private` (nay là CrabbyStudio, dự án riêng)):** ở đó không có kênh NDJSON, phải đọc thanh tqdm của
 > `mlx_whisper` trên stderr. Bản đầu bắt `"NN%|"` chung chung — thanh `Fetching 4 files: 100%`
 > của `huggingface_hub` (kiểm tra model trong cache, xong tức thì) khớp NGAY dòng đầu và đẩy
 > thanh lên 100 % **trước khi bóc băng bắt đầu**. Nay chỉ nhận thanh có đơn vị `frames/s`.
@@ -8673,6 +8673,8 @@ nằm trong `faster_whisper` và không hook được.
 > trên máy Mac.
 
 ### Ba chỗ lệch với nhánh macOS (CrabbyCut_v2.0.1)
+
+> **Lưu ý 2026-10-16:** "nhánh macOS" ở mục này là `CrabbyCut_Private` (nay là CrabbyStudio, dự án riêng). Mục này là ghi chép lịch sử; sửa luật ở CrabbyCut KHÔNG cần sửa bên CrabbyStudio, và không chép code qua lại khi người dùng chưa đồng ý.
 
 **1. Kênh tiến độ ASR.** macOS = tqdm `frames/s` trên stderr (mlx_whisper). Windows = khoá
 `ratio` trong NDJSON trên stdout (faster-whisper), chia pha như bảng trên. `runPythonSidecar`
@@ -8682,7 +8684,7 @@ giữ CẢ HAI đường nên một tệp chạy được cho cả hai nhánh.
 nằm ở `static/js/ai-video-panel.js` trên nhánh macOS và dùng chung với "Tạo video AI". Nhánh
 Windows CHƯA có tệp đó, nên bản luật sống trong `static/js/auto-subtitle.js`. `cuesFromSegments`
 vẫn ưu tiên `AiVideoPanel.chunkSpansForScene` nếu tệp kia được port sang, nên không bao giờ có
-hai bản luật cùng chạy — nhưng **sửa luật thì phải sửa cả hai nhánh**.
+hai bản luật cùng chạy. ~~**sửa luật thì phải sửa cả hai nhánh**~~ (bỏ 2026-10-16: hai dự án đã tách).
 
 **3. Vị trí textbox mặc định.** Trên macOS, `addTextItem()` khớp MỌI textbox mới vào lưới an
 toàn (tự xuống dòng + neo cạnh dưới), kể cả nút "+Text". Trên nhánh Windows, theo quyết định
@@ -9127,7 +9129,8 @@ thì thay bộ cũ" — ít việc hơn nhưng không làm được song ngữ.
 Cách lưu: bộ Auto Subtitle GIỮ khoá cũ `subtitleState`; các bộ nhập nằm ở khoá MỚI
 `subtitleImports` (mảng) trong `getHistoryState()`. Không dời `subtitleState` vào mảng vì ba thứ
 đã dựng trên giao ước "một bộ tự động ⇄ `<Tên dự án>.srt` cạnh `.crab`": lượt Lưu, Đóng gói
-(`electron/project-package.js` đọc thẳng `editingState.subtitleState`), và nhánh macOS mở cùng
+(`electron/project-package.js` đọc thẳng `editingState.subtitleState`), và nhánh macOS (lúc ghi là
+`CrabbyCut_Private` (nay là CrabbyStudio, dự án riêng)) mở cùng
 `.crab`. Nhờ vậy dự án cũ mở lên không phải di trú gì; bản ứng dụng cũ mở dự án mới chỉ mất SỔ
 của các bộ nhập (block vẫn còn, là text thường).
 
@@ -9785,7 +9788,7 @@ KHÔNG có LUT, từ 5s mới hiện rồi giảm. Biểu thức trộn vẫn đ
 
 ## Lớp Điều chỉnh xếp chồng, lane riêng cho lớp mới, lane chính thấp hơn (2026-09-26, đợt 6)
 
-Port từ `CrabbyCut_Private` nhánh `CrabbyCut_v2.0.4`: commit `0a0cf02` (trọn) và một phần `aa127e6`.
+Port từ `CrabbyCut_Private` (nay là CrabbyStudio, dự án riêng) nhánh `CrabbyCut_v2.0.4` (ghi chép lịch sử): commit `0a0cf02` (trọn) và một phần `aa127e6`.
 
 **1. Lane chính 78 -> 62px** (`LANE_HEIGHTS.main`). Hàng tên lane vẫn hiện (ngưỡng `>= 40`).
 
@@ -9827,6 +9830,8 @@ TRÊN CÙNG thắng" -> hai lớp cùng có LUT thì chỉ LUT lớp trên có m
   triển, chưa kiểm hành vi trong bản đóng gói (đường dẫn module nằm trong app.asar).
 
 ### Miếng vá Retouch "phóng to" của nhánh macOS: đo trên nhánh Windows (2026-09-26)
+
+> "Nhánh macOS" ở mục này là `CrabbyCut_Private` (nay là CrabbyStudio, dự án riêng); ghi chép lịch sử.
 
 **Vì sao hai nhánh khác nhau.** Nhánh macOS vẽ lane chính trên canvas theo cỡ TEXTURE (quy về
 `source_*`), nên thiếu hệ số vừa khung -> nguồn 1728x3072 trên sequence 1080x1920 vẽ to 1.6 lần;
