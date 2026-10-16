@@ -178,7 +178,9 @@
      * đã có file cài đặt từ trước khi có mục này được backend gán 'vi' lúc đọc (xem
      * readAppSettings) để giao diện không tự đổi sang tiếng Anh sau khi cập nhật. */
     const LANGUAGES = ['auto', 'vi', 'en', 'zh'];
-    const DEFAULT_GENERAL = { undoSteps: 20, devMode: false, snapDefault: true, language: 'auto' };
+    /* automationBridge: cho MCP server (mcp/) điều khiển app qua cầu nối cục bộ — xem
+     * electron/automation-bridge.js. Mặc định TẮT: không bật thì không có cổng nào mở. */
+    const DEFAULT_GENERAL = { undoSteps: 20, devMode: false, snapDefault: true, language: 'auto', automationBridge: false };
     // transitionQuality 'auto' = 2 mức (CSS px khi phát, ×dpr khi dừng); 'sharp' = luôn ×dpr,
     // nét hơn khi phát nhưng hiệu ứng Xoắn sẽ giật (xem transitionRenderScale).
     /* transparencyWarning: nền xanh nhấp nháy ở vùng khung hình trong suốt (để soi lỗi lọt nền).
@@ -505,6 +507,7 @@
         return {
             undoSteps: Math.round(clampNumber(s.undoSteps, LIMITS.undoSteps.min, LIMITS.undoSteps.max, D.undoSteps)),
             devMode: typeof s.devMode === 'boolean' ? s.devMode : D.devMode,
+            automationBridge: typeof s.automationBridge === 'boolean' ? s.automationBridge : D.automationBridge,
             snapDefault: typeof s.snapDefault === 'boolean' ? s.snapDefault : D.snapDefault,
             language: LANGUAGES.includes(s.language) ? s.language : D.language,
         };

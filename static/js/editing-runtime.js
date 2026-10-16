@@ -27301,6 +27301,8 @@
         startMainBlockDrag,
         selectBlocksBySide,
         selectMainClip: setPrimaryMainSelection,
+        // Chọn MỘT block lane overlay theo id (cầu nối tự động hoá, static/js/automation-bridge.js).
+        selectItem: selectEditingItem,
         deleteSelectedBlocks,
         clearSelection: () => {
             clearEditingSelection();
