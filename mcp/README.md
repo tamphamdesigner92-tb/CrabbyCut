@@ -20,7 +20,7 @@ Claude ──stdio──► mcp/crabbycut-mcp.js ──HTTP 127.0.0.1 + token─
 claude mcp add crabbycut -- node mcp/crabbycut-mcp.js
 ```
 
-**Bản đã cài trên Windows** (không cần Node; đổi đường dẫn nếu bạn cài chỗ khác):
+**Bản đã cài trên Windows** (không cần Node; đổi đường dẫn nếu bạn cài chỗ khác). Bản cài 1.1.16 trở về trước chưa có thư mục `resources\app\mcp\` — dùng cách của bản dev cho tới khi cài bản mới hơn:
 
 ```bash
 claude mcp add crabbycut -e ELECTRON_RUN_AS_NODE=1 -- "%LOCALAPPDATA%\Programs\CrabbyCut\CrabbyCut.exe" "%LOCALAPPDATA%\Programs\CrabbyCut\resources\app\mcp\crabbycut-mcp.js"
@@ -34,6 +34,8 @@ claude mcp add crabbycut -e ELECTRON_RUN_AS_NODE=1 -- /Applications/CrabbyCut.ap
 
 ## Claude Desktop (`claude_desktop_config.json`)
 
+`claude mcp add` chỉ đăng ký cho Claude Code; Claude Desktop đọc cấu hình riêng ở `%APPDATA%\Claude\claude_desktop_config.json` (bản Microsoft Store chuyển tệp này vào `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\`, nhưng sửa đường dẫn nào cũng là cùng một tệp). Tệp JSON không hiểu `%LOCALAPPDATA%`, nên phải ghi đường dẫn đầy đủ.
+
 ```json
 {
   "mcpServers": {
@@ -45,6 +47,23 @@ claude mcp add crabbycut -e ELECTRON_RUN_AS_NODE=1 -- /Applications/CrabbyCut.ap
   }
 }
 ```
+
+`<you>` phải đúng tên thư mục người dùng, kể cả dấu cách (thư mục `C:\Users\Nguyen Van A` thì trong JSON viết `C:\\Users\\Nguyen Van A\\...`) — gõ thiếu dấu cách là Claude Desktop báo `spawn ... ENOENT`. Mở `%LOCALAPPDATA%` trong Explorer để chép đường dẫn thật.
+
+Với bản dev:
+
+```json
+{
+  "mcpServers": {
+    "crabbycut": {
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": ["E:\\đường\\dẫn\\tới\\CrabbyCut\\mcp\\crabbycut-mcp.js"]
+    }
+  }
+}
+```
+
+Sửa xong phải thoát hẳn Claude Desktop (cả biểu tượng ở khay hệ thống) rồi mở lại.
 
 ## Khi bản dev và bản cài cùng mở
 
