@@ -4724,6 +4724,19 @@ void WriteOverlaySetpts(std::ostream& out, const ExportOverlay& overlay, const E
   }
 }
 
+/* KHUNG ĐẦU MANG PTS ÂM — lớp phủ đặt ở 0 (chuỗi khung sớm ¼ khung, video sớm kOverlayTieEpsilon,
+ * cùng công thức với WriteOverlaySetpts). `fade` của FFmpeg (vf_fade.c) so `frame->pts` (int64) với
+ * mốc bắt đầu kiểu uint64: PTS âm thành số không dấu khổng lồ nên "đã tới mốc" và "đã hết hiệu ứng"
+ * ngay khung đầu — fade-in bị bỏ qua, fade-out TRONG SUỐT CẢ BLOCK (2026-10-17: GeoCode đầu dự án
+ * "Giai-thich-thay-ma" mất hình trong bản xuất, block sau 0 thì không). */
+bool OverlayFirstPtsNegative(const ExportOverlay& overlay, const ExportSettings& settings) {
+  const double start = overlay.timelineStart;
+  const double renderFpsForSeq = ParseFpsValue(settings.renderFps);
+  if (OverlayIsImageSequence(overlay) && renderFpsForSeq > 0.0) return start - 0.25 / renderFpsForSeq < 0.0;
+  if (!OverlayIsImageLike(overlay) && !OverlayIsImageSequence(overlay)) return start - kOverlayTieEpsilon < 0.0;
+  return start < 0.0;
+}
+
 /* Chuỗi THỜI GIAN của lớp phủ (trim + setpts). Ảnh tĩnh xử lý một lần: rỗng — trim/setpts dời ra
  * sau `loop` ở cuối chuỗi (xem OverlayStillOnce). */
 std::string OverlayTimingChain(const ExportOverlay& overlay, const ExportSettings& settings) {
@@ -4849,14 +4862,21 @@ void WriteVisualOverlayFilter(
   }
   // Hoạt ảnh video: opacity In/Out qua fade alpha (mốc tuyệt đối = start + cục bộ).
   if (hasVideoAnim) {
+    // Khung đầu PTS âm (xem OverlayFirstPtsNegative): dời tạm cả luồng lẫn mốc fade lên 1 s quanh
+    // cặp fade rồi trả về. round(1/TB) là số nguyên nên PTS ra đúng như cũ, không lệch 1 tick.
+    const bool fadeShift = (overlay.animInDur > 0.001 || overlay.animOutDur > 0.001)
+      && OverlayFirstPtsNegative(overlay, settings);
+    const double fadeBase = start + (fadeShift ? 1.0 : 0.0);
+    if (fadeShift) script << ",setpts=PTS+round(1/TB)";
     if (overlay.animInDur > 0.001) {
-      script << ",fade=t=in:st=" << FfmpegDouble(start + overlay.animInStart)
+      script << ",fade=t=in:st=" << FfmpegDouble(fadeBase + overlay.animInStart)
              << ":d=" << FfmpegDouble(overlay.animInDur) << ":alpha=1";
     }
     if (overlay.animOutDur > 0.001) {
-      script << ",fade=t=out:st=" << FfmpegDouble(start + overlay.animOutStart)
+      script << ",fade=t=out:st=" << FfmpegDouble(fadeBase + overlay.animOutStart)
              << ":d=" << FfmpegDouble(overlay.animOutDur) << ":alpha=1";
     }
+    if (fadeShift) script << ",setpts=PTS-round(1/TB)";
   }
   // Ghép ở YUV (xem YuvCompositeEnabled). `yuvStatic` = lớp phủ đứng yên, không xoay.
   const bool yuvChain = YuvCompositeEnabled(settings);
