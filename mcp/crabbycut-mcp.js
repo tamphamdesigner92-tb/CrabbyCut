@@ -21,9 +21,13 @@ const os = require('os');
 const path = require('path');
 const http = require('http');
 
-const SERVER_INFO = { name: 'crabbycut', version: '0.2.0' };
+const SERVER_INFO = { name: 'crabbycut', version: '0.3.0' };
 const SUPPORTED_PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const HTTP_TIMEOUT_MS = 35_000;
+// Lệnh chạy lâu (nhập cả loạt tệp, lệnh gộp): app chờ renderer chừng này, HTTP chờ thêm 5 s.
+// PHẢI khớp LONG_RPC_TIMEOUT_MS ở electron/automation-bridge.js.
+const LONG_TIMEOUT_MS = 300_000;
+const LONG_METHODS = new Set(['batch', 'add_media_batch', 'import_media']);
 
 /* ---- Tìm app ---- */
 
@@ -79,7 +83,9 @@ function describe(b) {
 
 function rpc(method, params) {
   const bridge = pickBridge();
-  const body = JSON.stringify({ method, params: params || {} });
+  const long = LONG_METHODS.has(method);
+  const payload = long ? { ...(params || {}), timeout_ms: LONG_TIMEOUT_MS } : (params || {});
+  const body = JSON.stringify({ method, params: payload });
   return new Promise((resolve, reject) => {
     const req = http.request({
       host: '127.0.0.1',
@@ -91,7 +97,7 @@ function rpc(method, params) {
         'Content-Length': Buffer.byteLength(body),
         Authorization: `Bearer ${bridge.token}`,
       },
-      timeout: HTTP_TIMEOUT_MS,
+      timeout: long ? LONG_TIMEOUT_MS + 5_000 : HTTP_TIMEOUT_MS,
     }, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
@@ -115,6 +121,28 @@ function rpc(method, params) {
  * không gọi bừa rồi phải đoán lỗi. */
 
 const NO_ARGS = { type: 'object', properties: {}, additionalProperties: false };
+
+/* Mảnh schema dùng chung cho update_block / add_media_batch / batch. */
+const KEYFRAME_POINT = {
+  type: 'object',
+  properties: {
+    t: { type: 'number', description: 'Seconds from the block start (or sequence seconds with keyframe_time "timeline").' },
+    v: { description: 'Value: px for position_x/y, % for scale/opacity/volume, degrees for rotation, -100..100 for most colour params. For "position" pass [x, y] or use x/y.' },
+    x: { type: 'number' },
+    y: { type: 'number' },
+    e: { type: 'string', enum: ['linear', 'ease-in', 'ease-out', 'ease-in-out', 'back', 'spring', 'bounce'], description: 'Easing of the segment LEAVING this keyframe (default ease-in-out).' },
+  },
+  required: ['t'],
+};
+const KEYFRAMES_SCHEMA = {
+  type: 'object',
+  description: 'Keyframes per field: { field: [{t, v, e}] }. Fields: position (both axes, {t, x, y}), position_x, position_y, scale, rotation, opacity, volume, and keyframable colour params (e.g. "basic.exposure", "basic.saturation", "lut.intensity", "effects.vignette"; see crabbycut_catalog color_params). Interpolated between keyframes, held before the first and after the last.',
+  additionalProperties: { type: 'array', items: KEYFRAME_POINT },
+};
+const KEYFRAME_MODE = { type: 'string', enum: ['merge', 'replace'], default: 'merge', description: 'merge = insert/overwrite the given keyframes; replace = the listed fields get exactly these keyframes ([] clears the field).' };
+const KEYFRAME_TIME = { type: 'string', enum: ['local', 'timeline'], default: 'local', description: 't measured from the block start (local) or on the sequence (timeline).' };
+const TRANSFORM_SCHEMA = { type: 'object', additionalProperties: { type: ['number', 'boolean'] }, description: 'position_x, position_y (px from centre), scale (%), rotation (deg), opacity (%), flip_x, flip_y.' };
+const ANIM_SIDE = { type: 'object', properties: { type: { type: 'string' }, duration: { type: 'number' }, easing: { type: 'string' } } };
 
 const TOOLS = [
   {
@@ -309,6 +337,7 @@ const TOOLS = [
         track_id: { type: 'string' },
         trim_start: { type: 'number', minimum: 0 },
         trim_end: { type: 'number', minimum: 0 },
+        duration: { type: 'number', exclusiveMinimum: 0 },
       },
       additionalProperties: false,
     },
@@ -329,13 +358,16 @@ const TOOLS = [
   /* ---- Sửa block ---- */
   {
     name: 'crabbycut_update_block',
-    description: 'Editing step only. Change properties of ONE block: a main-lane clip (main_index) or an overlay item (item_id). transform: position_x, position_y, scale, rotation, opacity, flip_x, flip_y (fields with keyframes get a keyframe at the playhead). volume is percent (100 = original). speed is a rate (1 = normal). Overlay items also accept timeline_start, duration, muted, text (text blocks) and style (text: font_family, font_size, color, font_weight, letter_spacing, line_height, align, stroke_*, bg_*, shadow_*). One undo step.',
+    description: 'Editing step only. Change properties of ONE block: a main-lane clip (main_index) or an overlay item (item_id). transform: position_x, position_y, scale, rotation, opacity, flip_x, flip_y (fields with keyframes get a keyframe at the playhead). keyframes animates fields over time, e.g. {"position": [{"t": 0, "x": -400, "y": 0}, {"t": 2, "x": 0, "y": 0, "e": "ease-out"}], "scale": [{"t": 0, "v": 80}, {"t": 2, "v": 100}]}. volume is percent (100 = original). speed is a rate (1 = normal). Overlay items also accept timeline_start, duration, muted, text (text blocks) and style (text: font_family, font_size, color, font_weight, letter_spacing, line_height, align, stroke_*, bg_*, shadow_*). One undo step.',
     inputSchema: {
       type: 'object',
       properties: {
         main_index: { type: 'integer', minimum: 0 },
         item_id: { type: 'string' },
-        transform: { type: 'object', additionalProperties: { type: ['number', 'boolean'] } },
+        transform: TRANSFORM_SCHEMA,
+        keyframes: KEYFRAMES_SCHEMA,
+        keyframe_mode: KEYFRAME_MODE,
+        keyframe_time: KEYFRAME_TIME,
         volume: { type: 'number', minimum: 0, maximum: 1000 },
         speed: { type: 'number', minimum: 0.1, maximum: 100 },
         pitch_correct: { type: 'boolean' },
@@ -370,8 +402,8 @@ const TOOLS = [
         item_id: { type: 'string' },
         combo: { type: 'string' },
         combo_duration: { type: 'number' },
-        in: { type: 'object', properties: { type: { type: 'string' }, duration: { type: 'number' }, easing: { type: 'string' } } },
-        out: { type: 'object', properties: { type: { type: 'string' }, duration: { type: 'number' }, easing: { type: 'string' } } },
+        in: ANIM_SIDE,
+        out: ANIM_SIDE,
       },
       additionalProperties: false,
     },
@@ -407,6 +439,76 @@ const TOOLS = [
       additionalProperties: false,
     },
     run: async (args) => json(await rpc('set_color', args)),
+  },
+
+  /* ---- Lệnh gộp: cả lô = MỘT bước Hoàn tác + MỘT lượt vẽ ---- */
+  {
+    name: 'crabbycut_add_media_batch',
+    description: 'Editing step only. Put MANY images/videos/audio files on the timeline in ONE call and ONE undo step — use this instead of repeated import_media/add_asset/update_block calls. Each item: exactly one of path (absolute file path, imported once), asset_id or library {category, name}; start (seconds; default right after the previous item + gap, the first item at the batch start or the playhead), duration, track_id, trim_start/trim_end (source seconds), transform, keyframes (+ keyframe_mode, keyframe_time), animation {combo, combo_duration} or {in, out}, transition {type, duration} to the next block on the same track, color {lut_id, lut_intensity, params}, volume, muted. defaults are merged into every item. on_error "abort" (default) rolls back the whole batch on any failure; "continue" skips failed items. Returns [{index, item_id, asset_id, track_id, timeline_start, duration, error?}].',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 500,
+          items: {
+            type: 'object',
+            properties: {
+              path: { type: 'string' },
+              asset_id: { type: 'string' },
+              library: { type: 'object', properties: { category: { type: 'string' }, name: { type: 'string' } }, required: ['category', 'name'] },
+              start: { anyOf: [{ type: 'number', minimum: 0 }, { type: 'string', enum: ['after_previous'] }] },
+              duration: { type: 'number', exclusiveMinimum: 0 },
+              track_id: { type: 'string' },
+              trim_start: { type: 'number', minimum: 0 },
+              trim_end: { type: 'number', minimum: 0 },
+              transform: TRANSFORM_SCHEMA,
+              keyframes: KEYFRAMES_SCHEMA,
+              keyframe_mode: KEYFRAME_MODE,
+              keyframe_time: KEYFRAME_TIME,
+              animation: { type: 'object', properties: { combo: { type: 'string' }, combo_duration: { type: 'number' }, in: ANIM_SIDE, out: ANIM_SIDE } },
+              transition: { type: 'object', properties: { type: { type: 'string' }, duration: { type: 'number' } } },
+              color: { type: 'object', properties: { lut_id: { type: 'string' }, lut_intensity: { type: 'number' }, params: { type: 'object', additionalProperties: { type: 'number' } } } },
+              volume: { type: 'number', minimum: 0, maximum: 1000 },
+              muted: { type: 'boolean' },
+            },
+          },
+        },
+        defaults: { type: 'object', description: 'Fields merged into every item (item values win; nested objects merge one level).' },
+        mode: { type: 'string', enum: ['copy', 'link'], default: 'copy', description: 'copy files into the project, or link them in place.' },
+        start: { type: 'number', minimum: 0, description: 'Start of the first item (default playhead).' },
+        gap: { type: 'number', minimum: 0, default: 0, description: 'Seconds between consecutive auto-placed items.' },
+        track_id: { type: 'string', description: 'Preferred track for every item (falls back to a free track of the right type).' },
+        on_error: { type: 'string', enum: ['abort', 'continue'], default: 'abort' },
+      },
+      required: ['items'],
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('add_media_batch', args)),
+  },
+  {
+    name: 'crabbycut_batch',
+    description: 'Editing step only. Run many EDIT commands in one call and ONE undo step, in order. ops: [{tool, args}] where tool is one of add_text, update_block, apply_text_preset, set_animation, set_transition, set_color, split, select, delete_selected, seek, add_asset, import_media, add_media_batch (with or without the crabbycut_ prefix) and args are the arguments of that tool. Reference an earlier result with a string "$<index>.<path>", e.g. {"tool": "add_text", "args": {"text": "Hi"}} then {"tool": "update_block", "args": {"item_id": "$0.item_id", "keyframes": {...}}}. UI tools, screenshots and jobs are not allowed. on_error "abort" (default) rolls back everything on the first failure; "continue" rolls back only the failed op.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ops: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 500,
+          items: {
+            type: 'object',
+            properties: { tool: { type: 'string' }, args: { type: 'object' } },
+            required: ['tool'],
+          },
+        },
+        on_error: { type: 'string', enum: ['abort', 'continue'], default: 'abort' },
+      },
+      required: ['ops'],
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('batch', args)),
   },
 
   /* ---- Job chạy lâu ---- */
@@ -618,6 +720,8 @@ async function handle(message) {
         instructions: 'Controls a running CrabbyCut video editor. Call crabbycut_status first. '
           + 'Editing tools work only in the Editing step (state.editing_ready = true). '
           + 'Prefer the feature tools (update_block, set_transition, set_color, import_media, start_job…); '
+          + 'for several edits at once use crabbycut_add_media_batch (many files + keyframes/animation) or '
+          + 'crabbycut_batch (any edit commands) — one call, one undo step. '
           + 'look up valid ids with crabbycut_catalog. For anything without a dedicated tool, drive the UI '
           + 'like a user: crabbycut_screenshot + crabbycut_ui_snapshot, then crabbycut_ui_click / ui_type / '
           + 'ui_key / ui_drag / ui_scroll, and screenshot again to verify. Native OS dialogs (file pickers) '

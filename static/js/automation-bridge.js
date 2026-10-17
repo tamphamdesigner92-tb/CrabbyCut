@@ -50,6 +50,11 @@
         return out;
     }
 
+    // Block vừa tạo: có `item_id` để lệnh gộp tham chiếu kiểu "$0.item_id".
+    function itemResult(item) {
+        return { item_id: item.id, ...flatFields(item) };
+    }
+
     function isPlaying() {
         if (typeof usesVirtualClock === 'function' && usesVirtualClock()) {
             return typeof isVirtualClockPlaying === 'function' && isVirtualClockPlaying();
@@ -199,8 +204,8 @@
             requireEditing();
             if (typeof text !== 'string' || !text.trim()) throw new Error('"text" không được rỗng');
             const placement = { start: Number.isFinite(Number(start)) ? Number(start) : undefined, trackId: track_id || undefined };
-            const item = need(window.EditingRuntime?.addTextItem, 'EditingRuntime.addTextItem')(placement, { text, duration });
-            return flatFields(item);
+            const add = need(window.EditingRuntime?.addTextItem, 'EditingRuntime.addTextItem');
+            return asOneUndoStep(() => itemResult(add(placement, { text, duration })));
         },
 
         save_project: async () => {
@@ -236,24 +241,46 @@
         return rt().automation;
     }
 
-    /* Một bước hoàn tác cho cả lệnh; kết thúc batch kể cả khi lỗi (bỏ sót là hỏng undo về sau).
-     * Lệnh LỖI giữa chừng thì quay lui về ảnh chụp vừa ghi: không để lại thay đổi dở dang, cũng
-     * không để lại một bước Hoàn tác rỗng. */
-    async function asOneUndoStep(fn) {
-        const depth = typeof undoStack !== 'undefined' ? undoStack.length : -1;
-        const end = rt().beginHistoryBatch();
+    /* Mốc trên cùng của undoStack. So theo DANH TÍNH chứ không theo độ dài: chồng đã đầy
+     * (general.undoSteps) thì mỗi lần ghi là một lần shift, độ dài đứng yên — so độ dài là
+     * tưởng "không có mốc mới" và lệnh lỗi không được quay lui. */
+    function historyTop() {
+        return typeof undoStack !== 'undefined' && undoStack.length ? undoStack[undoStack.length - 1] : null;
+    }
+
+    /* Ảnh chụp vị trí chồng Hoàn tác: đỉnh (để biết có mốc mới không) + đáy (chồng đầy thì ghi
+     * mốc mới là đẩy mốc CŨ NHẤT ra — lệnh lỗi phải trả nó về chỗ cũ). */
+    function historyMark() {
+        return { top: historyTop(), bottom: typeof undoStack !== 'undefined' ? undoStack[0] : undefined };
+    }
+
+    /* Một bước hoàn tác + một lượt vẽ cho cả lệnh; kết thúc batch kể cả khi lỗi (bỏ sót là hỏng
+     * undo về sau). Lệnh LỖI giữa chừng thì quay lui về ảnh chụp vừa ghi: không để lại thay đổi
+     * dở dang, cũng không để lại một bước Hoàn tác rỗng.
+     *
+     * `joinSince`: historyMark() chụp TRƯỚC KHI lệnh bắt đầu. Có mốc mới ghi từ đó (bước nhập tệp
+     * tự ghi) thì phần này nhập chung vào mốc đó thay vì thêm bước thứ hai — nhập + đặt block là
+     * MỘT lần Ctrl+Z. Gọi lồng (trong lệnh gộp) thì lịch sử đang treo: không ghi gì thêm. */
+    async function asOneUndoStep(fn, { joinSince } = {}) {
+        const runtime = rt();
+        const mark = joinSince || historyMark();
+        const joined = !!joinSince && historyTop() !== joinSince.top;
+        const endHistory = joined ? runtime.automation.suspendHistory() : runtime.beginHistoryBatch();
+        const releaseRender = runtime.automation.suspendRender();
         try {
             return await fn();
         } catch (error) {
-            end();
-            if (depth >= 0 && undoStack.length > depth && typeof restoreHistoryState === 'function') {
+            endHistory();
+            if (historyTop() !== mark.top && typeof restoreHistoryState === 'function') {
                 restoreHistoryState(undoStack.pop());
+                if (mark.bottom && !undoStack.includes(mark.bottom)) undoStack.unshift(mark.bottom);
                 if (typeof updateUndoRedoButtons === 'function') updateUndoRedoButtons();
             }
             throw error;
         } finally {
-            end();
-            rt().renderAll();
+            endHistory();
+            runtime.renderAll();
+            releaseRender();
         }
     }
 
@@ -281,8 +308,9 @@
     }
 
     function describeTarget({ kind, target, index }) {
-        if (kind === 'main') return { main_index: index, ...flatFields(target), transform: target.transform || null, animation: target.animation || null, transition: target.transition || null };
-        return { ...flatFields(target), transform: target.transform || null, style: target.style || null, animation: target.animation || null, transition: target.transition || null };
+        const keyframes = target.keyframes && Object.keys(target.keyframes).length ? target.keyframes : null;
+        if (kind === 'main') return { main_index: index, ...flatFields(target), transform: target.transform || null, keyframes, animation: target.animation || null, transition: target.transition || null };
+        return { item_id: target.id, ...flatFields(target), transform: target.transform || null, keyframes, style: target.style || null, animation: target.animation || null, transition: target.transition || null };
     }
 
     function mainClipDuration(index) {
@@ -290,6 +318,121 @@
     }
 
     const TRANSFORM_FIELDS = ['position_x', 'position_y', 'scale', 'rotation', 'opacity', 'flip_x', 'flip_y'];
+
+    /* =====================================================================
+     * KEYFRAME QUA MCP
+     * keyframes = { field: [{ t, v, e }] } — đúng mô hình lưu của app (text-animations.js):
+     *   t = giây CỤC BỘ từ đầu block (hoặc giây sequence với keyframe_time: "timeline"),
+     *   v = giá trị (px / % / độ — cùng đơn vị ô Thuộc tính), e = easing của đoạn RỜI mốc này.
+     * Field nhận: position_x/y, scale, rotation, opacity; "position" = [{t, x, y}] cho cả hai
+     * trục; volume (%); thông số màu keyframe được ("basic.exposure" hoặc "adj.basic.exposure").
+     * Ghi bằng upsertKeyframe của runtime rồi pairPositionKeyframes — giữ bất biến "X và Y luôn
+     * có mốc trùng nhau" mà nút ◆ Vị trí dựa vào.
+     * ===================================================================== */
+
+    const KF_TIME_EPS = 0.02;
+
+    function easingValues() {
+        return (window.TextAnimations?.EASING_OPTIONS || []).map((o) => o.value);
+    }
+
+    // Đầu + độ dài của block trên trục SEQUENCE (để đổi giờ timeline -> giờ cục bộ và kiểm biên).
+    function blockSpan({ kind, target, index }) {
+        if (kind === 'item') return { start: Number(target.timeline_start) || 0, duration: Number(target.duration) || 0 };
+        const span = api().mainClipSequenceSpans()[index];
+        return { start: span ? span.start : 0, duration: span ? span.duration : mainClipDuration(index) };
+    }
+
+    function keyframeFieldOf(name) {
+        const TA = window.TextAnimations;
+        const CA = window.ColorAdjust;
+        const raw = String(name || '');
+        if (raw === 'position') return { kind: 'position', fields: ['position_x', 'position_y'] };
+        if ((TA?.KEYFRAME_FIELDS || []).includes(raw)) return { kind: 'transform', fields: [raw] };
+        if (raw === (TA?.VOLUME_KEYFRAME_FIELD || 'volume')) return { kind: 'volume', fields: [raw] };
+        const path = raw.startsWith('adj.') ? raw.slice(4) : raw;
+        if (CA?.canKeyframe?.(path)) return { kind: 'color', fields: [CA.keyframeFieldName(path)] };
+        const colorList = (CA?.KEYFRAME_PARAMS || []).map((p) => p.path).join(', ');
+        throw new Error(`keyframes.${raw} không hỗ trợ. Có: position, ${(TA?.KEYFRAME_FIELDS || []).join(', ')}, volume, và màu: ${colorList}`);
+    }
+
+    function checkKeyframeTarget(kind, { kind: targetKind, target }) {
+        if (targetKind === 'main') return;
+        const type = target.type;
+        if ((kind === 'transform' || kind === 'position') && ['audio', 'adjust'].includes(type)) {
+            throw new Error(`Block loại "${type}" không có keyframe biến đổi`);
+        }
+        if (kind === 'volume' && !['media', 'audio'].includes(type)) throw new Error('Keyframe âm lượng chỉ cho block media/âm thanh');
+        if (kind === 'color' && !['media', 'adjust'].includes(type)) throw new Error('Keyframe màu chỉ cho clip lane chính, block media hoặc lớp Điều chỉnh');
+    }
+
+    function keyframeValue(kind, field, raw) {
+        const v = Number(raw);
+        if (!Number.isFinite(v)) throw new Error(`Giá trị keyframe "${field}" phải là số`);
+        if (kind === 'transform' || kind === 'position') {
+            return typeof clampTransformValue === 'function' ? clampTransformValue(field, v) : v;
+        }
+        if (kind === 'volume') return api().normalizeVolumePercent(v);
+        return v;
+    }
+
+    /* Ghi keyframe cho MỘT đích đã chọn (selectTarget). mode "merge" chèn/ghi đè từng mốc,
+     * "replace" thay trọn danh sách của field được nêu (mảng rỗng = xoá hết keyframe field đó).
+     * Trả về danh sách field đã đổi. */
+    function applyKeyframes(sel, spec, { mode = 'merge', time = 'local' } = {}) {
+        if (!spec || typeof spec !== 'object' || Array.isArray(spec)) throw new Error('"keyframes" phải là object { field: [{t, v, e}] }');
+        if (!['merge', 'replace'].includes(mode)) throw new Error('"keyframe_mode" là merge | replace');
+        if (!['local', 'timeline'].includes(time)) throw new Error('"keyframe_time" là local | timeline');
+        const { target } = sel;
+        const span = blockSpan(sel);
+        const easings = easingValues();
+        if (!target.keyframes || typeof target.keyframes !== 'object') target.keyframes = {};
+        const kfs = target.keyframes;
+        const changed = [];
+        let touchedPosition = false;
+        let touchedColor = false;
+        for (const [name, list] of Object.entries(spec)) {
+            if (!Array.isArray(list)) throw new Error(`keyframes.${name} phải là mảng [{t, v, e}]`);
+            const info = keyframeFieldOf(name);
+            checkKeyframeTarget(info.kind, sel);
+            if (mode === 'replace') info.fields.forEach((f) => { kfs[f] = []; });
+            for (const entry of list) {
+                if (!entry || typeof entry !== 'object') throw new Error(`keyframes.${name}: mỗi mốc là { t, v, e }`);
+                let t = Number(entry.t);
+                if (!Number.isFinite(t)) throw new Error(`keyframes.${name}: thiếu "t" (giây)`);
+                if (time === 'timeline') t -= span.start;
+                if (t < -KF_TIME_EPS || t > span.duration + KF_TIME_EPS) {
+                    throw new Error(`keyframes.${name}: t=${round3(entry.t)} nằm ngoài block (0–${round3(span.duration)} s${time === 'timeline' ? ` cục bộ, block bắt đầu ở ${round3(span.start)} s` : ' cục bộ'})`);
+                }
+                t = round3(Math.max(0, Math.min(span.duration, t)));
+                const ease = entry.e === undefined ? 'ease-in-out' : String(entry.e);
+                if (!easings.includes(ease)) throw new Error(`Easing "${ease}" không có. Có: ${easings.join(', ')}`);
+                let values;
+                if (info.kind === 'position') {
+                    const pair = Array.isArray(entry.v) ? entry.v : [entry.x, entry.y];
+                    values = info.fields.map((f, i) => [f, keyframeValue(info.kind, f, pair[i])]);
+                } else {
+                    values = [[info.fields[0], keyframeValue(info.kind, info.fields[0], entry.v)]];
+                }
+                for (const [field, value] of values) {
+                    const next = api().upsertKeyframe(kfs[field], t, value, ease);
+                    // upsertKeyframe giữ easing cũ khi mốc đã có — MCP nêu easing thì phải ăn.
+                    const hit = next.find((k) => Math.abs(Number(k.t) - t) <= KF_TIME_EPS);
+                    if (hit && entry.e !== undefined) hit.e = ease;
+                    kfs[field] = next;
+                }
+            }
+            info.fields.forEach((f) => {
+                if (Array.isArray(kfs[f]) && !kfs[f].length) delete kfs[f];
+            });
+            if (info.kind === 'position' || info.fields.some((f) => f === 'position_x' || f === 'position_y')) touchedPosition = true;
+            if (info.kind === 'color') touchedColor = true;
+            changed.push(`keyframes.${name}`);
+        }
+        if (touchedPosition) window.TextAnimations?.pairPositionKeyframes?.(target);
+        if (touchedColor && window.ColorAdjust) target.adjustments = ColorAdjust.normalize(target.adjustments);
+        return changed;
+    }
 
     async function updateBlock(params) {
         requireEditing();
@@ -343,7 +486,11 @@
                     if (params[key] !== undefined) throw new Error(`"${key}" không áp cho clip lane chính (dùng split/trim bằng giao diện)`);
                 }
             }
-            if (!changed.length) throw new Error('Không có gì để đổi — truyền transform/volume/speed/timeline_start/duration/text/style/muted');
+            // Sau cùng: biên kiểm keyframe là thời lượng block SAU khi đã đổi duration/speed.
+            if (params.keyframes !== undefined) {
+                changed.push(...applyKeyframes(sel, params.keyframes, { mode: params.keyframe_mode, time: params.keyframe_time }));
+            }
+            if (!changed.length) throw new Error('Không có gì để đổi — truyền transform/keyframes/volume/speed/timeline_start/duration/text/style/muted');
             if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
             return { changed, block: describeTarget(sel) };
         });
@@ -410,6 +557,14 @@
         });
     }
 
+    // Block overlay chạm mép phải của `left` trên cùng track (đích của chuyển cảnh overlay).
+    function rightNeighbor(left) {
+        if (!left) return null;
+        const end = (Number(left.timeline_start) || 0) + (Number(left.duration) || 0);
+        return rt().getState().editingItems.find((it) => it.id !== left.id && it.track_id === left.track_id
+            && Math.abs((Number(it.timeline_start) || 0) - end) < 0.05) || null;
+    }
+
     async function setTransition(params) {
         requireEditing();
         const T = window.Transitions;
@@ -424,10 +579,7 @@
                 if (!left) throw new Error(`Không có block id "${params.item_id}"`);
                 if (!['media', 'text', 'shape'].includes(left.type)) throw new Error('Chuyển cảnh overlay chỉ cho block media/chữ/hình');
                 if (isLocked(left.track_id)) throw new Error('Track đang khoá');
-                const end = (Number(left.timeline_start) || 0) + (Number(left.duration) || 0);
-                const items = rt().getState().editingItems;
-                const right = items.find((it) => it.id !== left.id && it.track_id === left.track_id
-                    && Math.abs((Number(it.timeline_start) || 0) - end) < 0.05);
+                const right = rightNeighbor(left);
                 if (!right && type && type !== 'none') throw new Error('Block này không có block sát bên phải trên cùng track');
                 cap = Math.min(T.DUR_MAX, Number(left.duration) || 0, Number(right?.duration) || T.DUR_MAX);
             } else {
@@ -507,60 +659,303 @@
         if (!list.length) throw new Error('"paths" phải là danh sách đường dẫn tuyệt đối');
         if (!['media', 'audio'].includes(kind)) throw new Error('"kind" là media (video/ảnh) hoặc audio');
         const a = api();
+        const mark = historyMark();
         const before = new Set(rt().getState().editingAssets.map((x) => x.id));
         if (mode === 'link') await a.linkAssetPaths(kind, list);
         else await a.importLocalPaths(kind, list);
         /* Chỉ lấy asset ĐÚNG tệp/thư mục được yêu cầu: danh sách asset còn được app tự thêm
          * vào ở nơi khác (nguồn lane chính đăng ký trễ sau new_project), diff thuần sẽ vơ cả. */
-        const key = (p) => String(p || '').replace(/\\/g, '/').toLowerCase();
-        const wanted = list.map(key);
+        const wanted = list.map(pathKey);
         const added = rt().getState().editingAssets.filter((x) => {
             if (before.has(x.id)) return false;
-            const src = key(x.source_path || x.path);
-            return wanted.some((w) => src === w || src.startsWith(`${w.replace(/\/$/, '')}/`));
+            const src = pathKey(x.source_path || x.path);
+            return wanted.some((w) => src === w || src.startsWith(`${w}/`));
         });
         if (!added.length) throw new Error('Không nhập được tệp nào (sai đường dẫn, sai loại, hoặc đã có trong dự án)');
         let items = [];
         if (add_to_timeline) {
+            await Promise.all(added.map((asset) => a.ensureAssetProbed(asset)));
             let cursor = Number.isFinite(Number(start)) ? Number(start) : undefined;
-            items = await asOneUndoStep(async () => {
+            // Nhập + đặt block = MỘT bước Hoàn tác (nhập đã tự ghi mốc, phần này nhập chung vào).
+            items = await asOneUndoStep(() => {
                 const out = [];
                 for (const asset of added) {
-                    await a.ensureAssetProbed(asset);
                     const item = a.addItemForAsset(asset, null, { start: cursor, trackId: track_id || undefined });
                     if (item) {
-                        out.push(flatFields(item));
+                        out.push(itemResult(item));
                         cursor = (Number(item.timeline_start) || 0) + (Number(item.duration) || 0);
                     }
                 }
                 return out;
-            });
+            }, { joinSince: mark });
         }
         return { assets: added.map(assetSummary), items };
     }
 
-    async function addAsset({ asset_id, library, start, track_id, trim_start, trim_end } = {}) {
+    async function addAsset({ asset_id, library, start, track_id, trim_start, trim_end, duration } = {}) {
         requireEditing();
         const a = api();
-        const placement = { start: Number.isFinite(Number(start)) ? Number(start) : undefined, trackId: track_id || undefined };
-        const trim = (trim_start !== undefined || trim_end !== undefined)
-            ? { start: Number(trim_start) || 0, end: Number(trim_end) || undefined }
-            : null;
+        const placement = {
+            start: Number.isFinite(Number(start)) ? Number(start) : undefined,
+            trackId: track_id || undefined,
+            duration: Number(duration) > 0 ? Number(duration) : undefined,
+        };
+        const trim = trimOf(trim_start, trim_end);
         if (library) {
             if (!library.category || !library.name) throw new Error('"library" cần { category, name } (xem list_assets)');
-            const before = new Set(rt().getState().editingItems.map((x) => x.id));
-            await a.addLibraryItem(String(library.category), String(library.name), placement, trim);
-            const item = rt().getState().editingItems.find((x) => !before.has(x.id));
-            if (!item) throw new Error('Không thêm được tài nguyên thư viện (sai tên/danh mục?)');
-            return flatFields(item);
+            return asOneUndoStep(async () => itemResult(await addLibraryBlock(library, placement, trim)));
         }
         const asset = a.findAsset(String(asset_id || ''));
         if (!asset) throw new Error(`Không có asset "${asset_id}" (xem list_assets)`);
-        return asOneUndoStep(async () => {
-            await a.ensureAssetProbed(asset);
+        await a.ensureAssetProbed(asset);
+        return asOneUndoStep(() => {
             const item = a.addItemForAsset(asset, null, placement, trim);
             if (!item) throw new Error('Không thêm được block');
-            return flatFields(item);
+            return itemResult(item);
+        });
+    }
+
+    function trimOf(trimStart, trimEnd) {
+        if (trimStart === undefined && trimEnd === undefined) return null;
+        return { start: Number(trimStart) || 0, end: Number(trimEnd) || undefined };
+    }
+
+    async function addLibraryBlock(library, placement, trim) {
+        const before = new Set(rt().getState().editingItems.map((x) => x.id));
+        await api().addLibraryItem(String(library.category), String(library.name), placement, trim);
+        const item = rt().getState().editingItems.find((x) => !before.has(x.id));
+        if (!item) throw new Error(`Không thêm được tài nguyên thư viện "${library.category}/${library.name}" (sai tên/danh mục? xem list_assets)`);
+        return item;
+    }
+
+    /* =====================================================================
+     * LỆNH GỘP
+     * Mỗi lệnh lẻ = 1 HTTP + 1 IPC + 1 ảnh chụp toàn bộ state (undo) + vài lượt vẽ lại; đưa 20
+     * ảnh kèm keyframe bằng lệnh lẻ là hàng chục lượt gọi và vượt trần Hoàn tác (20 bước).
+     * Hai lệnh dưới chạy cả lô trong MỘT bước Hoàn tác + MỘT lượt vẽ (asOneUndoStep).
+     * on_error "abort" (mặc định): một mục lỗi = hoàn nguyên cả lô. "continue": mục lỗi được
+     * quay lui riêng (ảnh chụp trước mục đó), các mục còn lại vẫn chạy.
+     * ===================================================================== */
+
+    const AUDIO_EXT_RE = /\.(mp3|wav|m4a|aac|flac|ogg|opus|aif|aiff|wma)$/i;
+    const MAX_BATCH = 500;
+
+    function pathKey(p) {
+        return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+    }
+
+    function errorText(error) {
+        return error?.message || String(error);
+    }
+
+    // Ảnh chụp để quay lui MỘT mục khi on_error = "continue" (không đụng undoStack).
+    function snapshotForItem(onError) {
+        return onError === 'continue' && typeof captureFullState === 'function' ? captureFullState() : null;
+    }
+
+    function rollbackItem(snapshot) {
+        if (snapshot && typeof restoreHistoryState === 'function') restoreHistoryState(snapshot);
+    }
+
+    // Gộp `defaults` vào từng mục: object con (transform, keyframes, animation…) gộp một tầng.
+    function withDefaults(defaults, item) {
+        const out = { ...(defaults || {}) };
+        for (const [key, value] of Object.entries(item || {})) {
+            const base = out[key];
+            out[key] = value && typeof value === 'object' && !Array.isArray(value) && base && typeof base === 'object' && !Array.isArray(base)
+                ? { ...base, ...value }
+                : value;
+        }
+        return out;
+    }
+
+    /* Nhập MỘT lượt cho mọi đường dẫn (một request mỗi loại media/audio), tệp nào đã có trong
+     * dự án thì dùng lại asset sẵn có. Trả Map pathKey -> asset, và Map pathKey -> lỗi. */
+    async function importForBatch(paths, mode) {
+        const a = api();
+        const assets = () => rt().getState().editingAssets;
+        const found = new Map();
+        const errors = new Map();
+        const missing = [];
+        for (const p of paths) {
+            const key = pathKey(p);
+            if (found.has(key) || missing.some((m) => pathKey(m) === key)) continue;
+            const hit = assets().find((x) => pathKey(x.source_path) === key);
+            if (hit) found.set(key, hit);
+            else missing.push(p);
+        }
+        const groups = { media: missing.filter((p) => !AUDIO_EXT_RE.test(p)), audio: missing.filter((p) => AUDIO_EXT_RE.test(p)) };
+        for (const [kind, list] of Object.entries(groups)) {
+            if (!list.length) continue;
+            try {
+                if (mode === 'link') await a.linkAssetPaths(kind, list);
+                else await a.importLocalPaths(kind, list);
+            } catch (error) {
+                list.forEach((p) => errors.set(pathKey(p), errorText(error)));
+            }
+        }
+        for (const p of missing) {
+            const key = pathKey(p);
+            // Asset mới nhập: lấy bản ghi SAU CÙNG khớp đường dẫn (nhập copy có thể trùng tên cũ).
+            const hit = assets().filter((x) => pathKey(x.source_path) === key).pop();
+            if (hit) found.set(key, hit);
+            else if (!errors.has(key)) errors.set(key, `Không nhập được "${p}" (không tồn tại hoặc sai loại tệp)`);
+        }
+        return { found, errors, imported: missing.length - Array.from(errors.keys()).length };
+    }
+
+    const BLOCK_EXTRA_KEYS = ['transform', 'keyframes', 'keyframe_mode', 'keyframe_time', 'volume', 'muted'];
+
+    async function addMediaBatch({ items, mode = 'copy', gap = 0, start, track_id, defaults, on_error = 'abort' } = {}) {
+        requireEditing();
+        if (!Array.isArray(items) || !items.length) throw new Error('"items" phải là mảng có ít nhất 1 phần tử');
+        if (items.length > MAX_BATCH) throw new Error(`Tối đa ${MAX_BATCH} mục mỗi lô`);
+        if (!['copy', 'link'].includes(mode)) throw new Error('"mode" là copy | link');
+        if (!['abort', 'continue'].includes(on_error)) throw new Error('"on_error" là abort | continue');
+        const a = api();
+        const list = items.map((item) => withDefaults(defaults, item));
+        list.forEach((item, i) => {
+            const sources = ['path', 'asset_id', 'library'].filter((k) => item[k] !== undefined && item[k] !== '');
+            if (sources.length !== 1) throw new Error(`Mục ${i}: cần đúng MỘT trong path | asset_id | library`);
+            if (item.path !== undefined) item.path = pathList(item.path)[0] || '';
+        });
+
+        const mark = historyMark();
+        const { found, errors, imported } = await importForBatch(list.filter((it) => it.path).map((it) => it.path), mode);
+        const assetOf = (item) => (item.path ? found.get(pathKey(item.path)) : (item.asset_id ? a.findAsset(String(item.asset_id)) : null));
+        // Số đo (thời lượng/kích thước) của mọi asset: song song, NGOÀI bước Hoàn tác.
+        const toProbe = Array.from(new Set(list.map(assetOf).filter(Boolean)));
+        await Promise.all(toProbe.map((asset) => a.ensureAssetProbed(asset).catch(() => asset)));
+
+        const gapSec = Math.max(0, Number(gap) || 0);
+        return asOneUndoStep(async () => {
+            let cursor = Number.isFinite(Number(start)) ? Number(start) : (typeof getCurrentTimelineTime === 'function' ? getCurrentTimelineTime() : 0);
+            const results = [];
+            for (let i = 0; i < list.length; i += 1) {
+                const it = list[i];
+                const snapshot = snapshotForItem(on_error);
+                try {
+                    let at;
+                    if (typeof it.start === 'number') at = it.start;
+                    else if (it.start === undefined || it.start === 'after_previous') at = i === 0 ? cursor : cursor + gapSec;
+                    else throw new Error('"start" là số giây hoặc "after_previous"');
+                    if (!(at >= 0)) throw new Error('"start" phải ≥ 0');
+                    const placement = {
+                        start: at,
+                        trackId: it.track_id || track_id || undefined,
+                        duration: Number(it.duration) > 0 ? Number(it.duration) : undefined,
+                    };
+                    const trim = trimOf(it.trim_start, it.trim_end);
+                    let item;
+                    if (it.library) {
+                        if (!it.library.category || !it.library.name) throw new Error('"library" cần { category, name }');
+                        item = await addLibraryBlock(it.library, placement, trim);
+                    } else {
+                        const asset = assetOf(it);
+                        if (!asset) throw new Error(it.path ? (errors.get(pathKey(it.path)) || `Không có tệp "${it.path}"`) : `Không có asset "${it.asset_id}"`);
+                        item = a.addItemForAsset(asset, null, placement, trim);
+                    }
+                    if (!item) throw new Error('Không thêm được block');
+                    const extra = {};
+                    BLOCK_EXTRA_KEYS.forEach((k) => { if (it[k] !== undefined) extra[k] = it[k]; });
+                    if (Object.keys(extra).length) await updateBlock({ item_id: item.id, ...extra });
+                    if (it.animation) await setAnimation({ item_id: item.id, ...it.animation });
+                    if (it.color) await setColor({ item_id: item.id, ...it.color });
+                    cursor = (Number(item.timeline_start) || 0) + (Number(item.duration) || 0);
+                    results.push({
+                        index: i, item_id: item.id, asset_id: item.asset_id || null, track_id: item.track_id,
+                        timeline_start: round3(item.timeline_start), duration: round3(item.duration),
+                    });
+                } catch (error) {
+                    if (on_error !== 'continue') throw new Error(`Mục ${i}: ${errorText(error)} — đã hoàn nguyên cả lô`);
+                    rollbackItem(snapshot);
+                    results.push({ index: i, error: errorText(error) });
+                }
+            }
+            /* Chuyển cảnh đặt SAU khi mọi block đã nằm chỗ: nó cần block kề phải trên cùng lane.
+             * Mục KHÔNG có block kề phải (mục cuối, hoặc có gap) thì bỏ qua và ghi chú — nhất là
+             * khi chuyển cảnh đến từ `defaults`, áp cho cả mục cuối là chuyện bình thường. */
+            for (const row of results) {
+                const transition = list[row.index].transition;
+                if (!transition || !row.item_id) continue;
+                if (transition.type && transition.type !== 'none' && !rightNeighbor(a.findItem(row.item_id))) {
+                    row.transition_skipped = 'no adjacent block on the right on the same track';
+                    continue;
+                }
+                const snapshot = snapshotForItem(on_error);
+                try {
+                    await setTransition({ item_id: row.item_id, ...transition });
+                } catch (error) {
+                    if (on_error !== 'continue') throw new Error(`Mục ${row.index} (transition): ${errorText(error)} — đã hoàn nguyên cả lô`);
+                    rollbackItem(snapshot);
+                    row.transition_error = errorText(error);
+                }
+            }
+            const created = results.filter((r) => r.item_id).length;
+            if (!created) throw new Error(`Không thêm được mục nào: ${results.map((r) => `#${r.index} ${r.error}`).join('; ')}`);
+            return { items: results, created, failed: results.length - created, imported_assets: imported, undo_steps: 1 };
+        }, { joinSince: mark });
+    }
+
+    /* crabbycut_batch: chạy tuần tự nhiều lệnh SỬA trong một bước Hoàn tác. Tham chiếu kết quả
+     * bước trước bằng chuỗi "$<chỉ số>.<đường dẫn>", ví dụ "$0.item_id", "$2.items.3.item_id". */
+    const BATCHABLE = new Set([
+        'add_text', 'update_block', 'apply_text_preset', 'set_animation', 'set_transition', 'set_color',
+        'split', 'select', 'delete_selected', 'seek', 'add_asset', 'import_media', 'add_media_batch',
+    ]);
+
+    function resolveRefs(value, results) {
+        if (typeof value === 'string') {
+            const m = /^\$(\d+)(?:\.(.+))?$/.exec(value);
+            if (!m) return value;
+            const step = results[Number(m[1])];
+            if (!step) throw new Error(`Tham chiếu "${value}": bước ${m[1]} chưa chạy (chỉ tham chiếu được bước TRƯỚC)`);
+            if (!step.ok) throw new Error(`Tham chiếu "${value}": bước ${m[1]} đã lỗi`);
+            let node = step.result;
+            for (const key of (m[2] ? m[2].split('.') : [])) {
+                if (node === null || node === undefined || !Object.prototype.hasOwnProperty.call(Object(node), key)) {
+                    throw new Error(`Tham chiếu "${value}": kết quả bước ${m[1]} không có "${key}"`);
+                }
+                node = node[key];
+            }
+            return node;
+        }
+        if (Array.isArray(value)) return value.map((v) => resolveRefs(v, results));
+        if (value && typeof value === 'object') {
+            const out = {};
+            for (const [k, v] of Object.entries(value)) out[k] = resolveRefs(v, results);
+            return out;
+        }
+        return value;
+    }
+
+    async function runBatch({ ops, on_error = 'abort' } = {}) {
+        requireEditing();
+        if (!Array.isArray(ops) || !ops.length) throw new Error('"ops" phải là mảng [{ tool, args }]');
+        if (ops.length > MAX_BATCH) throw new Error(`Tối đa ${MAX_BATCH} lệnh mỗi lô`);
+        if (!['abort', 'continue'].includes(on_error)) throw new Error('"on_error" là abort | continue');
+        const names = ops.map((op) => String(op?.tool || op?.method || '').replace(/^crabbycut_/, ''));
+        names.forEach((name, i) => {
+            if (!BATCHABLE.has(name)) {
+                throw new Error(`Bước ${i}: "${ops[i]?.tool || ''}" không chạy được trong batch. Được: ${Array.from(BATCHABLE).join(', ')}`);
+            }
+        });
+        return asOneUndoStep(async () => {
+            const results = [];
+            for (let i = 0; i < ops.length; i += 1) {
+                const snapshot = snapshotForItem(on_error);
+                try {
+                    const args = resolveRefs(ops[i].args || {}, results);
+                    const result = await METHODS[names[i]](args);
+                    results.push({ index: i, tool: names[i], ok: true, result: result === undefined ? null : result });
+                } catch (error) {
+                    if (on_error !== 'continue') throw new Error(`Bước ${i} (${names[i]}): ${errorText(error)} — đã hoàn nguyên cả lô`);
+                    rollbackItem(snapshot);
+                    results.push({ index: i, tool: names[i], ok: false, error: errorText(error) });
+                }
+            }
+            const okCount = results.filter((r) => r.ok).length;
+            return { results, ok_count: okCount, failed_count: results.length - okCount, undo_steps: 1 };
         });
     }
 
@@ -911,6 +1306,8 @@
         set_color: setColor,
         import_media: importMedia,
         add_asset: addAsset,
+        add_media_batch: addMediaBatch,
+        batch: runBatch,
         list_assets: listAssets,
         add_main_videos: addMainVideos,
         new_project: newProject,

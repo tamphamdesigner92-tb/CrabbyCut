@@ -29,6 +29,10 @@ const crypto = require('crypto');
 const { ipcMain, screen } = require('electron');
 
 const RPC_TIMEOUT_MS = 30_000;
+/* Lệnh chạy lâu: nhập/chép cả loạt tệp, lệnh gộp hàng trăm thao tác. MCP server gửi kèm
+ * `timeout_ms` (và tự chờ HTTP lâu hơn chừng đó một chút); bảng này là mặc định khi không có. */
+const LONG_RPC_TIMEOUT_MS = { batch: 300_000, add_media_batch: 300_000, import_media: 300_000 };
+const MAX_RPC_TIMEOUT_MS = 600_000;
 const MAX_BODY_BYTES = 1024 * 1024;
 const SCREENSHOT_MAX_WIDTH = 1600;
 const EXPORT_OUTPUT_TTL_MS = 2 * 60_000;
@@ -96,17 +100,26 @@ function createAutomationBridge({ getWindow, discoveryDir, appInfo }) {
     else entry.reject(new Error(String(error || 'renderer error')));
   });
 
-  function callRenderer(method, params) {
+  function rpcTimeout(method, params) {
+    const asked = Number(params?.timeout_ms);
+    if (Number.isFinite(asked) && asked > 0) return Math.max(1000, Math.min(MAX_RPC_TIMEOUT_MS, asked));
+    return LONG_RPC_TIMEOUT_MS[method] || RPC_TIMEOUT_MS;
+  }
+
+  function callRenderer(method, rawParams) {
     const win = getWindow();
     if (!win || win.isDestroyed()) return Promise.reject(new Error('Cửa sổ chính chưa mở'));
     const id = `a${++callSeq}`;
+    const timeoutMs = rpcTimeout(method, rawParams);
+    // timeout_ms là chuyện của đường truyền, không phải tham số của lệnh.
+    const { timeout_ms: _ignored, ...params } = rawParams || {};
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id);
-        reject(new Error(`Renderer không trả lời "${method}" sau ${RPC_TIMEOUT_MS / 1000}s`));
-      }, RPC_TIMEOUT_MS);
+        reject(new Error(`Renderer không trả lời "${method}" sau ${timeoutMs / 1000}s`));
+      }, timeoutMs);
       pending.set(id, { resolve, reject, timer });
-      win.webContents.send('automation-call', { id, method, params: params || {} });
+      win.webContents.send('automation-call', { id, method, params });
     });
   }
 
