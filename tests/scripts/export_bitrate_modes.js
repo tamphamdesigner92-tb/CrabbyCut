@@ -133,9 +133,13 @@ function testSidecar() {
     ['cpu_legacy_small', { quality: 'small' }, ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23']],
     ['cpu_bad_custom', { rate_mode: 'custom', rate_mbps: 1000 }, ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18']],
   ];
+  // `-x264-params asm=avx2` chỉ có trên CPU AVX-512 (X264AsmCap, core_process.cpp) — runner CI có
+  // máy có máy không, nên bỏ cặp này trước khi so.
+  const dropAsmCap = (enc) => enc.filter((a, i) => !(a === '-x264-params' && enc[i + 1] === 'asm=avx2')
+    && !(a === 'asm=avx2' && enc[i - 1] === '-x264-params'));
   for (const [tag, settings, want] of cpuCases) {
     const { enc } = exportOnce(tag, source, { codec: 'h264', ...settings }, false);
-    assert.deepStrictEqual(enc, want, `${tag}: tham số encoder`);
+    assert.deepStrictEqual(dropAsmCap(enc), want, `${tag}: tham số encoder`);
   }
   console.log(`  ok  CPU: ${cpuCases.length} ca tham số encoder (CRF theo mức, Tùy chỉnh ABR, payload cũ, số sai)`);
 
