@@ -32,7 +32,7 @@ Môi trường tách biệt (backend wrapper 8123 + `electron . --remote-debuggi
 Sửa: `GeoCode.localTimeAt()` snap mốc đầu theo fps sequence, `frameIndexAt` dung sai 1e-3 khung. Test mới `tests/scripts/geocode_frame_index.js` (`npm run test:geocode-frame-index`, vm, 3200 vị trí playhead; trả từng chỗ sửa về bản cũ đều bị bắt). Kiểm lại trong Electron: 13 mốc khớp, kể cả block 6,01 s.
 
 ## Chưa làm / chưa kiểm
-- **Chưa chạy trên macOS** (CI sẽ chạy `test:geocode-render` khi mở PR). Mac không có runtime Python: cần `python3 -m pip install pillow numpy`, pane báo rõ khi thiếu.
+- macOS: CI (macos-14, PR #14) chạy `test:geocode-render` XANH trong Electron thật (24 s) — trước đó CI đặt `ELECTRON_SKIP_BINARY_DOWNLOAD=1` nên test không chạy được, đã bỏ. Phần Python của test có thể đã bị bỏ qua nếu runner thiếu pillow/numpy; chưa thử app thật trên máy Mac. Mac không có runtime Python: cần `python3 -m pip install pillow numpy`, pane báo rõ khi thiếu.
 - GeoCode có fps KHÁC fps sequence (vd 24 trên 30) chưa so preview/xuất — preview chọn khung theo fps của GeoCode, bản xuất qua bộ lọc fps của ffmpeg; có thể lệch ở biên khung.
 - Fps xuất khác fps sequence: preview snap theo fps sequence, bản xuất snap theo fps xuất.
 - Quan sát (không riêng GeoCode, chưa sửa): block lệch lưới hiện trong bản xuất từ khung `round(start·fps)` (6,01 s → khung 6,0 s) còn preview chỉ hiện khi playhead ≥ 6,01 → khung đầu block chênh một khung. Fade In của bản xuất ở độ mờ thấp hơi trễ (0,175 vs 0,2 ở 0,2 s) — cùng đường `fade` của video overlay.
