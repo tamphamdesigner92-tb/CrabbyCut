@@ -8147,8 +8147,7 @@ async function shutdown(signal = 'SIGTERM') {
   killActiveChildren('SIGTERM');
   const closeServer = httpServer
     ? new Promise((resolve) => httpServer.close(resolve))
-    : Promise.resolve();
-  await Promise.race([
+    : Promise.resolve();  await Promise.race([
     closeServer,
     new Promise((resolve) => setTimeout(resolve, 3000)),
   ]);
@@ -8165,6 +8164,30 @@ if (require.main === module) {
   process.on('SIGTERM', () => {
     shutdown('SIGTERM').catch(() => process.exit(143));
   });
+  watchParentStdin();
+}
+
+/* TẮT THEO MAIN PROCESS. Electron spawn backend với stdin là một pipe (electron/main.js,
+ * startBackendSidecar) và đặt CRAB_EXIT_WITH_PARENT=1. Main thoát kiểu gì — kể cả bị kill/crash,
+ * lúc không ai kịp gửi tín hiệu — hệ điều hành cũng đóng đầu ghi của pipe, ở đây nhận EOF và tắt.
+ * CẦN CHO macOS/Linux: ở đó tiến trình con sống sót khi cha chết, nên app bị kill/crash để lại
+ * backend mồ côi giữ cổng; lần mở sau app coi nó là "backend ngoài" — không có khoá ký đường
+ * dẫn xuất (job xuất MCP rơi vào Downloads), và chạy mã của bản cũ nếu vừa cập nhật. Windows
+ * không bị: libuv gom tiến trình con vào job object kill-on-close (đo 2026-10-17: kill riêng
+ * main thì backend chết theo ngay, kể cả không có đoạn này).
+ * Thêm một lợi ích trên Windows: `proc.kill('SIGTERM')` ở đó là TerminateProcess nên handler
+ * SIGTERM ở trên không bao giờ chạy; main nay đóng stdin trước để đi đường shutdown() này.
+ * Không có biến (npm run backend:dev, test) thì stdin là TTY/không dùng -> bỏ qua. */
+function watchParentStdin() {
+  if (process.env.CRAB_EXIT_WITH_PARENT !== '1' || !process.stdin) return;
+  const onParentGone = () => {
+    console.log('[backend] main process đã đóng kết nối -> tắt backend');
+    shutdown('SIGTERM').catch(() => process.exit(143));
+  };
+  process.stdin.on('end', onParentGone);
+  process.stdin.on('close', onParentGone);
+  process.stdin.on('error', onParentGone);
+  process.stdin.resume();
 }
 
 // normalizeColorAdjustFields xuất ra để TEST được trực tiếp: nó là nơi chuỗi filter màu bị

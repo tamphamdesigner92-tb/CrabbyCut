@@ -150,6 +150,8 @@ function startBackendSidecar() {
     // Ngôn ngữ hệ điều hành cho cài đặt 'auto' — Node của backend không đọc được nó chắc chắn.
     CRAB_SYSTEM_LOCALE: I18nMain.systemLocale(),
     CRAB_EXPORT_OUTPUT_SECRET: EXPORT_OUTPUT_SECRET,
+    // stdin là pipe: main chết kiểu gì backend cũng nhận EOF và tự tắt (watchParentStdin ở server.js).
+    CRAB_EXIT_WITH_PARENT: '1',
   };
 
   if (!process.env.BACKEND_NODE) {
@@ -160,8 +162,10 @@ function startBackendSidecar() {
   backendProcess = spawn(nodeCommand, [backendScript], {
     cwd: projectRoot,
     env,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
+  // Không ghi gì vào stdin; lỗi EPIPE khi backend đã thoát thì bỏ qua.
+  backendProcess.stdin.on('error', () => {});
 
   backendProcess.stdout.on('data', (chunk) => {
     process.stdout.write(`[backend] ${chunk}`);
@@ -205,6 +209,14 @@ async function stopBackendSidecar() {
 
   if (proc.exitCode !== null || proc.killed) return;
 
+  /* Đóng stdin TRƯỚC: backend nhận EOF và tự shutdown() — dừng ffmpeg/sidecar con, dọn khung
+   * hoạt ảnh của phiên, đóng server (tối đa 3 s) rồi tự exit. Gửi SIGTERM ngay thì trên Windows
+   * là TerminateProcess: handler dọn dẹp của backend không bao giờ chạy. */
+  const exited = new Promise((resolve) => proc.once('exit', resolve));
+  try { proc.stdin.end(); } catch (_) { /* đã đóng */ }
+  await Promise.race([exited, sleep(4000)]);
+  if (proc.exitCode !== null || proc.signalCode !== null) return;
+
   proc.kill('SIGTERM');
 
   await Promise.race([
@@ -247,8 +259,9 @@ function watchBlobDownloads(ses) {
  * `export-pick-output`): renderer đi đường tải về dự phòng. Không đặt sẵn đích thì Chromium mở
  * hộp thoại Lưu mà không ai bấm (MCP không bấm được hộp thoại gốc), ghi cả bản xuất vào
  * Downloads dưới tên `<guid>.tmp` trong lúc chờ, còn job lại báo xong với output_path không có
- * tệp nào (đo 2026-10-17). Bản cài cũng rơi vào nhánh này khi backend của lần chạy trước còn
- * sống (app bị kill/crash — backend không tự thoát theo main). Đuôi phải khớp: lượt tải blob
+ * tệp nào (đo 2026-10-17). Ngoài môi trường thử, nhánh này gặp khi cổng đã có backend chạy
+ * riêng (`npm run backend:dev`), hoặc trên macOS khi backend của lần chạy trước còn sống sau
+ * crash (nay đã tự tắt theo main, xem watchParentStdin ở server.js). Đuôi phải khớp: lượt tải blob
  * khác (EDL, XML, .srt) không được lấy mất đích của bản xuất. */
 let automationDownloadTarget = '';
 function takeAutomationDownloadTarget(filename) {
