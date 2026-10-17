@@ -45,17 +45,27 @@ function fakeSession() {
 }
 function fakeItem(url) {
   const done = [];
-  return { getURL: () => url, once(evt, fn) { if (evt === 'done') done.push(fn); }, finish() { done.forEach((fn) => fn()); } };
+  let savePath = '';
+  return {
+    getURL: () => url,
+    getFilename: () => 'studio_final_cut.mp4',
+    setSavePath: (p) => { savePath = p; },
+    getSavePath: () => savePath,
+    once(evt, fn) { if (evt === 'done') done.push(fn); },
+    finish() { done.forEach((fn) => fn({}, 'completed')); },
+  };
 }
 function fakeContents() {
-  return { sent: [], destroyed: false, isDestroyed() { return this.destroyed; }, send(ch, url) { this.sent.push([ch, url]); } };
+  return { sent: [], destroyed: false, isDestroyed() { return this.destroyed; }, send(ch, url, info) { this.sent.push([ch, url, info]); } };
 }
 
 // --- A: main process ---
 {
-  const sb = {};
+  const sb = { path };
   vm.createContext(sb);
-  vm.runInContext(`const watchedDownloadSessions = new WeakSet();\n${extractFunction(MAIN, 'watchBlobDownloads')}\nglobalThis.watch = watchBlobDownloads;`, sb);
+  // Đích MCP của lượt tải (backend ngoài) có test riêng: tests/scripts/mcp_export_download.js.
+  vm.runInContext(`let automationDownloadTarget = '';\n${extractFunction(MAIN, 'takeAutomationDownloadTarget')}\n`
+    + `const watchedDownloadSessions = new WeakSet();\n${extractFunction(MAIN, 'watchBlobDownloads')}\nglobalThis.watch = watchBlobDownloads;`, sb);
   const ses = fakeSession();
   sb.watch(ses);
   sb.watch(ses);
@@ -65,7 +75,9 @@ function fakeContents() {
   ses.handlers[0]({}, blobItem, contents);
   assert.deepStrictEqual(contents.sent, [], 'chưa báo khi lượt tải còn chờ hộp thoại lưu');
   blobItem.finish();
-  assert.deepStrictEqual(contents.sent, [['blob-download-done', 'blob:http://127.0.0.1:8000/abc']], 'báo đúng URL khi xong');
+  // Đối tượng sinh trong vm khác realm (prototype khác) -> so qua JSON.
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(contents.sent)),
+    [['blob-download-done', 'blob:http://127.0.0.1:8000/abc', { state: 'completed', path: '' }]], 'báo đúng URL khi xong');
   const httpItem = fakeItem('http://127.0.0.1:8000/file.mp4');
   ses.handlers[0]({}, httpItem, contents);
   httpItem.finish();

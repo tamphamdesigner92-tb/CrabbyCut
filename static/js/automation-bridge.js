@@ -1191,14 +1191,59 @@
         job._timer = setInterval(() => {
             job.message = (document.getElementById('exportProgressText')?.textContent || statusLine()).trim();
         }, 1000);
-        Promise.resolve(need(performVideoExport, 'performVideoExport')()).then(() => {
+        Promise.resolve(need(performVideoExport, 'performVideoExport')()).then(async () => {
             const box = document.getElementById('exportProgress');
             const text = (document.getElementById('exportProgressText')?.textContent || statusLine()).trim();
             const timing = window.__crabLastExportTiming;
-            if (box?.dataset.state === 'done') finish(job, 'complete', { progress: 100, message: text, result: { output_path: options.output_path, timing: timing ? flatFields(timing) : null } });
-            else finish(job, 'failed', { error: timing?.error || text || 'Xuất video không thành công' });
+            if (box?.dataset.state !== 'done') {
+                finish(job, 'failed', { error: timing?.error || text || 'Xuất video không thành công' });
+                return;
+            }
+            const result = { output_path: timing?.output_path || '', timing: timing ? flatFields(timing) : null };
+            // Không ghi thẳng ra đĩa (backend ngoài) -> bản xuất đi đường tải blob: chỉ báo xong
+            // khi lượt tải đã nằm trên đĩa, với ĐÚNG đường dẫn Chromium ghi ra.
+            if (!result.output_path && timing?.download_url) {
+                const saved = await waitBlobDownload(timing.download_url, EXPORT_DOWNLOAD_WAIT_MS);
+                if (saved?.state !== 'completed' || !saved.path) {
+                    finish(job, 'failed', { error: saved
+                        ? `Đã render xong nhưng lượt lưu tệp ${saved.state === 'cancelled' ? 'bị huỷ' : 'bị gián đoạn'}`
+                        : 'Đã render xong nhưng tệp chưa được lưu (hộp thoại Lưu của app đang chờ?)' });
+                    return;
+                }
+                result.output_path = saved.path;
+            }
+            finish(job, 'complete', { progress: 100, message: text, result });
         }).catch((error) => finish(job, 'failed', { error: error?.message || String(error) }));
         return job;
+    }
+
+    /* LƯỢT TẢI BLOB ĐÃ XONG: url -> { state, path } (electron/main.js, watchBlobDownloads). Ghi từ
+     * lúc nạp trang chứ không đợi job hỏi tới: bản xuất nhỏ tải xong trước cả khi
+     * performVideoExport trả về. */
+    const EXPORT_DOWNLOAD_WAIT_MS = 10 * 60 * 1000;
+    const blobDownloads = new Map();
+    const blobDownloadWaiters = new Map();
+    env.onBlobDownloadDone?.((url, info) => {
+        const waiter = blobDownloadWaiters.get(url);
+        if (waiter) {
+            blobDownloadWaiters.delete(url);
+            waiter(info || {});
+            return;
+        }
+        blobDownloads.set(url, info || {});
+        if (blobDownloads.size > 20) blobDownloads.delete(blobDownloads.keys().next().value);
+    });
+
+    function waitBlobDownload(url, timeoutMs) {
+        if (blobDownloads.has(url)) {
+            const info = blobDownloads.get(url);
+            blobDownloads.delete(url);
+            return Promise.resolve(info);
+        }
+        return new Promise((resolve) => {
+            const timer = setTimeout(() => { blobDownloadWaiters.delete(url); resolve(null); }, timeoutMs);
+            blobDownloadWaiters.set(url, (info) => { clearTimeout(timer); resolve(info); });
+        });
     }
 
     /* =====================================================================
