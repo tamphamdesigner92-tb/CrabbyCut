@@ -191,7 +191,7 @@ Mục không có `start` nối ngay sau mục trước (+ `gap`); mục đầu b
 | `crabbycut_job_status` | Tiến độ / kết quả; `wait_seconds` (≤ 25) chờ job xong rồi mới trả lời |
 | `crabbycut_cancel_job` | Huỷ (chỉ Auto Subtitle huỷ được giữa chừng) |
 
-Xuất video bắt buộc có `options.output_path`: main process ký vé ghi tệp cho đúng đường dẫn đó và bỏ qua hộp thoại Lưu. Renderer vẫn không tự chọn được nơi ghi.
+Xuất video bắt buộc có `options.output_path`: main process ký vé ghi tệp cho đúng đường dẫn đó và bỏ qua hộp thoại Lưu. Renderer vẫn không tự chọn được nơi ghi. Backend chạy ngoài app (không có khoá ký) thì bản xuất đi đường tải về, và main lưu lượt tải đó thẳng ra `output_path`. Job chỉ báo `complete` khi tệp đã nằm trên đĩa, `result.output_path` là đường dẫn thật.
 
 ### Giao diện (như người dùng)
 

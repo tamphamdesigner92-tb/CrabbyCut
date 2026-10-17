@@ -41,8 +41,9 @@ contextBridge.exposeInMainWorld('desktopEnv', {
   // Xuất video: chọn chỗ lưu TRƯỚC khi render, trả { path, ticket } | { canceled } | { unsupported }.
   pickExportOutput: async (opts) => ipcRenderer.invoke('export-pick-output', opts || {}),
   // Lượt tải blob: URL đã xong/huỷ (electron/main.js, watchBlobDownloads) -> renderer thu hồi URL.
+  // Đối số thứ hai { state: 'completed'|'cancelled'|'interrupted', path } — job xuất của MCP dùng.
   onBlobDownloadDone: (callback) => {
-    ipcRenderer.on('blob-download-done', (_event, url) => callback(url));
+    ipcRenderer.on('blob-download-done', (_event, url, info) => callback(url, info || {}));
   },
   readProjectFile: async (filePath) => ipcRenderer.invoke('project-read', filePath),
   statMedia: async (entries) => ipcRenderer.invoke('media-stat', entries),

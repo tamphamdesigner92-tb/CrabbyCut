@@ -16680,6 +16680,8 @@
         const a = document.createElement("a");
         a.href = URL.createObjectURL(exportBlob);
         a.download = `${exportFileName}.${audioOnly ? EXPORT_AUDIO_EXT[exportKind.format] : (exportCodec === 'prores' ? 'mov' : 'mp4')}`;
+        // Job xuất của MCP chờ đúng lượt tải này xong mới báo tệp nằm ở đâu (automation-bridge.js).
+        exportTiming.download_url = a.href;
         a.click();
         releaseExportBlobUrlWhenSaved(a.href);
         exportResult = { ok: true, message: _t('Đã xuất xong: {name}', { name: a.download }) };

@@ -150,6 +150,8 @@ function startBackendSidecar() {
     // Ngôn ngữ hệ điều hành cho cài đặt 'auto' — Node của backend không đọc được nó chắc chắn.
     CRAB_SYSTEM_LOCALE: I18nMain.systemLocale(),
     CRAB_EXPORT_OUTPUT_SECRET: EXPORT_OUTPUT_SECRET,
+    // stdin là pipe: main chết kiểu gì backend cũng nhận EOF và tự tắt (watchParentStdin ở server.js).
+    CRAB_EXIT_WITH_PARENT: '1',
   };
 
   if (!process.env.BACKEND_NODE) {
@@ -160,8 +162,10 @@ function startBackendSidecar() {
   backendProcess = spawn(nodeCommand, [backendScript], {
     cwd: projectRoot,
     env,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
+  // Không ghi gì vào stdin; lỗi EPIPE khi backend đã thoát thì bỏ qua.
+  backendProcess.stdin.on('error', () => {});
 
   backendProcess.stdout.on('data', (chunk) => {
     process.stdout.write(`[backend] ${chunk}`);
@@ -205,6 +209,14 @@ async function stopBackendSidecar() {
 
   if (proc.exitCode !== null || proc.killed) return;
 
+  /* Đóng stdin TRƯỚC: backend nhận EOF và tự shutdown() — dừng ffmpeg/sidecar con, dọn khung
+   * hoạt ảnh của phiên, đóng server (tối đa 3 s) rồi tự exit. Gửi SIGTERM ngay thì trên Windows
+   * là TerminateProcess: handler dọn dẹp của backend không bao giờ chạy. */
+  const exited = new Promise((resolve) => proc.once('exit', resolve));
+  try { proc.stdin.end(); } catch (_) { /* đã đóng */ }
+  await Promise.race([exited, sleep(4000)]);
+  if (proc.exitCode !== null || proc.signalCode !== null) return;
+
   proc.kill('SIGTERM');
 
   await Promise.race([
@@ -224,7 +236,10 @@ async function stopBackendSidecar() {
  * `<userData>/blob_storage` tới khi tắt app (đo: 11 GB sau lượt xuất 39 phút; mỗi lượt xuất
  * thêm một bản). Nhưng thu hồi NGAY sau click là sai: lượt tải còn chờ hộp thoại lưu của
  * Chromium. Nên chờ DownloadItem `done` (xong / huỷ / gián đoạn) rồi mới báo về đúng trang
- * đã tải. Gắn một lần cho session: createWindow có thể chạy lại. */
+ * đã tải. Gắn một lần cho session: createWindow có thể chạy lại.
+ *
+ * Kèm theo `{ state, path }` của lượt tải: job xuất của MCP chờ cái này để báo ĐÚNG tệp đã
+ * nằm ở đâu (static/js/automation-bridge.js, startExport). */
 const watchedDownloadSessions = new WeakSet();
 function watchBlobDownloads(ses) {
   if (!ses || watchedDownloadSessions.has(ses)) return;
@@ -232,10 +247,28 @@ function watchBlobDownloads(ses) {
   ses.on('will-download', (_event, item, contents) => {
     const url = item.getURL();
     if (!url.startsWith('blob:')) return;
-    item.once('done', () => {
-      if (contents && !contents.isDestroyed()) contents.send('blob-download-done', url);
+    const automationTarget = takeAutomationDownloadTarget(item.getFilename());
+    if (automationTarget) item.setSavePath(automationTarget);
+    item.once('done', (_doneEvent, state) => {
+      if (contents && !contents.isDestroyed()) contents.send('blob-download-done', url, { state, path: item.getSavePath() });
     });
   });
+}
+
+/* ĐÍCH MCP CHO LƯỢT TẢI BLOB CỦA BẢN XUẤT — chỉ khi backend chạy NGOÀI (không có khoá ký, xem
+ * `export-pick-output`): renderer đi đường tải về dự phòng. Không đặt sẵn đích thì Chromium mở
+ * hộp thoại Lưu mà không ai bấm (MCP không bấm được hộp thoại gốc), ghi cả bản xuất vào
+ * Downloads dưới tên `<guid>.tmp` trong lúc chờ, còn job lại báo xong với output_path không có
+ * tệp nào (đo 2026-10-17). Ngoài môi trường thử, nhánh này gặp khi cổng đã có backend chạy
+ * riêng (`npm run backend:dev`), hoặc trên macOS khi backend của lần chạy trước còn sống sau
+ * crash (nay đã tự tắt theo main, xem watchParentStdin ở server.js). Đuôi phải khớp: lượt tải blob
+ * khác (EDL, XML, .srt) không được lấy mất đích của bản xuất. */
+let automationDownloadTarget = '';
+function takeAutomationDownloadTarget(filename) {
+  const target = automationDownloadTarget;
+  if (!target || path.extname(String(filename || '')).toLowerCase() !== path.extname(target).toLowerCase()) return '';
+  automationDownloadTarget = '';
+  return target;
 }
 
 function createWindow() {
@@ -702,13 +735,16 @@ const EXPORT_OUTPUT_KINDS = {
  * Backend chạy ngoài (không do main spawn, nên không có khoá) -> `unsupported`: renderer đi
  * đường tải về cũ, khỏi hỏi chỗ lưu hai lần. Thư mục chọn lần trước được nhớ trong phiên. */
 ipcMain.handle('export-pick-output', async (_event, { suggestedName, ext, projectPath } = {}) => {
+  const extension = EXPORT_OUTPUT_KINDS[ext] ? ext : 'mp4';
+  /* Cầu nối tự động hoá (MCP) đã chọn sẵn chỗ lưu qua kênh có token -> bỏ hộp thoại. Vé
+   * vẫn do MAIN ký như mọi lượt khác: renderer không tự chọn được đường dẫn ghi. Lấy ra cả
+   * khi backend chạy ngoài: lượt tải blob về sau cần nó (takeAutomationDownloadTarget). */
+  const automationPath = automationBridge.takeExportOutput(extension);
+  // Lượt nào cũng đặt lại: đích cũ của một lượt MCP hỏng không được rơi vào lượt tải sau.
+  automationDownloadTarget = isExternalBackend ? automationPath : '';
   if (isExternalBackend) return { unsupported: true };
   try {
-    const extension = EXPORT_OUTPUT_KINDS[ext] ? ext : 'mp4';
     const kind = EXPORT_OUTPUT_KINDS[extension];
-    /* Cầu nối tự động hoá (MCP) đã chọn sẵn chỗ lưu qua kênh có token -> bỏ hộp thoại. Vé
-     * vẫn do MAIN ký như mọi lượt khác: renderer không tự chọn được đường dẫn ghi. */
-    const automationPath = automationBridge.takeExportOutput(extension);
     if (automationPath) {
       return { path: automationPath, ticket: crypto.createHmac('sha256', EXPORT_OUTPUT_SECRET).update(automationPath).digest('hex') };
     }
