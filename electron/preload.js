@@ -117,6 +117,24 @@ contextBridge.exposeInMainWorld('desktopEnv', {
       }
     });
   },
+  /* GEOCODE (electron/geocode-renderer.js). render/preview trả { ok, … } chứ không ném: lỗi
+   * của MÃ NGƯỜI DÙNG là chuyện thường, pane hiện nó như một dòng báo lỗi. Tiến độ + log đi
+   * kèm `jobId` để pane chỉ nghe đúng lượt của mình. */
+  geocodeRender: async (jobId, spec) => ipcRenderer.invoke('geocode-render', { jobId, spec }),
+  geocodeCancel: async (jobId) => ipcRenderer.invoke('geocode-cancel', jobId),
+  geocodeCacheInfo: async (spec) => ipcRenderer.invoke('geocode-cache-info', spec),
+  geocodePreview: async (jobId, spec, t) => ipcRenderer.invoke('geocode-preview', { jobId, spec, t }),
+  geocodeCheckPython: async () => ipcRenderer.invoke('geocode-check-python'),
+  onGeocodeEvent: (handler) => {
+    const progress = (_event, payload) => handler('progress', payload);
+    const log = (_event, payload) => handler('log', payload);
+    ipcRenderer.on('geocode-progress', progress);
+    ipcRenderer.on('geocode-log', log);
+    return () => {
+      ipcRenderer.removeListener('geocode-progress', progress);
+      ipcRenderer.removeListener('geocode-log', log);
+    };
+  },
   versions: {
     node: process.versions.node,
     chrome: process.versions.chrome,

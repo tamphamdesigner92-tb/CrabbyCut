@@ -650,7 +650,8 @@ body.home-active .app-statusbar-version { display: none; }
 .editing-item-media { background: var(--clip-video); }
 .editing-item-text { background: var(--clip-text); }
 .editing-item-shape,
-.editing-item-vector { background: var(--clip-shape); }
+.editing-item-vector,
+.editing-item-geocode { background: var(--clip-shape); }
 .editing-item-audio { background: var(--clip-audio); }
 .editing-thumb-strip { opacity: 0.72; background-color: rgba(0, 0, 0, 0.2); }
 .editing-block-label {
@@ -665,6 +666,7 @@ body.home-active .app-statusbar-version { display: none; }
 .editing-item-text .editing-block-label,
 .editing-item-shape .editing-block-label,
 .editing-item-vector .editing-block-label,
+.editing-item-geocode .editing-block-label,
 .editing-item-audio .editing-block-label { background: transparent; }
 .editing-item-audio .editing-block-label { top: 2px; }
 

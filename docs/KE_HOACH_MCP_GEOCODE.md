@@ -90,3 +90,9 @@
 0. **Lưu nguyên kế hoạch này thành `docs/KE_HOACH_MCP_GEOCODE.md`** (theo yêu cầu người dùng; gồm cả mục "Quyết định đã chốt").
 1. A1–A3 (MCP gộp + keyframe) → test + chạy thật qua MCP → PR 1.
 2. B1–B2 (UI + khối dữ liệu) → B3 HTML/JS → B4 preview → B5 xuất → B3 Python → B6 → PR 2.
+
+## Lệch so với kế hoạch (ghi khi triển khai, 2026-10-17)
+- **B3 HTML/canvas không đi ống ffmpeg.** Đã đo trên Electron 31: `capturePage().toBitmap()` là BGRA *nhân trước alpha* (đỏ 50 % ra R=128) và Windows kẹp cỡ cửa sổ về vùng làm việc (1920×1080 → 1920×1040, 4K hỏng). Thay bằng cửa sổ offscreen + CDP `Emulation.setDeviceMetricsOverride` (khung nhìn đúng W×H, DPR 1 — xử lý luôn HiDPI) + `Page.captureScreenshot` (PNG alpha thẳng, ghi thẳng ra tệp). Python vẫn đi ống stdout → ffmpeg như kế hoạch.
+- **"Xem thử"** dựng MỘT khung tại giây t (có thanh trượt t) và hiện ngay trong pane, thay cho cửa sổ chạy trực tiếp — chạy được cho cả ba ngôn ngữ, không ghi cache.
+- **Hoạt ảnh In/Out của block GeoCode** xuất bằng biểu thức FFmpeg (`animation_video`) như video, không bake lại khung.
+- Hai nhánh: `feat/geocode` xếp chồng lên `feat/mcp-batch` (B6 dùng `crabbycut_batch`).

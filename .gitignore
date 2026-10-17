@@ -20,6 +20,8 @@ docs/MOI_TRUONG_PYTHON.md
 proxy_cache/
 # Miếng vá của Xoá logo AI (backend/logo-ai.js) — cache, sinh lại được.
 logo_ai_cache/
+# Khung GeoCode (electron/geocode-renderer.js) — cache theo khoá nội dung, dựng lại được từ mã.
+geocode_cache/
 concat_cache/
 vendor/
 

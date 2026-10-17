@@ -31,9 +31,6 @@ jobs:
         os: [macos-14, windows-2022]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
-    env:
-      # Không test nào chạy Electron — khỏi tải ~100 MB binary của nó.
-      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
     steps:
       - uses: actions/checkout@v4
 
@@ -42,6 +39,8 @@ jobs:
           node-version: 22
           cache: npm
 
+      # npm ci tải luôn binary Electron (~100 MB): test:geocode-render dựng khung GeoCode trong
+      # cửa sổ offscreen + CDP của Electron THẬT — chỉ chạy được ở đó, và cần chạy trên CẢ macOS.
       - name: Cài phụ thuộc npm
         run: npm ci
 

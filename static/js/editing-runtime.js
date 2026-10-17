@@ -168,6 +168,7 @@
     let editPanelTransitionCat = 'all'; // sub-tab đang chọn trong panel "Chuyển tiếp"
     let editPanelLutCat = 'soft';       // sub-tab đang chọn trong panel "LUT" (mặc định nhóm dịu)
     let editPanelTextSub = 'import';    // sub-tab đang chọn trong panel "Văn bản" (Nhập | Mẫu | Hiệu ứng | Auto/Local Subtitle)
+    let editPanelShapeSub = 'shapes';   // sub-tab của panel "Hình học" (Hình dạng | GeoCode)
     let editPanelAudioSub = 'import';   // sub-tab của panel "Âm thanh" (hiện chỉ còn Nhập — Auto Subtitle đã sang tab Văn bản)
     let transitionBoundaryCache = [];   // điểm cắt đã render gần nhất (để hit-test khi kéo-thả)
     let selectedTransitionKey = null;   // node chuyển cảnh đang được chọn (key điểm cắt)
@@ -371,6 +372,8 @@
         if (type === 'adjust') return 'adjust';
         if (type === 'text') return 'text';
         if (type === 'shape') return 'shape';
+        // GeoCode (static/js/geocode.js) nằm trên lane Hình khối.
+        if (type === 'geocode') return 'shape';
         if (type === 'vector') return 'vector';
         return 'media';
     }
@@ -576,6 +579,8 @@
         if (itemIsTextTemplate(item)) return false;
         if (item.type === 'text' || item.type === 'shape') return true;
         if (item.type === 'media') return true; // ảnh (chuỗi PNG) + video (filter FFmpeg)
+        // GeoCode: khung có sẵn -> hoạt ảnh đi biểu thức FFmpeg như video (videoAnimationExpr).
+        if (item.type === 'geocode') return true;
         return false;
     }
 
@@ -4072,6 +4077,108 @@
        theo block xa nhất (overlayTimelineEnd, getTimelineDuration ở index.html). Chỉ giữ sàn
        0.2s và không lùi ra trước mốc 0; video overlay vẫn kẹp theo nguồn ở tay cầm trim /
        ô Thời lượng (itemSourceDurationLimit). */
+    /* ===== GEOCODE (static/js/geocode.js) =====
+     * Block `geocode` nằm trên lane Hình khối, mang item.geocode = đặc tả (ngôn ngữ, mã, cỡ, loại,
+     * fps, thời lượng, nền, lặp) + khoá khung trong cache. Khung là cache dựng lại được từ mã, nên
+     * .crab chỉ cần đặc tả; thiếu khung (dọn cache, máy khác) thì GeoCode.ensureFrames dựng lại. */
+    function geocodeSize(item) {
+        const gc = item?.geocode || {};
+        return { width: Number(gc.width) || 450, height: Number(gc.height) || 200 };
+    }
+
+    function geocodeItemDuration(gc) {
+        return gc?.kind === 'video' && Number(gc.duration) > 0 ? Number(gc.duration) : 5;
+    }
+
+    function addGeocodeItem(geocode, placement = null) {
+        const want = Number(placement?.duration) > 0 ? Number(placement.duration) : geocodeItemDuration(geocode);
+        const { start, duration, track } = resolveNewItemPlacement('geocode', want, placement);
+        recordHistory();
+        const item = {
+            id: nextId('item'),
+            type: 'geocode',
+            track_id: track.id,
+            timeline_start: start,
+            duration,
+            transform: defaultTransform(),
+            geocode: { ...geocode },
+        };
+        editingItems.push(item);
+        selectEditingItem(item.id);
+        renderAll();
+        return item;
+    }
+
+    // "Tạo lại": thay khung của block (một bước Hoàn tác), giữ vị trí/biến đổi/keyframe/hoạt ảnh.
+    function updateGeocodeItem(id, geocode) {
+        const item = findItem(id);
+        if (!item || item.type !== 'geocode') return null;
+        if (isTrackLocked(itemTrack(item))) {
+            setEditingStatusText(_t('Track của block đang khoá.'));
+            return null;
+        }
+        recordHistory();
+        // Block đang dài đúng bằng video cũ -> theo độ dài video mới; người dùng đã kéo dài/cắt thì giữ.
+        if (geocode.kind === 'video' && Math.abs((Number(item.duration) || 0) - geocodeItemDuration(item.geocode)) < 0.02) {
+            item.duration = geocodeItemDuration(geocode);
+        }
+        item.geocode = { ...geocode };
+        clampItemTiming(item);
+        renderAll();
+        return item;
+    }
+
+    /* Vẽ khung tại playhead lên <canvas> của block. Chưa nạp xong thì GIỮ khung đang có (không
+     * xoá -> không nháy), nạp xong tự xin một lượt vẽ. */
+    function paintGeocodeCanvas(el, item, seqTime, previewScale, displayScale) {
+        const gc = item.geocode;
+        if (!gc || !window.GeoCode) return;
+        // Mốc đầu snap vào lưới khung sequence như bản xuất — xem GeoCode.localTimeAt.
+        const seqFps = typeof resolveSequenceFps === 'function' ? resolveSequenceFps() : 0;
+        const local = window.GeoCode.localTimeAt(seqTime, item.timeline_start, seqFps);
+        const displayPx = (Number(gc.width) || 1) * previewScale * displayScale * (window.devicePixelRatio || 1);
+        const bitmap = window.GeoCode.frameBitmap(gc, local, {
+            displayPx,
+            playing: isMainPreviewPlaying(),
+            onReady: requestPreviewOverlayRefresh,
+        });
+        if (!bitmap || el.__gcBitmap === bitmap) return;
+        if (el.width !== bitmap.width || el.height !== bitmap.height) {
+            el.width = bitmap.width;
+            el.height = bitmap.height;
+        }
+        const ctx = el.getContext('2d');
+        ctx.clearRect(0, 0, el.width, el.height);
+        ctx.drawImage(bitmap, 0, 0);
+        el.__gcBitmap = bitmap;
+    }
+
+    // Mở dự án / hoàn tác: kiểm khung của mọi block GeoCode (mỗi khoá một lần), thiếu thì dựng lại.
+    function ensureGeocodeFramesInBackground() {
+        if (!window.GeoCode?.available?.()) return;
+        const seen = new Set();
+        editingItems.forEach((it) => {
+            const key = it?.type === 'geocode' ? it.geocode?.render_key : '';
+            if (!key || seen.has(key)) return;
+            seen.add(key);
+            window.GeoCode.ensureFrames(it.geocode);
+        });
+    }
+
+    // Xuất: khung PHẢI có trước khi gửi khoá cho backend — thiếu là backend báo lỗi rõ ràng.
+    async function ensureGeocodeFramesForExport() {
+        const items = editingItems.filter((it) => it?.type === 'geocode' && isItemVisible(it));
+        if (!items.length) return;
+        if (!window.GeoCode?.available?.()) throw new Error(_t('Dự án có block GeoCode — cần bản desktop của CrabbyCut để xuất.'));
+        const keys = new Map();
+        items.forEach((it) => { if (it.geocode?.render_key) keys.set(it.geocode.render_key, it.geocode); });
+        for (const gc of keys.values()) {
+            // eslint-disable-next-line no-await-in-loop
+            const ok = await window.GeoCode.ensureFrames(gc);
+            if (!ok) throw new Error(_t('Không dựng được khung GeoCode ({key}) — xem lỗi ở pane GeoCode.', { key: String(gc.render_key).slice(0, 8) }));
+        }
+    }
+
     function clampItemTiming(item) {
         item.duration = Math.max(0.2, Number(item.duration) || 0.2);
         item.timeline_start = Math.max(0, Number(item.timeline_start) || 0);
@@ -4611,6 +4718,7 @@
         if (typeof updateTimelineLayout === 'function') updateTimelineLayout();
         if (typeof updateInspectorState === 'function') updateInspectorState();
         if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
+        if (editPanelTab === 'shape' && editPanelShapeSub === 'geocode') window.GeoCode?.onSelectionChanged?.();
     }
 
     /* Lane chính trống: nút Xuất video bật theo việc timeline có block hay không (bản xuất
@@ -4633,7 +4741,7 @@
         }, {});
         // Tên loại nội bộ (media/text/…) -> nhãn giao diện; loại lạ thì hiện nguyên tên.
         const typeLabels = {
-            media: _t('Tệp phương tiện'), text: _t('Văn bản'), shape: _t('Hình khối'),
+            media: _t('Tệp phương tiện'), text: _t('Văn bản'), shape: _t('Hình khối'), geocode: 'GeoCode',
             vector: _t('Vector'), audio: _t('Âm thanh'), adjust: _t('Điều chỉnh'),
         };
         const text = Object.entries(counts).map(([type, count]) => `${typeLabels[type] || type}: ${count}`).join(', ');
@@ -5162,6 +5270,11 @@
 
     function blockLabelForItem(item) {
         if (item.type === 'adjust') return item.name || _t('Điều chỉnh');
+        if (item.type === 'geocode') {
+            const gc = item.geocode || {};
+            const lang = { html: 'HTML', canvas: 'Canvas', python: 'Python' }[gc.lang] || '';
+            return `GeoCode · ${lang} ${Number(gc.width) || 0}×${Number(gc.height) || 0}`;
+        }
         if (item.type === 'text') return item.text || _t('Văn bản');
         if (item.type === 'shape') {
             const shapeType = item.style?.shape_type || '';
@@ -15152,6 +15265,7 @@
                     text: _t('Overlay văn bản'),
                     media: _t('Overlay tệp phương tiện'),
                     shape: _t('Overlay hình khối'),
+                    geocode: _t('Overlay GeoCode'),
                     audio: _t('Overlay âm thanh'),
                 }[item.type];
                 target.innerText = count > 1
@@ -16019,6 +16133,7 @@
      * NGUỒN — canvas bake chuỗi khung (giữ đủ độ nét khi phóng to), mặt nạ — tức đúng cỡ luồng
      * mà sidecar nhận; sidecar nhân thêm `fit_scale` (xem exportPayload) để ra cỡ hiển thị. */
     function itemNativeSize(item, asset = null) {
+        if (item?.type === 'geocode') return geocodeSize(item);
         return {
             width: Number(asset?.width) || (payloadSequence().width * 0.45),
             height: Number(asset?.height) || (payloadSequence().height * 0.25),
@@ -16035,6 +16150,9 @@
         if (item?.type === 'text') {
             return measureTextItemBox(item);
         }
+        // GeoCode: scale 100 % = đúng W×H px của mã (không "vừa khung" như media) — nút 450×200
+        // là 450×200 px trên sequence, khớp bản xuất (backend để fit_scale = 1).
+        if (item?.type === 'geocode') return geocodeSize(item);
         // Media: cỡ TRÊN CANVAS ở scale 100% = cỡ gốc × hệ số vừa khung (xem mediaAssetFitScale).
         const native = itemNativeSize(item, asset);
         const f = mediaAssetFitScale(asset);
@@ -16048,7 +16166,7 @@
         if (selectedEditingItemIds.size !== 1 || !selectedEditingItemId) return null;
         const item = selectedEditingItem();
         if (!item || item.type === 'audio') return null;
-        if (!['media', 'text', 'shape'].includes(item.type)) return null;
+        if (!['media', 'text', 'shape', 'geocode'].includes(item.type)) return null;
         if (!isItemVisible(item)) return null;
         if (seqTime < Number(item.timeline_start) || seqTime > itemEnd(item)) return null;
         return item;
@@ -16206,6 +16324,14 @@
                 stopSelectionBoxEvent(event);
                 if (pathEditItemId === item.id) exitShapePathEdit();
                 else enterShapePathEdit(item);
+                return;
+            }
+            // Nhấp đúp block GeoCode -> mở pane GeoCode để sửa mã.
+            if (!isMainClip && item.type === 'geocode') {
+                stopSelectionBoxEvent(event);
+                editPanelTab = 'shape';
+                editPanelShapeSub = 'geocode';
+                renderEditPanel();
                 return;
             }
             beginPreviewTextEditFromSelectionBox(event, item);
@@ -17504,7 +17630,8 @@
                `src` chỉ gán lúc TẠO phần tử, nên bấm LQ/HQ mà khoá không đổi thì <video>
                vẫn phát bản cũ và cái nút thành ra vô nghĩa với lane overlay. */
             const mediaUrl = previewAssetUrl(asset);
-            const mediaKey = item.type === 'media' ? `${asset?.id || ''}|${mediaUrl}` : '';
+            const mediaKey = item.type === 'media' ? `${asset?.id || ''}|${mediaUrl}`
+                : (item.type === 'geocode' ? `gc:${item.geocode?.render_key || ''}` : '');
             /* Đổi qua/lại giữa text thường và MẪU VĂN BẢN là đổi cả LOẠI THẺ
                (<div> chữ CSS <-> <canvas> vẽ nhiều lớp). Không dựng lại thì thẻ cũ
                còn đó và preview hiện sai loại nội dung. */
@@ -17544,6 +17671,8 @@
                     el = document.createElement(wantTemplateCanvas ? 'canvas' : 'div');
                 } else if (item.type === 'shape') {
                     el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                } else if (item.type === 'geocode') {
+                    el = document.createElement('canvas');
                 } else if (useColorFx) {
                     el = document.createElement('canvas');
                     const srcEl = makeMediaEl();
@@ -17798,6 +17927,9 @@
                 el.classList.remove('is-text-overlay', 'is-editing-text');
                 el.contentEditable = 'false';
                 if (item.type === 'shape') setShapeSvgElement(el, item);
+                if (item.type === 'geocode') {
+                    paintGeocodeCanvas(el, item, seqTime, previewScale, Math.abs(Number(transform.scale) || 100) / 100);
+                }
                 // Shape: element = canvas SVG (gồm phần stroke tràn) để không bị xén; box chọn vẫn = W×H (giữa)
                 const size = item.type === 'shape' ? shapeCanvasSize(item.style) : itemBaseSize(item, asset);
                 el.style.width = `${Math.max(1, size.width * previewScale)}px`;
@@ -18258,7 +18390,12 @@
                dùng) — kịch bản cũng là văn bản, gom về một chỗ cho dải tab gọn hơn. */
             { id: 'script', label: _t('Kịch bản') },
         ],
-        shape: [{ id: 'shapes', label: _t('Hình dạng') }],
+        /* GeoCode (2026-10-17): viết mã HTML/CSS/JS, canvas hay Python rồi dựng ảnh/video đặt
+           lên lane Hình khối — panel ở static/js/geocode.js. */
+        shape: [
+            { id: 'shapes', label: _t('Hình dạng') },
+            { id: 'geocode', label: 'GeoCode' },
+        ],
         transition: [
             { id: 'all', label: _t('Tất cả') },
             ...((window.Transitions && window.Transitions.TRANSITION_CATEGORIES) || []),
@@ -19737,6 +19874,7 @@
         else if (editPanelTab === 'text') activeSub = editPanelTextSub;
         // (Thêm nhóm mới thì nhớ thêm cả ở ĐÂY lẫn ở handler click — xem bẫy của tab LUT.)
         else if (editPanelTab === 'audio') activeSub = editPanelAudioSub;
+        else if (editPanelTab === 'shape') activeSub = editPanelShapeSub;
         subEl.innerHTML = subs.map((s) => `<button class="edit-subtab ${s.id === activeSub ? 'is-active' : ''}" type="button" data-edit-subtab="${s.id}" role="tab" aria-selected="${s.id === activeSub}" aria-controls="editPanelBody">${s.label}</button>`).join('');
         if (editPanelTab === 'media') bodyEl.innerHTML = renderImportPaneHtml('media');
         else if (editPanelTab === 'audio') {
@@ -19768,7 +19906,16 @@
                 if (editPanelTextSub === 'template') initTextTemplateThumbs(bodyEl);
             }
         }
-        else if (editPanelTab === 'shape') bodyEl.innerHTML = renderShapePaneHtml();
+        else if (editPanelTab === 'shape') {
+            if (editPanelShapeSub === 'geocode') {
+                if (window.GeoCode) {
+                    bodyEl.innerHTML = window.GeoCode.renderPaneHtml();
+                    window.GeoCode.bindPane(bodyEl);
+                } else {
+                    bodyEl.innerHTML = `<div class="edit-empty">${_t('Không nạp được {file}', { file: 'geocode.js' })}</div>`;
+                }
+            } else bodyEl.innerHTML = renderShapePaneHtml();
+        }
         else if (editPanelTab === 'transition') { bodyEl.innerHTML = renderTransitionPaneHtml(); initTransitionThumbs(bodyEl); }
         else if (editPanelTab === 'lut') {
             bodyEl.innerHTML = renderLutPaneHtml();
@@ -19830,6 +19977,7 @@
             else if (editPanelTab === 'lut') editPanelLutCat = subBtn.dataset.editSubtab;
             else if (editPanelTab === 'text') editPanelTextSub = subBtn.dataset.editSubtab;
             else if (editPanelTab === 'audio') editPanelAudioSub = subBtn.dataset.editSubtab;
+            else if (editPanelTab === 'shape') editPanelShapeSub = subBtn.dataset.editSubtab;
             renderEditPanel();
             return;
         }
@@ -22705,6 +22853,7 @@
                 timingCount[key] = (timingCount[key] || 0) + 1;
             }
         };
+        if (!audioOnly) await ensureGeocodeFramesForExport();
         // Asset .svg của dự án cũ phải thành PNG trước khi xuất (migrateLegacyVectorAssets).
         if (legacyVectorMigration) await legacyVectorMigration;
         else await migrateLegacyVectorAssets();
@@ -22846,6 +22995,17 @@
                     copy.rendered_shape_height = rendered.height;
                 }
                 await attachAnim(copy, renderShapeAnimationSequence, { kind: 'shape_anim', parts: itemSeqParts(copy) });
+            } else if (copy?.type === 'geocode') {
+                /* GEOCODE: khung nằm sẵn trong cache theo khoá; backend tự dựng đường dẫn từ khoá
+                   (materializeGeocodeFrames) — không gửi đường dẫn, không gửi MÃ (tới 512 KB mỗi
+                   block, backend không cần). Hoạt ảnh In/Out đi biểu thức FFmpeg như video, hộp
+                   = W×H gốc như preview. */
+                const gc = copy.geocode || {};
+                copy.geocode = { render_key: gc.render_key, loop: gc.loop === true };
+                if (window.TextAnimations && TextAnimations.hasAnimation(copy)) {
+                    const spec = TextAnimations.videoAnimationExpr(copy, Number(gc.height) || 0);
+                    if (spec) copy.animation_video = spec;
+                }
             } else if (copy?.type === 'media' && !itemIsVideoMedia(copy)) {
                 // Ảnh (media image): chỉ sinh chuỗi hoạt ảnh; đoạn hold trong chuỗi đã
                 // phủ toàn khoảng nên không cần PNG tĩnh riêng (backend rơi về ảnh gốc
@@ -23027,6 +23187,7 @@
             if (window.TextAnimations?.pairPositionKeyframes) TextAnimations.pairPositionKeyframes(it);
         });
         editingAssets = Array.isArray(state.editingAssets) ? deepClone(state.editingAssets) : [];
+        ensureGeocodeFramesInBackground();
         // Dự án cũ: scale media overlay tính trên cỡ gốc -> quy về mốc vừa khung (xem hàm).
         if (state.mediaScaleBasis !== 'fit') migrateMediaScaleToFit();
         // Dự án cũ: asset .svg -> PNG (chạy nền, sau quy đổi scale vì giữ cỡ cũ của asset).
@@ -24059,7 +24220,8 @@
                 background: linear-gradient(180deg, #c05f49 0%, #a94f3c 58%, #94422f 100%);
             }
             .editing-item-shape,
-            .editing-item-vector {
+            .editing-item-vector,
+            .editing-item-geocode {
                 background: linear-gradient(180deg, #eda833 0%, #d99522 58%, #bd7f14 100%);
             }
             .editing-item-audio {
@@ -24068,7 +24230,8 @@
             }
             .editing-item-text .editing-block-label,
             .editing-item-shape .editing-block-label,
-            .editing-item-vector .editing-block-label {
+            .editing-item-vector .editing-block-label,
+            .editing-item-geocode .editing-block-label {
                 top: 50%;
                 transform: translateY(-50%);
                 background: rgba(255,255,255,0.16);
@@ -27442,6 +27605,10 @@
         subtitleFontForLanguage,
         addTextItem,
         beginHistoryBatch,
+        // ----- GEOCODE (static/js/geocode.js) -----
+        addGeocodeItem,
+        updateGeocodeItem,
+        setStatusText: setEditingStatusText,
         splitTextToMaxLines,
         textFitsOneLine,
         // Số block timeline đã dựng ở lượt gần nhất / tổng số item (ảo hoá — dùng cho test).
@@ -27485,6 +27652,8 @@
             // Lệnh gộp: một bước Hoàn tác + một lượt vẽ cho cả lô.
             suspendRender,
             suspendHistory,
+            addGeocodeItem,
+            updateGeocodeItem,
             renderStats: () => ({ renderAll: renderAllRuns, suspended: renderSuspendDepth }),
             // Keyframe qua MCP: cùng hàm chèn/gộp mốc mà nút ◆ dùng.
             upsertKeyframe,
