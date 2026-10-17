@@ -50,6 +50,15 @@
 #include <unistd.h>
 extern char** environ;
 #endif
+// Dò AVX-512 cho libx264 — xem X264AsmCap().
+#if defined(_M_X64) || defined(__x86_64__)
+#ifdef _MSC_VER
+#include <intrin.h>
+#include <immintrin.h>
+#else
+#include <cpuid.h>
+#endif
+#endif
 
 namespace fs = std::filesystem;
 
@@ -5145,6 +5154,66 @@ void WriteOverlayAudioFilter(std::ofstream& script, const ExportOverlay& overlay
   audioLabels.push_back("[aov" + id + "]");
 }
 
+/* LIBX264 KHÔNG TẤT ĐỊNH TRÊN CPU AVX-512 (đo 2026-10-17 trên runner CI windows-2022, x264 core 165
+ * r3222 trong ffmpeg ghim): CÙNG lệnh, CÙNG máy, 60 lần xuất ra 3–8 bản khác bit nhau trên Xeon
+ * 8370C/8573C và EPYC Zen 4/5 — kể cả `-threads 1`, trong khi đầu ra của filter luôn trùng. Lệch
+ * gọn trong vài macroblock rồi lan qua khung tham chiếu: mắt không thấy, nhưng mọi phép so
+ * framemd5 giữa hai lần xuất (test:media-scale-fit và 8 test khác) đỏ ngẫu nhiên tuỳ runner rơi vào
+ * máy nào. Máy không có AVX-512 (Zen 3, Ryzen 2700X) luôn ra một bản.
+ *
+ * `-x264-params asm=avx2` giới hạn x264 ở tập lệnh AVX2: tất định 180/180 lần trên cả ba loại máy
+ * AVX-512 và TRÙNG TỪNG BIT với bản xuất trên máy chỉ có AVX2. Giá: mã hoá chậm hơn ~4–10 % trên
+ * máy AVX-512, 0 % ở máy khác (người dùng chốt đánh đổi này 2026-10-17).
+ *
+ * CHỈ thêm khi CPU THẬT có AVX-512 dùng được (cpuid + XCR0): x264 OR thẳng các cờ của tên "avx2"
+ * vào cờ CPU chứ không giao với cờ dò được, nên ép nó trên máy không có AVX2 là chết vì lệnh lạ.
+ * CRABBYCUT_X264_ASM_CAP: auto (mặc định) | avx2 (ép, để kiểm trên máy không AVX-512) | off. */
+bool CpuHasUsableAvx512() {
+#if defined(_M_X64) || defined(__x86_64__)
+  unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+#ifdef _MSC_VER
+  int r[4] = {0, 0, 0, 0};
+  __cpuid(r, 0);
+  if (r[0] < 7) return false;
+  __cpuid(r, 1);
+  ecx = static_cast<unsigned int>(r[2]);
+#else
+  if (__get_cpuid_max(0, nullptr) < 7) return false;
+  __get_cpuid(1, &eax, &ebx, &ecx, &edx);
+#endif
+  // OSXSAVE (bit 27) + AVX (bit 28): hệ điều hành bật được thanh ghi mở rộng.
+  if ((ecx & (1u << 27)) == 0 || (ecx & (1u << 28)) == 0) return false;
+#ifdef _MSC_VER
+  const unsigned long long xcr0 = _xgetbv(0);
+  __cpuidex(r, 7, 0);
+  ebx = static_cast<unsigned int>(r[1]);
+#else
+  unsigned int xlo = 0, xhi = 0;
+  __asm__ volatile("xgetbv" : "=a"(xlo), "=d"(xhi) : "c"(0));
+  const unsigned long long xcr0 = (static_cast<unsigned long long>(xhi) << 32) | xlo;
+  __get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx);
+#endif
+  // XCR0: SSE|AVX (bit 1,2) + opmask|ZMM_Hi256|Hi16_ZMM (bit 5,6,7) — hệ điều hành lưu đủ trạng thái AVX-512.
+  if ((xcr0 & 0xE6ull) != 0xE6ull) return false;
+  // Lá 7: AVX2 (EBX bit 5) + AVX512F (EBX bit 16).
+  return (ebx & (1u << 5)) != 0 && (ebx & (1u << 16)) != 0;
+#else
+  return false;
+#endif
+}
+
+// "avx2" khi phải giới hạn x264, rỗng khi để x264 tự dò. Tính một lần.
+const std::string& X264AsmCap() {
+  static const std::string cap = [] {
+    const char* env = std::getenv("CRABBYCUT_X264_ASM_CAP");
+    const std::string mode = env ? env : "auto";
+    if (mode == "off") return std::string();
+    if (mode == "avx2") return std::string("avx2");
+    return CpuHasUsableAvx512() ? std::string("avx2") : std::string();
+  }();
+  return cap;
+}
+
 void AppendCpuEncoderArgs(std::vector<std::string>& cmd, const ExportSettings& settings) {
   if (settings.codec == "prores") {
     cmd.insert(cmd.end(), {"-c:v", "prores_ks", "-profile:v", "3", "-c:a", "pcm_s16le"});
@@ -5152,6 +5221,9 @@ void AppendCpuEncoderArgs(std::vector<std::string>& cmd, const ExportSettings& s
   }
   const std::string preset = QualityPreset(settings);
   cmd.insert(cmd.end(), {"-c:v", settings.codec == "hevc" ? "libx265" : "libx264", "-preset", preset});
+  if (settings.codec != "hevc" && !X264AsmCap().empty()) {
+    cmd.insert(cmd.end(), {"-x264-params", "asm=" + X264AsmCap()});
+  }
   if (RateIsCustom(settings)) {
     // "Tùy chỉnh": bitrate trung bình người dùng nhập, đỉnh ×1,5 (bộ đệm 2 giây của đỉnh).
     const long long kbps = RateKbps(settings);
@@ -7177,6 +7249,9 @@ int CommandExportVideo(int argc, char** argv) {
   encoderProbe.get();
   EncoderPlan plan = SelectEncoderPlan(settings);
   Emit("progress", "Export encoder: " + plan.videoEncoder + (plan.hardware ? " (hardware)" : " (CPU)"));
+  if (!plan.hardware && settings.codec != "hevc" && settings.codec != "prores" && !X264AsmCap().empty()) {
+    Emit("progress", "libx264 asm=" + X264AsmCap() + " (giới hạn AVX2 để bản xuất tất định — xem X264AsmCap)");
+  }
   if (std::any_of(overlays.begin(), overlays.end(), [](const ExportOverlay& overlay) { return overlay.type == "text"; })
       && !TextOverlaySupported()) {
     Emit("progress", "FFmpeg hiện tại không có drawtext; text overlay sẽ bị bỏ qua khi export.");
