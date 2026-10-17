@@ -292,11 +292,23 @@ def frame(t, width, height):
         return `/geocode_cache/${key}/${proxy ? 'proxy/' : ''}frame_${String(index).padStart(5, '0')}.png`;
     }
 
+    /* Giây cục bộ của block tại thời điểm sequence `seqTime`. Mốc đầu SNAP vào lưới khung sequence
+       như bản xuất (snapT ở normalizeEditingPayload của backend): tính từ mốc thô thì block kéo
+       lệch lưới (6.01 s) hiện chậm bản xuất đúng một khung ở MỌI vị trí playhead (đo 2026-10-17
+       bằng chuỗi khung đánh số). */
+    function localTimeAt(seqTime, timelineStart, seqFps) {
+        const start = Number(timelineStart) || 0;
+        const fps = Number(seqFps) || 0;
+        return (Number(seqTime) || 0) - (fps > 0 ? Math.round(start * fps) / fps : start);
+    }
+
     // Khung ứng với giây cục bộ `local` của block (lặp hoặc giữ khung cuối).
     function frameIndexAt(gc, local) {
         const n = Math.max(1, Number(gc.frame_count) || 1);
         if (gc.kind !== 'video' || n === 1) return 0;
-        const f = Math.floor(Math.max(0, local) * (Number(gc.fps) || 30) + 1e-6);
+        /* Dung sai 1e-3 KHUNG: video.currentTime bị cắt xuống micro-giây (8.2 -> 8.199999), nên
+           playhead đứng đúng mốc khung lại rơi vào khung trước — lệch bản xuất một khung. */
+        const f = Math.floor(Math.max(0, local) * (Number(gc.fps) || 30) + 1e-3);
         return gc.loop ? ((f % n) + n) % n : Math.min(n - 1, f);
     }
 
@@ -712,6 +724,7 @@ def frame(t, width, height):
         ensureFrames,
         frameBitmap,
         frameIndexAt,
+        localTimeAt,
         buildGeocode,
         starterCode,
         presetSize: (id) => {

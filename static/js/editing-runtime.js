@@ -4133,7 +4133,9 @@
     function paintGeocodeCanvas(el, item, seqTime, previewScale, displayScale) {
         const gc = item.geocode;
         if (!gc || !window.GeoCode) return;
-        const local = seqTime - (Number(item.timeline_start) || 0);
+        // Mốc đầu snap vào lưới khung sequence như bản xuất — xem GeoCode.localTimeAt.
+        const seqFps = typeof resolveSequenceFps === 'function' ? resolveSequenceFps() : 0;
+        const local = window.GeoCode.localTimeAt(seqTime, item.timeline_start, seqFps);
         const displayPx = (Number(gc.width) || 1) * previewScale * displayScale * (window.devicePixelRatio || 1);
         const bitmap = window.GeoCode.frameBitmap(gc, local, {
             displayPx,
