@@ -519,6 +519,62 @@ async function partA() {
         ok('distort: update_block ghi danh sách + keyframe dst.* một bước Hoàn tác, gộp theo id, dọn keyframe, lỗi rõ ràng không để dở; chạy trong batch; catalog distort');
     }
 
+    // ---- Wiggle (kiểu After Effects) qua set_animation + catalog
+    {
+        const app = makeApp();
+        const sh = await app.call('add_shape', { shape_type: 'rectangle', start: 0, duration: 4 });
+        const item = () => app.state.editingItems.find((it) => it.id === sh.item_id);
+        const undo0 = app.sandbox.undoStack.length;
+        const r = await app.call('set_animation', { item_id: sh.item_id, wiggle: { position: { freq: 2.5, amp: 40, axis: 'x' }, rotation: true } });
+        assert.strictEqual(app.sandbox.undoStack.length, undo0 + 1, 'set_animation wiggle = MỘT bước Hoàn tác');
+        assert.deepStrictEqual(plain(r.wiggle.position), { enabled: true, freq: 2.5, amp: 40, octaves: 1, amp_mult: 0.5, seed: 1, axis: 'x' });
+        assert.strictEqual(r.wiggle.rotation.enabled, true, 'true = bật với mặc định');
+        assert.ok(TextAnimations.hasAnimation(item()), 'block có hoạt ảnh nhờ wiggle');
+        const st = TextAnimations.animationStateAt(item(), 1.1, { boxHeight: 100 });
+        assert.ok(st.dx !== 0 && st.dy === 0 && st.rotate !== 0, 'trục x + xoay chạy trong engine');
+        // Sửa từng phần: chỉ đổi amp xoay, vị trí giữ nguyên
+        await app.call('set_animation', { item_id: sh.item_id, wiggle: { rotation: { amp: 5 } } });
+        assert.strictEqual(item().animation.wiggle.position.amp, 40);
+        assert.strictEqual(item().animation.wiggle.rotation.amp, 5);
+        // combo / in-out không đụng wiggle
+        await app.call('set_animation', { item_id: sh.item_id, combo: 'pop_fade' });
+        assert.strictEqual(item().animation.in.type, 'pop');
+        assert.strictEqual(item().animation.wiggle.position.amp, 40, 'combo giữ wiggle');
+        await app.call('set_animation', { item_id: sh.item_id, combo: 'none' });
+        assert.strictEqual(item().animation.in.type, 'none');
+        assert.ok(item().animation.wiggle.rotation, 'combo none giữ wiggle');
+        // Tắt giữ tham số; null bỏ một loại; "none" bỏ hết
+        await app.call('set_animation', { item_id: sh.item_id, wiggle: { position: { enabled: false }, rotation: { enabled: false } } });
+        assert.ok(!TextAnimations.hasAnimation(item()), 'tắt hết = không có hoạt ảnh');
+        assert.strictEqual(item().animation.wiggle.position.amp, 40, 'tắt vẫn giữ tham số');
+        await app.call('set_animation', { item_id: sh.item_id, wiggle: { rotation: null } });
+        assert.deepStrictEqual(plain(Object.keys(item().animation.wiggle)), ['position']);
+        await app.call('set_animation', { item_id: sh.item_id, wiggle: 'none' });
+        assert.strictEqual(item().animation, undefined, 'bỏ hết wiggle + không in/out = không còn animation');
+        // Kiểm chặt, lỗi không để dở
+        const before = plain(item().animation || null);
+        await assert.rejects(app.call('set_animation', { item_id: sh.item_id, wiggle: { shake: {} } }), /Không có wiggle "shake"/);
+        await assert.rejects(app.call('set_animation', { item_id: sh.item_id, wiggle: { scale: { axis: 'x' } } }), /không có khoá "axis"/);
+        await assert.rejects(app.call('set_animation', { item_id: sh.item_id, wiggle: { position: { amp: 5000 } } }), /amp phải là số trong \[0, 2000\]/);
+        await assert.rejects(app.call('set_animation', { item_id: sh.item_id, wiggle: { opacity: { freq: 0 } } }), /freq phải là số/);
+        await assert.rejects(app.call('set_animation', { item_id: sh.item_id, wiggle: { scale: { uniform: 'no' } } }), /uniform là true\/false/);
+        await assert.rejects(app.call('set_animation', { item_id: sh.item_id, wiggle: [1] }), /"wiggle" là object/);
+        assert.deepStrictEqual(plain(item().animation || null), before, 'lỗi không ghi dở');
+        // Trong animation của add_shape và trong batch
+        const s2 = await app.call('add_shape', { shape_type: 'circle', start: 5, animation: { in: { type: 'fade', duration: 0.5 }, wiggle: { scale: { amp: 15, uniform: false } } } });
+        const it2 = app.state.editingItems.find((it) => it.id === s2.item_id);
+        assert.strictEqual(it2.animation.in.type, 'fade');
+        assert.strictEqual(it2.animation.wiggle.scale.uniform, false);
+        const b = await app.call('batch', { ops: [{ tool: 'add_shape', args: { shape_type: 'square', start: 9 } }, { tool: 'set_animation', args: { item_id: '$0.item_id', wiggle: { opacity: { amp: 60 } } } }] });
+        assert.ok(b && app.state.editingItems.some((it) => it.animation && it.animation.wiggle && it.animation.wiggle.opacity && it.animation.wiggle.opacity.amp === 60), 'set_animation wiggle chạy trong batch');
+        const cat = plain(await app.call('catalog', { kind: 'wiggle' }));
+        assert.deepStrictEqual(Object.keys(cat.types), ['position', 'scale', 'rotation', 'opacity']);
+        assert.strictEqual(cat.types.position.amp.max, 2000);
+        assert.deepStrictEqual(cat.types.position.axis.options, ['xy', 'x', 'y']);
+        assert.strictEqual(cat.types.scale.uniform.default, true);
+        ok('wiggle: set_animation sửa từng phần một bước Hoàn tác, giữ khi đổi combo/in/out, tắt giữ tham số, null/"none" bỏ, lỗi rõ ràng không để dở; chạy trong add_shape + batch; catalog wiggle');
+    }
+
     // ---- Subsequence (Nest)
     {
         const app = makeNestApp();
@@ -733,6 +789,10 @@ async function partB() {
         const ub = list.result.tools.find((t) => t.name === 'crabbycut_update_block');
         assert.deepStrictEqual(ub.inputSchema.properties.distort.items.properties.type.enum, ['wave', 'bezier', 'mesh', 'puppet', 'liquify'], 'update_block nhận distort');
         assert.ok(list.result.tools.find((t) => t.name === 'crabbycut_catalog').inputSchema.properties.kind.enum.includes('distort'), 'catalog có kind distort');
+        assert.ok(list.result.tools.find((t) => t.name === 'crabbycut_catalog').inputSchema.properties.kind.enum.includes('wiggle'), 'catalog có kind wiggle');
+        const sa = list.result.tools.find((t) => t.name === 'crabbycut_set_animation');
+        assert.ok(sa && sa.inputSchema.properties.wiggle && sa.inputSchema.properties.wiggle.anyOf, 'set_animation nhận wiggle');
+        assert.ok(geo.inputSchema.properties.animation && geo.inputSchema.properties.animation.properties.wiggle, 'animation của add_geocode nhận wiggle');
         const sh = await tool('crabbycut_add_shape', { shape_type: 'circle' });
         assert.strictEqual(sh.data.item_id, 'item_shape_1');
         ok('MCP server: tool mới có trong danh sách, add_geocode/dub tự chờ job (một lượt gọi), hết hạn chờ trả job_id, read không tạo job');

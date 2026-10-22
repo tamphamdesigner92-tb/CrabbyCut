@@ -749,6 +749,60 @@
         });
     }
 
+    /* WIGGLE (kiểu After Effects) qua MCP: `wiggle` sửa TỪNG PHẦN theo loại, giữ loại không nêu.
+     *   "none" | null | false        -> bỏ hết wiggle
+     *   { position: null | false }   -> bỏ riêng loại đó
+     *   { position: true }           -> bật (tham số cũ hoặc mặc định)
+     *   { position: { amp: 40, … } } -> gộp vào tham số cũ; thiếu `enabled` = bật
+     * Kiểm chặt (loại / khoá lạ, số ngoài dải -> lỗi) rồi chuẩn hoá qua normalizeWiggleFx. */
+    const WIGGLE_KEYS = {
+        common: ['enabled', 'freq', 'amp', 'octaves', 'amp_mult', 'seed'],
+        position: ['axis'],
+        scale: ['uniform'],
+    };
+    function mergeWiggleParam(prev, spec) {
+        const TA = window.TextAnimations;
+        if (spec === 'none' || spec === null || spec === false) return null;
+        if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+            throw new Error('"wiggle" là object { position|scale|rotation|opacity: {...} } hoặc "none" (xem catalog wiggle)');
+        }
+        const out = { ...(TA.normalizeWiggle(prev) || {}) };
+        const ranges = {
+            freq: [TA.WIGGLE_FREQ_MIN, TA.WIGGLE_FREQ_MAX],
+            octaves: [1, TA.WIGGLE_OCTAVES_MAX],
+            amp_mult: [0, 1],
+            seed: [0, TA.WIGGLE_SEED_MAX],
+        };
+        for (const [type, fx] of Object.entries(spec)) {
+            if (!TA.WIGGLE_TYPES.includes(type)) throw new Error(`Không có wiggle "${type}" (một trong: ${TA.WIGGLE_TYPES.join(', ')})`);
+            if (fx === null || fx === false) { delete out[type]; continue; }
+            const patch = fx === true ? {} : fx;
+            if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error(`wiggle.${type} là object, true hoặc null`);
+            const allowed = WIGGLE_KEYS.common.concat(WIGGLE_KEYS[type] || []);
+            for (const [key, value] of Object.entries(patch)) {
+                if (!allowed.includes(key)) throw new Error(`wiggle.${type} không có khoá "${key}" (có: ${allowed.join(', ')})`);
+                if (key === 'enabled' || key === 'uniform') {
+                    if (typeof value !== 'boolean') throw new Error(`wiggle.${type}.${key} là true/false`);
+                } else if (key === 'axis') {
+                    if (!['xy', 'x', 'y'].includes(value)) throw new Error(`wiggle.${type}.axis là "xy", "x" hoặc "y"`);
+                } else {
+                    const lim = key === 'amp' ? [0, TA.WIGGLE_AMP_MAX[type]] : ranges[key];
+                    if (typeof value !== 'number' || !Number.isFinite(value) || value < lim[0] || value > lim[1]) {
+                        throw new Error(`wiggle.${type}.${key} phải là số trong [${lim[0]}, ${lim[1]}]`);
+                    }
+                }
+            }
+            out[type] = TA.normalizeWiggleFx(type, { ...(out[type] || {}), enabled: true, ...patch });
+        }
+        return Object.keys(out).length ? out : null;
+    }
+
+    // Tóm tắt wiggle của block cho kết quả lệnh (null nếu không có).
+    function wiggleSummary(target) {
+        const w = window.TextAnimations.normalizeWiggle(target && target.animation && target.animation.wiggle);
+        return w || null;
+    }
+
     async function setAnimation(params) {
         requireEditing();
         const TA = window.TextAnimations;
@@ -758,8 +812,9 @@
             const { kind, target } = sel;
             if (kind === 'item' && !api().itemSupportsAnimation(target)) throw new Error(`Block loại "${target.type}" không có hoạt ảnh`);
             let next;
-            // Wiggle (subtab Wiggle của Inspector) không do lệnh này đặt -> luôn giữ nguyên.
-            const keptWiggle = target.animation && typeof target.animation === 'object' ? target.animation.wiggle : null;
+            // Wiggle: không truyền `wiggle` thì giữ nguyên; có thì gộp theo loại (mergeWiggleParam).
+            const prevWiggle = target.animation && typeof target.animation === 'object' ? target.animation.wiggle : null;
+            const keptWiggle = params.wiggle !== undefined ? mergeWiggleParam(prevWiggle, params.wiggle) : prevWiggle;
             if (params.combo) {
                 if (params.combo === 'none') next = keptWiggle ? { in: { type: 'none' }, out: { type: 'none' } } : null;
                 else {
@@ -786,7 +841,9 @@
             else delete target.animation;
             if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
             rt().renderPreviewOverlays();
-            return describeTarget(sel);
+            const result = describeTarget(sel);
+            if (params.wiggle !== undefined) result.wiggle = wiggleSummary(target);
+            return result;
         });
     }
 
@@ -1536,6 +1593,28 @@
                     style: 'width/height px (20-4000), fill_color/stroke_color #rrggbb, stroke_width 0-100, stroke_position inside|center|outside, corner_radius (rectangle/square/triangle/trapezoid/polygon), outer_corner_radius + inner_corner_radius (star), sides 3+ (polygon), points 3+ (star)',
                     path: 'shape_type "path": path_points [{x, y, ix?, iy?, ox?, oy?, r?}] with x/y as 0..1 fractions of the width x height box, ix/iy/ox/oy Bezier handles relative to the point (same units), r corner radius px; path_closed true|false',
                 };
+            case 'wiggle': {
+                const TA = window.TextAnimations;
+                const fx = (type) => {
+                    const d = TA.normalizeWiggleFx(type, {});
+                    const out = {
+                        enabled: { default: false, note: 'set_animation turns a type on when it is given without enabled' },
+                        freq: { min: TA.WIGGLE_FREQ_MIN, max: TA.WIGGLE_FREQ_MAX, default: d.freq, unit: 'wiggles/second' },
+                        amp: { min: 0, max: TA.WIGGLE_AMP_MAX[type], default: d.amp,
+                            unit: { position: 'px (sequence)', scale: '% of scale', rotation: 'degrees', opacity: '% fade (dims only, range 1-amp..1)' }[type] },
+                        octaves: { min: 1, max: TA.WIGGLE_OCTAVES_MAX, default: d.octaves, integer: true },
+                        amp_mult: { min: 0, max: 1, default: d.amp_mult, note: 'amplitude multiplier per extra octave' },
+                        seed: { min: 0, max: TA.WIGGLE_SEED_MAX, default: d.seed, integer: true, note: 'random seed; same seed = same motion' },
+                    };
+                    if (type === 'position') out.axis = { options: ['xy', 'x', 'y'], default: 'xy' };
+                    if (type === 'scale') out.uniform = { default: true, note: 'false = X and Y wiggle independently' };
+                    return out;
+                };
+                return {
+                    note: 'After Effects style wiggle, continuous for the whole block, stacked on in/out animation and keyframes. Set with crabbycut_set_animation { wiggle: { <type>: {...} } } (partial: other types kept; <type>: null removes it; wiggle: "none" removes all), or inside "animation" of add_text / add_shape / add_geocode / add_media_batch. Works on text, shape, image, video, GeoCode and main lane clips (not text templates).',
+                    types: Object.fromEntries(TA.WIGGLE_TYPES.map((t) => [t, fx(t)])),
+                };
+            }
             case 'distort': {
                 const D = window.Distort;
                 if (!D) throw new Error('Module Biến dạng (distort.js) chưa nạp');

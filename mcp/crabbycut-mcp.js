@@ -163,7 +163,35 @@ const KEYFRAME_MODE = { type: 'string', enum: ['merge', 'replace'], default: 'me
 const KEYFRAME_TIME = { type: 'string', enum: ['local', 'timeline'], default: 'local', description: 't measured from the block start (local) or on the sequence (timeline).' };
 const TRANSFORM_SCHEMA = { type: 'object', additionalProperties: { type: ['number', 'boolean'] }, description: 'position_x, position_y (px from centre), scale (%), rotation (deg), opacity (%), flip_x, flip_y.' };
 const ANIM_SIDE = { type: 'object', properties: { type: { type: 'string' }, duration: { type: 'number' }, easing: { type: 'string' } } };
-const ANIMATION_SCHEMA = { type: 'object', properties: { combo: { type: 'string' }, combo_duration: { type: 'number' }, in: ANIM_SIDE, out: ANIM_SIDE } };
+const WIGGLE_FX = {
+  anyOf: [
+    { type: 'null' },
+    { type: 'boolean' },
+    {
+      type: 'object',
+      properties: {
+        enabled: { type: 'boolean' },
+        freq: { type: 'number' },
+        amp: { type: 'number' },
+        octaves: { type: 'integer' },
+        amp_mult: { type: 'number' },
+        seed: { type: 'integer' },
+        axis: { type: 'string', enum: ['xy', 'x', 'y'] },
+        uniform: { type: 'boolean' },
+      },
+      additionalProperties: false,
+    },
+  ],
+};
+const WIGGLE_SCHEMA = {
+  description: 'CrabbyStudio only. After Effects style wiggle (continuous shake for the whole block, on top of in/out + keyframes). Partial update per type; types not given are kept. <type>: {freq, amp, octaves, amp_mult, seed, axis (position), uniform (scale), enabled (default true)} | true (turn on) | null/false (remove). "none" removes all. Ranges: crabbycut_catalog wiggle.',
+  anyOf: [
+    { type: 'string', enum: ['none'] },
+    { type: 'null' },
+    { type: 'object', properties: { position: WIGGLE_FX, scale: WIGGLE_FX, rotation: WIGGLE_FX, opacity: WIGGLE_FX }, additionalProperties: false },
+  ],
+};
+const ANIMATION_SCHEMA = { type: 'object', properties: { combo: { type: 'string' }, combo_duration: { type: 'number' }, in: ANIM_SIDE, out: ANIM_SIDE, wiggle: WIGGLE_SCHEMA } };
 const WAIT_SECONDS = { type: 'number', minimum: 0, maximum: 600, default: 50, description: 'How long the server waits for the job before returning (still running -> job_id for crabbycut_job_status).' };
 const PLACEMENT_PROPS = {
   start: { type: 'number', minimum: 0 },
@@ -440,10 +468,10 @@ const TOOLS = [
   },
   {
     name: 'crabbycut_catalog',
-    description: 'Look up valid ids/values before editing: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories, geocode (languages, size presets, limits), shapes (shape types + style fields), voices (dubbing engines, voices, cloned voice profiles), text_warps (text warp types + text-on-path presets), distort (After Effects style distort effects wave | bezier | mesh | puppet | liquify: every param with its range/options/default and whether it can be keyframed).',
+    description: 'Look up valid ids/values before editing: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories, geocode (languages, size presets, limits), shapes (shape types + style fields), voices (dubbing engines, voices, cloned voice profiles), text_warps (text warp types + text-on-path presets), wiggle (After Effects style wiggle types position | scale | rotation | opacity: params, ranges, defaults; CrabbyStudio only), distort (After Effects style distort effects wave | bezier | mesh | puppet | liquify: every param with its range/options/default and whether it can be keyframed).',
     inputSchema: {
       type: 'object',
-      properties: { kind: { type: 'string', enum: ['transitions', 'animations', 'text_styles', 'text_effects', 'luts', 'color_params', 'export_options', 'subtitle', 'library_categories', 'geocode', 'shapes', 'voices', 'text_warps', 'distort'] } },
+      properties: { kind: { type: 'string', enum: ['transitions', 'animations', 'text_styles', 'text_effects', 'luts', 'color_params', 'export_options', 'subtitle', 'library_categories', 'geocode', 'shapes', 'voices', 'text_warps', 'wiggle', 'distort'] } },
       required: ['kind'],
       additionalProperties: false,
     },
@@ -504,7 +532,7 @@ const TOOLS = [
   },
   {
     name: 'crabbycut_set_animation',
-    description: 'Editing step only. Set in/out animation of a block (main_index or item_id). Either combo (e.g. "pop_fade", "none" to clear) with optional combo_duration (total seconds), or in/out objects {type, duration 0.2-2, easing}. Values from crabbycut_catalog animations.',
+    description: 'Editing step only. Set in/out animation of a block (main_index or item_id). Either combo (e.g. "pop_fade", "none" to clear) with optional combo_duration (total seconds), or in/out objects {type, duration 0.2-2, easing}. Values from crabbycut_catalog animations. CrabbyStudio only: wiggle = After Effects style continuous wiggle of position / scale / rotation / opacity, e.g. {"wiggle": {"position": {"freq": 2, "amp": 30}, "rotation": {"amp": 8}}}; kept when only combo/in/out change; ranges in crabbycut_catalog wiggle.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -514,6 +542,7 @@ const TOOLS = [
         combo_duration: { type: 'number' },
         in: ANIM_SIDE,
         out: ANIM_SIDE,
+        wiggle: WIGGLE_SCHEMA,
       },
       additionalProperties: false,
     },
@@ -600,7 +629,7 @@ const TOOLS = [
               keyframes: KEYFRAMES_SCHEMA,
               keyframe_mode: KEYFRAME_MODE,
               keyframe_time: KEYFRAME_TIME,
-              animation: { type: 'object', properties: { combo: { type: 'string' }, combo_duration: { type: 'number' }, in: ANIM_SIDE, out: ANIM_SIDE } },
+              animation: ANIMATION_SCHEMA,
               transition: { type: 'object', properties: { type: { type: 'string' }, duration: { type: 'number' } } },
               color: { type: 'object', properties: { lut_id: { type: 'string' }, lut_intensity: { type: 'number' }, params: { type: 'object', additionalProperties: { type: 'number' } } } },
               volume: { type: 'number', minimum: 0, maximum: 1000 },
