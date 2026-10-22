@@ -16610,6 +16610,7 @@
         if (!item || editingTextSession) {
             box?.remove();
             pathEditItemId = null;
+            syncPathTextEditor(null);
             return;
         }
         const selectionRoot = document.getElementById('sequencePreviewShell') || root;
@@ -16641,6 +16642,13 @@
         };
         box.ondblclick = (event) => {
             if (event.target !== box) return;
+            // Chữ theo đường: bấm đúp = sửa nội dung + sửa đường (như Pen) cùng lúc.
+            if (!isMainClip && isPathTextItem(item)) {
+                stopSelectionBoxEvent(event);
+                if (pathEditItemId === item.id) exitShapePathEdit();
+                else enterTextPathEdit(item);
+                return;
+            }
             if (!isMainClip && item.type === 'shape') {
                 stopSelectionBoxEvent(event);
                 if (pathEditItemId === item.id) exitShapePathEdit();
@@ -16658,7 +16666,8 @@
             beginPreviewTextEditFromSelectionBox(event, item);
         };
 
-        if (pathEditItemId && (isMainClip || pathEditItemId !== item.id || item.type !== 'shape')) pathEditItemId = null;
+        if (pathEditItemId && (isMainClip || pathEditItemId !== item.id || !(item.type === 'shape' || isPathTextItem(item)))) pathEditItemId = null;
+        syncPathTextEditor(isMainClip ? null : item);
         const lineShape = !isMainClip && item.type === 'shape' && normalizeShapeStyle(item.style).shape_type === 'line';
         if (!isMainClip && pathEditItemId === item.id) {
             appendPathEditHandles(box, item);
@@ -17034,8 +17043,8 @@
      * từ đỉnh đó (biến góc nhọn thành điểm cong), giống Convert Vertex của After Effects. */
     function movePathVertex(item, event) {
         const index = Number(String(previewBoxDrag.mode).split(':')[1]);
-        const start = normalizeShapeStyle(previewBoxDrag.startStyle);
-        if (start.shape_type !== 'path' || !start.path_points[index]) return;
+        const start = pathEditStyleOf(item, previewBoxDrag.startStyle);
+        if (!start || start.shape_type !== 'path' || !start.path_points[index]) return;
         const delta = localPointerDelta(event, previewBoxDrag);
         const local = pathPointsToLocalPx(start);
         const v = local[index];
@@ -17049,11 +17058,46 @@
         commitPathLocalPoints(item, start, local);
     }
 
+    /* CHỮ THEO ĐƯỜNG dùng CHUNG bộ sửa đỉnh của shape Pen (kéo đỉnh/tay cầm, Alt bẻ góc, Alt+bấm
+     * đúp đổi nhọn/trơn). Đường của chữ lưu trong style chữ (path_points/path_w/path_h, cùng mô
+     * hình đỉnh) — hai hàm dưới quy đổi qua lại với dạng "shape path" mà bộ sửa đỉnh làm việc. */
+    function isPathTextItem(item) {
+        return !!item && item.type === 'text' && !itemIsTextTemplate(item) && item.style?.path_enabled === true
+            && !!window.TextDeform?.normalizePath(item.style);
+    }
+
+    function pathEditStyleOf(item, style = item?.style) {
+        if (!item) return null;
+        if (item.type === 'shape') return normalizeShapeStyle(style);
+        const p = item.type === 'text' ? window.TextDeform?.normalizePath(style) : null;
+        if (!p) return null;
+        return {
+            shape_type: 'path',
+            width: Math.max(1, p.w),
+            height: Math.max(1, p.h),
+            path_points: p.points.map((pt) => ({ ...pt, r: 0 })),
+            path_closed: p.closed,
+        };
+    }
+
+    function writePathEditStyle(item, start, fit) {
+        if (item.type === 'text') {
+            item.style = {
+                ...item.style,
+                path_w: fit.width,
+                path_h: fit.height,
+                path_points: fit.points.map((pt) => ({ x: pt.x, y: pt.y, ix: pt.ix, iy: pt.iy, ox: pt.ox, oy: pt.oy })),
+            };
+            return;
+        }
+        item.style = normalizeShapeStyle({ ...start, width: fit.width, height: fit.height, path_points: fit.points });
+    }
+
     // Ghi lại các đỉnh (pixel cục bộ) vào item: đo lại box khít đường cong rồi bù tâm box
     // để mọi phần không bị kéo đứng yên trên khung hình.
     function commitPathLocalPoints(item, start, local) {
         const fit = fitPathToBox(local, start.path_closed);
-        item.style = normalizeShapeStyle({ ...start, width: fit.width, height: fit.height, path_points: fit.points });
+        writePathEditStyle(item, start, fit);
         applyLocalCenterShift(item, previewBoxDrag, fit.cx, fit.cy);
     }
 
@@ -17064,8 +17108,8 @@
     function movePathHandle(item, event) {
         const [kind, idxText] = String(previewBoxDrag.mode).split(':');
         const index = Number(idxText);
-        const start = normalizeShapeStyle(previewBoxDrag.startStyle);
-        if (start.shape_type !== 'path' || !start.path_points[index]) return;
+        const start = pathEditStyleOf(item, previewBoxDrag.startStyle);
+        if (!start || start.shape_type !== 'path' || !start.path_points[index]) return;
         const delta = localPointerDelta(event, previewBoxDrag);
         const local = pathPointsToLocalPx(start);
         const v = local[index];
@@ -17116,8 +17160,8 @@
     }
 
     function togglePathVertexSmooth(item, index) {
-        const style = normalizeShapeStyle(item.style);
-        if (style.shape_type !== 'path' || !style.path_points[index]) return;
+        const style = pathEditStyleOf(item);
+        if (!style || style.shape_type !== 'path' || !style.path_points[index]) return;
         const local = pathPointsToLocalPx(style);
         const v = local[index];
         const n = local.length;
@@ -17149,7 +17193,7 @@
             }
         }
         const fit = fitPathToBox(local, style.path_closed);
-        item.style = normalizeShapeStyle({ ...style, width: fit.width, height: fit.height, path_points: fit.points });
+        writePathEditStyle(item, style, fit);
         // Box đo lại có thể lệch tâm -> bù vị trí để các đỉnh khác đứng yên trên khung hình.
         applyLocalCenterShift(item, { startTransform: normalizeTransform(item.transform) }, fit.cx, fit.cy);
         renderAll();
@@ -17218,14 +17262,90 @@
 
     function exitShapePathEdit() {
         if (!pathEditItemId) return;
+        const wasText = isPathTextItem(findItem(pathEditItemId));
         pathEditItemId = null;
-        renderPreviewOverlays();
+        syncPathTextEditor(null);
+        // Chữ đã gõ trong ô nổi -> cập nhật timeline/inspector một lượt khi thoát.
+        if (wasText) renderAll();
+        else renderPreviewOverlays();
+    }
+
+    /* SỬA CHỮ THEO ĐƯỜNG (bấm đúp): khung chọn hiện ĐỈNH + TAY CẦM của đường (appendPathEditHandles,
+     * cùng bộ với shape Pen) và một Ô GÕ CHỮ nổi ngay trên preview, đặt ở tâm đường. Gõ là chữ cong
+     * cập nhật tức thì (vẽ lại overlay, không dựng lại cả panel). Enter / Esc / bấm đúp lần nữa /
+     * chọn block khác = thoát. Gõ chữ cả lượt = MỘT bước Hoàn tác. */
+    function enterTextPathEdit(item) {
+        if (!isPathTextItem(item) || isTrackLocked(itemTrack(item))) return;
+        pathEditItemId = item.id;
+        setEditingStatusText(_t('Sửa chữ theo đường: gõ để đổi nội dung · kéo đỉnh/tay cầm để uốn đường · Alt+kéo để bẻ góc · Alt+bấm đúp đỉnh để đổi nhọn/trơn · Enter/Esc để thoát.'));
+        renderAll();
+        const input = document.getElementById('editingPathTextInput');
+        if (input) { input.focus(); input.select(); }
+    }
+
+    function syncPathTextEditor(item) {
+        let input = document.getElementById('editingPathTextInput');
+        const active = item && pathEditItemId === item.id && isPathTextItem(item);
+        if (!active) {
+            // Thoát bằng cách bấm ra ngoài / chọn block khác sau khi đã gõ: vẽ lại timeline + panel
+            // một lượt (gõ chỉ vẽ lại overlay). Hoãn một nhịp — đang ở giữa lượt vẽ khung chọn.
+            if (input?.dataset.historyArmed === '1') setTimeout(renderAll, 0);
+            input?.remove();
+            return;
+        }
+        const shell = document.getElementById('sequencePreviewShell');
+        const metrics = previewFrameMetrics();
+        if (!shell || !metrics) return;
+        if (!input) {
+            input = document.createElement('input');
+            input.id = 'editingPathTextInput';
+            input.type = 'text';
+            input.className = 'editing-path-text-input';
+            input.spellcheck = false;
+            input.setAttribute('aria-label', _t('Nội dung chữ theo đường'));
+            // Không để cú bấm vào ô rơi xuống khung xem trước (bỏ chọn) hay khung chọn (kéo block).
+            ['mousedown', 'pointerdown', 'dblclick', 'click'].forEach((ev) => input.addEventListener(ev, (e) => e.stopPropagation()));
+            input.addEventListener('input', () => {
+                const it = findItem(input.dataset.itemId);
+                if (!it) return;
+                if (input.dataset.historyArmed !== '1') { recordHistory(); input.dataset.historyArmed = '1'; }
+                it.text = input.value.replace(/\s*\n\s*/g, ' ');
+                renderPreviewOverlays();
+            });
+            input.addEventListener('keydown', (e) => {
+                e.stopPropagation();
+                if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); exitShapePathEdit(); }
+            });
+            shell.appendChild(input);
+        }
+        if (input.dataset.itemId !== item.id) {
+            input.dataset.itemId = item.id;
+            input.dataset.historyArmed = '0';
+            input.value = String(item.text || '');
+        }
+        // Đặt ô ngay dưới tâm box đường (toạ độ khung -> toạ độ shell).
+        const transform = selectionBoxTransform(item);
+        const { x: offX, y: offY } = previewFrameOffsetIn(shell);
+        const m = measureTextItemBox(item);
+        const scale = Math.max(0.01, transform.scale / 100);
+        input.style.width = `${Math.round(Math.max(180, Math.min(metrics.frameW * 0.95, 460)))}px`;
+        input.style.left = `${offX + metrics.frameW / 2 + transform.position_x * metrics.previewScale}px`;
+        input.style.top = `${offY + metrics.frameH / 2 + transform.position_y * metrics.previewScale + (m.height / 2) * metrics.previewScale * scale + 8}px`;
     }
 
     // Đỉnh + tay cầm + đường nối tay cầm, đặt theo % của khung chọn (khung đã xoay/co giãn sẵn).
     function appendPathEditHandles(box, item) {
-        const style = normalizeShapeStyle(item.style);
-        const canvas = shapeCanvasSize(style);
+        const style = pathEditStyleOf(item);
+        if (!style) return;
+        // Khung chọn của chữ theo đường = box đường + lề chữ (measureTextItemBox, deform.pad).
+        let canvas;
+        if (item.type === 'text') {
+            const m = measureTextItemBox(item);
+            const pad = m.deform?.pad || 0;
+            canvas = { overhang: pad, width: m.width, height: m.height };
+        } else {
+            canvas = shapeCanvasSize(style);
+        }
         box.classList.add('is-path-editing');
         const px = (v) => canvas.overhang + v * style.width;
         const py = (v) => canvas.overhang + v * style.height;
@@ -17508,9 +17628,9 @@
             item.style = normalizeShapeStyle(ns);
         } else if (previewBoxDrag.mode?.startsWith('shape-edge-')) {
             resizeShapeEdge(item, event);
-        } else if (previewBoxDrag.mode?.startsWith('path-vertex:') && item.type === 'shape') {
+        } else if (previewBoxDrag.mode?.startsWith('path-vertex:') && (item.type === 'shape' || isPathTextItem(item))) {
             movePathVertex(item, event);
-        } else if (/^path-(in|out):/.test(previewBoxDrag.mode || '') && item.type === 'shape') {
+        } else if (/^path-(in|out):/.test(previewBoxDrag.mode || '') && (item.type === 'shape' || isPathTextItem(item))) {
             movePathHandle(item, event);
         } else if (previewBoxDrag.mode === 'text-left' || previewBoxDrag.mode === 'text-right') {
             const style = { ...defaultTextStyle(), ...(previewBoxDrag.startStyle || {}) };
@@ -24255,6 +24375,7 @@
             .editing-pen-svg .pen-anchor.is-hot { fill: #ffd34d; stroke: #1b1b1b; }
             .editing-pen-hint { position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); width: max-content; max-width: calc(100% - 16px); padding: 3px 8px; border-radius: 5px; background: rgba(0,0,0,0.6); color: #fff; font-size: 10px; line-height: 1.35; text-align: center; pointer-events: none; opacity: 0.85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             .editing-selection-handle.path-vertex { width: 9px; height: 9px; border-radius: 1px; background: #fff; box-shadow: 0 0 0 1.5px #3b9cff; cursor: move; z-index: 2; }
+            .editing-path-text-input { position: absolute; transform: translateX(-50%); z-index: 30; box-sizing: border-box; padding: 6px 10px; border-radius: 8px; border: 1.5px solid #3b9cff; background: rgba(12, 14, 20, 0.92); color: #fff; font: 600 13px/1.3 system-ui, sans-serif; outline: none; box-shadow: 0 4px 16px rgba(0,0,0,.45); }
             .editing-selection-handle.path-bezier-handle { width: 8px; height: 8px; border-radius: 50%; background: #3b9cff; box-shadow: 0 0 0 1.5px #fff; cursor: crosshair; z-index: 3; }
             .editing-selection-box.is-path-editing { border-style: dashed; border-color: rgba(59,156,255,0.55); box-shadow: none; }
             .editing-selection-box .path-edit-lines { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }

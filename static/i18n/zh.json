@@ -2072,5 +2072,7 @@
   "Kerning": "字距调整",
   "Theo font": "按字体",
   "Tắt": "关闭",
-  "Kerning: khoảng cách riêng của từng cặp chữ do font quy định. Tắt nếu chữ đầu từ bị đẩy xa (vd. font Nunito).": "字距调整：字体为每对字母定义的间距。如果单词首字母被推远（例如 Nunito 字体），请关闭。"
+  "Kerning: khoảng cách riêng của từng cặp chữ do font quy định. Tắt nếu chữ đầu từ bị đẩy xa (vd. font Nunito).": "字距调整：字体为每对字母定义的间距。如果单词首字母被推远（例如 Nunito 字体），请关闭。",
+  "Sửa chữ theo đường: gõ để đổi nội dung · kéo đỉnh/tay cầm để uốn đường · Alt+kéo để bẻ góc · Alt+bấm đúp đỉnh để đổi nhọn/trơn · Enter/Esc để thoát.": "编辑路径文字：输入以修改内容 · 拖动锚点/手柄调整路径 · Alt+拖动断开角点 · Alt+双击锚点切换尖角/平滑 · Enter/Esc 退出。",
+  "Nội dung chữ theo đường": "路径文字内容"
 }

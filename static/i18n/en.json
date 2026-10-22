@@ -2372,5 +2372,7 @@
   "Kerning": "Kerning",
   "Theo font": "From font",
   "Tắt": "Off",
-  "Kerning: khoảng cách riêng của từng cặp chữ do font quy định. Tắt nếu chữ đầu từ bị đẩy xa (vd. font Nunito).": "Kerning: per-pair spacing defined by the font. Turn it off if the first letter of a word is pushed away (e.g. Nunito)."
+  "Kerning: khoảng cách riêng của từng cặp chữ do font quy định. Tắt nếu chữ đầu từ bị đẩy xa (vd. font Nunito).": "Kerning: per-pair spacing defined by the font. Turn it off if the first letter of a word is pushed away (e.g. Nunito).",
+  "Sửa chữ theo đường: gõ để đổi nội dung · kéo đỉnh/tay cầm để uốn đường · Alt+kéo để bẻ góc · Alt+bấm đúp đỉnh để đổi nhọn/trơn · Enter/Esc để thoát.": "Editing text on path: type to change the text · drag points/handles to reshape the path · Alt+drag to break a corner · Alt+double-click a point to toggle corner/smooth · Enter/Esc to finish.",
+  "Nội dung chữ theo đường": "Text on path content"
 }

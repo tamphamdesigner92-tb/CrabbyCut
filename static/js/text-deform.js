@@ -602,6 +602,10 @@
         document.head.appendChild(el);
     }
 
+    /* Ô số kéo-chỉnh được như mọi ô của bảng thuộc tính (editing-runtime.js editingScrubConfig đọc
+       data-scrub-*): kéo ngang để đổi, Shift = bước 1/10, Alt = bước ×10. */
+    const scrub = (step, min, max, integer) => `data-scrub-axis="x" data-scrub-step="${step}" data-scrub-min="${min}" data-scrub-max="${max}"${integer ? ' data-scrub-integer="1"' : ''}`;
+
     function inspectorHtml(style) {
         injectStyle();
         const st = style || {};
@@ -612,7 +616,7 @@
                 <span>${esc(label)}</span>
                 <span class="tdf-slider">
                     <input type="range" min="-100" max="100" step="1" value="${num(key, d)}" data-text-deform="${key}" ${type === 'none' ? 'disabled' : ''}>
-                    <input type="number" min="-100" max="100" step="1" value="${num(key, d)}" data-text-deform="${key}" ${type === 'none' ? 'disabled' : ''}>
+                    <input type="number" min="-100" max="100" step="1" value="${num(key, d)}" data-text-deform="${key}" ${scrub(1, -100, 100, true)} ${type === 'none' ? 'disabled' : ''}>
                 </span>
             </label>`;
         const warpHtml = `
@@ -638,7 +642,7 @@
                     <span>${esc(_t('Dời dọc đường'))}</span>
                     <span class="tdf-slider">
                         <input type="range" min="-100" max="100" step="0.5" value="${clampNum(st.path_offset, -100, 100, 0)}" data-text-deform="path_offset">
-                        <input type="number" min="-100" max="100" step="0.5" value="${clampNum(st.path_offset, -100, 100, 0)}" data-text-deform="path_offset">
+                        <input type="number" min="-100" max="100" step="0.5" value="${clampNum(st.path_offset, -100, 100, 0)}" data-text-deform="path_offset" ${scrub(0.5, -100, 100, false)}>
                     </span>
                 </label>
                 <label class="tdf-row">
@@ -651,15 +655,15 @@
                 </label>
                 <label class="tdf-row">
                     <span>${esc(_t('Nâng chữ (px)'))}</span>
-                    <input type="number" min="-500" max="500" step="1" value="${clampNum(st.path_shift, -500, 500, 0)}" data-text-deform="path_shift">
+                    <input type="number" min="-500" max="500" step="1" value="${clampNum(st.path_shift, -500, 500, 0)}" data-text-deform="path_shift" ${scrub(1, -500, 500, true)}>
                 </label>
                 <label class="tdf-row">
                     <span>${esc(_t('Rộng đường (px)'))}</span>
-                    <input type="number" min="10" max="8000" step="1" value="${Math.round(clampNum(st.path_w, 10, 8000, 600))}" data-text-deform="path_w">
+                    <input type="number" min="10" max="8000" step="1" value="${Math.round(clampNum(st.path_w, 10, 8000, 600))}" data-text-deform="path_w" ${scrub(1, 10, 8000, true)}>
                 </label>
                 <label class="tdf-row">
                     <span>${esc(_t('Cao đường (px)'))}</span>
-                    <input type="number" min="0" max="8000" step="1" value="${Math.round(clampNum(st.path_h, 0, 8000, 200))}" data-text-deform="path_h">
+                    <input type="number" min="0" max="8000" step="1" value="${Math.round(clampNum(st.path_h, 0, 8000, 200))}" data-text-deform="path_h" ${scrub(1, 0, 8000, true)}>
                 </label>
                 <label class="tdf-check"><input type="checkbox" data-text-deform="path_flip"${st.path_flip ? ' checked' : ''}> ${esc(_t('Đảo phía chữ'))}</label>
                 <label class="tdf-check"><input type="checkbox" data-text-deform="path_closed"${st.path_closed ? ' checked' : ''}> ${esc(_t('Đường khép kín'))}</label>

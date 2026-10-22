@@ -120,7 +120,14 @@ const near = (a, b, eps, msg) => assert.ok(Math.abs(a - b) <= eps, `${msg}: ${a}
     assert.ok(/data-text-deform="warp_type"/.test(TD.inspectorHtml({})), 'inspector có ô kiểu Warp');
     assert.ok(!/data-text-deform-section="path"/.test(TD.inspectorHtml({})), 'chữ thường: không có mục đường');
     assert.ok(/data-text-deform-section="path"/.test(TD.inspectorHtml(TD.presetStyle('arc'))), 'chữ theo đường: có mục đường');
-    ok('ô inspector -> patch được kẹp đúng khoảng; mục đường chỉ hiện với chữ theo đường');
+    // Mọi ô SỐ (trừ thanh trượt) kéo-chỉnh được: tự khai data-scrub-* cho editingScrubConfig.
+    const html = TD.inspectorHtml({ ...TD.presetStyle('arc'), warp_type: 'arc' });
+    const numbers = [...html.matchAll(/<input type="number"[^>]*>/g)].map((m) => m[0]);
+    assert.ok(numbers.length >= 7, `thiếu ô số (${numbers.length})`);
+    numbers.forEach((tag) => {
+        assert.ok(/data-scrub-axis="x"/.test(tag) && /data-scrub-step="[\d.]+"/.test(tag), `ô số phải kéo-chỉnh được: ${tag}`);
+    });
+    ok('ô inspector -> patch được kẹp đúng khoảng; mục đường chỉ hiện với chữ theo đường; mọi ô số kéo-chỉnh được');
 }
 
 // ---- Kerning (editing-runtime.js): tuỳ chọn font_kerning áp ở mọi chỗ đo/vẽ, Magic Fill tắt sẵn
@@ -147,6 +154,24 @@ const near = (a, b, eps, msg) => assert.ok(Math.abs(a - b) <= eps, `${msg}: ${a}
     assert.ok(/font_kerning: 'none'/.test(grab('magicFillStylePatch')) && /font_kerning: 'none'/.test(grab('magicFillTextPatch')), 'Magic Fill tắt kerning sẵn');
     assert.ok(/el\.style\.fontKerning = /.test(rt), 'preview DOM dùng đúng kerning');
     ok('kerning: mặc định theo font, "none" áp ở đo/vẽ/preview; Magic Fill tắt sẵn');
+
+    // Bấm đúp chữ theo đường: sửa đỉnh (dùng chung bộ của shape Pen) + ô gõ chữ nổi.
+    const box = grab('renderSelectionBox');
+    assert.ok(/isPathTextItem\(item\)[\s\S]{0,200}enterTextPathEdit\(item\)/.test(box), 'bấm đúp chữ theo đường -> enterTextPathEdit');
+    assert.ok(/syncPathTextEditor\(/.test(box), 'khung chọn đồng bộ ô gõ chữ');
+    assert.ok(/pathEditStyleOf\(item, previewBoxDrag\.startStyle\)/.test(grab('movePathVertex')), 'kéo đỉnh đọc đường qua bộ quy đổi (cả chữ)');
+    assert.ok(/pathEditStyleOf\(item, previewBoxDrag\.startStyle\)/.test(grab('movePathHandle')), 'kéo tay cầm đọc đường qua bộ quy đổi (cả chữ)');
+    assert.ok(/writePathEditStyle\(/.test(grab('commitPathLocalPoints')), 'ghi đường qua bộ quy đổi');
+    // eslint-disable-next-line no-new-func
+    const writePath = new Function('normalizeShapeStyle', `${grab('writePathEditStyle')}; return writePathEditStyle;`)((x) => ({ ...x, normalized: true }));
+    const textItem = { type: 'text', style: { color: '#fff', path_enabled: true, path_w: 1, path_h: 1, path_points: [] } };
+    writePath(textItem, null, { width: 300, height: 120, points: [{ x: 0, y: 1, ix: 0, iy: 0, ox: 0.2, oy: -0.5, r: 7 }, { x: 1, y: 0, ix: 0, iy: 0, ox: 0, oy: 0, r: 0 }] });
+    assert.deepStrictEqual([textItem.style.path_w, textItem.style.path_h, textItem.style.color], [300, 120, '#fff'], 'chữ: ghi cỡ box đường, giữ kiểu chữ');
+    assert.ok(!('r' in textItem.style.path_points[0]) && textItem.style.path_points[0].ox === 0.2, 'chữ: đỉnh không mang bán kính bo của shape');
+    const shapeItem = { type: 'shape', style: {} };
+    writePath(shapeItem, { shape_type: 'path', fill_color: '#f00' }, { width: 50, height: 60, points: [] });
+    assert.ok(shapeItem.style.normalized && shapeItem.style.width === 50, 'shape: vẫn đi normalizeShapeStyle như cũ');
+    ok('bấm đúp chữ theo đường: sửa đỉnh dùng chung bộ của Pen, ghi đúng vào style chữ; shape giữ nguyên đường cũ');
 }
 
 console.log('text_deform: OK');
