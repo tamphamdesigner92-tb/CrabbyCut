@@ -686,6 +686,15 @@ function cleanInlineText(value, maxLength = 500) {
     .slice(0, maxLength);
 }
 
+/* ĐƯỜNG DẪN TỆP: chỉ bỏ ký tự điều khiển, KHÔNG gộp khoảng trắng như cleanInlineText — tên tệp
+ * thật có thể chứa hai dấu cách liền nhau ("Nào-  #shorts.mp4"), gộp lại là sidecar mở một tệp không
+ * tồn tại ("No such file or directory") và lượt xuất hỏng. */
+function cleanPathText(value, maxLength = 2000) {
+  return String(value ?? '')
+    .replace(/[\u0000-\u001f]/g, '')
+    .slice(0, maxLength);
+}
+
 function finiteNumberOrNull(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
@@ -6039,7 +6048,7 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
     id: cleanInlineText(asset?.id || '', 80),
     type: cleanInlineText(asset?.type || '', 40),
     name: cleanInlineText(asset?.name || '', 255),
-    path: cleanInlineText(usePath(asset?.path), 2000),
+    path: cleanPathText(usePath(asset?.path), 2000),
     url: cleanInlineText(asset?.url || '', 2000),
     thumbnail_url: cleanInlineText(asset?.thumbnail_url || '', 2000),
     width: finiteNumberOrNull(asset?.width),
@@ -6081,7 +6090,7 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
       : (shapeImagePath ? 'shape_image'
         : (geocodeSrc ? (geocodeSrc.still ? 'media_image' : 'image_seq') : cleanInlineText(asset?.type || '', 40)));
     const overlayAssetPath = textImagePath || shapeImagePath
-      || (geocodeSrc ? (geocodeSrc.still || geocodeSrc.pattern) : cleanInlineText(usePath(asset?.path), 2000));
+      || (geocodeSrc ? (geocodeSrc.still || geocodeSrc.pattern) : cleanPathText(usePath(asset?.path), 2000));
     const baseOverlay = {
       id: cleanInlineText(item.id || `overlay_${index}`, 120),
       type: overlayType,

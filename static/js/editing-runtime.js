@@ -6000,7 +6000,7 @@
                 setPrimaryMainSelection(span.index, { seek: false });
             });
             block.addEventListener('contextmenu', (event) => openTimelineBlockContextMenu(event, { mainIndex: span.index }));
-            // SUBSEQUENCE trên lane chính: cùng màu; bấm đúp -> handleNestBlockDblClick.
+            // SUBSEQUENCE trên lane chính: cùng màu; bấm đúp -> handleNestBlockPress.
             if (mainRowNestAsset(span.clip)) block.classList.add('is-nest');
             if (block.classList.contains('is-selected')) {
                 appendKeyframeMarkers(block, span.clip, `main:${span.index}`, span.start, span.duration, mainTrackLocked);
@@ -6079,7 +6079,7 @@
             block.append(leftHandle, rightHandle);
             block.addEventListener('mousedown', (event) => startItemDrag(event, item, block));
             block.addEventListener('contextmenu', (event) => openTimelineBlockContextMenu(event, { itemId: item.id }));
-            // SUBSEQUENCE: màu riêng (như Premiere); bấm đúp -> handleNestBlockDblClick.
+            // SUBSEQUENCE: màu riêng (như Premiere); bấm đúp -> handleNestBlockPress.
             if (itemIsNest(item)) block.classList.add('is-nest');
             if (selectedEditingItemIds.has(item.id)) {
                 appendKeyframeMarkers(block, item, item.id, item.timeline_start, item.duration, isTrackLocked(itemTrackRef));
@@ -9860,25 +9860,53 @@
         bar.innerHTML = parts.join('');
     }
 
-    /* BẤM ĐÚP block Subsequence -> vào sửa bên trong. Gắn MỘT lần ở #segmentsTrack (uỷ quyền):
-     * cú bấm đầu chọn block và lượt vẽ lại thay phần tử block bằng phần tử mới, nên listener gắn
-     * trên từng block không bao giờ nhận được dblclick khi block chưa được chọn từ trước. */
-    function handleNestBlockDblClick(event) {
-        if (currentMode !== 'FINAL' || currentStepId !== 'step4') return;
-        if (event.target.closest?.('.editing-resize-handle')) return;
-        const block = event.target.closest?.('.editing-block.is-nest');
-        if (!block) return;
-        event.preventDefault();
-        event.stopPropagation();
-        if (block.dataset.itemId) enterNest(block.dataset.itemId);
-        else if (block.dataset.index != null) enterNestFromMainRow(Number(block.dataset.index));
+    /* BẤM ĐÚP block Subsequence -> vào sửa bên trong.
+     *
+     * KHÔNG dựa vào sự kiện `dblclick`: cú bấm đầu lên block TUA playhead tới chỗ bấm, mà playhead
+     * ghim GIỮA khung nhìn nên timeline cuộn đi — tới cú bấm thứ hai block đã trôi khỏi con trỏ (và
+     * phần tử block còn bị vẽ lại), `dblclick` rơi vào chỗ khác. Nên tự nhận "bấm đúp" = hai lần
+     * nhấn chuột liên tiếp ở CÙNG chỗ trên màn hình trong khoảng thời gian bấm đúp, và vào đúng
+     * block của lần nhấn ĐẦU. Lần nhấn thứ hai bị chặn để không mở thêm một lượt kéo/tua. */
+    const NEST_DBLCLICK_MS = 450;
+    const NEST_DBLCLICK_PX = 6;
+    let nestLastPress = null;   // { t, x, y, itemId, index, nest }
+
+    function handleNestBlockPress(event) {
+        if (event.button !== 0) { nestLastPress = null; return; }   // chuột phải/giữa cắt chuỗi bấm
+        if (event.detail === 0) return;
+        if (currentMode !== 'FINAL' || currentStepId !== 'step4') { nestLastPress = null; return; }
+        if (!event.target.closest?.('#segmentsTrack')) { nestLastPress = null; return; }
+        const now = performance.now();
+        const prev = nestLastPress;
+        const onHandle = !!event.target.closest?.('.editing-resize-handle');
+        if (prev && prev.nest && !onHandle
+            && now - prev.t <= NEST_DBLCLICK_MS
+            && Math.abs(event.clientX - prev.x) <= NEST_DBLCLICK_PX
+            && Math.abs(event.clientY - prev.y) <= NEST_DBLCLICK_PX) {
+            nestLastPress = null;
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+            if (prev.itemId) enterNest(prev.itemId);
+            else if (prev.index != null) enterNestFromMainRow(prev.index);
+            return;
+        }
+        const block = onHandle ? null : event.target.closest?.('.editing-block');
+        nestLastPress = {
+            t: now,
+            x: event.clientX,
+            y: event.clientY,
+            nest: !!block?.classList.contains('is-nest'),
+            itemId: block?.dataset.itemId || '',
+            index: block && block.dataset.index != null ? Number(block.dataset.index) : null,
+        };
     }
 
     function installNestDblClick() {
-        const track = document.getElementById('segmentsTrack');
-        if (!track || track.__nestDblClick) return;
-        track.__nestDblClick = true;
-        track.addEventListener('dblclick', handleNestBlockDblClick);
+        if (window.__crabNestPressInstalled) return;
+        window.__crabNestPressInstalled = true;
+        // Pha CAPTURE ở window: chạy TRƯỚC handler mousedown của lane chính (index.html) và của block.
+        window.addEventListener('mousedown', handleNestBlockPress, true);
     }
 
     /* MENU CHUỘT PHẢI trên block timeline (overlay lẫn lane chính). */
