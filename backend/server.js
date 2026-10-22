@@ -6209,6 +6209,14 @@ function httpError(res, statusCode, detail) {
   res.status(statusCode).json({ detail: String(detail?.message || detail) });
 }
 
+/* res.sendFile cho ĐƯỜNG TUYỆT ĐỐI. Express 5 / `send` không có `root` thì soi MỌI đoạn của
+ * đường; gặp thư mục bắt đầu bằng "." (`D:\.footage\`, `~/.config/…`, worktree `.claude\…`) là
+ * coi như dotfile và trả 404 dù tệp có thật. Đặt root = thư mục chứa tệp thì `send` chỉ soi tên
+ * tệp — tệp ẩn vẫn bị chặn như cũ; Range/ETag/headers giữ nguyên. */
+function sendFileAbs(res, file, options = {}) {
+  return res.sendFile(path.basename(file), { ...options, root: path.dirname(file) });
+}
+
 /* Xoá SẠCH temp_uploads cho dự án mới.
  *
  * MỖI MỤC MỘT LẦN THỬ RIÊNG, KHÔNG ĐỂ LỖI ĐẦU TIÊN CHẶN CẢ VÒNG LẶP. Bản trước gọi
@@ -6386,7 +6394,7 @@ function createApp() {
         res.set('Content-Type', 'application/octet-stream');
         res.set('Cache-Control', 'public, max-age=31536000, immutable');
         res.set('X-Peaks-Key', job.key);
-        return res.sendFile(job.path);
+        return sendFileAbs(res, job.path);
       }
       if (job.status === 'error') {
         return res.status(500).json({ status: 'error', ...peaksJobPublicState(job) });
@@ -6635,13 +6643,13 @@ function createApp() {
     }
   });
 
-  // Phát file nguồn tại chỗ (không chép). res.sendFile hỗ trợ sẵn Range nên <video> tua được.
+  // Phát file nguồn tại chỗ (không chép). sendFile hỗ trợ sẵn Range nên <video> tua được.
   app.get('/api/source-file', (req, res) => {
     try {
       const filePath = path.resolve(String(req.query.path || ''));
       if (!isSourceAccessAllowed(filePath)) return httpError(res, 403, _t('Đường dẫn chưa được đăng ký.'));
       if (!isSupportedEditingAssetFile(filePath)) return httpError(res, 404, _t('Không tìm thấy tệp phương tiện.'));
-      res.sendFile(filePath);
+      sendFileAbs(res, filePath);
     } catch (error) {
       httpError(res, 500, error);
     }
@@ -7428,7 +7436,7 @@ function createApp() {
     if (!file) return res.status(404).end();
     // Một miếng vá không bao giờ đổi nội dung (lượt mới = thư mục run mới) -> cache lâu.
     res.set('Cache-Control', 'private, max-age=86400, immutable');
-    res.sendFile(file);
+    sendFileAbs(res, file);
   });
 
   app.post('/api/pose/track', async (req, res) => {
@@ -7597,7 +7605,7 @@ function createApp() {
 
   app.get('/api/voice-profiles/:id/audio', (req, res) => {
     try {
-      res.sendFile(voiceProfiles.audioPath(req.params.id), { headers: { 'Cache-Control': 'no-store' } });
+      sendFileAbs(res, voiceProfiles.audioPath(req.params.id), { headers: { 'Cache-Control': 'no-store' } });
     } catch (error) {
       httpError(res, error?.status || 500, error);
     }
@@ -8081,7 +8089,10 @@ function createApp() {
           ...(audioTarget ? { audio_path: audioTarget, audio_name: path.basename(audioTarget) } : {}),
         });
       } else {
-        res.download(outputPath, outputName);
+        /* `root` BẮT BUỘC: không có nó thì `send` soi MỌI đoạn của đường tuyệt đối, gặp thư mục
+         * bắt đầu bằng "." (worktree `.claude\worktrees\…`, `~/.config`…) là trả 404 dù tệp có
+         * thật. Có `root` thì chỉ soi phần sau root — ở đây chỉ còn tên tệp. */
+        res.download(outputName, outputName, { root: path.dirname(outputPath) });
       }
     } catch (error) {
       recordProjectError('export', error, { endpoint: '/api/export-video', exportSettings: exportSettingsForError });
