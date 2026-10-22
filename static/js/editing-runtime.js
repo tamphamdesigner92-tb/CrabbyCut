@@ -25760,7 +25760,8 @@
         for (const item of editingItems) {
             if (audioOnly && item?.type !== 'audio' && item?.type !== 'media') continue;
             const copy = deepClone(item);
-            let imageWiggleExpr = false;   // ảnh chỉ có Wiggle -> xuất bằng biểu thức như video
+            let imageWiggleExpr = false;   // ảnh có Wiggle -> xuất bằng biểu thức như video
+            let imageInOutOpacityExpr = null;   // …và có In/Out: hệ số độ mờ khớp engine
             /* Media: sidecar co luồng CỠ GỐC (tệp, hoặc chuỗi khung bake ở cỡ gốc) theo scale/100 ×
              * fit_scale — cùng mốc "100% = vừa khung" với preview (xem mediaAssetFitScale). */
             if (copy?.type === 'media') copy.fit_scale = mediaAssetFitScale(findAsset(copy.asset_id));
@@ -25839,16 +25840,28 @@
                 // (Có animation_render nên khối màu/mặt nạ phía sau tự bỏ qua — đã bake vào khung.)
                 const distorted = itemHasDistort(copy)
                     && await timed('distort', () => exportDistortImage(copy, exportFps, collectFile, imgAsset, rtStill));
-                /* CHỈ CÓ WIGGLE (không In/Out, không Retouch): xuất bằng biểu thức FFmpeg như block
+                /* CÓ WIGGLE (kể cả kèm In/Out; không Retouch): xuất bằng biểu thức FFmpeg như block
                    video thay vì bake từng khung. Wiggle rung suốt block nên bake là MỖI khung một PNG
                    cỡ ảnh gốc (~1,3 GB cho 3 ảnh 8 s) — vượt trần chuỗi V8 / bộ nhớ blob. Biểu thức
-                   còn khớp preview: preview dời wiggle theo px SEQUENCE, còn chuỗi bake dời trong hộp
-                   gốc rồi bị thu theo transform.scale. Độ mờ wiggle đi keyframe_expr (khối dưới). */
+                   còn khớp preview: preview dời wiggle/trượt theo px SEQUENCE, còn chuỗi bake dời trong
+                   hộp gốc rồi bị thu theo transform.scale. In/Out đi CHUNG biểu thức với video (mọi
+                   hiệu ứng của ảnh đều diễn đạt được — VIDEO_SUPPORTED_EFFECTS). Độ mờ wiggle đi
+                   keyframe_expr (khối dưới). Ảnh có In/Out mà KHÔNG Wiggle: vẫn bake như cũ. */
                 const imgAnim = window.TextAnimations ? TextAnimations.normalizeAnimation(copy.animation) : null;
-                if (!distorted && !rtStill && imgAnim && imgAnim.in.type === 'none' && imgAnim.out.type === 'none'
+                const exprSide = (side) => side.type === 'none' || TextAnimations.VIDEO_SUPPORTED_EFFECTS?.has(side.type);
+                if (!distorted && !rtStill && imgAnim && exprSide(imgAnim.in) && exprSide(imgAnim.out)
                     && TextAnimations.hasActiveWiggle(imgAnim.wiggle)) {
                     const spec = TextAnimations.videoAnimationExpr(copy, itemBaseSize(copy, imgAsset).height);
                     if (spec) {
+                        // Độ mờ In/Out: biểu thức chính xác (khối KEYFRAME) thay cho cửa trập fade
+                        // tuyến tính — fade lệch engine rõ ở easing cong (vd. ease-out: 0,48 vs 0,88).
+                        imageInOutOpacityExpr = TextAnimations.inOutOpacityFfmpegExpr?.(copy) || null;
+                        if (imageInOutOpacityExpr) {
+                            spec.in_start = 0;
+                            spec.in_dur = 0;
+                            spec.out_start = 0;
+                            spec.out_dur = 0;
+                        }
                         copy.animation_video = spec;
                         imageWiggleExpr = true;
                     }
@@ -25887,6 +25900,13 @@
                 // field transform.
                 const volumeExpr = TextAnimations.volumeKeyframeFfmpegExpr(copy.keyframes);
                 if (volumeExpr) kf.volume_expr = volumeExpr;
+                // ẢNH CÓ WIGGLE xuất bằng biểu thức: độ mờ In/Out đi biểu thức KHỚP engine (cửa trập
+                // fade đã tắt ở nhánh ảnh), nhân lên keyframe hoặc giá trị tĩnh.
+                if (imageInOutOpacityExpr) {
+                    const base = kf.opacity_expr
+                        || (Number(normalizeTransform(copy.transform).opacity) || 0).toFixed(4);
+                    kf.opacity_expr = `((${base})*${imageInOutOpacityExpr})`;
+                }
                 // WIGGLE ĐỘ MỜ của block VIDEO/GeoCode: không bake khung nên đi chung biểu thức
                 // độ mờ (nhân lên keyframe hoặc giá trị tĩnh). Ảnh/chữ/shape đã bake vào khung.
                 if (copy?.type === 'geocode' || (copy?.type === 'media' && itemIsVideoMedia(copy)) || imageWiggleExpr) {

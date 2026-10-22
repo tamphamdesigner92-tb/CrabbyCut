@@ -643,6 +643,30 @@
         return out;
     }
 
+    /* Hệ số độ mờ CHÍNH XÁC của In/Out (0..1) theo LOCALT, KHỚP animationStateAt
+     * (opacityMul = min(1, op·v) trong cửa sổ In/Out, 1 ở đoạn hold) — thay cho cửa trập
+     * `fade` tuyến tính của videoAnimationExpr. Dùng cho ẢNH có Wiggle xuất bằng biểu thức
+     * (chuỗi bake cũ của ảnh khớp engine từng khung, đường biểu thức phải giữ được điều đó).
+     * null nếu không có In/Out. */
+    function inOutOpacityFfmpegExpr(item) {
+        const w = resolveWindows(item);
+        if (!w) return null;
+        const inHas = w.anim.in.type !== 'none';
+        const outHas = w.anim.out.type !== 'none';
+        if (!inHas && !outHas) return null;
+        const f = (n) => (Number(n) || 0).toFixed(4);
+        const inDur = Math.max(0.001, w.inEnd - w.inStart);
+        const outDur = Math.max(0.001, w.outEnd - w.outStart);
+        const term = (side, pExpr) => {
+            const spec = sideSpec(side);
+            // effectiveEasing: fade + spring/bounce chạy ease-in-out — đúng như animationStateAt.
+            return `min(1,${f((spec && spec.op) || 1)}*(${ffEase(effectiveEasing(side.type, side.easing), pExpr)}))`;
+        };
+        const inPart = inHas ? term(w.anim.in, `clip((LOCALT-${f(w.inStart)})/${f(inDur)},0,1)`) : '1';
+        const outPart = outHas ? term(w.anim.out, `clip(1-(LOCALT-${f(w.outStart)})/${f(outDur)},0,1)`) : '1';
+        return `clip(if(lt(LOCALT,${f(w.inEnd)}),${inPart},if(gt(LOCALT,${f(w.outStart)}),${outPart},1)),0,1)`;
+    }
+
     /* ---- KEYFRAME: nội suy giá trị thuộc tính theo thời gian (lớp NÂNG CAO, song song
      * In/Out/Combo) ---- Mô hình: keyframes = { field: [{ t, v, e }] } với t = giây CỤC BỘ
      * (từ đầu item/clip), v = giá trị, e = easing đoạn RỜI keyframe này. effectiveTransformAt
@@ -1104,6 +1128,7 @@
         drawThumb,
         VIDEO_SUPPORTED_EFFECTS,
         videoAnimationExpr,
+        inOutOpacityFfmpegExpr,
         // Bảng hệ số gốc — test đối chiếu biểu thức FFmpeg với hàm JS đọc từ đây
         EFFECT_SPECS,
         KEYFRAME_FIELDS,
