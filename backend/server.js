@@ -8505,7 +8505,10 @@ function createApp() {
           ...(audioTarget ? { audio_path: audioTarget, audio_name: path.basename(audioTarget) } : {}),
         });
       } else {
-        res.download(outputPath, outputName);
+        /* `root` BẮT BUỘC: không có nó thì `send` soi MỌI đoạn của đường tuyệt đối, gặp thư mục
+         * bắt đầu bằng "." (worktree `.claude\worktrees\…`, `~/.config`…) là trả 404 dù tệp có
+         * thật. Có `root` thì chỉ soi phần sau root — ở đây chỉ còn tên tệp. */
+        res.download(outputName, outputName, { root: path.dirname(outputPath) });
       }
     } catch (error) {
       recordProjectError('export', error, { endpoint: '/api/export-video', exportSettings: exportSettingsForError });
