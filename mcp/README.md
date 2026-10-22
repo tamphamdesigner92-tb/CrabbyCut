@@ -91,7 +91,7 @@ Claude có hai cách làm việc. **Tool theo tính năng** gọi thẳng hàm c
 | `crabbycut_seek` / `crabbycut_playback` | Đặt playhead / phát, dừng |
 | `crabbycut_undo` | Hoàn tác / làm lại |
 | `crabbycut_select` / `crabbycut_split` / `crabbycut_delete_selected` | Chọn, cắt, xoá clip/block |
-| `crabbycut_catalog` | Tra id hợp lệ: chuyển cảnh, hoạt ảnh, kiểu chữ, hiệu ứng chữ, LUT, thông số màu, tuỳ chọn xuất, phụ đề, thư viện |
+| `crabbycut_catalog` | Tra id hợp lệ: chuyển cảnh, hoạt ảnh, kiểu chữ, hiệu ứng chữ, LUT, thông số màu, tuỳ chọn xuất, phụ đề, thư viện, GeoCode, hình (`shapes`), giọng đọc (`voices`), biến dạng chữ + mẫu đường (`text_warps`) |
 
 ### Dự án và media
 
@@ -103,7 +103,7 @@ Claude có hai cách làm việc. **Tool theo tính năng** gọi thẳng hàm c
 | `crabbycut_import_media` | Nhập ảnh/video/âm thanh theo đường dẫn (chép hoặc liên kết), có thể đặt luôn lên timeline |
 | `crabbycut_list_assets` | Tài nguyên của dự án và thư viện có sẵn |
 | `crabbycut_add_asset` | Đặt tài nguyên dự án hoặc thư viện lên track overlay |
-| `crabbycut_add_text` | Thêm block chữ |
+| `crabbycut_add_text` | Thêm block chữ — kèm luôn trong cùng lượt gọi (một bước hoàn tác): `style`, **biến dạng** `warp` (kiểu Warp của After Effects: arc, arch, bulge, flag, wave, fish, rise, fisheye, inflate, squeeze, twist…, `bend` / `horizontal` / `vertical` −100..100), **chữ chạy theo đường** `path` (mẫu `arc` / `smile` / `wave` / `circle` / `s_curve` / `rise` hoặc `points` theo mô hình Pen; `offset`, `align`, `flip`, `shift`), `transform`, `keyframes`, `animation`. Sửa về sau bằng `crabbycut_update_block` `style {warp_*, path_*}`. Tra bằng `crabbycut_catalog text_warps` |
 
 ### Chỉnh sửa block
 

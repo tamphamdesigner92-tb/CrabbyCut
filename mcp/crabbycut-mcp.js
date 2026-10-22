@@ -306,7 +306,7 @@ const TOOLS = [
   },
   {
     name: 'crabbycut_add_text',
-    description: 'Editing step only. Add a text block on an overlay track. start defaults to the playhead, duration to 5 s. Undoable.',
+    description: 'Editing step only. Add a text block on an overlay track — with its look in the SAME call (one undo step): style (font_family, font_size, color, font_weight, letter_spacing, font_kerning auto|none, align, stroke_*, bg_*, shadow_*), warp (After Effects style text warp: type arc | arc_lower | arc_upper | arch | bulge | shell_lower | shell_upper | flag | wave | fish | rise | fisheye | inflate | squeeze | twist, bend/horizontal/vertical -100..100), path (text running along a curve: preset arc | smile | wave | circle | s_curve | rise, or points in the Pen model; width/height of the path box, x/y its centre in px from the frame centre, offset, align, flip, shift), transform, keyframes, animation. start defaults to the playhead, duration to 5 s. Warp types: crabbycut_catalog text_warps. Change them later with crabbycut_update_block style {warp_*, path_*}.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -314,6 +314,38 @@ const TOOLS = [
         start: { type: 'number', minimum: 0 },
         duration: { type: 'number', exclusiveMinimum: 0 },
         track_id: { type: 'string' },
+        style: { type: 'object', description: 'Text style fields (see crabbycut_update_block).' },
+        warp: {
+          type: 'object',
+          properties: {
+            type: { type: 'string', enum: ['none', 'arc', 'arc_lower', 'arc_upper', 'arch', 'bulge', 'shell_lower', 'shell_upper', 'flag', 'wave', 'fish', 'rise', 'fisheye', 'inflate', 'squeeze', 'twist'] },
+            bend: { type: 'number', minimum: -100, maximum: 100 },
+            horizontal: { type: 'number', minimum: -100, maximum: 100 },
+            vertical: { type: 'number', minimum: -100, maximum: 100 },
+          },
+          required: ['type'],
+        },
+        path: {
+          type: 'object',
+          properties: {
+            preset: { type: 'string', enum: ['arc', 'smile', 'wave', 'circle', 's_curve', 'rise'] },
+            points: { type: 'array', items: { type: 'object' } },
+            closed: { type: 'boolean' },
+            width: { type: 'number', minimum: 10 },
+            height: { type: 'number', minimum: 0 },
+            x: { type: 'number' },
+            y: { type: 'number' },
+            offset: { type: 'number', minimum: -100, maximum: 100 },
+            align: { type: 'string', enum: ['left', 'center', 'right'] },
+            flip: { type: 'boolean' },
+            shift: { type: 'number' },
+          },
+        },
+        transform: TRANSFORM_SCHEMA,
+        keyframes: KEYFRAMES_SCHEMA,
+        keyframe_mode: KEYFRAME_MODE,
+        keyframe_time: KEYFRAME_TIME,
+        animation: ANIMATION_SCHEMA,
       },
       required: ['text'],
       additionalProperties: false,
@@ -408,10 +440,10 @@ const TOOLS = [
   },
   {
     name: 'crabbycut_catalog',
-    description: 'Look up valid ids/values before editing: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories, geocode (languages, size presets, limits), shapes (shape types + style fields), voices (dubbing engines, voices, cloned voice profiles).',
+    description: 'Look up valid ids/values before editing: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories, geocode (languages, size presets, limits), shapes (shape types + style fields), voices (dubbing engines, voices, cloned voice profiles), text_warps (text warp types + text-on-path presets).',
     inputSchema: {
       type: 'object',
-      properties: { kind: { type: 'string', enum: ['transitions', 'animations', 'text_styles', 'text_effects', 'luts', 'color_params', 'export_options', 'subtitle', 'library_categories', 'geocode', 'shapes', 'voices'] } },
+      properties: { kind: { type: 'string', enum: ['transitions', 'animations', 'text_styles', 'text_effects', 'luts', 'color_params', 'export_options', 'subtitle', 'library_categories', 'geocode', 'shapes', 'voices', 'text_warps'] } },
       required: ['kind'],
       additionalProperties: false,
     },
@@ -421,7 +453,7 @@ const TOOLS = [
   /* ---- Sửa block ---- */
   {
     name: 'crabbycut_update_block',
-    description: 'Editing step only. Change properties of ONE block: a main-lane clip (main_index) or an overlay item (item_id). transform: position_x, position_y, scale, rotation, opacity, flip_x, flip_y (fields with keyframes get a keyframe at the playhead). keyframes animates fields over time, e.g. {"position": [{"t": 0, "x": -400, "y": 0}, {"t": 2, "x": 0, "y": 0, "e": "ease-out"}], "scale": [{"t": 0, "v": 80}, {"t": 2, "v": 100}]}. volume is percent (100 = original). speed is a rate (1 = normal). Overlay items also accept timeline_start, duration, muted, text (text blocks) and style (text: font_family, font_size, color, font_weight, letter_spacing, line_height, align, stroke_*, bg_*, shadow_*). One undo step.',
+    description: 'Editing step only. Change properties of ONE block: a main-lane clip (main_index) or an overlay item (item_id). transform: position_x, position_y, scale, rotation, opacity, flip_x, flip_y (fields with keyframes get a keyframe at the playhead). keyframes animates fields over time, e.g. {"position": [{"t": 0, "x": -400, "y": 0}, {"t": 2, "x": 0, "y": 0, "e": "ease-out"}], "scale": [{"t": 0, "v": 80}, {"t": 2, "v": 100}]}. volume is percent (100 = original). speed is a rate (1 = normal). Overlay items also accept timeline_start, duration, muted, text (text blocks) and style (text: font_family, font_size, color, font_weight, letter_spacing, font_kerning auto|none, line_height, align, stroke_*, bg_*, shadow_*, warp_*, path_*). One undo step.',
     inputSchema: {
       type: 'object',
       properties: {

@@ -53,6 +53,8 @@
     <!-- Hình học → GeoCode: dựng ảnh/video từ mã (electron/geocode-renderer.js). Dùng injectStyle
          của auto-subtitle.js nên nạp SAU nó. -->
     <script src="/static/js/geocode.js?v=geocode-p2"></script>
+    <!-- Văn bản → Biến dạng chữ (Warp) + Chữ theo đường. editing-runtime.js gọi vào lúc đo/vẽ chữ. -->
+    <script src="/static/js/text-deform.js?v=tdeform-p1"></script>
     <!-- Thanh trạng thái: tiến trình tải model AI lần đầu (góc trái). -->
     <script src="/static/js/model-download-status.js?v=mdl-p1"></script>
     <style>
@@ -9764,10 +9766,19 @@
     document.getElementById('btnRotateClip90')?.addEventListener('click', () => applyQuickTransformAction('rotate90'));
     document.getElementById('btnFlipClipX')?.addEventListener('click', () => applyQuickTransformAction('flipX'));
     document.getElementById('btnFlipClipY')?.addEventListener('click', () => applyQuickTransformAction('flipY'));
+    /* Bấm vào vùng TRỐNG của khung xem trước (kể cả trong khung hình) = bỏ chọn, như các trình
+     * dựng chuyên nghiệp. Block overlay tự chặn cú bấm của nó (selectPreviewOverlayItem); các chế
+     * độ dùng cú bấm vào khung (Pen, sửa đỉnh, gõ chữ, chấm màu, vẽ vùng, mặt nạ) và khung chọn /
+     * tay cầm thì giữ nguyên lựa chọn — xem EditingRuntime.previewKeepsSelection. */
     document.getElementById('sequencePreviewShell')?.addEventListener('mousedown', (event) => {
         if (currentMode !== 'FINAL' || currentStepId !== 'step4') return;
         const frame = document.getElementById('sequencePreviewFrame');
-        if (frame?.contains(event.target)) return;
+        // Ngoài khung hình (viền đen quanh khung): bỏ chọn như trước giờ.
+        if (frame?.contains(event.target)) {
+            // Trong khung: chỉ cú bấm trái thường (Shift = đang chọn thêm, không xoá cả nhóm).
+            if (event.button !== 0 || event.shiftKey) return;
+            if (window.EditingRuntime?.previewKeepsSelection?.(event.target, event)) return;
+        }
         clearCurrentBlockSelection();
     });
     syncSequenceControls();
@@ -16887,7 +16898,7 @@
         })
         .catch(() => { /* không hỏi được: giữ H.264 như trước */ });
 </script>
-<script src="/static/js/editing-runtime.js?v=lumen-p5-geocode2"></script>
+<script src="/static/js/editing-runtime.js?v=lumen-p5-tdeform1"></script>
 <script src="/static/js/automation-bridge.js?v=bridge-p2"></script>
 <script src="/static/js/perf-runtime.js"></script>
 <!-- Dụng cụ đo hiệu năng (Giai đoạn 0). Nạp SAU perf-runtime.js vì nó bọc chính những

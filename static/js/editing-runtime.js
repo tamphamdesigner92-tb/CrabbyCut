@@ -2101,6 +2101,14 @@
     /* Bề dày hai vòng viền của một style chữ. `stroke_width` là vòng TRONG (ôm sát chữ),
        `stroke2_width` là phần ĐẮP THÊM ra ngoài vòng đó — nên mép ngoài cùng cách đường
        biên glyph đúng tổng hai số. Cả hai chỉ có tác dụng khi công tắc "Viền" đang bật. */
+    /* KERNING (2026-10-17). Mặc định theo bảng kerning của font (như Metrics của After Effects).
+       'none' = tắt (Optical/0): khoảng cách chữ chỉ còn bề rộng glyph + AV. Cần cho font như Nunito,
+       vốn đặt kerning DƯƠNG cho cặp chữ hoa + chữ thường (T→h, T→i, K→i) nên chữ đầu từ bị đẩy xa
+       khi AV = 0. Áp ở MỌI chỗ đo/vẽ: DOM preview, measureTextItemBox, drawTextItemContent, magicWrap. */
+    function textFontKerning(style) {
+        return style && style.font_kerning === 'none' ? 'none' : 'normal';
+    }
+
     function textStrokeInnerPx(style) {
         return Math.max(0, Number(style?.stroke_width) || 0);
     }
@@ -3600,7 +3608,22 @@
 
     function isPenToolActive() { return !!penSession; }
 
-    function startPenTool() {
+    /* Bấm chuột TRONG khung xem trước có được bỏ chọn không (index.html: bấm vùng trống của
+     * khung = bỏ chọn, như Premiere/CapCut). Giữ nguyên lựa chọn khi đang ở một chế độ dùng cú
+     * bấm vào khung (Pen, sửa đỉnh path, gõ chữ, chấm màu, vẽ vùng xoá vật thể, kéo mặt nạ) hoặc
+     * bấm trúng block / khung chọn / tay cầm / lớp mặt nạ. */
+    function previewKeepsSelection(target, event = null) {
+        if (isPenToolActive() || pathEditItemId || editingTextSession || adjustPickMode || logoDrawCleanup || maskDrag) return true;
+        // Bấm trúng chỗ trong suốt của GeoCode/ảnh mà bên dưới không có hình (selectPreviewOverlayItem).
+        // Nút/ô điều khiển đặt trong khung (LQ/HQ…) là thao tác của khung, không phải bấm vùng trống.
+        if (target?.closest?.('button, input, select, textarea, a, [role="button"]')) return true;
+        if (event?.__crabPassThrough) return !!target?.closest?.('#editingSelectionBox, .adj-mask-overlay, #editingPenOverlay, .is-color-picking');
+        return !!target?.closest?.('#editingSelectionBox, #editingPreviewOverlay [data-item-id], .adj-mask-overlay, #editingPenOverlay, .is-color-picking');
+    }
+
+    /* `options.onFinish(points, closed)`: thay vì tạo block shape, trao đường vừa vẽ cho nơi gọi
+     * (subtab "Chữ theo đường" dùng nó để tạo/vẽ lại đường của chữ). */
+    function startPenTool(options = {}) {
         if (penSession) { finishPenTool(false); return; }
         const metrics = previewFrameMetrics();
         const shell = document.getElementById('sequencePreviewShell');
@@ -3614,7 +3637,7 @@
         overlay.innerHTML = `<svg class="editing-pen-svg" xmlns="http://www.w3.org/2000/svg"></svg>
             <div class="editing-pen-hint">${_t('Pen Tool: bấm để thêm đỉnh · kéo để uốn cong · Alt tách tay cầm · Shift khoá 45° · bấm đỉnh đầu để khép kín · Enter/Esc để kết thúc · Backspace xoá đỉnh vừa thêm')}</div>`;
         shell.appendChild(overlay);
-        penSession = { points: [], drag: null, hover: null, closing: false, overlay };
+        penSession = { points: [], drag: null, hover: null, closing: false, overlay, onFinish: typeof options.onFinish === 'function' ? options.onFinish : null };
         overlay.addEventListener('mousedown', onPenMouseDown);
         overlay.addEventListener('mousemove', onPenHover);
         overlay.addEventListener('mouseleave', () => { if (penSession && !penSession.drag) { penSession.hover = null; drawPenOverlay(); } });
@@ -3868,11 +3891,13 @@
             if (Math.hypot(a.x - b.x, a.y - b.y) > eps || a.ox || a.oy) break;
             pts.pop();
         }
+        const onFinish = penSession.onFinish;
         cancelPenTool();
         if (pts.length < 2 || (closed && pts.length < 3 && !pts.some((p) => p.ox || p.oy))) {
             setEditingStatusText(_t('Đã thoát Pen Tool.'));
             return;
         }
+        if (onFinish) { onFinish(pts, closed); return; }
         addPenShapeItem(pts, closed);
     }
 
@@ -3915,6 +3940,144 @@
         selectEditingItem(item.id);
         renderAll();
         setEditingStatusText(closed ? _t('Đã tạo hình khép kín từ Pen Tool.') : _t('Đã tạo đường vẽ từ Pen Tool.'));
+    }
+
+    /* ===== CHỮ CHẠY THEO ĐƯỜNG (subtab Văn bản › Chữ theo đường; static/js/text-deform.js) =====
+     * Chữ theo đường là một block CHỮ thường mang thêm path_* trong style: đường chỉ là khuôn để
+     * rải chữ, không tự vẽ ra (như mask path của lớp chữ trong After Effects). Box của đường có tâm
+     * ở transform.position_x/y — cùng quy ước với shape Pen, nên đổi qua lại giữ đúng chỗ. */
+    function pathStyleFromPoints(points, closed, w, h) {
+        return {
+            path_enabled: true,
+            path_points: (points || []).map((p) => ({ x: p.x, y: p.y, ix: p.ix || 0, iy: p.iy || 0, ox: p.ox || 0, oy: p.oy || 0 })),
+            path_closed: !!closed,
+            path_w: Math.max(10, Number(w) || 600),
+            path_h: Math.max(0, Number(h) || 0),
+            path_offset: 0,
+            path_align: 'center',
+            path_flip: false,
+            path_shift: 0,
+        };
+    }
+
+    /* opts: preset (id mẫu) HOẶC points/closed/w/h (mô hình đỉnh Pen, tỉ lệ 0..1 của box w×h);
+     * text, duration, placement {start, trackId}, style (patch thêm), center [x, y] (px từ tâm khung). */
+    function addPathTextItem(opts = {}) {
+        const TD = window.TextDeform;
+        if (!TD) return null;
+        const pathStyle = opts.preset ? TD.presetStyle(opts.preset)
+            : (Array.isArray(opts.points) ? pathStyleFromPoints(opts.points, opts.closed, opts.w, opts.h) : null);
+        if (!pathStyle || !TD.normalizePath(pathStyle)) {
+            setEditingStatusText(_t('Đường không hợp lệ — cần ít nhất 2 đỉnh.'));
+            return null;
+        }
+        const text = typeof opts.text === 'string' && opts.text.trim() ? opts.text.replace(/\s*\n\s*/g, ' ') : _t('Chữ chạy theo đường cong');
+        const endBatch = beginHistoryBatch();
+        let item;
+        try {
+            item = addTextItem(opts.placement || null, {
+                text,
+                duration: opts.duration,
+                style: { ...(opts.style || {}), ...pathStyle, bg_enabled: false },
+                defer: true,
+            });
+            // addTextItem gói dòng + neo chữ xuống đáy khung cho chữ thường; chữ theo đường thì không.
+            item.text = text;
+            item.transform.position_x = clampTransformValue('position_x', Array.isArray(opts.center) ? Number(opts.center[0]) || 0 : 0);
+            item.transform.position_y = clampTransformValue('position_y', Array.isArray(opts.center) ? Number(opts.center[1]) || 0 : 0);
+        } finally {
+            endBatch();
+        }
+        selectEditingItem(item.id);
+        renderAll();
+        setEditingStatusText(_t('Đã tạo chữ theo đường — chỉnh ở Thuộc tính › Văn bản › Biến đổi.'));
+        return item;
+    }
+
+    // Vẽ đường bằng Pen: đang chọn chữ theo đường thì THAY đường của nó, không thì tạo block mới.
+    function startTextPathPen() {
+        const sel = selectedEditingItem();
+        const reuseId = sel && sel.type === 'text' && sel.style?.path_enabled === true ? sel.id : '';
+        startPenTool({
+            onFinish: (pts, closed) => {
+                const fit = fitPathToBox(pts, closed);
+                const target = reuseId ? findItem(reuseId) : null;
+                if (target && !isTrackLocked(itemTrack(target))) {
+                    recordHistory();
+                    target.style = { ...target.style, ...pathStyleFromPoints(fit.points, closed, fit.width, fit.height),
+                        path_offset: target.style.path_offset, path_align: target.style.path_align,
+                        path_flip: target.style.path_flip, path_shift: target.style.path_shift };
+                    // Đường vẽ ở hệ toạ độ khung -> block về scale 100%, không xoay để khớp đúng nét vừa vẽ.
+                    target.transform.position_x = clampTransformValue('position_x', fit.cx);
+                    target.transform.position_y = clampTransformValue('position_y', fit.cy);
+                    target.transform.scale = 100;
+                    target.transform.rotation = 0;
+                    selectEditingItem(target.id);
+                    renderAll();
+                    setEditingStatusText(_t('Đã thay đường của chữ.'));
+                    return;
+                }
+                addPathTextItem({ points: fit.points, closed, w: fit.width, h: fit.height, center: [fit.cx, fit.cy] });
+            },
+        });
+    }
+
+    // Shape Pen đang chọn -> chữ chạy theo đúng đường đó (cùng chỗ, cùng biến đổi, cùng thời gian); shape được gỡ.
+    function placeTextOnShapePath(shapeId) {
+        const shape = findItem(String(shapeId || ''));
+        if (!shape || shape.type !== 'shape' || normalizeShapeStyle(shape.style).shape_type !== 'path') {
+            setEditingStatusText(_t('Chọn một hình vẽ bằng Pen trước.'));
+            return null;
+        }
+        const st = normalizeShapeStyle(shape.style);
+        const endBatch = beginHistoryBatch();
+        let item = null;
+        try {
+            recordHistory();
+            item = addPathTextItem({
+                points: st.path_points, closed: st.path_closed, w: st.width, h: st.height,
+                placement: { start: shape.timeline_start },
+                duration: shape.duration,
+                style: { color: st.fill_color },
+            });
+            if (item) {
+                item.transform = { ...item.transform, ...(shape.transform || {}) };
+                const idx = editingItems.indexOf(shape);
+                if (idx >= 0) editingItems.splice(idx, 1);
+            }
+        } finally {
+            endBatch();
+        }
+        if (item) {
+            selectEditingItem(item.id);
+            renderAll();
+        }
+        return item;
+    }
+
+    function removeTextPath(itemId) {
+        const item = findItem(String(itemId || ''));
+        if (!item || item.type !== 'text' || item.style?.path_enabled !== true) return;
+        recordHistory();
+        item.style = { ...item.style, path_enabled: false };
+        renderAll();
+    }
+
+    function textPathPaneContext() {
+        const sel = selectedEditingItem();
+        return {
+            selectedShapePath: !!sel && sel.type === 'shape' && sel.style?.shape_type === 'path',
+            selectedPathText: !!sel && sel.type === 'text' && sel.style?.path_enabled === true,
+        };
+    }
+
+    // Đổi chọn khi subtab đang mở: chỉ cập nhật hai nút (không dựng lại cả panel).
+    function syncTextPathPane() {
+        const ctx = textPathPaneContext();
+        const fromShape = document.querySelector('[data-text-path-from-shape]');
+        if (fromShape) fromShape.disabled = !ctx.selectedShapePath;
+        const pen = document.querySelector('[data-text-path-pen]');
+        if (pen) pen.textContent = ctx.selectedPathText ? _t('Vẽ lại đường bằng Pen') : _t('Vẽ đường bằng Pen');
     }
 
     // Phím trong lúc Pen bật. Trả true nếu đã nuốt phím.
@@ -4852,6 +5015,7 @@
         if (typeof updateInspectorState === 'function') updateInspectorState();
         if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
         if (editPanelTab === 'shape' && editPanelShapeSub === 'geocode') window.GeoCode?.onSelectionChanged?.();
+        if (editPanelTab === 'text' && editPanelTextSub === 'path') syncTextPathPane();
     }
 
     /* Lane chính trống: nút Xuất video bật theo việc timeline có block hay không (bản xuất
@@ -13457,6 +13621,13 @@
        override; ô này chỉ ghi đè khi người dùng tự sửa. */
     Math.round((Number(style.letter_spacing) || 0) * 100) / 100}"><span class="fig-affix">%</span></div>
                     </div>
+                    ${isTextTemplate ? '' : `<div class="ins-row">
+                        <label for="editingTextKerning" title="${_t('Kerning: khoảng cách riêng của từng cặp chữ do font quy định. Tắt nếu chữ đầu từ bị đẩy xa (vd. font Nunito).')}">${_t('Kerning')}</label>
+                        <div class="fig-field"><select id="editingTextKerning">
+                            <option value="auto"${textFontKerning(style) === 'none' ? '' : ' selected'}>${_t('Theo font')}</option>
+                            <option value="none"${textFontKerning(style) === 'none' ? ' selected' : ''}>${_t('Tắt')}</option>
+                        </select></div>
+                    </div>`}
                     <div class="ins-row">
                         <label for="editingTextColor">${_t('Màu')}</label>
                         <div class="fig-field color-row"><input id="editingTextColor" class="color-swatch" type="color" value="${style.color || '#ffffff'}"><input type="text" class="color-hex" value="${hexLabel(style.color || '#ffffff')}" maxlength="6" spellcheck="false" autocomplete="off" aria-label="${_t('Mã màu (hex)')}"></div>
@@ -13532,6 +13703,7 @@
                     </div>
                 </div>
                 ${textEffectSectionHtml(item, style)}
+                ${!isTextTemplate && window.TextDeform ? window.TextDeform.inspectorHtml(style) : ''}
             ` : ''}
             ${animSectionHtml}
             ${item.type === 'media' ? buildVideoMaskSectionHtml() : ''}
@@ -14571,6 +14743,17 @@
         if (!item) return;
         if (isTrackLocked(itemTrack(item))) return;
         rememberInspectorEdit();
+        // Biến dạng chữ / chữ theo đường (Inspector › Văn bản › Biến đổi) — static/js/text-deform.js.
+        if (target.dataset && target.dataset.textDeform && item.type === 'text' && window.TextDeform) {
+            const patch = window.TextDeform.patchFromField(target);
+            if (patch) patchTextStyle(item, patch);
+            window.TextDeform.syncTwin(target);
+            if (options.commit) inspectorEditInProgress = false;
+            // Đổi kiểu Warp bật/tắt các thanh trượt -> dựng lại inspector khi chốt.
+            if (!options.commit) { renderPreviewOverlays(); renderEditingTimeline(); return; }
+            renderAll();
+            return;
+        }
         // Hoạt ảnh In/Out: ghi item.animation qua normalize (kẹp giá trị hợp lệ)
         const animFieldMatch = /^editingAnim(In|Out)(Type|Duration|Easing)$/.exec(target.id || '');
         if (animFieldMatch && itemSupportsAnimation(item) && window.TextAnimations) {
@@ -14644,7 +14827,7 @@
             if (comboVal) playItemAnimationPreview(item);
             return;
         }
-        const isTextLiveField = ['editingItemText', 'editingTextFontFamily', 'editingTextFontSize', 'editingTextColor', 'editingTextWeight', 'editingTextLineHeight', 'editingTextLetterSpacing', 'editingTextStrokeOn', 'editingTextStrokeColor', 'editingTextStrokeWidth', 'editingTextStroke2Color', 'editingTextStroke2Width', 'editingTextBgOn', 'editingTextBgColor', 'editingTextBgRadius', 'editingTextBgOpacity', 'editingTextBgPadX', 'editingTextBgPadY', 'editingTextShadowOn', 'editingTextShadowColor', 'editingTextShadowDx', 'editingTextShadowDy', 'editingTextShadowBlur', 'editingTextShadowOpacity'].includes(target.id);
+        const isTextLiveField = ['editingItemText', 'editingTextFontFamily', 'editingTextFontSize', 'editingTextColor', 'editingTextWeight', 'editingTextLineHeight', 'editingTextLetterSpacing', 'editingTextKerning', 'editingTextStrokeOn', 'editingTextStrokeColor', 'editingTextStrokeWidth', 'editingTextStroke2Color', 'editingTextStroke2Width', 'editingTextBgOn', 'editingTextBgColor', 'editingTextBgRadius', 'editingTextBgOpacity', 'editingTextBgPadX', 'editingTextBgPadY', 'editingTextShadowOn', 'editingTextShadowColor', 'editingTextShadowDx', 'editingTextShadowDy', 'editingTextShadowBlur', 'editingTextShadowOpacity'].includes(target.id);
         const isShapeLiveField = [
             'editingShapeType',
             'editingShapeWidth',
@@ -14742,6 +14925,7 @@
             }));
         }
         if (target.id === 'editingTextLetterSpacing') patchTextStyle(item, { letter_spacing: Number(target.value) || 0 });
+        if (target.id === 'editingTextKerning') patchTextStyle(item, { font_kerning: target.value === 'none' ? 'none' : 'auto' });
         if (target.id === 'editingTextLineHeight') {
             const v = String(target.value).trim().toLowerCase();
             let lh = 'auto';
@@ -14800,6 +14984,10 @@
     }
 
     function handleTextInspectorClick(event) {
+        if (event.target.closest('[data-text-path-remove]')) {
+            removeTextPath(selectedEditingItemId);
+            return;
+        }
         if (event.target.closest('#btnTextSettings')) {
             document.getElementById('textSettingsPopup')?.classList.toggle('is-open');
             return;
@@ -17425,7 +17613,24 @@
         hidePreviewHud();
         if (!previewBoxDrag) return;
         const didChange = previewBoxDrag.historySaved;
+        const clickOnly = previewBoxDrag.mode === 'pending-move' && !didChange && previewBoxDrag.mainClipIndex < 0;
+        const clickAt = { x: previewBoxDrag.startX, y: previewBoxDrag.startY, itemId: previewBoxDrag.itemId };
         previewBoxDrag = null;
+        /* Bấm (không kéo) vào khung chọn của GeoCode/ảnh ở chỗ TRONG SUỐT: như bấm xuyên ở
+         * selectPreviewOverlayItem — chọn block có hình bên dưới, không có thì bỏ chọn. Kéo thì
+         * vẫn di chuyển block như cũ (block phủ kín khung vẫn kéo được từ bất kỳ đâu). */
+        if (clickOnly) {
+            const item = findItem(clickAt.itemId);
+            const el = item ? document.getElementById(`preview_${item.id}`) : null;
+            if (item && el && !overlayHasInkAt(el, item, clickAt.x, clickAt.y)) {
+                const below = inkedOverlayItemAt(clickAt.x, clickAt.y);
+                document.body.classList.remove('editing-selection-dragging');
+                inspectorEditInProgress = false;
+                if (below) setPrimaryItemSelection(below.id);
+                else selectEditingItem('');
+                return;
+            }
+        }
         document.body.classList.remove('editing-selection-dragging');
         inspectorEditInProgress = false;
         if (didChange) renderAll();
@@ -17597,13 +17802,85 @@
         syncEditingTextBlockLabel(item);
     }
 
+    /* BẤM XUYÊN PIXEL TRONG SUỐT (2026-10-17). GeoCode/ảnh PNG thường phủ KÍN khung với nền trong
+     * suốt; chọn theo khung bao thì mọi cú bấm vào khung đều trúng chúng và không bao giờ bỏ chọn
+     * được. Như Photoshop/CapCut: điểm bấm trong suốt (alpha thấp) thì xuyên xuống block bên dưới;
+     * không còn block nào có hình ở đó thì để cú bấm rơi xuống khung -> bỏ chọn (index.html).
+     * Chữ và hình vector vẫn chọn theo khung bao (bấm giữa hai con chữ vẫn trúng chữ). */
+    let alphaProbe = null;
+    function overlayAlphaAt(el, clientX, clientY) {
+        try {
+            const tag = el?.tagName;
+            const isCanvas = tag === 'CANVAS';
+            if (!isCanvas && !(tag === 'IMG' && el.complete && el.naturalWidth)) return null;
+            const w = el.offsetWidth;
+            const h = el.offsetHeight;
+            if (!(w > 0 && h > 0)) return null;
+            /* Toạ độ CỤC BỘ của phần tử. Tâm lấy từ getBoundingClientRect (đã gồm mọi dịch chuyển
+             * và thu phóng của khung cha); chỉ gỡ phần TUYẾN TÍNH của transform riêng phần tử
+             * (xoay/lật/scale) — phần dịch của nó đã nằm trong tâm rồi. */
+            const rect = el.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            const tf = getComputedStyle(el).transform;
+            const m = tf && tf !== 'none' ? new DOMMatrix(tf) : new DOMMatrix();
+            const lin = new DOMMatrix([m.a, m.b, m.c, m.d, 0, 0]);
+            // Thu phóng của khung cha = hộp hiển thị / hộp sau transform riêng.
+            const ownW = Math.abs(m.a) * w + Math.abs(m.c) * h;
+            const k = ownW > 0 ? rect.width / ownW : 1;
+            const p = lin.inverse().transformPoint(new DOMPoint((clientX - cx) / k, (clientY - cy) / k));
+            const lx = p.x;
+            const ly = p.y;
+            const u = (lx + w / 2) / w;
+            const v = (ly + h / 2) / h;
+            if (u < 0 || u > 1 || v < 0 || v > 1) return 0;
+            const sw = isCanvas ? el.width : el.naturalWidth;
+            const sh = isCanvas ? el.height : el.naturalHeight;
+            if (!alphaProbe) {
+                const c = document.createElement('canvas');
+                c.width = 1; c.height = 1;
+                alphaProbe = c.getContext('2d', { willReadFrequently: true });
+            }
+            alphaProbe.clearRect(0, 0, 1, 1);
+            alphaProbe.drawImage(el, Math.min(sw - 1, Math.floor(u * sw)), Math.min(sh - 1, Math.floor(v * sh)), 1, 1, 0, 0, 1, 1);
+            return alphaProbe.getImageData(0, 0, 1, 1).data[3];
+        } catch (_) {
+            return null;   // không đọc được (nguồn chưa tải…) -> coi như có hình
+        }
+    }
+
+    function overlayHasInkAt(el, item, clientX, clientY) {
+        if (!item || (item.type !== 'geocode' && item.type !== 'media')) return true;
+        const a = overlayAlphaAt(el, clientX, clientY);
+        return a === null || a > 24;
+    }
+
+    // Block TRÊN CÙNG có hình tại điểm bấm (bỏ qua chỗ trong suốt), hoặc null.
+    function inkedOverlayItemAt(clientX, clientY) {
+        const stack = document.elementsFromPoint ? document.elementsFromPoint(clientX, clientY) : [];
+        for (const node of stack) {
+            const el = node.closest?.('#editingPreviewOverlay [data-item-id]');
+            if (!el || el !== node.closest('[data-item-id]')) continue;
+            const item = findItem(el.dataset.itemId);
+            if (!item || isTrackLocked(itemTrack(item))) continue;
+            if (overlayHasInkAt(el, item, clientX, clientY)) return item;
+        }
+        return null;
+    }
+
     function selectPreviewOverlayItem(event, item) {
         if (!item || event.button !== undefined && event.button !== 0) return;
-        if (editingTextSession?.itemId && editingTextSession.itemId !== item.id) finishPreviewTextEdit(true);
+        let target = item;
+        if (!overlayHasInkAt(event.currentTarget, item, event.clientX, event.clientY)) {
+            target = inkedOverlayItemAt(event.clientX, event.clientY);
+            // Không trúng hình nào: để cú bấm rơi xuống khung xem trước -> bỏ chọn.
+            if (!target) { event.__crabPassThrough = true; return; }
+        }
+        if (editingTextSession?.itemId && editingTextSession.itemId !== target.id) finishPreviewTextEdit(true);
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation?.();
-        setPrimaryItemSelection(item.id);
+        setPrimaryItemSelection(target.id);
     }
 
     /* Gom nhiều yêu cầu vẽ lại overlay thành MỘT lượt (các sự kiện tải/tua của nhiều nguồn
@@ -17993,6 +18270,7 @@
                 el.style.fontFamily = `"${normalizeTextFontFamily(style.font_family)}", system-ui, sans-serif`;
                 el.style.fontWeight = String(textBox.weight || 400);
                 el.style.letterSpacing = `${(textBox.letterPx || 0) * previewScale}px`;
+                el.style.fontKerning = textFontKerning(style) === 'none' ? 'none' : '';
                 const tcase = style.text_case || 'none';
                 el.style.textTransform = tcase === 'uppercase' ? 'uppercase' : (tcase === 'lowercase' ? 'lowercase' : (tcase === 'title' ? 'capitalize' : 'none'));
                 el.style.fontVariant = textFontVariant(tcase);
@@ -18029,7 +18307,8 @@
                    mép tưa — để nó cho CSS thì preview ra viên thuốc bo tròn còn bản xuất ra
                    vệt sơn, hai đằng khác hẳn nhau. */
                 const hasStroke = style.stroke_enabled && textStrokeOuterPx(style) > 0;
-                const useInk = (hasStroke || textBgIsBrush(style)) && editingTextSession?.itemId !== item.id;
+                // Biến dạng / chữ theo đường: CSS không vẽ được -> luôn đi lớp mực canvas.
+                const useInk = (hasStroke || textBgIsBrush(style) || !!textBox.deform) && editingTextSession?.itemId !== item.id;
                 if (useInk) {
                     paintTextInkCanvas(el, item, style, textBox, previewScale,
                         Math.abs(Number(transform.scale) || 100) / 100,
@@ -18517,6 +18796,8 @@
             { id: 'import', label: _t('Nhập') },
             { id: 'template', label: _t('Mẫu văn bản') },
             { id: 'effect', label: _t('Hiệu ứng chữ') },
+            /* Chữ chạy theo đường (2026-10-17) — static/js/text-deform.js. */
+            { id: 'path', label: _t('Chữ theo đường') },
             { id: 'subtitle', label: 'Auto Subtitle' },
             { id: 'local-subtitle', label: 'Local Subtitle' },
             /* "Kịch bản" từng là tab riêng; v1.1.17 dời vào đây làm tab con (theo yêu cầu người
@@ -19519,6 +19800,7 @@
     }
 
     function renderTextPaneHtml() {
+        if (editPanelTextSub === 'path' && window.TextDeform) return window.TextDeform.renderPaneHtml(textPathPaneContext());
         if (editPanelTextSub === 'template') return renderTextTemplatePaneHtml();
         if (editPanelTextSub === 'effect') return renderTextEffectPaneHtml();
         return `<div class="edit-card-grid">
@@ -20225,6 +20507,10 @@
         if (fxCard) { addTextEffectItem(fxCard.dataset.editAddTextEffect); return; }
         if (event.target.closest('[data-edit-add-text]')) { addTextItem(); return; }
         if (event.target.closest('[data-edit-pen-tool]')) { startPenTool(); return; }
+        const pathPreset = event.target.closest('[data-text-path-preset]');
+        if (pathPreset) { addPathTextItem({ preset: pathPreset.dataset.textPathPreset }); return; }
+        if (event.target.closest('[data-text-path-pen]')) { startTextPathPen(); return; }
+        if (event.target.closest('[data-text-path-from-shape]')) { placeTextOnShapePath(selectedEditingItemId); return; }
         const shapeBtn = event.target.closest('[data-edit-add-shape]');
         if (shapeBtn) { addShapeItem(shapeBtn.dataset.editAddShape); return; }
         /* Ô tick "nguồn lọc" ĐÃ BỎ (2026-08-16): nguồn của luồng bóc băng nay CHÍNH LÀ
@@ -20403,6 +20689,7 @@
             if (ctx) {
                 ctx.font = fontShorthand;
                 try { ctx.letterSpacing = `${letterPx}px`; } catch (_) {}
+                try { ctx.fontKerning = textFontKerning(style); } catch (_) {}
                 let maxAscent = 0;
                 let maxDescent = 0;
                 measuredWidth = Math.max(1, ...lines.map((line) => {
@@ -20441,7 +20728,7 @@
             margin = Math.max(margin, ov.ovx, ov.ovy);
         }
         margin = margin > 0 ? Math.ceil(margin + 2) : 0;
-        return {
+        const plainBox = {
             width: Math.ceil(Math.max(measuredWidth, requestedWidth) + (padX * 2)),
             height: boxHeight,
             // Bề rộng CHỮ không tính bề rộng đặt tay — chỗ kéo tay cầm cần nó làm điểm
@@ -20460,6 +20747,12 @@
             fontReady,
             margin,
         };
+        /* BIẾN DẠNG CHỮ / CHỮ THEO ĐƯỜNG (static/js/text-deform.js): hộp đo được thay bằng hộp sau
+           hiệu ứng (đối xứng quanh tâm, lề viền/bóng giữ nguyên) và mang `deform` cho
+           drawTextItemContent. Đây là cửa đo DUY NHẤT của chữ thường nên khung transform, lớp mực
+           preview, PNG xuất và chuỗi khung hoạt ảnh tự đúng theo. Không có hiệu ứng = y như cũ. */
+        const deformer = typeof window !== 'undefined' ? window.TextDeform : null;
+        return (deformer && deformer.deformMeasure(style, plainBox, style.stroke_enabled ? textStrokeOuterPx(style) : 0)) || plainBox;
     }
 
     /* Vẽ toàn bộ nội dung text item (nền, shadow, stroke, fill, decoration) lên ctx.
@@ -20482,6 +20775,13 @@
             ctx.restore();
             return;
         }
+        // Biến dạng / chữ theo đường: xem measureTextItemBox. `deform.base` = số đo chữ thường.
+        if (measured?.deform && window.TextDeform) {
+            window.TextDeform.drawDeformed(ctx, item, style, measured, opts,
+                (c, base, o) => drawTextItemContent(c, item, style, base, o),
+                { strokeInner: textStrokeInnerPx, strokeOuter: textStrokeOuterPx });
+            return;
+        }
         const originX = Number(opts.originX) || 0;
         const originY = Number(opts.originY) || 0;
         const charLimit = Number.isFinite(opts.charLimit) ? Math.max(0, Math.floor(opts.charLimit)) : Infinity;
@@ -20499,6 +20799,7 @@
         const boxH = measured.height;
         ctx.font = measured.fontShorthand;
         try { ctx.letterSpacing = `${measured.letterPx}px`; } catch (_) {}
+        try { ctx.fontKerning = textFontKerning(style); } catch (_) {}
         // Căn dọc GIỐNG DOM preview. CSS chia đôi "leading" (lineHeight − chiều cao
         // font) lên trên & dưới mỗi dòng nên chữ nằm GIỮA ô lineHeight. Canvas mặc
         // định baseline='top' vẽ chữ sát MÉP TRÊN ô -> cả khối chữ bị đẩy lên (lề
@@ -20580,6 +20881,7 @@
             // vẽ sang canvas phụ, canvas đó chưa có gì).
             c.font = measured.fontShorthand;
             try { c.letterSpacing = `${measured.letterPx}px`; } catch (_) {}
+            try { c.fontKerning = textFontKerning(style); } catch (_) {}
             c.textBaseline = 'alphabetic';
             c.textAlign = limited ? 'left' : align;
             /* VIỀN HAI VÒNG. Mỗi nét vẽ CĂN GIỮA đường biên glyph, nên muốn vòng ngoài
@@ -25683,7 +25985,8 @@
     /* Bản vá style đã quy px theo Sequence. Dùng hàm chứ không phải hằng vì bo góc phải
        nhân theo độ phân giải — xem sequenceTextScale(). */
     function magicFillStylePatch() {
-        return { ...MAGIC_FILL_STYLE_PATCH, bg_radius: scaledTextPx(MAGIC_FILL_BG_RADIUS) };
+        // Kerning tắt: font Magic Fill (Nunito) đẩy chữ đầu từ ra xa ở cặp hoa+thường — xem textFontKerning.
+        return { ...MAGIC_FILL_STYLE_PATCH, bg_radius: scaledTextPx(MAGIC_FILL_BG_RADIUS), font_kerning: 'none' };
     }
 
     /* CỤM IN ĐẬM KHÔNG KHỚP HÌNH NÀO -> chữ thường mang hiệu ứng "Hồng kẹo" (người dùng
@@ -25709,6 +26012,7 @@
             align: 'center',
             font_family: MAGIC_FILL_FONT_FAMILY,
             font_weight: MAGIC_FILL_FONT_WEIGHT,
+            font_kerning: 'none',
         };
     }
     // Giãn chữ (% cỡ chữ) của hiệu ứng — phép gói dòng phải dùng ĐÚNG con số này, nếu
@@ -25969,7 +26273,7 @@
         return tokens;
     }
 
-    function magicWrap(text, fontSize, family, weight, letterPx, maxWidth) {
+    function magicWrap(text, fontSize, family, weight, letterPx, maxWidth, kerning = 'normal') {
         const ctx = magicMeasureCtx();
         const fam = (typeof normalizeTextFontFamily === 'function') ? normalizeTextFontFamily(family) : family;
         const w = (typeof resolveFontWeight === 'function') ? resolveFontWeight(fam, weight) : weight;
@@ -25978,6 +26282,7 @@
         if (ctx) {
             ctx.font = `${w} ${fontSize}px "${fam}"`;
             try { ctx.letterSpacing = `${letterPx}px`; } catch (_) {}
+            try { ctx.fontKerning = kerning === 'none' ? 'none' : 'normal'; } catch (_) {}
             const tokens = wrapTokens(text);
             let cur = '';
             for (const token of tokens) {
@@ -26014,7 +26319,7 @@
     function magicFitFontSize(text, family, weight, maxWidth, maxBoxHeight, maxFont, minFont) {
         for (let size = maxFont; size >= minFont; size -= 2) {
             const letterPx = size * magicFillLetterPct() / 100;
-            const wr = magicWrap(text, size, family, weight, letterPx, maxWidth);
+            const wr = magicWrap(text, size, family, weight, letterPx, maxWidth, 'none');
             if (wr.lines.length > MAGIC_FILL_MAX_LINES) continue;
             const textValue = wr.lines.join('\n');
             if (magicBoxHeight(textValue, size, family, Math.ceil(wr.width)) <= maxBoxHeight) return size;
@@ -26036,7 +26341,7 @@
         let cur = [];
         for (const word of words) {
             const next = cur.concat(word);
-            const wrapped = magicWrap(next.join(' '), fontSize, family, weight, letterPx, maxWidth);
+            const wrapped = magicWrap(next.join(' '), fontSize, family, weight, letterPx, maxWidth, 'none');
             /* `cur.length` phải > 0 mới được cắt: một TỪ đơn dài hơn cả dòng vẫn phải giữ
                lại (cắt ra sẽ thành mảnh rỗng và lặp vô hạn). Trường hợp đó rơi xuống
                magicFitFontSize thu nhỏ chữ. */
@@ -27013,7 +27318,7 @@
 
             // (3) Dựng nội dung + đo box cho từng cụm ở cỡ chữ chung
             for (const p of boxes) {
-                const wrapped = magicWrap(p.content, unifiedFont, family, weight, letterPx, inkWidth);
+                const wrapped = magicWrap(p.content, unifiedFont, family, weight, letterPx, inkWidth, 'none');
                 const lines = wrapped.lines.slice(0, MAGIC_FILL_MAX_LINES);
                 if (wrapped.lines.length > MAGIC_FILL_MAX_LINES) {
                     lines[MAGIC_FILL_MAX_LINES - 1] = wrapped.lines.slice(MAGIC_FILL_MAX_LINES - 1).join(' ');
@@ -27719,6 +28024,7 @@
         scheduleRulerRender: scheduleEditingRulerRender,
         // index.html hỏi để ẩn đường kẻ mờ bám chuột trong lúc đang kéo block / quét chọn.
         isTimelineDragActive,
+        previewKeepsSelection,
         rescaleOverlaysForSequenceResize,
         // ----- AUTO SUBTITLE (static/js/auto-subtitle.js) -----
         collectAudibleTimelineSpans,
@@ -27789,6 +28095,8 @@
             updateGeocodeItem,
             addShapeItemWithStyle,
             normalizeShapeStyle,
+            addPathTextItem,
+            removeTextPath,
             renderStats: () => ({ renderAll: renderAllRuns, suspended: renderSuspendDepth }),
             // Keyframe qua MCP: cùng hàm chèn/gộp mốc mà nút ◆ dùng.
             upsertKeyframe,

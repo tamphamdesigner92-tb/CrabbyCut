@@ -26,6 +26,7 @@ const { spawn } = require('child_process');
 const ROOT = path.resolve(__dirname, '..', '..');
 const runtimeJs = fs.readFileSync(path.join(ROOT, 'static', 'js', 'editing-runtime.js'), 'utf8');
 const bridgeJs = fs.readFileSync(path.join(ROOT, 'static', 'js', 'automation-bridge.js'), 'utf8');
+const textDeformJs = fs.readFileSync(path.join(ROOT, 'static', 'js', 'text-deform.js'), 'utf8');
 const TextAnimations = require(path.join(ROOT, 'static', 'js', 'text-animations.js'));
 const ColorAdjust = require(path.join(ROOT, 'static', 'js', 'color-adjust.js'));
 
@@ -117,7 +118,27 @@ function makeApp() {
         }
         var subtitleImports = [];
         var dubbingBlocks = [];
+        function addTextItem(placement, options) {
+            recordHistory();
+            const p = resolveNewItemPlacement('text', options.duration || 5, placement);
+            const item = { id: nextId('item_text'), type: 'text', track_id: 'track_text_1', timeline_start: p.start, duration: p.duration,
+                text: options.text, transform: defaultTransform(), style: { font_size: 56, ...(options.style || {}) } };
+            rtState.editingItems.push(item);
+            renderAll();
+            return item;
+        }
+        function addPathTextItem(opts) {
+            const pathStyle = opts.preset ? TextDeform.presetStyle(opts.preset)
+                : { path_enabled: true, path_points: opts.points, path_closed: !!opts.closed, path_w: opts.w, path_h: opts.h };
+            if (!TextDeform.normalizePath(pathStyle)) return null;
+            const item = addTextItem(opts.placement, { text: opts.text, duration: opts.duration, style: { ...(opts.style || {}), ...pathStyle } });
+            item.transform.position_x = opts.center[0];
+            item.transform.position_y = opts.center[1];
+            return item;
+        }
+        function patchTextStyle(item, patch) { item.style = { ...item.style, ...patch }; }
         var EditingRuntime = {
+            addTextItem,
             beginHistoryBatch, renderAll, renderEditingTimeline: renderAll, renderPreviewOverlays, selectItem,
             getState: () => rtState,
             timelineDuration: () => 60,
@@ -136,6 +157,7 @@ function makeApp() {
                 mainClipSequenceSpans: () => [],
                 suspendRender, suspendHistory, upsertKeyframe,
                 addGeocodeItem, updateGeocodeItem, addShapeItemWithStyle, normalizeShapeStyle,
+                addPathTextItem, patchTextStyle,
                 renderStats: () => ({ renderAll: renderAllRuns, suspended: renderSuspendDepth }),
             },
         };
@@ -177,6 +199,7 @@ function makeApp() {
         }
         return { ok: false, status: 404, json: async () => ({ detail: `no route ${url}` }) };
     };
+    vm.runInContext(textDeformJs, sandbox, { filename: 'text-deform.js' });
     vm.runInContext(bridgeJs, sandbox, { filename: 'automation-bridge.js' });
     const call = (method, params) => sandbox.desktopEnv.handler(method, params);
     const waitJob = async (job) => {
@@ -220,6 +243,31 @@ async function partA() {
         const shapes = await app.call('catalog', { kind: 'shapes' });
         assert.ok(shapes.shape_types.includes('path'));
         ok('add_shape: một hình / cả lô một bước Hoàn tác, style chuẩn hoá, nối theo gap, chạy trong batch');
+    }
+
+    // ---- Chữ: style + warp + path trong MỘT lượt gọi
+    {
+        const app = makeApp();
+        const t = await app.call('add_text', { text: 'Xin chào', start: 2, style: { color: '#ff0000' }, warp: { type: 'arc', bend: 40 }, transform: { position_x: 120 } });
+        const item = app.state.editingItems[0];
+        assert.ok(t.item_id === item.id, JSON.stringify(t));
+        assert.strictEqual(item.style.warp_type, 'arc');
+        assert.strictEqual(item.style.warp_bend, 40);
+        assert.strictEqual(item.style.color, '#ff0000');
+        assert.strictEqual(app.sandbox.undoStack.length, 1, 'chữ + kiểu + warp + biến đổi = MỘT bước Hoàn tác');
+        const p = await app.call('add_text', { text: 'Quanh vòng', path: { preset: 'circle', x: 10, y: -20, offset: 25, flip: true, width: 600 } });
+        const pi = app.state.editingItems.find((i) => i.id === p.item_id);
+        assert.strictEqual(pi.style.path_enabled, true);
+        assert.deepStrictEqual([pi.style.path_offset, pi.style.path_flip, pi.style.path_w], [25, true, 600], 'tuỳ chọn đường + cỡ box ghi đúng');
+        assert.deepStrictEqual([pi.transform.position_x, pi.transform.position_y], [10, -20], 'tâm box đường');
+        await assert.rejects(app.call('add_text', { text: 'x', warp: { type: 'heart' } }), /warp.type/);
+        await assert.rejects(app.call('add_text', { text: 'x', path: { preset: 'zigzag' } }), /path.preset/);
+        await assert.rejects(app.call('add_text', { text: 'x', path: { points: [{ x: 0, y: 0 }] } }), /preset hoặc points/);
+        const plainText = await app.call('add_text', { text: 'Thường' });
+        assert.ok(plainText.item_id, 'add_text không tham số mới vẫn như cũ');
+        const cat = await app.call('catalog', { kind: 'text_warps' });
+        assert.ok(cat.warp_types.includes('twist') && cat.path_presets.some((x) => x.id === 'wave'));
+        ok('add_text: style + warp + path + biến đổi trong một lượt gọi / một bước Hoàn tác; giá trị lạ bị từ chối; catalog text_warps');
     }
 
     // ---- GeoCode

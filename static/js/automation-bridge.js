@@ -200,13 +200,7 @@
             return getState();
         },
 
-        add_text: ({ text, start, duration, track_id } = {}) => {
-            requireEditing();
-            if (typeof text !== 'string' || !text.trim()) throw new Error('"text" không được rỗng');
-            const placement = { start: Number.isFinite(Number(start)) ? Number(start) : undefined, trackId: track_id || undefined };
-            const add = need(window.EditingRuntime?.addTextItem, 'EditingRuntime.addTextItem');
-            return asOneUndoStep(() => itemResult(add(placement, { text, duration })));
-        },
+        add_text: (params = {}) => addTextBlock(params),
 
         save_project: async () => {
             if (!currentProjectPath) {
@@ -1069,6 +1063,13 @@
             }
             case 'voices':
                 return voicesCatalog();
+            case 'text_warps':
+                return {
+                    warp_types: (window.TextDeform?.WARP_TYPES || []).map((w) => w.id),
+                    warp: 'crabbycut_add_text warp {type, bend -100..100 (default 50), horizontal -100..100, vertical -100..100}; later: update_block style {warp_type, warp_bend, warp_h, warp_v} (warp_type "none" turns it off)',
+                    path_presets: (window.TextDeform?.PATH_PRESETS || []).map((p) => ({ id: p.id, width: p.w, height: p.h, closed: p.closed })),
+                    path: 'crabbycut_add_text path {preset | points [{x, y, ix?, iy?, ox?, oy?}] as 0..1 fractions of the width x height box (Pen model, Bezier handles relative to the point) + closed, width, height, x, y (box centre, px from frame centre), offset -100..100 (% of path length), align left|center|right, flip, shift (px)}; later: update_block style {path_offset, path_align, path_flip, path_shift, path_w, path_h, path_points, path_closed, path_enabled}',
+                };
             case 'shapes':
                 return {
                     shape_types: SHAPE_TYPES,
@@ -1076,7 +1077,7 @@
                     path: 'shape_type "path": path_points [{x, y, ix?, iy?, ox?, oy?, r?}] with x/y as 0..1 fractions of the width x height box, ix/iy/ox/oy Bezier handles relative to the point (same units), r corner radius px; path_closed true|false',
                 };
             default:
-                throw new Error('"kind" là một trong: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories, geocode, shapes, voices');
+                throw new Error('"kind" là một trong: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories, geocode, shapes, voices, text_warps');
         }
     }
 
@@ -1487,6 +1488,76 @@
             .then((result) => finish(job, 'complete', { progress: 100, message: 'Xong', result }))
             .catch((error) => finish(job, 'failed', { error: errorText(error) }));
         return job;
+    }
+
+    /* =====================================================================
+     * CHỮ: add_text nhận thêm kiểu chữ, biến dạng (warp) và chữ theo đường (path) — trọn một block
+     * chữ trong MỘT lượt gọi, MỘT bước Hoàn tác (trước đây: add_text + update_block + ... ).
+     * Warp/path là khoá phẳng trong style (static/js/text-deform.js) nên update_block { style }
+     * sửa được về sau như mọi thuộc tính chữ.
+     * ===================================================================== */
+    function warpStyleFrom(warp) {
+        if (!warp) return {};
+        if (warp === 'none' || warp.type === 'none') return { warp_type: 'none' };
+        const ids = (window.TextDeform?.WARP_TYPES || []).map((w) => w.id);
+        if (!ids.includes(warp.type)) throw new Error(`"warp.type" là none | ${ids.join(' | ')}`);
+        return {
+            warp_type: warp.type,
+            ...(warp.bend !== undefined ? { warp_bend: Number(warp.bend) } : {}),
+            ...(warp.horizontal !== undefined ? { warp_h: Number(warp.horizontal) } : {}),
+            ...(warp.vertical !== undefined ? { warp_v: Number(warp.vertical) } : {}),
+        };
+    }
+
+    function pathOptionStyle(path) {
+        const out = {};
+        if (path.offset !== undefined) out.path_offset = Number(path.offset);
+        if (path.align !== undefined) out.path_align = path.align;
+        if (path.flip !== undefined) out.path_flip = !!path.flip;
+        if (path.shift !== undefined) out.path_shift = Number(path.shift);
+        return out;
+    }
+
+    async function addTextBlock(params = {}) {
+        requireEditing();
+        const { text, start, duration, track_id } = params;
+        if (typeof text !== 'string' || !text.trim()) throw new Error('"text" không được rỗng');
+        const placement = { start: Number.isFinite(Number(start)) ? Number(start) : undefined, trackId: track_id || undefined };
+        const style = { ...(params.style && typeof params.style === 'object' ? params.style : {}), ...warpStyleFrom(params.warp) };
+        const path = params.path && typeof params.path === 'object' ? params.path : null;
+        if (path) {
+            const presets = (window.TextDeform?.PATH_PRESETS || []).map((p) => p.id);
+            if (path.preset !== undefined && !presets.includes(path.preset)) throw new Error(`"path.preset" là ${presets.join(' | ')}`);
+            if (path.preset === undefined && !(Array.isArray(path.points) && path.points.length >= 2)) {
+                throw new Error('"path" cần preset hoặc points (>= 2 đỉnh {x, y} theo tỉ lệ 0..1 của box width x height)');
+            }
+        }
+        return asOneUndoStep(async () => {
+            let item;
+            if (path) {
+                item = need(api().addPathTextItem, 'addPathTextItem')({
+                    preset: path.preset, points: path.points, closed: path.closed, w: path.width, h: path.height,
+                    text, duration, placement, style,
+                    center: [Number(path.x) || 0, Number(path.y) || 0],
+                });
+                if (!item) throw new Error('Không tạo được chữ theo đường (đường không hợp lệ?)');
+                // Mẫu đường mang sẵn dời/căn/phía/cỡ mặc định -> tuỳ chọn của lượt gọi vá SAU khi tạo.
+                const after = {
+                    ...pathOptionStyle(path),
+                    ...(path.preset !== undefined && path.width !== undefined ? { path_w: Number(path.width) } : {}),
+                    ...(path.preset !== undefined && path.height !== undefined ? { path_h: Number(path.height) } : {}),
+                };
+                if (Object.keys(after).length) api().patchTextStyle(item, after);
+            } else {
+                const add = need(window.EditingRuntime?.addTextItem, 'EditingRuntime.addTextItem');
+                item = add(placement, { text, duration, ...(Object.keys(style).length ? { style } : {}) });
+            }
+            const extra = {};
+            ['transform', 'keyframes', 'keyframe_mode', 'keyframe_time'].forEach((k) => { if (params[k] !== undefined) extra[k] = params[k]; });
+            if (Object.keys(extra).length) await updateBlock({ item_id: item.id, ...extra });
+            if (params.animation) await setAnimation({ item_id: item.id, ...params.animation });
+            return itemResult(api().findItem(item.id));
+        });
     }
 
     /* =====================================================================
