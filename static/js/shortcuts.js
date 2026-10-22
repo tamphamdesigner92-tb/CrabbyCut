@@ -85,6 +85,9 @@
         { display: _t('Alt + kéo block'), label: _t('Nhân bản block') },
         { display: _t('Alt + lăn chuột'), label: _t('Phóng to/thu nhỏ timeline') },
         { display: _t('Shift + lăn chuột'), label: _t('Hít playhead vào mốc block') },
+        { display: _t('Alt + Shift + lăn chuột'), label: _t('Cuộn dọc giữa các lane timeline') },
+        { display: _t('Lăn chuột trên cột tên lane'), label: _t('Cuộn dọc giữa các lane timeline') },
+        { display: _t('Giữ chuột giữa + kéo'), label: _t('Kéo khung nhìn timeline (dọc lẫn ngang)') },
         { display: _t('Shift / Alt + kéo số'), label: _t('Tinh chỉnh ×0.1 / tăng nhanh ×10 ở bảng thông số') },
     ];
 

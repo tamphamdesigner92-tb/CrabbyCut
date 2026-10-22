@@ -8,14 +8,19 @@
        nhãn và icon chuyển cảnh không phải tính lại — chỉ phần trống bị bớt đi.
        Vùng "thả vào GIỮA hai lane để tạo lane mới" vẫn rộng 8px như cũ: rowIndexFromClientY
        chỉ tính trúng lane khi con trỏ nằm trong THÂN block (bỏ phần đệm), nên dải trống
-       2 + 4 + 2 giữa hai block chính là vùng chèn. */
-    const LANE_GAP = 4;
-    const LANE_BLOCK_INSET = 2;
+       2 + 4 + 2 giữa hai block chính là vùng chèn.
+       SÁT HƠN NỮA (2026-10-22, người dùng yêu cầu): dự án nhiều lane khó làm việc, khe chỉ
+       cần đủ để phân biệt hai lane. Đệm 1px + khe 1px = 3px giữa hai block; lane thấp đi
+       đúng 2px (đệm bớt mỗi bên 1px) nên CHIỀU CAO BLOCK VẪN GIỮ NGUYÊN. Vùng chèn lane mới
+       không còn là dải trống nữa mà nới bằng LANE_INSERT_ZONE (xem rowIndexFromClientY). */
+    const LANE_GAP = 1;
+    const LANE_BLOCK_INSET = 1;
+    const LANE_INSERT_ZONE = 8;
     const LANE_TOP_PADDING = 30;
     // Lane overlay HÌNH (media = ảnh/video) cố ý THẤP HƠN lane chính: lane chính là
     // mạch chuyện, lane phủ chỉ là lớp chèn — cao bằng nhau thì mắt không phân được
     // đâu là trục chính. Block media 45 ≈ 2/3 block chính 74 (chốt 2026-08-12).
-    const LANE_HEIGHTS = { main: 62, media: 49, text: 32, shape: 32, vector: 32, audio: 40, adjust: 26 };
+    const LANE_HEIGHTS = { main: 60, media: 47, text: 30, shape: 30, vector: 30, audio: 38, adjust: 24 };
     const ASSET_KIND_ACCEPT = {
         media: '.mp4,.mov,.m4v,.webm,.png,.jpg,.jpeg,.webp,.svg',
         audio: '.mp3,.wav,.m4a,.aac',
@@ -5502,9 +5507,12 @@
         if (!frame) return -1;
         const y = timelineContentYFromClientY(clientY);
         const rows = visibleRows();
+        // Khe giữa hai block chỉ còn 3px -> gọt thêm mỗi mép thân block để vùng chèn vẫn
+        // rộng LANE_INSERT_ZONE như trước (thả trúng được bằng chuột thường).
+        const trim = Math.max(0, (LANE_INSERT_ZONE - (LANE_BLOCK_INSET * 2 + LANE_GAP)) / 2);
         for (let i = 0; i < rows.length; i += 1) {
             const top = laneBlockTop(laneRowTop(i, rows));
-            if (y >= top && y <= top + laneBlockHeight(rows[i])) return i;
+            if (y >= top + trim && y <= top + laneBlockHeight(rows[i]) - trim) return i;
         }
         return -1;
     }
@@ -5648,6 +5656,125 @@
 
     function assetThumbnailUrl(asset) {
         return asset?.thumbnail_url || asset?.url || '';
+    }
+
+    /* ===== DẢI THUMBNAIL NHIỀU KHUNG CỦA LANE CHÍNH (2026-10-22) =====
+     * Block lane chính trước đây chỉ có một dải ảnh tĩnh cao 8px (inset 28/22 của block 58px)
+     * và cùng MỘT ảnh cho mọi block. Nay giống CapCut: ảnh phủ phần trên block, mỗi ô là khung
+     * THẬT tại mốc nguồn của nó, lấy từ một sprite do /api/filmstrip trích từ temp_input.mp4.
+     * Dải dưới cùng (MAIN_WAVE_BAND) dành cho sóng âm, tên clip là nhãn nhỏ đè lên ảnh.
+     *
+     * HIỆU NĂNG: ô có bề rộng CỐ ĐỊNH theo chiều cao dải, nên số ô tăng theo bề rộng block.
+     * Chỉ dựng ô nằm trong timelineRenderWindow (cùng cơ chế ảo hoá block); cuộn ra khỏi
+     * vùng đó thì lượt dựng lại có sẵn sẽ dựng ô mới. Mọi ô dùng chung một ảnh nên trình
+     * duyệt chỉ giải mã một lần. */
+    const MAIN_WAVE_BAND = 18;
+    const MAIN_FILMSTRIP_MAX_TILES = 240;   // trần khi chưa có khung nhìn để ảo hoá
+    const MAIN_FILMSTRIP_POLL_MS = 700;
+    const MAIN_FILMSTRIP_MAX_POLLS = 180;
+    let mainFilmstrip = { url: '', status: 'idle', info: null, timer: null, polls: 0 };
+
+    function mainFilmstripRequestUrl() {
+        const version = typeof window.getMainPeaksVersion === 'function'
+            ? String(window.getMainPeaksVersion() || '')
+            : '';
+        const suffix = version ? `&v=${encodeURIComponent(version)}` : '';
+        return `${waveformApiBase()}/filmstrip?source=main${suffix}`;
+    }
+
+    function fetchMainFilmstrip(state) {
+        state.status = 'pending';
+        fetch(state.url, { cache: 'no-store' })
+            .then((res) => (res.ok ? res.json() : { status: 'error' }))
+            .then((data) => {
+                if (mainFilmstrip !== state) return;
+                if (data?.status === 'ready' && data.url && Number(data.cols) > 0 && Number(data.rows) > 0) {
+                    const img = new Image();
+                    img.onload = () => {
+                        if (mainFilmstrip !== state) return;
+                        const cols = Number(data.cols);
+                        const rows = Number(data.rows);
+                        state.info = {
+                            url: data.url,
+                            interval: Number(data.interval) || 1,
+                            count: Math.max(1, Number(data.count) || 1),
+                            cols,
+                            rows,
+                            tileW: img.naturalWidth / cols,
+                            tileH: img.naturalHeight / rows,
+                            image: img,   // giữ tham chiếu -> ảnh đã giải mã không bị bỏ
+                        };
+                        state.status = 'ready';
+                        renderEditingTimeline();
+                    };
+                    img.onerror = () => { if (mainFilmstrip === state) state.status = 'error'; };
+                    img.src = data.url;
+                    return;
+                }
+                if (data?.status === 'pending' && state.polls < MAIN_FILMSTRIP_MAX_POLLS) {
+                    state.polls += 1;
+                    state.timer = setTimeout(() => {
+                        state.timer = null;
+                        if (mainFilmstrip === state) fetchMainFilmstrip(state);
+                    }, MAIN_FILMSTRIP_POLL_MS);
+                    return;
+                }
+                state.status = 'error';
+            })
+            .catch(() => { if (mainFilmstrip === state) state.status = 'error'; });
+    }
+
+    // Thông tin sprite nếu đã sẵn sàng, null nếu chưa (lần đầu gọi thì bắt đầu tải).
+    function ensureMainFilmstrip() {
+        if (typeof fetch !== 'function') return null;
+        const url = mainFilmstripRequestUrl();
+        if (mainFilmstrip.url !== url) {
+            if (mainFilmstrip.timer) clearTimeout(mainFilmstrip.timer);
+            mainFilmstrip = { url, status: 'idle', info: null, timer: null, polls: 0 };
+        }
+        if (mainFilmstrip.status === 'idle') fetchMainFilmstrip(mainFilmstrip);
+        return mainFilmstrip.status === 'ready' ? mainFilmstrip.info : null;
+    }
+
+    /* Trả false khi sprite chưa có -> caller dùng dải ảnh tĩnh cũ thay thế. */
+    function appendMainFilmstrip(block, span, blockLeft, blockWidth) {
+        const info = ensureMainFilmstrip();
+        if (!info || !(info.tileW > 0) || !(info.tileH > 0)) return false;
+        // Block có viền 1px (border-box): dải nằm trong phần đệm, chừa MAIN_WAVE_BAND ở đáy.
+        const stripHeight = Math.max(12, laneBlockHeight('main') - 2 - MAIN_WAVE_BAND);
+        // Bề rộng ô NGUYÊN px và sprite co theo đúng bội số đó -> không lem viền ô kề bên.
+        const tileW = Math.max(16, Math.round(stripHeight * (info.tileW / info.tileH)));
+        const total = Math.max(1, Math.ceil(blockWidth / tileW));
+        const origin = blockLeft + 1;
+        const win = timelineRenderWindow;
+        let first = 0;
+        let last = total - 1;
+        if (win) {
+            first = Math.max(0, Math.floor((win.x0 - origin) / tileW));
+            last = Math.min(last, Math.ceil((win.x1 - origin) / tileW));
+        } else {
+            last = Math.min(last, MAIN_FILMSTRIP_MAX_TILES - 1);
+        }
+        const srcStart = Number(span.clip.start) || 0;
+        const srcSpan = Math.max(0, (Number(span.clip.end) || 0) - srcStart);
+        const parts = [];
+        for (let i = first; i <= last; i += 1) {
+            // Mốc nguồn ở GIỮA ô; khung k của sprite là mốc k × interval (fps lấy khung gần nhất).
+            const ratio = Math.min(1, ((i + 0.5) * tileW) / Math.max(1, blockWidth));
+            const frame = Math.max(0, Math.min(info.count - 1, Math.round((srcStart + ratio * srcSpan) / info.interval)));
+            const col = frame % info.cols;
+            const row = Math.floor(frame / info.cols);
+            parts.push(`<span class="editing-filmstrip-tile" style="left:${i * tileW}px;width:${tileW}px;`
+                + `background-position:${-col * tileW}px ${-row * stripHeight}px"></span>`);
+        }
+        const strip = document.createElement('div');
+        strip.className = 'editing-thumb-strip is-filmstrip';
+        strip.style.setProperty('--filmstrip-url', `url("${String(info.url).replace(/"/g, '%22')}")`);
+        strip.style.setProperty('--filmstrip-size', `${info.cols * tileW}px ${info.rows * stripHeight}px`);
+        strip.innerHTML = parts.join('');
+        block.appendChild(strip);
+        block.classList.add('has-audio');
+        return true;
     }
 
     function appendThumbStrip(block, url, hasAudio = false, asset = null) {
@@ -5929,8 +6056,9 @@
             label.appendChild(nameSpan);
             // Hàng tên chỉ hiện ở lane đủ cao (main 62 / media 49 / audio 40); lane 32px chỉ
             // còn hàng điều khiển, danh tính đã do badge V1/A1 đảm nhiệm. Tên 13 + khe 3 +
-            // nút 20 = 36px vừa lane audio 40px.
-            label.classList.toggle('has-name', laneHeight(row) >= 40);
+            // nút 20 = 36px vừa lane audio 40px. So theo chiều cao BLOCK (không đổi khi khe
+            // giữa lane thu hẹp) để đúng những lane cũ vẫn hiện tên.
+            label.classList.toggle('has-name', laneBlockHeight(row) >= 36);
             renderTrackControls(label, row, trackBadgeText(rows, row));
             label.addEventListener('dblclick', (event) => {
                 if (event.target?.closest?.('.editing-lane-icon-btn')) return;
@@ -5969,7 +6097,10 @@
             block.style.width = `${span.duration * zoomScale}px`;
             block.style.height = `${laneBlockHeight('main')}px`;
             block.appendChild(createBlockLabel(span.clip.text || _t('Clip {n}', { n: span.index + 1 })));
-            appendThumbStrip(block, mainThumbnailUrl(), true);
+            // Block Subsequence ẩn dải ảnh bằng CSS -> khỏi dựng ô filmstrip cho nó.
+            if (mainRowNestAsset(span.clip) || !appendMainFilmstrip(block, span, timelineX(span.start), span.duration * zoomScale)) {
+                appendThumbStrip(block, mainThumbnailUrl(), true);
+            }
             // Tay cầm trim 2 đầu — giống lane overlay. Lane chính xếp gạch liền mạch nên
             // trim là RIPPLE: đổi vùng nguồn (clip.start/clip.end) và mọi block sau dồn theo.
             if (!mainTrackLocked) {
@@ -6500,6 +6631,10 @@
         const x = left + inset;
         const w = Math.max(0, width - inset * 2);
         const mapRect = { x: left, w: width };
+        // Lane chính: dải sóng riêng ở đáy block, ngay dưới dải thumbnail (MAIN_WAVE_BAND).
+        if (kind === 'main') {
+            return { x, w, mapRect, y: top + height - MAIN_WAVE_BAND, h: MAIN_WAVE_BAND - 2 };
+        }
         if (kind === 'audio') {
             return { x, w, mapRect, y: top + WAVE_AUDIO_TOP, h: Math.max(6, height - WAVE_AUDIO_TOP - WAVE_AUDIO_BOTTOM) };
         }
@@ -6507,6 +6642,32 @@
             return { x, w, mapRect, y: top + height - WAVE_OVERLAY_BOTTOM - WAVE_OVERLAY_HEIGHT, h: WAVE_OVERLAY_HEIGHT };
         }
         return { x, w, mapRect, y: top + height - WAVE_MEDIA_BOTTOM - WAVE_MEDIA_HEIGHT, h: WAVE_MEDIA_HEIGHT };
+    }
+
+    /* SÓNG LANE CHÍNH VẼ THEO THANG dB + CHUẨN HOÁ THEO NGUỒN (kiểu CapCut).
+       Tuyến tính thì sóng lane chính hay "biến mất": phim có tiếng nhỏ (đỉnh trung bình chỉ
+       3-10% thang, đo trên dự án Full Test 2) chỉ cao dưới 1px trong dải 16px, hạ âm lượng
+       xuống 10% (-20 dB, thường gặp khi lồng tiếng đè lên) thì chỉ còn một vạch phẳng.
+         - dB: 0 dBFS = đầy dải, -MAIN_WAVE_DB_RANGE dB = 0 -> âm lượng 10% hạ ~42% chiều cao
+           chứ không còn 90%; vẫn thấy rõ chỗ to/nhỏ.
+         - Chuẩn hoá: đưa phân vị 98% của đỉnh nguồn lên 0 dBFS (chỉ phóng, tối đa ×8), tính
+           MỘT lần cho mỗi phiên bản nguồn. */
+    const MAIN_WAVE_DB_RANGE = 48;
+    let mainWaveNorm = { url: '', value: 1 };
+
+    function mainWaveNormalization(source) {
+        if (mainWaveNorm.url === source.url) return mainWaveNorm.value;
+        const entry = window.AudioWaveform.ensure(source.key, source.url);
+        if (!entry || entry.status !== 'ready' || !(entry.duration > 0)) return 1;
+        const cols = window.AudioWaveform.columns(source.key, 0, entry.duration, 1024);
+        if (!cols) return 1;
+        const peaks = [];
+        for (let i = 0; i < cols.count; i += 1) peaks.push(cols.values[i * 2]);
+        peaks.sort((a, b) => a - b);
+        const p98 = peaks[Math.min(peaks.length - 1, Math.floor(peaks.length * 0.98))];
+        const value = p98 > 0 ? Math.min(8, Math.max(1, 1 / p98)) : 1;
+        mainWaveNorm = { url: source.url, value };
+        return value;
     }
 
     // Độ mờ: khớp cảm giác của block (lane ẩn .28 / lane khoá tối đi) + mute thì nhạt hẳn.
@@ -6529,6 +6690,7 @@
             const laneH = laneBlockHeight('main');
             const mainMuted = isTrackMuted(mainTrack);
             const mainLocked = isTrackLocked(mainTrack);
+            const mainNorm = mainWaveNormalization(source);
             mainClipSequenceSpans().forEach((span) => {
                 if (span.duration <= 0) return;
                 const width = span.duration * zoomScale;
@@ -6537,13 +6699,14 @@
                     kind: 'media',
                     key: source.key,
                     url: source.url,
-                    rect: waveformStripRect('media', timelineX(span.start), laneTop, width, laneH),
+                    rect: waveformStripRect('main', timelineX(span.start), laneTop, width, laneH),
                     // Khoảng NGUỒN của block, KHÔNG suy từ span.duration (đó là thời gian
                     // sequence, đã chia tốc độ). Cùng một rect phủ khoảng nguồn dài/ngắn
                     // hơn -> sóng âm tự co dãn đúng theo tốc độ.
                     srcStart: Number(span.clip.start) || 0,
                     srcEnd: Number(span.clip.end) || 0,
-                    gain: ensureMainClipAudioVolume(span.clip) / 100,
+                    gain: (ensureMainClipAudioVolume(span.clip) / 100) * mainNorm,
+                    dbRange: MAIN_WAVE_DB_RANGE,
                     alpha: waveformAlpha({ muted: mainMuted, hiddenTrack: false, lockedTrack: mainLocked }),
                     ...WAVE_STYLE.media,
                 });
@@ -27131,6 +27294,40 @@
             /* Video overlay CÓ TIẾNG: dải phim nhường 19px ở đáy (khe 2px + dải sóng 14px + đáy 3px,
                xem WAVE_OVERLAY_* trong JS) — sóng âm có tầng riêng, không vẽ đè thumbnail nữa. */
             .editing-item-block.editing-media-block.has-audio .editing-thumb-strip { bottom: 19px; }
+            /* Block LANE CHÍNH kiểu CapCut: ảnh phủ trọn phần trên (không còn dải nhãn dày
+               28px ở trên + dải ảnh 8px), sóng âm ở dải đáy MAIN_WAVE_BAND, tên clip là nhãn
+               nhỏ nền tối đè lên ảnh. Bỏ lớp gradient tối ::after và độ mờ của dải ảnh để ảnh
+               nhìn rõ như CapCut. Selector 3 class để thắng cả lumen-skin.css. */
+            .editing-block.editing-main-block .editing-thumb-strip {
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: ${MAIN_WAVE_BAND}px;
+                border-radius: 0;
+                opacity: 1;
+                background-color: rgba(0,0,0,0.28);
+            }
+            .editing-block.editing-main-block:not(.is-nest)::after { background: none; }
+            .editing-thumb-strip.is-filmstrip { display: block; }
+            .editing-filmstrip-tile {
+                position: absolute;
+                top: 0;
+                bottom: 0;
+                background-image: var(--filmstrip-url);
+                background-size: var(--filmstrip-size);
+                background-repeat: no-repeat;
+                box-shadow: inset -1px 0 0 rgba(0,0,0,0.35);
+            }
+            .editing-block.editing-main-block:not(.is-nest) .editing-block-label {
+                top: 2px;
+                left: 3px;
+                max-width: calc(100% - 8px);
+                padding: 0 5px;
+                border-radius: 3px;
+                background: rgba(10,12,16,0.55);
+                font-size: 10.5px;
+                line-height: 15px;
+            }
             /* Sóng âm THẬT: 1 canvas phủ viewport, nằm TRONG #segmentsTrack.
                z-index 25 = trên MỌI trạng thái của block, dưới dải chuyển cảnh (26) và rail
                nhãn lane (30) -> tự bị rail che, không cần tự clip. pointer-events none để

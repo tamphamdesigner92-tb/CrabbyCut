@@ -3468,6 +3468,120 @@ function queueAudioPeaks(rawPath) {
   return job;
 }
 
+/* =============================================================================
+ * DẢI THUMBNAIL NHIỀU KHUNG (filmstrip) cho lane chính ở Editing — kiểu CapCut
+ *
+ * Trước đây block lane chính chỉ có MỘT ảnh tĩnh (thumbnail của video đầu thư viện) cho
+ * mọi block, nên không nhìn ra block nào là cảnh nào. Nay trích một tấm SPRITE: các khung
+ * cách đều `interval` giây xếp lưới `cols` cột, mỗi ô cao FILMSTRIP_TILE_HEIGHT px.
+ * Frontend chỉ việc dịch background-position tới ô của thời điểm cần vẽ.
+ *
+ * NHANH NHỜ `-skip_frame nokey`: chỉ giải mã khung khoá rồi `fps` lấy khung gần nhất cho
+ * từng mốc — đo 2026-10-22: phim 4K AV1 10 phút ra 202 khung trong 0,67 s. Độ chính xác
+ * theo khoảng cách khung khoá là đủ cho ảnh xem nhanh 70px. Nguồn nào giải mã kiểu đó hụt
+ * thì thử lại giải mã đủ.
+ *
+ * CACHE: temp_uploads/filmstrips/<sha1(path|size|mtime|version)>.jpg + .json — key gồm
+ * size+mtime nên dựng lại temp_input.mp4 là tự ra tấm mới. Chạy TUẦN TỰ từng job một để
+ * không giành CPU với ASR/export.
+ * ========================================================================== */
+const FILMSTRIP_DIR = path.join(TEMP_DIR, 'filmstrips');
+const FILMSTRIP_FORMAT_VERSION = 1;
+const FILMSTRIP_TILE_HEIGHT = 72;     // ô hiển thị ~40px -> đủ nét ở màn Retina
+const FILMSTRIP_COLUMNS = 20;
+const FILMSTRIP_MAX_FRAMES = 600;     // trần ô: tấm 2560×2160 với nguồn 16:9
+const FILMSTRIP_MIN_INTERVAL = 1;     // giây — dày hơn không thấy khác ở mức zoom thường
+const FILMSTRIP_MAX_ATTEMPTS = 2;
+const filmstripJobs = new Map();
+let filmstripChain = Promise.resolve();
+
+function filmstripPublicState(job) {
+  if (!job) return { status: 'error' };
+  if (job.status !== 'ready') return { status: job.status === 'error' ? 'error' : 'pending', error: job.error || null };
+  return {
+    status: 'ready',
+    url: `/temp_uploads/filmstrips/${job.key}.jpg`,
+    ...job.meta,
+  };
+}
+
+async function buildFilmstrip(job) {
+  const duration = mediaDurationSeconds(job.source);
+  if (!(duration > 0)) throw new Error('không đo được thời lượng nguồn');
+  const interval = Math.max(FILMSTRIP_MIN_INTERVAL, duration / FILMSTRIP_MAX_FRAMES);
+  const count = Math.max(1, Math.ceil(duration / interval));
+  const cols = Math.min(FILMSTRIP_COLUMNS, count);
+  const rows = Math.max(1, Math.ceil(count / cols));
+  let tonemap = '';
+  // Nguồn HDR -> nén dải về SDR trước khi trích (đường zscale CPU, xem HDR_TONEMAP_ZSCALE).
+  try { tonemap = sourceIsHdr(job.source) ? HDR_TONEMAP_ZSCALE : ''; } catch (_) { tonemap = ''; }
+  const vf = [tonemap, `fps=1/${interval.toFixed(6)}`, `scale=-2:${FILMSTRIP_TILE_HEIGHT}`, `tile=${cols}x${rows}`]
+    .filter(Boolean).join(',');
+  const partPath = path.join(FILMSTRIP_DIR, `${job.key}.part.jpg`);
+  const encode = (keyframesOnly) => runProcess('ffmpeg', [
+    '-v', 'error', '-y',
+    ...(keyframesOnly ? ['-skip_frame', 'nokey'] : []),
+    '-i', job.source, '-an', '-sn', '-dn',
+    '-vf', vf, '-frames:v', '1', '-q:v', '5', partPath,
+  ]);
+  const written = () => fs.existsSync(partPath) && fs.statSync(partPath).size > 0;
+  try {
+    await encode(true);
+  } catch (_) { /* thử giải mã đủ bên dưới */ }
+  if (!written()) await encode(false);
+  // ffmpeg trả 0 mà không ghi gì là ca có thật (xem scaleImageTo) — kiểm file, đừng tin mã thoát.
+  if (!written()) throw new Error('ảnh dải thumbnail rỗng');
+  fs.renameSync(partPath, job.path);
+  job.meta = { interval, count, cols, rows, duration };
+  fs.writeFileSync(job.metaPath, JSON.stringify(job.meta));
+}
+
+// Bảo đảm có dải thumbnail cho 1 nguồn video. Trả state ĐỒNG BỘ, không chặn request.
+function queueFilmstrip(rawPath) {
+  const source = resolveAllowedSourcePath(rawPath, ALLOWED_VIDEO_EXTENSIONS);
+  if (!source) return null;
+  let stat;
+  try {
+    stat = fs.statSync(source);
+  } catch (_) {
+    return null;
+  }
+  const key = sha1Text(`${source}|${stat.size}|${Math.trunc(stat.mtimeMs)}|f${FILMSTRIP_FORMAT_VERSION}`).slice(0, 24);
+  const imagePath = path.join(FILMSTRIP_DIR, `${key}.jpg`);
+  const metaPath = path.join(FILMSTRIP_DIR, `${key}.json`);
+  const existing = filmstripJobs.get(key);
+  if (existing) {
+    if (existing.status === 'queued' || existing.status === 'running') return existing;
+    if (existing.status === 'ready' && fs.existsSync(imagePath)) return existing;
+    if (existing.status === 'error' && existing.attempts >= FILMSTRIP_MAX_ATTEMPTS) return existing;
+  } else if (fs.existsSync(imagePath) && fs.existsSync(metaPath)) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+      const ready = { key, source, path: imagePath, metaPath, status: 'ready', meta, attempts: 0 };
+      filmstripJobs.set(key, ready);
+      return ready;
+    } catch (_) { /* meta hỏng -> dựng lại */ }
+  }
+  fs.mkdirSync(FILMSTRIP_DIR, { recursive: true });
+  const job = existing || { key, source, path: imagePath, metaPath, attempts: 0 };
+  job.status = 'queued';
+  job.error = null;
+  job.attempts = (job.attempts || 0) + 1;
+  filmstripJobs.set(key, job);
+  filmstripChain = filmstripChain.then(async () => {
+    job.status = 'running';
+    try {
+      await buildFilmstrip(job);
+      job.status = 'ready';
+    } catch (error) {
+      job.status = 'error';
+      job.error = cleanInlineText(error?.message || error, 300);
+      recordProjectError('filmstrip', error, { source: job.source });
+    }
+  });
+  return job;
+}
+
 // Prewarm nhiều asset cùng lúc (upload/import/library): bỏ qua thứ không có tiếng.
 function prewarmAudioPeaksForAssets(assets) {
   for (const asset of (assets || [])) {
@@ -6615,6 +6729,23 @@ function createApp() {
         return res.status(500).json({ status: 'error', ...peaksJobPublicState(job) });
       }
       return res.status(202).json({ status: 'pending', ...peaksJobPublicState(job) });
+    } catch (error) {
+      httpError(res, 500, error);
+    }
+  });
+
+  /* Dải thumbnail nhiều khung (xem khối "DẢI THUMBNAIL NHIỀU KHUNG").
+   * Tham số như /api/audio-peaks: source=main HOẶC path= HOẶC url=.
+   * Luôn trả 200 JSON {status: ready|pending|error, url, interval, count, cols, rows}:
+   * thiếu dải ảnh không phải lỗi của người dùng (block vẫn có ảnh tĩnh thay thế). */
+  app.get('/api/filmstrip', (req, res) => {
+    try {
+      const requested = String(req.query.source || '') === 'main'
+        ? path.join(TEMP_DIR, 'temp_input.mp4')
+        : (req.query.path || req.query.url || '');
+      const job = queueFilmstrip(requested);
+      res.set('Cache-Control', 'no-store');
+      return res.json(job ? filmstripPublicState(job) : { status: 'error', error: 'not_found' });
     } catch (error) {
       httpError(res, 500, error);
     }
