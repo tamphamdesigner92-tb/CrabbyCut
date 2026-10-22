@@ -12,7 +12,9 @@
  *      (batch đó giải mã nguồn bằng CPU) — mọi batch đi GPU;
  *   4. đồ thị GPU lỗi (CRABBYCUT_EXPORT_GPU_TEST_FAIL=1) -> batch đó chạy lại bằng đồ thị CPU, bản xuất
  *      trùng từng khung với bản CPU;
- *   5. nguồn NVDEC không giải mã được (H.264 10-bit) -> giải mã CPU, tải lên dạng p010.
+ *   5. nguồn NVDEC không giải mã được (H.264 10-bit) -> giải mã CPU, tải lên dạng p010;
+ *   6. ngân sách VRAM: batch GPU mang ước lượng VRAM, mặc định vẫn chạy song song; ngân sách 1 MB
+ *      (CRABBYCUT_EXPORT_VRAM_MB) -> lượt GPU nối tiếp nhau, bản xuất không đổi.
  * Dự án A: nguồn 1280×720 25 khung/s KHÔNG gắn nhãn màu (crabgeo đọc theo bt709 như UntaggedColorFix),
  * sequence 640×360 ở nhịp lẻ của "Bin Tom" (1218000/40601); clip co 50% / 37% đặt lệch lẻ / 80% cắt một
  * phần / 65%; ảnh tĩnh có alpha ở toạ độ lẻ; video lớp phủ 150% độ mờ 60%.
@@ -232,6 +234,27 @@ function scenarioA(assets) {
   assert.deepStrictEqual(p.bad.map((r) => `${r[0]}:${r[1].toFixed(1)}`), [],
     `khung GPU khác CPU (dưới ${MIN_PSNR} dB)`);
   checkSequences(gpuOut, 'GPU');
+
+  /* NGÂN SÁCH VRAM (EstimateBatchGpuVramMb / GpuVramBudgetMb): mỗi batch GPU mang ước lượng VRAM, lượt
+   * xuất đọc VRAM trống; dự án nhỏ này vừa ngân sách nên các batch vẫn chạy CHỒNG nhau. Ngân sách 1 MB
+   * (CRABBYCUT_EXPORT_VRAM_MB) -> lượt GPU chạy NỐI TIẾP (chờ VRAM), bản xuất không đổi. */
+  const overlapping = (rs) => rs.some((x, i) => rs.some((y, j) => i !== j
+    && x.start_ms >= 0 && y.start_ms >= 0 && x.start_ms < y.start_ms + y.run_ms && y.start_ms < x.start_ms + x.run_ms));
+  assert.ok(runs.every((r) => r.vram_est_mb > 0), `mỗi batch GPU phải có vram_est_mb: ${JSON.stringify(runs)}`);
+  assert.ok(gpu.timing.vram_budget_mb > 0, `phải đọc được VRAM trống (nvidia-smi): ${gpu.timing.vram_budget_mb}`);
+  assert.ok(overlapping(runs), 'dự án nhỏ vừa VRAM: các batch GPU phải chạy cùng lúc');
+  const serialOut = path.join(dir, 'gpu_serial.mp4');
+  const serial = exportOnce(dir, source, timelineFile, serialOut, { CRABBYCUT_EXPORT_GPU: '1', CRABBYCUT_EXPORT_VRAM_MB: '1' });
+  const serialRuns = videoRuns(serial.timing);
+  assert.strictEqual(serial.timing.vram_budget_mb, 1, 'CRABBYCUT_EXPORT_VRAM_MB phải đặt ngân sách');
+  assert.ok(serialRuns.length === runs.length && serialRuns.every((r) => r.gpu && !r.gpu_fallback), 'ngân sách nhỏ: vẫn mọi batch GPU');
+  assert.ok(!overlapping(serialRuns), `ngân sách 1 MB: lượt GPU không được chồng nhau: ${JSON.stringify(serialRuns.map((r) => [r.start_ms, r.run_ms]))}`);
+  assert.ok(/Chờ VRAM trống/.test(serial.stdout), 'ngân sách nhỏ: phải báo đang chờ VRAM');
+  const s = frameHashes(serialOut);
+  if (!(s.length === b.length && s.every((h, i) => h === b[i]))) {
+    const q = framePsnr(serialOut, gpuOut, 'gpu_serial');
+    assert.ok(q.count === b.length && q.worst[1] >= 60, `xuất nối tiếp phải trùng bản song song (tệ nhất ${q.worst[1]} dB)`);
+  }
 
   // Đồ thị GPU hỏng -> batch GPU chạy lại bằng đồ thị CPU, bản xuất trùng bản CPU.
   const cacheFile = path.join(dir, 'gpu_probe_cache.txt');

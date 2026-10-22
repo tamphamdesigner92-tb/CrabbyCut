@@ -1503,6 +1503,8 @@ struct ExportRunTiming {
   bool gpu = false;           // lượt chạy bằng đồ thị GPU (mục 1.21)
   bool gpuFallback = false;   // đồ thị GPU lỗi -> chạy lại bằng đồ thị CPU
   bool cacheHit = false;      // dùng lại batch trong cache render (mục 1.13), không chạy ffmpeg
+  double vramEstMb = 0.0;     // VRAM ước lượng của bản GPU (EstimateBatchGpuVramMb)
+  double startMs = -1.0;      // mốc khởi chạy ffmpeg tính từ đầu lượt xuất (lần chạy cuối); -1 = không chạy
 };
 
 struct ExportTimingLog {
@@ -1520,6 +1522,7 @@ struct ExportTimingLog {
   // Cache render (mục 1.13): thời gian tính khoá, số batch cất vào cache sau lượt này.
   double cacheKeyMs = 0.0;
   size_t cacheStored = 0;
+  double vramBudgetMb = 0.0;   // ngân sách VRAM của lượt GPU song song (GpuVramBudgetMb); 0 = không giới hạn
   std::vector<ExportRunTiming> runs;
 };
 
@@ -1577,6 +1580,7 @@ std::string ExportTimingJson(const std::string& encoder) {
       << ",\"gpu_probe_cached\":" << (g_exportTiming.gpuProbeCached ? "true" : "false")
       << ",\"cache_key_ms\":" << g_exportTiming.cacheKeyMs
       << ",\"cache_stored\":" << g_exportTiming.cacheStored
+      << ",\"vram_budget_mb\":" << g_exportTiming.vramBudgetMb
       << ",\"runs\":[";
   for (size_t i = 0; i < g_exportTiming.runs.size(); i++) {
     const ExportRunTiming& run = g_exportTiming.runs[i];
@@ -1594,6 +1598,8 @@ std::string ExportTimingJson(const std::string& encoder) {
         << ",\"cpu_retry\":" << (run.cpuRetry ? "true" : "false")
         << ",\"gpu\":" << (run.gpu ? "true" : "false")
         << ",\"gpu_fallback\":" << (run.gpuFallback ? "true" : "false")
+        << ",\"vram_est_mb\":" << run.vramEstMb
+        << ",\"start_ms\":" << run.startMs
         << ",\"cache_hit\":" << (run.cacheHit ? "true" : "false") << "}";
   }
   out << "]}";
@@ -5314,6 +5320,135 @@ bool BatchGpuEligible(const std::vector<ExportInterval>& intervals, size_t offse
   return true;
 }
 
+/* ===== VRAM CỦA MỘT BATCH GPU (2026-10-23) =====
+ *
+ * Mỗi lớp phủ trên đồ thị GPU giữ bộ nhớ CUDA RIÊNG suốt cả lượt ffmpeg, kể cả khi chỉ hiện vài
+ * giây: pool của `hwupload` cấp sẵn 2 khung (initial_pool_size = 2), `crabgeo_cuda` giữ 4 mặt phẳng
+ * float cỡ ảnh ra + bộ đệm lượt ngang (ensure_buffer, không bao giờ trả) và pool khung ra. Ảnh RGBA
+ * là ~30 byte thô mỗi điểm ảnh ra. Batch 180 s có 100+ phụ đề nên VRAM của
+ * một lượt tỉ lệ với TỔNG cỡ ảnh lớp phủ — đo trên "Full Test" (phụ đề box 3400 px, PNG ~3460×153):
+ * 3,2–3,7 GB một lượt, trong khi bản phụ đề khít chữ chỉ ~1,1 GB.
+ * Trước đây RunBatchJobs chạy tới 4 lượt GPU cùng lúc (ExportParallelWorkers chỉ xét RAM) -> GTX
+ * 1060 6 GB cần ~13 GB: WDDM phân trang VRAM (2 khung/s), lượt khác lỗi CUDA rồi chạy lại bằng CPU.
+ * Nay ước lượng VRAM từng batch ở đây và RunBatchJobs chỉ khởi chạy thêm lượt GPU khi tổng ước lượng
+ * còn nằm trong VRAM trống (GpuVramBudgetMb). Hệ số hiệu chỉnh bằng số đo từng batch chạy một mình
+ * (đỉnh "GPU Process Memory\Dedicated Usage", 27 batch của Full Test và phim 39 phút cũ, 3840×1646,
+ * GTX 1060): VRAM ≈ 150 MB + 19 byte × điểm ảnh khung + Σ lớp phủ (1,37 × byte thô các cấp phát
+ * − 2,25 MB); ước lượng / đo = 0,99–1,16 — cố ý dư nhẹ, vì ước thiếu là tràn VRAM còn ước dư chỉ
+ * mất bớt song song. Làm tròn cấp phát 2 MiB (đoán ban đầu) ước dư tới 2,7× với ảnh nhỏ: CUDA trên
+ * WDDM gom các cấp phát nhỏ. Số đo + cách đo: docs/BAN_GIAO_RENDER_GTX1060_VRAM.md. */
+constexpr double kVramMiB = 1024.0 * 1024.0;
+constexpr double kVramRawFactor = 1.37;           // VRAM thật / byte thô của các cấp phát lớp phủ
+constexpr double kVramPerOverlayMb = 2.25;        // bớt mỗi lớp phủ (hệ số khớp, xem trên)
+constexpr double kVramBaseMb = 150.0;             // ngữ cảnh CUDA + phiên NVENC
+constexpr double kVramBaseBytesPerPixel = 19.0;   // khung lane chính, crabblend, bề mặt NVENC
+
+// Cỡ ảnh PNG đọc thẳng từ khối IHDR (8 byte chữ ký + 4 độ dài + "IHDR" + rộng + cao, big-endian).
+bool ReadPngSize(const std::string& path, int& width, int& height) {
+  std::ifstream in(path, std::ios::binary);
+  unsigned char head[24] = {};
+  if (!in.read(reinterpret_cast<char*>(head), sizeof(head))) return false;
+  if (head[0] != 0x89 || head[1] != 'P' || head[2] != 'N' || head[3] != 'G'
+      || head[12] != 'I' || head[13] != 'H' || head[14] != 'D' || head[15] != 'R') return false;
+  const auto be32 = [&](int at) {
+    return (static_cast<unsigned>(head[at]) << 24) | (static_cast<unsigned>(head[at + 1]) << 16)
+         | (static_cast<unsigned>(head[at + 2]) << 8) | static_cast<unsigned>(head[at + 3]);
+  };
+  width = static_cast<int>(be32(16));
+  height = static_cast<int>(be32(20));
+  return width > 0 && height > 0 && width < 100000 && height < 100000;
+}
+
+// Tệp của khung đầu chuỗi ("…frame_%05d.png" + seqStartFrame) — chỉ dạng %0Nd mà backend ghi.
+std::string ImageSequenceFirstFile(const ExportOverlay& overlay) {
+  const std::string& pattern = overlay.assetPath;
+  const size_t pct = pattern.rfind('%');
+  if (pct == std::string::npos || pct + 3 >= pattern.size() || pattern[pct + 1] != '0'
+      || !std::isdigit(static_cast<unsigned char>(pattern[pct + 2])) || pattern[pct + 3] != 'd') return pattern;
+  const int digits = pattern[pct + 2] - '0';
+  std::string number = std::to_string(std::max(0, overlay.seqStartFrame));
+  if (static_cast<int>(number.size()) < digits) number.insert(0, digits - number.size(), '0');
+  return pattern.substr(0, pct) + number + pattern.substr(pct + 4);
+}
+
+bool ProbeVideoSize(const std::string& path, int& width, int& height) {
+  static std::map<std::string, std::pair<int, int>> cache;
+  auto hit = cache.find(path);
+  if (hit == cache.end()) {
+    const std::string text = CommandOutput({"ffprobe", "-v", "error", "-select_streams", "v:0",
+                                            "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", path});
+    int w = 0, h = 0;
+    if (std::sscanf(text.c_str(), "%dx%d", &w, &h) != 2) w = h = 0;
+    hit = cache.emplace(path, std::make_pair(w, h)).first;
+  }
+  width = hit->second.first;
+  height = hit->second.second;
+  return width > 0 && height > 0;
+}
+
+/* Byte VRAM một lớp phủ giữ trong lượt ffmpeg GPU, theo đúng các chỗ cấp phát (WriteVisualOverlayFilter
+ * Gpu / WriteVisualOverlayFilter nhánh CpuYuv, CpuCanvas). Không đọc được cỡ nguồn -> coi như khung
+ * sequence (ước lượng dư thì chỉ mất song song, thiếu thì tràn VRAM). */
+double OverlayGpuVramBytes(const ExportOverlay& overlay, const ExportSettings& settings) {
+  const double seqW = settings.width > 0 ? settings.width : 1920;
+  const double seqH = settings.height > 0 ? settings.height : 1080;
+  const OverlayGpu mode = OverlayGpuModeFor(overlay, settings);
+  const bool image = OverlayIsImageLike(overlay) || OverlayIsImageSequence(overlay);
+  int inW = 0, inH = 0;
+  const bool known = image ? ReadPngSize(OverlayIsImageSequence(overlay) ? ImageSequenceFirstFile(overlay) : overlay.assetPath, inW, inH)
+                           : ProbeVideoSize(overlay.assetPath, inW, inH);
+  if (!known) { inW = static_cast<int>(seqW); inH = static_cast<int>(seqH); }
+  const double fit = overlay.fitScale > 0.0 ? overlay.fitScale : 1.0;
+  const double s = std::max(0.01, (overlay.scale / 100.0) * fit);
+  // Cỡ ảnh ra của crabgeo: max(2, ceil(iw*S/2)*2) + 4 (lề trong suốt).
+  const double ow = std::max(2.0, std::ceil(inW * s / 2.0) * 2.0) + 4.0;
+  const double oh = std::max(2.0, std::ceil(inH * s / 2.0) * 2.0) + 4.0;
+  const auto yuva = [](double w, double h) { return w * h * 2.5; };
+  const auto rgba = [](double w, double h) { return w * h * 4.0; };
+  // crabgeo nguồn RGB(A): 4 mặt phẳng float ở lưới ra + bộ đệm lượt ngang (ra × hàng nguồn) + 2 khung ra.
+  const auto crabgeoRgb = [&](double srcH, double w, double h) {
+    return 4.0 * w * h * 4.0 + w * srcH * 4.0 + 2.0 * yuva(w, h);
+  };
+  double raw = 0.0;
+  switch (mode) {
+    case OverlayGpu::Native:
+      if (image) raw = 2.0 * rgba(inW, inH) + crabgeoRgb(inH, ow, oh);
+      // Video: NVDEC giữ bề mặt giải mã (~16 khung) hoặc hwupload 2 khung yuva420p; crabgeo YUV(A).
+      else raw = (overlay.gpuNvdec ? 16.0 * inW * inH * 1.5 : 2.0 * yuva(inW, inH))
+               + 4.0 * ow * oh * 4.0 + ow * inH * 4.0 + 3.0 * yuva(ow, oh);
+      break;
+    case OverlayGpu::CpuYuv:
+      raw = 2.0 * yuva(ow, oh);   // chuỗi CPU ra yuva420p đã đệm -> hwupload -> crabblend
+      break;
+    case OverlayGpu::CpuCanvas:
+      raw = 2.0 * rgba(seqW, seqH) + crabgeoRgb(seqH, seqW, seqH);   // khung trong suốt cỡ sequence
+      break;
+    default:
+      return 0.0;
+  }
+  return std::max(0.5 * kVramMiB, kVramRawFactor * raw - kVramPerOverlayMb * kVramMiB);
+}
+
+/* Phần cố định của một lượt GPU: ngữ cảnh CUDA + phiên NVENC + khung lane chính (pool hwupload/NVDEC
+ * của từng input nguồn, khung ra crabgeo, bản chép của crabblend, bề mặt NVENC). */
+double BatchGpuBaseVramBytes(const ExportSettings& settings, size_t sourceInputs) {
+  const double seqW = settings.width > 0 ? settings.width : 1920;
+  const double seqH = settings.height > 0 ? settings.height : 1080;
+  // Mỗi input nguồn thêm (dải nguồn, mục 1.1) có pool giải mã/tải lên riêng: ~8 khung yuv420p.
+  const double extraInputs = static_cast<double>(std::max<size_t>(1, sourceInputs) - 1);
+  return kVramBaseMb * kVramMiB + seqW * seqH * (kVramBaseBytesPerPixel + extraInputs * 8.0 * 1.5);
+}
+
+double EstimateBatchGpuVramMb(const std::vector<ExportOverlay>& overlays, const ExportSettings& settings,
+                              size_t sourceInputs) {
+  double bytes = BatchGpuBaseVramBytes(settings, sourceInputs);
+  for (const auto& overlay : overlays) {
+    if (!OverlayIsVisual(overlay) || overlay.type == "text" || overlay.assetInputIndex < 0) continue;
+    bytes += OverlayGpuVramBytes(overlay, settings);
+  }
+  return bytes / kVramMiB;
+}
+
 void WriteOverlayAudioFilter(std::ofstream& script, const ExportOverlay& overlay, std::vector<std::string>& audioLabels) {
   const int inputIndex = 1 + overlay.assetInputIndex;
   const std::string id = std::to_string(overlay.index);
@@ -6447,6 +6582,7 @@ struct BatchJob {
    * bộ mã hoá lùi về CPU (libx264 không nhận khung CUDA) — xem UseCpuGraph. */
   bool gpu = false;
   fs::path gpuScriptPath;
+  double vramMb = 0.0;   // VRAM ước lượng của bản GPU (EstimateBatchGpuVramMb); 0 = không tính
   std::function<std::vector<std::string>(const EncoderPlan&, const std::string&)> buildCmdCpu;
   /* CACHE RENDER (mục 1.13): batch hình + lượt tiếng của lượt xuất nhiều batch (`cacheable`). RunBatchJobs
    * tính `cacheKey` theo đúng dòng lệnh sắp chạy; trùng thì `cacheHit` = tệp trong cache, không chạy
@@ -6741,6 +6877,8 @@ bool PrepareExportBatch(
   job.gpu = gpu;
   job.timing.gpu = gpu;
   job.gpuScriptPath = gpu ? gpuScriptPath : fs::path();
+  job.vramMb = gpu ? EstimateBatchGpuVramMb(overlays, settings, std::max<size_t>(1, ranges.seekTo.size())) : 0.0;
+  job.timing.vramEstMb = job.vramMb;
   if (gpu) job.buildCmd = makeBuildCmd(true);
   else job.buildCmd = job.buildCmdCpu;
   return true;
@@ -6837,6 +6975,41 @@ bool RenderCacheLookup(BatchJob& job, const EncoderPlan& plan, const std::string
   return true;
 }
 
+/* NGÂN SÁCH VRAM (MB) cho các lượt GPU chạy cùng lúc của một RunBatchJobs: VRAM TRỐNG lúc bắt đầu
+ * (nvidia-smi — đã trừ phần app khác đang giữ: giao diện CrabbyCut, trình duyệt, DWM) trừ một khoảng
+ * dự phòng. Đọc lại ở mỗi lần gọi vì lượt chạy lại (GPU lỗi -> CPU, encoder lỗi -> lần lượt) đến sau
+ * khi các lượt trước đã nhả VRAM. Nhiều GPU: lấy VRAM trống NHỎ NHẤT (thiết bị `cuda=cu` là thiết bị 0
+ * theo thứ tự của CUDA, không chắc trùng thứ tự của nvidia-smi). Không đọc được -> 0 = không giới hạn
+ * (hành vi cũ). Env CRABBYCUT_EXPORT_VRAM_MB=N đặt thẳng ngân sách (0 = tắt giới hạn). */
+double GpuVramBudgetMb(const std::vector<BatchJob*>& jobs) {
+  bool anyGpu = false;
+  for (const BatchJob* job : jobs) anyGpu = anyGpu || (job->gpu && job->vramMb > 0.0);
+  if (!anyGpu) return 0.0;
+  if (const char* env = std::getenv("CRABBYCUT_EXPORT_VRAM_MB")) {
+    if (*env) {
+      const double value = std::max(0.0, std::atof(env));
+      g_exportTiming.vramBudgetMb = value;
+      return value;
+    }
+  }
+  const std::string text = CommandOutput({"nvidia-smi", "--query-gpu=memory.total,memory.used",
+                                          "--format=csv,noheader,nounits"});
+  double budget = -1.0;
+  std::istringstream lines(text);
+  std::string line;
+  while (std::getline(lines, line)) {
+    double total = 0.0, used = 0.0;
+    if (std::sscanf(line.c_str(), "%lf, %lf", &total, &used) != 2 || !(total > 0.0)) continue;
+    const double reserve = std::max(256.0, total * 0.05);
+    const double free = std::max(0.0, total - used - reserve);
+    budget = budget >= 0.0 ? std::min(budget, free) : free;
+  }
+  if (budget < 0.0) return 0.0;   // không đọc được -> không giới hạn
+  g_exportTiming.vramBudgetMb = budget;
+  // VRAM đã gần đầy: ngân sách tối thiểu = chỉ một lượt GPU mỗi lúc (vramBlocks luôn cho lượt đầu).
+  return std::max(1.0, budget);
+}
+
 std::vector<int> RunBatchJobs(std::vector<BatchJob*>& jobs, const EncoderPlan& plan, size_t concurrency,
                               const std::string& labelSuffix) {
   std::vector<int> codes(jobs.size(), 0);
@@ -6850,23 +7023,49 @@ std::vector<int> RunBatchJobs(std::vector<BatchJob*>& jobs, const EncoderPlan& p
   };
   concurrency = std::max<size_t>(1, concurrency);
 #ifdef _WIN32
-  struct Active { size_t index; HANDLE process; ExportClock::time_point started; };
+  struct Active { size_t index; HANDLE process; ExportClock::time_point started; double vramMb; };
   std::vector<Active> active;
+  /* NGÂN SÁCH VRAM cho lượt GPU (xem EstimateBatchGpuVramMb): lượt GPU kế tiếp chỉ khởi chạy khi
+   * tổng ước lượng của các lượt GPU đang chạy cộng nó còn vừa VRAM trống; không vừa thì CHỜ một lượt
+   * xong (giữ thứ tự batch). Không có lượt GPU nào đang chạy thì luôn cho chạy — batch tự nó vượt
+   * ngân sách vẫn phải render. Chỉ nhánh Windows: đồ thị CUDA không có trên macOS. */
+  const double vramBudgetMb = GpuVramBudgetMb(jobs);
+  std::vector<char> cacheMissKnown(jobs.size(), 0);   // đã tra cache (trượt) trước khi phải chờ VRAM
+  const auto vramBlocks = [&](const BatchJob& job) {
+    if (!job.gpu || vramBudgetMb <= 0.0 || job.vramMb <= 0.0) return false;
+    double used = 0.0;
+    bool anyGpu = false;
+    for (const auto& a : active) {
+      if (a.vramMb > 0.0) { used += a.vramMb; anyGpu = true; }
+    }
+    return anyGpu && used + job.vramMb > vramBudgetMb;
+  };
   size_t next = 0;
   while (next < jobs.size() || !active.empty()) {
     while (next < jobs.size() && active.size() < concurrency) {
       BatchJob& job = *jobs[next];
       const std::string runLabel = job.timing.label + labelSuffix;
-      prefetchBefore(job);
-      if (RenderCacheLookup(job, plan, runLabel)) { codes[next++] = 0; continue; }
+      if (!cacheMissKnown[next]) {
+        prefetchBefore(job);
+        if (RenderCacheLookup(job, plan, runLabel)) { codes[next++] = 0; continue; }
+        cacheMissKnown[next] = 1;
+      }
+      if (vramBlocks(job)) {
+        if (cacheMissKnown[next] == 1) {
+          cacheMissKnown[next] = 2;
+          Emit("progress", "Chờ VRAM trống để render " + job.progressText + "...");
+        }
+        break;
+      }
       const std::vector<std::string> cmd = JobCommandForRun(job, plan, runLabel);
       Emit("progress", "Đang render " + job.progressText
                        + (concurrency > 1 ? " — " + std::to_string(active.size() + 1) + " lượt chạy cùng lúc" : "") + "...");
       int immediate = 0;
       const auto started = ExportClock::now();
+      job.timing.startMs = MsSince(g_exportTiming.started);
       HANDLE process = SpawnIn(cmd, job.tempDir, immediate);
       if (process) {
-        active.push_back({next, process, started});
+        active.push_back({next, process, started, job.gpu ? job.vramMb : 0.0});
       } else if (immediate != 0) {
         codes[next] = immediate;
       } else {
@@ -6918,6 +7117,7 @@ std::vector<int> RunBatchJobs(std::vector<BatchJob*>& jobs, const EncoderPlan& p
       Emit("progress", "Đang render " + job.progressText
                        + (concurrency > 1 ? " — " + std::to_string(active.size() + 1) + " lượt chạy cùng lúc" : "") + "...");
       const auto started = ExportClock::now();
+      job.timing.startMs = MsSince(g_exportTiming.started);
       const pid_t pid = SpawnIn(cmd, job.tempDir);
       if (pid > 0) {
         active.push_back({next, pid, started});

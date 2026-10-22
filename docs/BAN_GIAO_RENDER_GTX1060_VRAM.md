@@ -1,4 +1,4 @@
-# Bàn giao: Full Test xuất rất chậm trên GTX 1060 — tràn VRAM do chạy song song (2026-10-23)
+# Bàn giao: Full Test xuất rất chậm trên GTX 1060 — tràn VRAM do chạy song song (2026-10-23, đã sửa)
 
 ## Câu hỏi
 
@@ -39,15 +39,48 @@ Bằng chứng nằm ở `test_temp/bench_export/fulltest_feat/` của worktree
 `.claude/worktrees/render-perf-gtx1060-slow-bdd140` (payload ghi lại, filter script, timing.json) và
 `reports/perf_export_forever_inside_full_main_vram_20261022165716.json` ở checkout chính.
 
-## Hướng sửa (chưa làm — chờ người dùng chọn)
+## Đã sửa: hướng A — xếp lượt GPU theo VRAM (người dùng chọn 2026-10-23)
 
-- **A. Giới hạn số lượt GPU song song theo VRAM** trong sidecar: ước lượng VRAM mỗi batch từ cỡ ảnh
-  lớp phủ + base, đọc VRAM trống, xếp lượt sao cho tổng ≤ ~85%; không dùng chỗ của lượt tiếng cho
-  batch GPU khi VRAM chật. Tự động cho mọi dự án, không đổi hình.
-- **B. Nhanh:** card ≤ 8 GB thì mặc định 1 lượt GPU. Đơn giản (Full Test 502 s) nhưng dự án nhẹ chậm
-  đi (phim cũ 377 s với 4 lượt).
-- **C. Chỉ đổi kiểu phụ đề** (box tự co theo chữ): VRAM ~một nửa, nhưng đổi hình (mất thanh nền
-  ngang khung) và lỗi vẫn chờ dự án khác.
+Ba hướng đã đưa ra: (A) xếp lượt theo VRAM, (B) card ≤ 8 GB chỉ 1 lượt GPU, (C) đổi kiểu phụ đề.
+Người dùng chọn A. Mã ở `native/sidecar/core_process.cpp`:
+
+- `EstimateBatchGpuVramMb` (đặt ngay sau `BatchGpuEligible`): VRAM một batch GPU =
+  150 MB + 19 byte × điểm ảnh khung + Σ lớp phủ max(0,5 MB, 1,37 × byte thô − 2,25 MB). Byte thô
+  theo đúng các cấp phát của bộ lọc: ảnh RGBA = 2 khung `hwupload` (4 B/px nguồn) + `crabgeo_cuda`
+  4 mặt phẳng float (16 B/px ra) + bộ đệm lượt ngang + 2 khung ra yuva420p; video NVDEC/hwupload,
+  CpuYuv, CpuCanvas (khung trong suốt cỡ sequence) tính riêng. Cỡ ảnh đọc từ IHDR của PNG (khung đầu
+  với chuỗi khung), video qua ffprobe.
+- `GpuVramBudgetMb`: VRAM trống từ `nvidia-smi` (đã trừ app khác đang giữ) trừ dự phòng
+  max(256 MB, 5%). Không đọc được = không giới hạn (như cũ). `CRABBYCUT_EXPORT_VRAM_MB=N` đặt tay
+  (0 = tắt).
+- `RunBatchJobs` (nhánh Windows): lượt GPU kế tiếp chỉ khởi chạy khi tổng ước lượng của các lượt GPU
+  đang chạy cộng nó còn vừa ngân sách; không thì chờ một lượt xong (giữ thứ tự batch, báo "Chờ VRAM
+  trống…"). Không có lượt GPU nào chạy thì luôn cho chạy. Lượt tiếng, batch CPU không bị chặn. Tra
+  cache render chỉ một lần cho mỗi batch kể cả khi phải chờ.
+- timing.json thêm `vram_budget_mb`, mỗi lượt thêm `vram_est_mb` + `start_ms` (mốc khởi chạy).
+
+**Hiệu chỉnh hệ số:** chạy riêng từng batch GPU (28 batch: Full Test + phim cũ, 3840×1646) tới hết,
+lấy đỉnh `\GPU Process Memory(pid_*)\Dedicated Usage`. Mô hình "làm tròn mỗi cấp phát 2 MiB" ước dư
+tới 2,7× với ảnh nhỏ (CUDA trên WDDM gom cấp phát nhỏ) nên bỏ; mô hình tuyến tính trên khớp
+ước lượng / đo = **0,99–1,16** trên 27 batch (batch có video Subsequence khớp bằng phần tính video).
+Phần cố định chỉ đo ở khung 4K — cỡ khung khác (1080p, dọc) là ngoại suy theo điểm ảnh.
+
+**Số đo sau sửa** (phát lại payload, GTX 1060, cấu hình mặc định — không ép số lượt; "sidecar" =
+thời gian sidecar trong timing.json):
+
+| Dự án | Trước | Sau (lượt 1 / lượt 2) | Ghi chú |
+| --- | --- | --- | --- |
+| Full Test (feat) | tràn VRAM: 2 khung/s, batch lỗi CUDA → lùi CPU; ép 1 lượt: 502 s | **425,0 / 437,5 s** | 14/14 batch GPU, 0 lùi CPU; 1–3 lượt GPU cùng lúc tuỳ cỡ batch; VRAM đỉnh 5.526/6.144 MB |
+| Phim 39 phút cũ | main hôm nay 361 s | **378,5 / 371,4 s** | lịch y hệt main: 4 lượt cùng lúc, 0 lần chờ VRAM; chênh nằm trong dao động giữa các lượt |
+
+**Test:** `tests/scripts/export_gpu.js` dự án A thêm mục 6 — mỗi batch có `vram_est_mb`, đọc được
+ngân sách, mặc định các batch vẫn chạy chồng nhau; ngân sách 1 MB thì không chồng nhau, có dòng
+"Chờ VRAM", bản xuất trùng bản song song. Đột biến tắt phép chặn -> test đỏ đúng chỗ. Cùng qua:
+export_parallel, export_batch_time_varying, export_render_cache, export_yuv_composite,
+export_many_overlays, export_seq_tail, export_source_ranges, wiggle_styles.
+`export_overlay_tail` và `export_distort_video` lỗi `HTTP 404` ở bước backend trả tệp — lỗi CÓ SẴN
+trên mã feat chưa sửa (đã build lại mã gốc để kiểm), cùng lỗi làm `bench_export` báo thất bại ở bước
+tải về sau khi xuất xong; chưa điều tra.
 
 ## Phát hiện phụ
 
