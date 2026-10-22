@@ -2464,5 +2464,22 @@
   "Dựng Subsequence \"{name}\" thất bại: {error}": "Rendering Subsequence \"{name}\" failed: {error}",
   "Tạo Subsequence (Nest) từ các block đang chọn": "Create a Subsequence (Nest) from the selected blocks",
   "Đã dựng xong Subsequence.": "Subsequence rendered.",
-  "Trong Subsequence không có lane chính — thả video lên một lane video.": "A Subsequence has no main lane — drop the video on a video lane."
+  "Trong Subsequence không có lane chính — thả video lên một lane video.": "A Subsequence has no main lane — drop the video on a video lane.",
+  "Trục": "Axis",
+  "X và Y": "X and Y",
+  "Chỉ X": "X only",
+  "Chỉ Y": "Y only",
+  "Đều hai trục": "Uniform (both axes)",
+  "Wiggle – {name}": "Wiggle – {name}",
+  "Tần số (lần/giây)": "Frequency (per second)",
+  "Biên độ": "Amplitude",
+  "Octaves": "Octaves",
+  "Amp Multiplier": "Amp Multiplier",
+  "Random Seed": "Random Seed",
+  "Seed ngẫu nhiên": "Random seed",
+  "Wiggle (rung lắc liên tục)": "Wiggle (continuous shake)",
+  "Rung suốt block, chồng lên hiệu ứng Vào/Ra và keyframe — như wiggle() của After Effects.": "Shakes for the whole block, on top of In/Out animations and keyframes — like After Effects' wiggle().",
+  "Vị trí": "Position",
+  "Thu phóng": "Scale",
+  "Độ mờ": "Opacity"
 }

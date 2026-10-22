@@ -191,6 +191,208 @@
         return easing;
     }
 
+    /* ---- WIGGLE (kiểu After Effects: Animation Presets › Behaviors › Wiggle) ----
+     * Rung lắc LIÊN TỤC suốt block, CHỒNG lên In/Out và keyframe (như wiggle() của AE
+     * cộng lên giá trị thuộc tính). Bốn hiệu ứng bật/tắt riêng, mỗi cái một bộ tham số
+     * giống AE: Tần số (lần/giây), Biên độ, Octaves, Amp Multiplier, Random Seed.
+     *
+     * Dữ liệu nằm TRONG item.animation (animation.wiggle = { position|scale|rotation|
+     * opacity: {...} }) chứ không phải field riêng của item: nhiều chỗ gọi engine bằng
+     * pseudo-item { animation, duration } (clip lane chính, auto-SFX...) — field riêng
+     * sẽ rơi mất ở những chỗ đó.
+     *
+     * NHIỄU = tổng các sóng sin có tần số/pha lấy từ seed (không phải nhiễu Perlin như AE):
+     * đó là thứ DUY NHẤT vừa trông ngẫu nhiên vừa viết được thành biểu thức FFmpeg, nên
+     * preview, chuỗi khung bake (ảnh/chữ/shape) và bản xuất VIDEO ra cùng một chuyển
+     * động — test so khớp (tests/scripts/wiggle.js). Mỗi octave có HAI sóng lệch tần số
+     * (tỉ lệ vô tỉ) để không lặp chu kỳ thấy được. Chuẩn hoá tổng trọng số = 1 nên
+     * |nhiễu| ≤ 1 -> Biên độ là biên TỐI ĐA, giống AE.
+     *
+     * Ánh xạ kênh (amp = Biên độ, n = nhiễu ∈ [-1, 1]):
+     *   position : dx/dy += amp·n (px sequence; axis 'xy' | 'x' | 'y')
+     *   scale    : scale ×= 1 + amp/100·n (đều hai trục, hoặc tách trục khi uniform=false)
+     *   rotation : rotate += amp·n (độ)
+     *   opacity  : opacity ×= 1 − amp/100·(0.5 + 0.5n) — chỉ mờ đi, chạy trong [1−amp, 1]
+     *              (AE cộng ±amp rồi kẹp 100% nên nửa thời gian đứng ở 100%; ở đây mượt). */
+    const WIGGLE_TYPES = ['position', 'scale', 'rotation', 'opacity'];
+    const WIGGLE_DEFAULTS = {
+        position: { freq: 2, amp: 30 },
+        scale: { freq: 2, amp: 10 },
+        rotation: { freq: 2, amp: 10 },
+        opacity: { freq: 3, amp: 50 },
+    };
+    const WIGGLE_AMP_MAX = { position: 2000, scale: 100, rotation: 360, opacity: 100 };
+    const WIGGLE_FREQ_MIN = 0.1;
+    const WIGGLE_FREQ_MAX = 20;
+    const WIGGLE_OCTAVES_MAX = 4;
+    const WIGGLE_SEED_MAX = 9999;
+    const WIGGLE_AXES = ['xy', 'x', 'y'];
+    // Mỗi KÊNH một "muối" để vị trí X, Y, xoay... không rung cùng nhịp dù chung seed.
+    const WIGGLE_SALT = { px: 1, py: 2, sx: 3, sy: 4, rot: 5, op: 6 };
+
+    function normalizeWiggleFx(type, raw) {
+        const d = WIGGLE_DEFAULTS[type];
+        const r = raw && typeof raw === 'object' ? raw : {};
+        const out = {
+            enabled: r.enabled === true,
+            freq: clampNumber(r.freq, WIGGLE_FREQ_MIN, WIGGLE_FREQ_MAX, d.freq),
+            amp: clampNumber(r.amp, 0, WIGGLE_AMP_MAX[type], d.amp),
+            octaves: Math.round(clampNumber(r.octaves, 1, WIGGLE_OCTAVES_MAX, 1)),
+            amp_mult: clampNumber(r.amp_mult, 0, 1, 0.5),
+            seed: Math.round(clampNumber(r.seed, 0, WIGGLE_SEED_MAX, 1)),
+        };
+        if (type === 'position') out.axis = WIGGLE_AXES.includes(r.axis) ? r.axis : 'xy';
+        if (type === 'scale') out.uniform = r.uniform !== false;
+        return out;
+    }
+
+    // null nếu không có gì; ngược lại CHỈ gồm các loại có mặt trong dữ liệu (giữ cả loại
+    // đang tắt để bật lại vẫn còn tham số cũ).
+    function normalizeWiggle(raw) {
+        if (!raw || typeof raw !== 'object') return null;
+        const out = {};
+        WIGGLE_TYPES.forEach((type) => {
+            if (raw[type] && typeof raw[type] === 'object') out[type] = normalizeWiggleFx(type, raw[type]);
+        });
+        return Object.keys(out).length ? out : null;
+    }
+
+    function wiggleFxActive(fx) {
+        return !!(fx && fx.enabled && fx.amp > 0);
+    }
+
+    function hasActiveWiggle(wiggle) {
+        return !!wiggle && WIGGLE_TYPES.some((type) => wiggleFxActive(wiggle[type]));
+    }
+
+    // PRNG tất định (mulberry32) — cùng seed + muối luôn ra cùng chuỗi số.
+    function wiggleRng(seed, salt) {
+        let a = ((Number(seed) || 0) * 7919 + salt * 104729 + 0x9e3779b9) >>> 0;
+        return () => {
+            a = (a + 0x6d2b79f5) >>> 0;
+            let x = a;
+            x = Math.imul(x ^ (x >>> 15), x | 1);
+            x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
+            return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+
+    /* Các sóng thành phần của MỘT kênh: [{ w, k, ph }] với giá trị = Σ w·sin(k·t + ph).
+     * Tần số AE = số "điểm đích ngẫu nhiên" mỗi giây — mắt thấy ~một nửa số chu kỳ, nên
+     * sóng chính chạy freq/2 chu kỳ/giây. Octave o: tần số ×2^o, trọng số ×amp_mult^o. */
+    function wiggleWaves(fx, salt) {
+        const rng = wiggleRng(fx.seed, salt);
+        const waves = [];
+        let total = 0;
+        for (let o = 0; o < fx.octaves; o += 1) {
+            const wo = Math.pow(fx.amp_mult, o);
+            [[0.5, 0.62], [0.81, 0.38]].forEach(([base, wj]) => {
+                const cycles = fx.freq * Math.pow(2, o) * base * (0.85 + 0.3 * rng());
+                const w = wo * wj;
+                waves.push({ w, k: 2 * Math.PI * cycles, ph: 2 * Math.PI * rng() });
+                total += w;
+            });
+        }
+        return total > 0 ? waves.map((v) => ({ ...v, w: v.w / total })) : [];
+    }
+
+    function wiggleNoiseAt(waves, t) {
+        let n = 0;
+        for (let i = 0; i < waves.length; i += 1) n += waves[i].w * Math.sin(waves[i].k * t + waves[i].ph);
+        return n;
+    }
+
+    // Cùng nhiễu dưới dạng biểu thức FFmpeg theo LOCALT. 6 chữ số thập phân: k·t với
+    // t tới vài phút vẫn lệch pha < 1e-3 rad.
+    function wiggleNoiseExpr(waves) {
+        const g = (n) => (Number(n) || 0).toFixed(6);
+        return `(${waves.map((v) => `${g(v.w)}*sin(${g(v.k)}*LOCALT+${g(v.ph)})`).join('+') || '0'})`;
+    }
+
+    /* Phần đóng góp của wiggle tại t (giây cục bộ): { dx, dy, sx, sy, rot, op } hoặc null
+     * nếu không có wiggle nào đang bật. sx/sy/op là HỆ SỐ NHÂN, dx/dy/rot là SỐ CỘNG. */
+    function wiggleStateAt(wiggle, t) {
+        if (!hasActiveWiggle(wiggle)) return null;
+        const time = Number(t) || 0;
+        const ch = (fx, salt) => wiggleNoiseAt(wiggleWaves(fx, salt), time);
+        const out = { dx: 0, dy: 0, sx: 1, sy: 1, rot: 0, op: 1 };
+        const pos = wiggle.position;
+        if (wiggleFxActive(pos)) {
+            if (pos.axis !== 'y') out.dx = pos.amp * ch(pos, WIGGLE_SALT.px);
+            if (pos.axis !== 'x') out.dy = pos.amp * ch(pos, WIGGLE_SALT.py);
+        }
+        const sc = wiggle.scale;
+        if (wiggleFxActive(sc)) {
+            out.sx = Math.max(0.01, 1 + (sc.amp / 100) * ch(sc, WIGGLE_SALT.sx));
+            out.sy = sc.uniform ? out.sx : Math.max(0.01, 1 + (sc.amp / 100) * ch(sc, WIGGLE_SALT.sy));
+        }
+        const rot = wiggle.rotation;
+        if (wiggleFxActive(rot)) out.rot = rot.amp * ch(rot, WIGGLE_SALT.rot);
+        const op = wiggle.opacity;
+        if (wiggleFxActive(op)) {
+            out.op = Math.min(1, Math.max(0, 1 - (op.amp / 100) * (0.5 + 0.5 * ch(op, WIGGLE_SALT.op))));
+        }
+        return out;
+    }
+
+    /* Biểu thức FFmpeg (LOCALT) cho từng kênh, KHỚP wiggleStateAt; kênh không rung -> null.
+     * { x, y, sx, sy, rot, op } — op là HỆ SỐ NHÂN 0..1 của độ mờ. */
+    function wiggleFfmpegExprs(wiggle) {
+        if (!hasActiveWiggle(wiggle)) return null;
+        const g = (n) => (Number(n) || 0).toFixed(6);
+        const ch = (fx, salt) => wiggleNoiseExpr(wiggleWaves(fx, salt));
+        const out = { x: null, y: null, sx: null, sy: null, rot: null, op: null };
+        const pos = wiggle.position;
+        if (wiggleFxActive(pos)) {
+            if (pos.axis !== 'y') out.x = `(${g(pos.amp)}*${ch(pos, WIGGLE_SALT.px)})`;
+            if (pos.axis !== 'x') out.y = `(${g(pos.amp)}*${ch(pos, WIGGLE_SALT.py)})`;
+        }
+        const sc = wiggle.scale;
+        if (wiggleFxActive(sc)) {
+            out.sx = `max(0.01,1+${g(sc.amp / 100)}*${ch(sc, WIGGLE_SALT.sx)})`;
+            out.sy = sc.uniform ? out.sx : `max(0.01,1+${g(sc.amp / 100)}*${ch(sc, WIGGLE_SALT.sy)})`;
+        }
+        const rot = wiggle.rotation;
+        if (wiggleFxActive(rot)) out.rot = `(${g(rot.amp)}*${ch(rot, WIGGLE_SALT.rot)})`;
+        const op = wiggle.opacity;
+        if (wiggleFxActive(op)) {
+            out.op = `clip(1-${g(op.amp / 100)}*(0.5+0.5*${ch(op, WIGGLE_SALT.op)}),0,1)`;
+        }
+        return out;
+    }
+
+    // Biểu thức độ mờ (đơn vị %, như keyframe opacity) = cơ sở × hệ số wiggle; null nếu
+    // không rung độ mờ. baseExpr = biểu thức keyframe opacity, hoặc null -> dùng staticPct.
+    // Dùng cho VIDEO (block video/GeoCode/clip lane chính): độ mờ của nó xuất bằng
+    // keyframe_expr.opacity_expr, còn ảnh/chữ/shape đã bake độ mờ vào chuỗi khung.
+    function wiggleOpacityFfmpegExpr(anim, baseExpr, staticPct) {
+        const a = normalizeAnimation(anim);
+        const ex = a && wiggleFfmpegExprs(a.wiggle);
+        if (!ex || !ex.op) return null;
+        const base = baseExpr ? `(${baseExpr})` : `(${(Number.isFinite(Number(staticPct)) ? Number(staticPct) : 100).toFixed(4)})`;
+        return `(${base}*${ex.op})`;
+    }
+
+    // Áp wiggle LÊN TRÊN trạng thái In/Out/hold. Không có wiggle -> trả nguyên state.
+    function applyWiggleToState(state, wiggle, t) {
+        if (!state || state.hidden) return state;
+        const wg = wiggleStateAt(wiggle, t);
+        if (!wg) return state;
+        const sx = (state.scaleX != null ? state.scaleX : 1) * wg.sx;
+        const sy = (state.scaleY != null ? state.scaleY : 1) * wg.sy;
+        return {
+            ...state,
+            hidden: false,
+            opacityMul: Math.min(1, Math.max(0, (state.opacityMul != null ? state.opacityMul : 1) * wg.op)),
+            dx: (Number(state.dx) || 0) + wg.dx,
+            dy: (Number(state.dy) || 0) + wg.dy,
+            scaleX: Math.max(0, sx),
+            scaleY: Math.max(0, sy),
+            scaleMul: Math.max(0, sx),
+            rotate: (Number(state.rotate) || 0) + wg.rot,
+        };
+    }
+
     function normalizeSide(side) {
         const type = side && EFFECT_VALUES.has(side.type) ? side.type : 'none';
         if (type === 'none') return { type: 'none', duration: 0.4, delay: 0, easing: 'ease-in-out' };
@@ -208,8 +410,10 @@
         if (!anim || typeof anim !== 'object') return null;
         const inn = normalizeSide(anim.in);
         const out = normalizeSide(anim.out);
-        if (inn.type === 'none' && out.type === 'none') return null;
-        return { in: inn, out };
+        const wiggle = normalizeWiggle(anim.wiggle);
+        if (inn.type === 'none' && out.type === 'none' && !hasActiveWiggle(wiggle)) return null;
+        // Không có wiggle -> object y hệt trước khi có Wiggle (không thêm khoá rỗng).
+        return wiggle ? { in: inn, out, wiggle } : { in: inn, out };
     }
 
     function hasAnimation(item) {
@@ -286,12 +490,13 @@
             const v = EASINGS[effectiveEasing(w.anim.out.type, w.anim.out.easing)](1 - p);
             state = EFFECTS[w.anim.out.type](v, metrics);
         }
-        if (!state) return { ...IDENTITY }; // vùng hold: trạng thái tĩnh
+        // vùng hold: trạng thái tĩnh (+ wiggle nếu có)
+        if (!state) return applyWiggleToState({ ...IDENTITY }, w.anim.wiggle, t);
 
         // scaleX/scaleY: effect có thể trả trục riêng (flip) hoặc scaleMul (đồng đều cũ)
         const sx = state.scaleX != null ? state.scaleX : (state.scaleMul != null ? state.scaleMul : 1);
         const sy = state.scaleY != null ? state.scaleY : (state.scaleMul != null ? state.scaleMul : 1);
-        return {
+        return applyWiggleToState({
             hidden: false,
             opacityMul: Math.min(1, Math.max(0, state.opacityMul != null ? state.opacityMul : 1)),
             dx: Number(state.dx) || 0,
@@ -301,7 +506,7 @@
             scaleMul: Math.max(0, sx), // tương thích cũ (đồng đều = scaleX)
             rotate: Number(state.rotate) || 0,
             charFrac: Math.min(1, Math.max(0, state.charFrac != null ? state.charFrac : 1)),
-        };
+        }, w.anim.wiggle, t);
     }
 
     // true nếu state khác trạng thái tĩnh (caller có thể bỏ qua ghi DOM khi tĩnh)
@@ -416,18 +621,22 @@
 
         // x/y luôn gửi (kể cả toàn 0): `anim_x_expr` là cờ "overlay này có hoạt ảnh" của
         // cả backend lẫn sidecar — bỏ đi thì mất luôn cửa trập fade.
+        // WIGGLE chồng lên: dịch/xoay CỘNG, thu phóng NHÂN — đúng như applyWiggleToState.
+        const wg = wiggleFfmpegExprs(w.anim.wiggle) || {};
+        const plus = (a, b) => (b ? (a && a !== '0' ? `(${a})+${b}` : b) : a);
+        const times = (a, b) => (b ? (a ? `(${a})*${b}` : b) : a);
         const out = {
-            x_expr: channelExpr(axisTerm('dx'), '0') || '0',
-            y_expr: channelExpr(axisTerm('dy'), '0') || '0',
+            x_expr: plus(channelExpr(axisTerm('dx'), '0') || '0', wg.x),
+            y_expr: plus(channelExpr(axisTerm('dy'), '0') || '0', wg.y),
             in_start: inHas ? w.inStart : 0,
             in_dur: inHas ? fadeSpan(inSpec, inDur) : 0,
             // Cửa trập Out phải CẠN đúng lúc cửa sổ Out kết thúc -> co về cuối cửa sổ
             out_start: outHas ? w.outEnd - fadeSpan(outSpec, outDur) : 0,
             out_dur: outHas ? fadeSpan(outSpec, outDur) : 0,
         };
-        const sxExpr = channelExpr(scaleTerm('sx'), '1');
-        const syExpr = channelExpr(scaleTerm('sy'), '1');
-        const rotExpr = channelExpr(rotTerm, '0');
+        const sxExpr = times(channelExpr(scaleTerm('sx'), '1'), wg.sx);
+        const syExpr = times(channelExpr(scaleTerm('sy'), '1'), wg.sy);
+        const rotExpr = plus(channelExpr(rotTerm, '0'), wg.rot);
         if (sxExpr) out.scale_x_expr = sxExpr;
         if (syExpr) out.scale_y_expr = syExpr;
         if (rotExpr) out.rot_expr = rotExpr;
@@ -686,6 +895,7 @@
     const THUMB_IN_DUR = 0.55;
     const THUMB_OUT_DUR = 0.55;
     const THUMB_HOLD = 0.45;
+    const THUMB_WIGGLE_DUR = 2;
 
     // spec = { side: 'in'|'out'|'combo', type, easing }. Trả null cho 'none'/không hợp lệ
     // (ô "Không" -> chỉ vẽ tile tĩnh + huy hiệu gạch chéo).
@@ -693,6 +903,16 @@
         const none = { type: 'none', duration: 0.4, delay: 0, easing: 'ease-in-out' };
         const type = spec && spec.type;
         if (!type || type === 'none') return null;
+        // Ô Wiggle: rung liên tục, biên độ đo theo khung ô minh hoạ (128×72).
+        if (spec.side === 'wiggle') {
+            if (!WIGGLE_DEFAULTS[type]) return null;
+            const THUMB_AMP = { position: 9, scale: 22, rotation: 22, opacity: 85 };
+            return {
+                animation: { in: { ...none }, out: { ...none },
+                    wiggle: { [type]: { enabled: true, freq: 3, amp: THUMB_AMP[type], seed: 3 } } },
+                duration: THUMB_WIGGLE_DUR,
+            };
+        }
         if (spec.side === 'combo') {
             const anim = applyCombo(type, THUMB_IN_DUR + THUMB_OUT_DUR, 0.5);
             if (!anim) return null;
@@ -719,6 +939,8 @@
      * trượt thì lệch, xoay thì nghiêng, đánh máy thì hụt chữ). */
     const THUMB_STATIC_VIS = 0.45;
     function thumbStaticTime(spec, pseudo) {
+        // Wiggle không có "lưng chừng": lấy một mốc đang lệch rõ khỏi trạng thái nghỉ.
+        if (spec && spec.side === 'wiggle') return 0.37;
         const w = resolveWindows(pseudo);
         if (!w) return 0;
         const useOut = spec.side === 'out';
@@ -904,6 +1126,20 @@
         volumeKeyframeFfmpegExpr,
         EASINGS,
         normalizeAnimation,
+        // Wiggle (kiểu AE) — xem khối chú thích WIGGLE.
+        WIGGLE_TYPES,
+        WIGGLE_DEFAULTS,
+        WIGGLE_AMP_MAX,
+        WIGGLE_FREQ_MIN,
+        WIGGLE_FREQ_MAX,
+        WIGGLE_OCTAVES_MAX,
+        WIGGLE_SEED_MAX,
+        normalizeWiggle,
+        normalizeWiggleFx,
+        hasActiveWiggle,
+        wiggleStateAt,
+        wiggleFfmpegExprs,
+        wiggleOpacityFfmpegExpr,
         resolveWindows,
         hasAnimation,
         animationStateAt,

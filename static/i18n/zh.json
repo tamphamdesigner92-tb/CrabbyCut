@@ -2164,5 +2164,22 @@
   "Dựng Subsequence \"{name}\" thất bại: {error}": "渲染子序列「{name}」失败：{error}",
   "Tạo Subsequence (Nest) từ các block đang chọn": "用所选片段创建子序列（嵌套）",
   "Đã dựng xong Subsequence.": "子序列渲染完成。",
-  "Trong Subsequence không có lane chính — thả video lên một lane video.": "子序列没有主轨道 — 请将视频放到视频轨道上。"
+  "Trong Subsequence không có lane chính — thả video lên một lane video.": "子序列没有主轨道 — 请将视频放到视频轨道上。",
+  "Trục": "轴",
+  "X và Y": "X 和 Y",
+  "Chỉ X": "仅 X",
+  "Chỉ Y": "仅 Y",
+  "Đều hai trục": "两轴统一",
+  "Wiggle – {name}": "抖动 – {name}",
+  "Tần số (lần/giây)": "频率（次/秒）",
+  "Biên độ": "幅度",
+  "Octaves": "倍频",
+  "Amp Multiplier": "幅度倍增",
+  "Random Seed": "随机种子",
+  "Seed ngẫu nhiên": "随机种子",
+  "Wiggle (rung lắc liên tục)": "抖动（持续晃动）",
+  "Rung suốt block, chồng lên hiệu ứng Vào/Ra và keyframe — như wiggle() của After Effects.": "在整个片段持续晃动，叠加在入场/出场动画和关键帧之上 — 类似 After Effects 的 wiggle()。",
+  "Vị trí": "位置",
+  "Thu phóng": "缩放",
+  "Độ mờ": "不透明度"
 }

@@ -1628,6 +1628,22 @@
         .anim-range-val { font-size: 11px; color: var(--text-muted); min-width: 32px; text-align: right; font-variant-numeric: tabular-nums; }
         /* Lưới chọn hiệu ứng có thumbnail chuyển động (kiểu CapCut). Ô đứng yên = khung
            giữa hiệu ứng; rê chuột vào ô thì canvas chạy lặp (xem initAnimThumbs). */
+        .wgl-hint { font-size: 11px; color: var(--text-muted); margin-bottom: var(--sp-3); line-height: 1.4; }
+        .wgl-fx { border: 1px solid var(--border-color, rgba(255,255,255,.12)); border-radius: 8px; padding: 6px 8px; margin: 8px 0; }
+        .wgl-fx.is-off .wgl-row { opacity: .5; }
+        .wgl-head { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+        .wgl-head input[type="checkbox"] { flex: 0 0 auto; margin: 0; }
+        .wgl-head .wgl-name { flex: 1; min-width: 0; }
+        .wgl-thumb { flex: 0 0 auto; display: inline-flex; }
+        .wgl-thumb canvas { width: 64px; height: 36px; border-radius: 4px; display: block; }
+        .wgl-row { display: flex; align-items: center; gap: 6px; margin: 6px 0; font-size: 12px; }
+        .wgl-row > span:first-child { flex: 0 0 96px; color: var(--text-muted); }
+        .wgl-row select { flex: 1; min-width: 0; }
+        .wgl-row input[type="checkbox"] { margin: 0; }
+        .wgl-slider { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
+        .wgl-slider input[type="range"] { flex: 1; min-width: 0; margin: 0; }
+        .wgl-row .wgl-slider input[type="text"] { flex: 0 0 52px; width: 52px; min-width: 0; padding: 2px 6px; }
+        .wgl-slider button { flex: 0 0 auto; min-width: 28px; padding: 0 6px; }
         .anim-fx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(74px, 1fr)); gap: 8px; margin-bottom: var(--sp-4); }
         .anim-fx-grid.is-locked { opacity: 0.4; pointer-events: none; }
         .anim-fx-card {
@@ -5919,7 +5935,7 @@
                được lọc theo section CÓ THẬT trong panel (xem presentSubs ở dưới), mà
                section đó chỉ được dựng cho mẫu — text thường tự không có tab này. */
             text: { label: _t('Văn bản'), subs: { basic: _t('Cơ bản'), template: _t('Mẫu'), effect: _t('Hiệu ứng'), transform: _t('Biến đổi') } },
-            anim: { label: _t('Hiệu ứng động'), subs: { in: _t('Vào'), out: _t('Ra'), combo: _t('Kết hợp') } },
+            anim: { label: _t('Hiệu ứng động'), subs: { in: _t('Vào'), out: _t('Ra'), combo: _t('Kết hợp'), wiggle: 'Wiggle' } },
             shape: { label: _t('Hình dạng'), subs: { basic: _t('Cơ bản'), transform: _t('Biến đổi') } },
             distort: { label: _t('Biến dạng'), subs: { basic: _t('Hiệu ứng') } },
             retouch: { label: _t('Retouch'), subs: { basic: _t('Làm đẹp'), logo: _t('Xoá vật thể') } },
@@ -16726,6 +16742,10 @@
                 const kf = TextAnimations.keyframeFfmpegExprs(clip.keyframes) || {};
                 const volumeExpr = TextAnimations.volumeKeyframeFfmpegExpr(clip.keyframes);
                 if (volumeExpr) kf.volume_expr = volumeExpr;
+                // WIGGLE ĐỘ MỜ: nhân lên keyframe/giá trị tĩnh của độ mờ (xem wiggleOpacityFfmpegExpr).
+                const wop = TextAnimations.wiggleOpacityFfmpegExpr?.(clip.animation, kf.opacity_expr,
+                    normalizeClipTransformForUi(clip.transform).opacity);
+                if (wop) kf.opacity_expr = wop;
                 if (Object.keys(kf).length) out = { ...out, keyframe_expr: kf };
             }
             return out;

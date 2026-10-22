@@ -758,18 +758,22 @@
             const { kind, target } = sel;
             if (kind === 'item' && !api().itemSupportsAnimation(target)) throw new Error(`Block loại "${target.type}" không có hoạt ảnh`);
             let next;
+            // Wiggle (subtab Wiggle của Inspector) không do lệnh này đặt -> luôn giữ nguyên.
+            const keptWiggle = target.animation && typeof target.animation === 'object' ? target.animation.wiggle : null;
             if (params.combo) {
-                if (params.combo === 'none') next = null;
+                if (params.combo === 'none') next = keptWiggle ? { in: { type: 'none' }, out: { type: 'none' } } : null;
                 else {
                     next = TA.applyCombo(params.combo, params.combo_duration, 0.5);
                     if (!next) throw new Error(`Không có combo "${params.combo}" (xem catalog animations)`);
                 }
+                if (next && keptWiggle) next.wiggle = keptWiggle;
             } else {
                 const current = TA.normalizeAnimation(target.animation) || { in: { type: 'none' }, out: { type: 'none' } };
                 next = {
                     in: params.in ? { ...current.in, ...params.in } : current.in,
                     out: params.out ? { ...current.out, ...params.out } : current.out,
                 };
+                if (keptWiggle) next.wiggle = keptWiggle;
                 for (const side of ['in', 'out']) {
                     const type = next[side].type || 'none';
                     if (!TA.EFFECT_OPTIONS.some((o) => o.value === type)) throw new Error(`Hiệu ứng "${type}" không có (xem catalog animations)`);
@@ -777,6 +781,8 @@
             }
             const normalized = next ? TA.normalizeAnimation(next) : null;
             if (normalized) target.animation = normalized;
+            // Wiggle đang tắt hết: vẫn giữ tham số để bật lại ở Inspector không mất.
+            else if (keptWiggle) target.animation = { in: { type: 'none' }, out: { type: 'none' }, wiggle: keptWiggle };
             else delete target.animation;
             if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
             rt().renderPreviewOverlays();

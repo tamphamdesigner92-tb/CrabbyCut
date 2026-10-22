@@ -14082,7 +14082,147 @@
                 <div class="ins-sec" data-ins-tab="anim">
                     <div class="ins-sec-head"><span class="ins-sec-title">${_t('Hoạt ảnh')}</span>
                     <button id="btnAnimPreview" class="anim-preview-btn" type="button" title="${_t('Phát thử hiệu ứng Vào/Ra')}">▶ ${_t('Xem thử')}</button></div>
-                </div>${sideHtml('in', _t('Vào (In)'))}${sideHtml('out', _t('Ra (Out)'))}${comboHtml}`;
+                </div>${sideHtml('in', _t('Vào (In)'))}${sideHtml('out', _t('Ra (Out)'))}${comboHtml}${wiggleSectionHtml(animObj, glyph)}`;
+    }
+
+    /* ===== WIGGLE (kiểu After Effects › Behaviors › Wiggle) — subtab "Wiggle" =====
+     * Bốn hiệu ứng bật/tắt riêng (Vị trí / Thu phóng / Xoay / Độ mờ), mỗi cái một bộ tham
+     * số như AE. Engine + biểu thức xuất ở text-animations.js (khối WIGGLE). Control mang
+     * data-wiggle-type + data-wiggle-key, ghi qua handleWiggleFieldInput — dùng chung cho
+     * overlay lẫn clip lane chính như các control editingAnim*. */
+    const WIGGLE_UI = {
+        position: { label: 'Vị trí', unit: 'px', ampSlider: 200 },
+        scale: { label: 'Thu phóng', unit: '%', ampSlider: 100 },
+        rotation: { label: 'Xoay', unit: '°', ampSlider: 90 },
+        opacity: { label: 'Độ mờ', unit: '%', ampSlider: 100 },
+    };
+
+    function wiggleSectionHtml(animObj, glyph) {
+        const TA = window.TextAnimations;
+        if (!TA || !TA.WIGGLE_TYPES) return '';
+        const stored = TA.normalizeWiggle(animObj && animObj.wiggle) || {};
+        const fmt = (v, step) => String(Number((Math.round(Number(v) / step) * step).toFixed(step < 1 ? 2 : 0)));
+        const scrub = (step, min, max) => `data-scrub-axis="x" data-scrub-step="${step}" data-scrub-min="${min}" data-scrub-max="${max}"${Number.isInteger(step) ? ' data-scrub-integer="1"' : ''}`;
+        const cards = TA.WIGGLE_TYPES.map((type) => {
+            const ui = WIGGLE_UI[type];
+            const fx = stored[type] || TA.normalizeWiggleFx(type, {});
+            const attrs = (key) => `data-wiggle-type="${type}" data-wiggle-key="${key}"`;
+            const slider = (key, label, min, sliderMax, max, step) => `
+                    <div class="wgl-row">
+                        <span>${escapeHtml(label)}</span>
+                        <span class="wgl-slider">
+                            <input type="range" min="${min}" max="${sliderMax}" step="${step}" value="${fmt(Math.min(sliderMax, fx[key]), step)}" ${attrs(key)}>
+                            <input type="text" inputmode="decimal" value="${fmt(fx[key], step)}" ${attrs(key)} ${scrub(step, min, max)}>
+                        </span>
+                    </div>`;
+            const extra = type === 'position'
+                ? `<div class="wgl-row"><span>${escapeHtml(_t('Trục'))}</span><select ${attrs('axis')}>
+                        ${[['xy', _t('X và Y')], ['x', _t('Chỉ X')], ['y', _t('Chỉ Y')]].map(([v, l]) => `<option value="${v}"${fx.axis === v ? ' selected' : ''}>${escapeHtml(l)}</option>`).join('')}
+                    </select></div>`
+                : (type === 'scale'
+                    ? `<div class="wgl-row"><span>${escapeHtml(_t('Đều hai trục'))}</span><input type="checkbox" ${attrs('uniform')}${fx.uniform ? ' checked' : ''}></div>`
+                    : '');
+            return `
+                <div class="wgl-fx${fx.enabled ? '' : ' is-off'}" data-wiggle-fx="${type}">
+                    <div class="wgl-head">
+                        <input type="checkbox" ${attrs('enabled')}${fx.enabled ? ' checked' : ''} title="${escapeHtml(_t('Bật/tắt hiệu ứng'))}">
+                        <span class="wgl-thumb"><canvas width="${ANIM_THUMB_W}" height="${ANIM_THUMB_H}" data-anim-thumb="${type}" data-anim-thumb-side="wiggle" data-anim-thumb-glyph="${glyph}"></canvas></span>
+                        <span class="wgl-name">${escapeHtml(_t('Wiggle – {name}', { name: _t(ui.label) }))}</span>
+                    </div>
+                    ${slider('freq', _t('Tần số (lần/giây)'), TA.WIGGLE_FREQ_MIN, 10, TA.WIGGLE_FREQ_MAX, 0.1)}
+                    ${slider('amp', `${_t('Biên độ')} (${ui.unit})`, 0, ui.ampSlider, TA.WIGGLE_AMP_MAX[type], 1)}
+                    ${extra}
+                    ${slider('octaves', _t('Octaves'), 1, TA.WIGGLE_OCTAVES_MAX, TA.WIGGLE_OCTAVES_MAX, 1)}
+                    ${slider('amp_mult', _t('Amp Multiplier'), 0, 1, 1, 0.05)}
+                    <div class="wgl-row">
+                        <span>${escapeHtml(_t('Random Seed'))}</span>
+                        <span class="wgl-slider">
+                            <input type="text" inputmode="numeric" value="${fx.seed}" ${attrs('seed')} ${scrub(1, 0, TA.WIGGLE_SEED_MAX)}>
+                            <button type="button" class="btn btn-secondary" data-wiggle-action="seed" data-wiggle-type="${type}" title="${escapeHtml(_t('Seed ngẫu nhiên'))}">🎲</button>
+                        </span>
+                    </div>
+                </div>`;
+        }).join('');
+        return `
+                <div class="ins-sec anim-side" data-ins-tab="anim" data-ins-sub="wiggle">
+                    <div class="anim-side-label">${_t('Wiggle (rung lắc liên tục)')}</div>
+                    <div class="wgl-hint">${_t('Rung suốt block, chồng lên hiệu ứng Vào/Ra và keyframe — như wiggle() của After Effects.')}</div>
+                    ${cards}
+                </div>`;
+    }
+
+    // applyCombo() trả {in, out} mới tinh -> gắn lại wiggle của animation cũ (nếu có).
+    function withWiggleOf(next, prev) {
+        if (!next || !prev || typeof prev !== 'object' || !prev.wiggle) return next;
+        return { ...next, wiggle: prev.wiggle };
+    }
+
+    // Ghi MỘT tham số Wiggle cho block đang chọn (overlay) hoặc các clip lane chính đang chọn.
+    // Trả true nếu target là control Wiggle (đã xử lý).
+    function handleWiggleFieldInput(target, item, options, rememberInspectorEdit) {
+        const TA = window.TextAnimations;
+        const type = target?.dataset?.wiggleType;
+        const key = target?.dataset?.wiggleKey;
+        if (!TA || !TA.WIGGLE_DEFAULTS || !type || !key || !TA.WIGGLE_DEFAULTS[type]) return false;
+        let value;
+        if (target.type === 'checkbox') value = !!target.checked;
+        else if (key === 'axis') value = String(target.value);
+        else {
+            value = Number(String(target.value).replace(',', '.'));
+            if (!Number.isFinite(value)) return true;   // đang gõ dở ("", "-") -> chờ
+        }
+        let fxOut = null;
+        // Giữ NGUYÊN in/out (và các loại wiggle khác) — chỉ thay đúng một tham số.
+        const mutate = (anim) => {
+            const base = anim && typeof anim === 'object' ? anim : {};
+            const wiggle = { ...(base.wiggle && typeof base.wiggle === 'object' ? base.wiggle : {}) };
+            fxOut = TA.normalizeWiggleFx(type, { ...(wiggle[type] || {}), [key]: value });
+            wiggle[type] = fxOut;
+            return { ...base, wiggle };
+        };
+        if (!item && selectedMainIndexesArray().length) {
+            if (isTrackLocked(findTrack('track_main'))) return true;
+            rememberInspectorEdit();
+            selectedMainIndexesArray().forEach((idx) => {
+                const clip = latestTimeline?.[idx];
+                if (clip) clip.animation = mutate(clip.animation);
+            });
+            if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
+        } else if (item && itemSupportsAnimation(item)) {
+            if (isTrackLocked(itemTrack(item))) return true;
+            rememberInspectorEdit();
+            item.animation = mutate(item.animation);
+            renderPreviewOverlays();
+        } else {
+            return true;
+        }
+        // Đồng bộ các ô cùng tham số (thanh trượt <-> ô số) theo giá trị đã kẹp.
+        const box = target.closest?.('[data-wiggle-fx]');
+        if (box && fxOut) {
+            if (key === 'enabled') box.classList.toggle('is-off', !fxOut.enabled);
+            box.querySelectorAll(`[data-wiggle-key="${key}"]`).forEach((el) => {
+                if (el.type === 'checkbox' || el.tagName === 'SELECT') return;
+                if (el === target && !options.commit) return;   // không giật ô đang gõ
+                const v = fxOut[key];
+                el.value = String(el.type === 'range' ? Math.min(Number(el.max), v) : Number(Number(v).toFixed(2)));
+            });
+        }
+        if (!options.commit) return true;
+        inspectorEditInProgress = false;
+        renderAll();
+        return true;
+    }
+
+    // Nút 🎲: seed ngẫu nhiên -> ghi vào ô Seed rồi đi chung đường ghi (một bước Hoàn tác).
+    function handleWiggleClick(event) {
+        const btn = event.target.closest?.('[data-wiggle-action="seed"]');
+        if (!btn) return false;
+        const input = btn.closest('[data-wiggle-fx]')?.querySelector('[data-wiggle-key="seed"]');
+        if (!input || input.disabled) return true;
+        const max = window.TextAnimations?.WIGGLE_SEED_MAX || 9999;
+        input.value = String(1 + Math.floor(Math.random() * max));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
     }
 
     /* Vẽ khung tĩnh cho mọi ô + gắn hover chạy lặp.
@@ -14100,18 +14240,19 @@
             };
             const drawOpts = { glyph: cv.dataset.animThumbGlyph || 'media' };
             TA.drawThumb(cv, spec, undefined, drawOpts);
-            const card = cv.closest('.anim-fx-card');
+            const card = cv.closest('.anim-fx-card') || cv.closest('.wgl-fx');
             if (!card || card.__animThumbBound) return;
             card.__animThumbBound = true;
             // Chu kỳ = thời lượng pseudo-item + khoảng nghỉ ngắn giữa 2 vòng để mắt
-            // kịp "chốt" trạng thái cuối trước khi lặp lại.
-            const cycleMs = (spec.side === 'combo' ? 1550 : 1000) + 260;
+            // kịp "chốt" trạng thái cuối trước khi lặp lại. Wiggle rung liên tục -> không nghỉ.
+            const rest = spec.side === 'wiggle' ? 0 : 260;
+            const cycleMs = (spec.side === 'wiggle' ? 2000 : (spec.side === 'combo' ? 1550 : 1000)) + rest;
             let raf = 0;
             let t0 = 0;
             const loop = (ts) => {
                 if (!t0) t0 = ts;
                 const elapsed = (ts - t0) % cycleMs;
-                const p = Math.min(1, elapsed / (cycleMs - 260));
+                const p = Math.min(1, elapsed / (cycleMs - rest));
                 TA.drawThumb(cv, spec, p, drawOpts);
                 raf = requestAnimationFrame(loop);
             };
@@ -16067,6 +16208,8 @@
         // TỐC ĐỘ — cũng dùng chung cho clip lane chính lẫn overlay, nên phải đứng TRƯỚC
         // nhánh `if (!item)` bên dưới.
         if (handleSpeedFieldInput(target, options, rememberInspectorEdit)) return;
+        // WIGGLE — dùng chung cho clip lane chính lẫn overlay (xem handleWiggleFieldInput).
+        if (handleWiggleFieldInput(target, item, options, rememberInspectorEdit)) return;
         if (target.id === 'editingMainVolumeDbRange' || target.id === 'editingMainVolumeDb') {
             rememberInspectorEdit();
             applyVolumeToSelected(volumeDbToPercent(Number(target.value)));
@@ -16107,7 +16250,8 @@
                         side.duration = Math.min(Number(target.value) || 0.4, md);
                     }
                     if (prop === 'Easing') side.easing = target.value;
-                    return { ...norm, [sideKey]: side };
+                    // withWiggleOf: giữ cả tham số Wiggle đang TẮT (normalize trả null thì mất).
+                    return withWiggleOf({ ...norm, [sideKey]: side }, cur);
                 });
                 if (prop === 'Duration') {
                     const label = document.getElementById(`${target.id}Val`);
@@ -16131,7 +16275,8 @@
                 if (dl) dl.textContent = `${total.toFixed(1)}s`;
                 const rl = document.getElementById('editingAnimComboRatioVal');
                 if (rl) rl.textContent = `${Math.round(ratio * 100)}%`;
-                if (comboVal) applyMain(() => TextAnimations.applyCombo(comboVal, total, ratio));
+                // Combo chỉ thay Vào/Ra — giữ Wiggle của clip.
+                if (comboVal) applyMain((cur) => withWiggleOf(TextAnimations.applyCombo(comboVal, total, ratio), cur));
             }
             if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
             if (!options.commit) return;
@@ -16190,7 +16335,8 @@
                 if (Number(target.value) > maxDur + 1e-6) target.value = String(side.duration);
             }
             if (prop === 'Easing') side.easing = target.value;
-            item.animation = { ...current, [sideKey]: side };
+            // withWiggleOf: giữ cả tham số Wiggle đang TẮT (normalize trả null thì mất).
+            item.animation = withWiggleOf({ ...current, [sideKey]: side }, item.animation);
             // Cập nhật nhãn giá trị slider ngay, không chờ rebuild inspector
             if (prop === 'Duration') {
                 const label = document.getElementById(`${target.id}Val`);
@@ -16236,7 +16382,8 @@
             const rl = document.getElementById('editingAnimComboRatioVal');
             if (rl) rl.textContent = `${Math.round(ratio * 100)}%`;
             if (comboVal) {
-                const applied = TextAnimations.applyCombo(comboVal, total, ratio);
+                // Combo chỉ thay Vào/Ra — giữ Wiggle của block.
+                const applied = withWiggleOf(TextAnimations.applyCombo(comboVal, total, ratio), item.animation);
                 if (applied) item.animation = applied;
             }
             renderPreviewOverlays();
@@ -25701,6 +25848,13 @@
                 // field transform.
                 const volumeExpr = TextAnimations.volumeKeyframeFfmpegExpr(copy.keyframes);
                 if (volumeExpr) kf.volume_expr = volumeExpr;
+                // WIGGLE ĐỘ MỜ của block VIDEO/GeoCode: không bake khung nên đi chung biểu thức
+                // độ mờ (nhân lên keyframe hoặc giá trị tĩnh). Ảnh/chữ/shape đã bake vào khung.
+                if (copy?.type === 'geocode' || (copy?.type === 'media' && itemIsVideoMedia(copy))) {
+                    const wop = TextAnimations.wiggleOpacityFfmpegExpr?.(copy.animation, kf.opacity_expr,
+                        normalizeTransform(copy.transform).opacity);
+                    if (wop) kf.opacity_expr = wop;
+                }
                 if (Object.keys(kf).length) copy.keyframe_expr = kf;
             }
             // ĐIỀU CHỈNH MÀU (chỉ media): chuỗi filter + .cube đã bake cho sidecar.
@@ -28048,6 +28202,7 @@
         document.getElementById('clipInspectorPanel')?.addEventListener('click', (event) => {
             if (handleVideoMaskClick(event)) return;
             if (handleAnimFxCardClick(event)) return;
+            if (handleWiggleClick(event)) return;
             if (handleAdjustClick(event)) return;
             if (handleSpeedPresetClick(event)) return;
             if (handleDistortClick(event)) return;
