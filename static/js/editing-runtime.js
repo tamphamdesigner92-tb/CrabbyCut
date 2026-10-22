@@ -23129,6 +23129,8 @@
      *   vùng hold vẫn chạy, chỉ gộp khi CẢ transform lẫn nội dung không đổi — nhờ vậy đoạn
      *   trước keyframe đầu và sau keyframe cuối (thường là phần lớn clip) vẫn được gộp,
      *   thay vì render lại từng frame cả span. */
+    // collectFile của lượt xuất đang dựng chuỗi (attachAnim đặt/trả) — chỉ chuỗi có Wiggle dùng.
+    let animSeqFrameCollect = null;
     async function renderAnimationSequence(item, resolved, fps, baseW, baseH, metrics, drawInto, options = {}) {
         if (!window.TextAnimations) return null;
         const spanStart = Math.max(0, Number(resolved.inStart) || 0); // trước mốc này: ẩn (nếu có In)
@@ -23206,6 +23208,14 @@
             ctx.restore();
         };
         const frames = [];
+        /* WIGGLE rung SUỐT block nên không có đoạn hold nào gộp được: mọi khung là một PNG đầy đủ.
+         * Nhét cả trăm khung data URL vào JSON payload là vượt trần chuỗi của V8 ("Invalid string
+         * length", vd. 3 ảnh 8 s × 30 fps). Ca đó đẩy khung qua multipart (bakedFrameSink) như chuỗi
+         * Biến dạng; mọi ca khác giữ nguyên đường data URL + `null` cũ. */
+        const wiggleAnim = TextAnimations.normalizeAnimation(item && item.animation);
+        const sink = (animSeqFrameCollect && wiggleAnim && TextAnimations.hasActiveWiggle(wiggleAnim.wiggle))
+            ? bakedFrameSink(animSeqFrameCollect, `anim_${String(item.id).replace(/[^\w-]+/g, '_')}`, 'image/png', undefined, { pipeline: true })
+            : null;
         let prevStatic = false;
         const contentSigAt = typeof options.contentSigAt === 'function' ? options.contentSigAt : null;
         let prevSig = null;
@@ -23219,15 +23229,22 @@
             // Nội dung tự đổi theo thời gian (perFrame) thì chỉ gộp khi chữ ký cũng không đổi.
             const sameContent = !perFrame || (contentSigAt && sig === prevSig);
             if (isStatic && prevStatic && sameContent) {
-                frames.push(null);
+                // frame_files không có "lặp frame trước": canvas vẫn giữ khung trước -> đẩy lại.
+                if (sink) await sink.push(canvas, k);
+                else frames.push(null);
             } else {
                 paintSample(st, t);
-                frames.push(canvas.toDataURL('image/png'));
+                if (sink) await sink.push(canvas, k);
+                else frames.push(canvas.toDataURL('image/png'));
             }
             prevStatic = isStatic;
             prevSig = sig;
             // Giữ UI responsive trong lúc render nhiều frame
             if (k % 20 === 19) await new Promise((resolve) => window.setTimeout(resolve, 0));
+        }
+        if (sink) {
+            await sink.flush();
+            return { ...sink.seq(spanDur, canvasW, canvasH, frameCount), start: spanStart };
         }
         return {
             start: spanStart,
@@ -25685,10 +25702,13 @@
                 if (!entry || !entry.cacheable) key = null;
             }
             const seq = await render();
-            if (seq && key && Array.isArray(seq.frames) && seq.frames.length >= 2) {
-                const { frames: _frames, ...meta } = seq;
+            // Chuỗi Wiggle đi multipart (frame_files) — backend cất y như chuỗi frames.
+            const seqFrames = seq && (Array.isArray(seq.frames) ? seq.frames
+                : (Array.isArray(seq.frame_files) ? seq.frame_files : null));
+            if (seq && key && seqFrames && seqFrames.length >= 2) {
+                const { frames: _frames, frame_files: _files, ...meta } = seq;
                 // frame_count của mục = số khung backend ghi ra (null "lặp khung trước" cũng thành tệp).
-                meta.frame_count = seq.frames.length;
+                meta.frame_count = seqFrames.length;
                 Object.assign(seq, withSource({ cache_key: key, cache_meta: { seq: meta } }));
                 prebakeStats.stores += 1;
             }
@@ -25723,19 +25743,24 @@
         };
         const attachAnim = async (copy, renderer, cache, ...args) => {
             if (!(window.TextAnimations && TextAnimations.hasAnimation(copy))) return;
+            const prevCollect = animSeqFrameCollect;
             try {
                 const resolved = TextAnimations.resolveWindows(copy);
                 if (!resolved) return;
+                animSeqFrameCollect = collectFile;
                 const seq = await timed('anim_seq', () => cachedSeq(cache,
                     () => renderer(copy, resolved, exportFps, ...args)));
                 if (seq) copy.animation_render = { fps: exportFps, seq };
             } catch (error) {
                 console.warn('Animation pre-render error:', error);
+            } finally {
+                animSeqFrameCollect = prevCollect;
             }
         };
         for (const item of editingItems) {
             if (audioOnly && item?.type !== 'audio' && item?.type !== 'media') continue;
             const copy = deepClone(item);
+            let imageWiggleExpr = false;   // ảnh chỉ có Wiggle -> xuất bằng biểu thức như video
             /* Media: sidecar co luồng CỠ GỐC (tệp, hoặc chuỗi khung bake ở cỡ gốc) theo scale/100 ×
              * fit_scale — cùng mốc "100% = vừa khung" với preview (xem mediaAssetFitScale). */
             if (copy?.type === 'media') copy.fit_scale = mediaAssetFitScale(findAsset(copy.asset_id));
@@ -25814,7 +25839,21 @@
                 // (Có animation_render nên khối màu/mặt nạ phía sau tự bỏ qua — đã bake vào khung.)
                 const distorted = itemHasDistort(copy)
                     && await timed('distort', () => exportDistortImage(copy, exportFps, collectFile, imgAsset, rtStill));
-                if (!distorted) {
+                /* CHỈ CÓ WIGGLE (không In/Out, không Retouch): xuất bằng biểu thức FFmpeg như block
+                   video thay vì bake từng khung. Wiggle rung suốt block nên bake là MỖI khung một PNG
+                   cỡ ảnh gốc (~1,3 GB cho 3 ảnh 8 s) — vượt trần chuỗi V8 / bộ nhớ blob. Biểu thức
+                   còn khớp preview: preview dời wiggle theo px SEQUENCE, còn chuỗi bake dời trong hộp
+                   gốc rồi bị thu theo transform.scale. Độ mờ wiggle đi keyframe_expr (khối dưới). */
+                const imgAnim = window.TextAnimations ? TextAnimations.normalizeAnimation(copy.animation) : null;
+                if (!distorted && !rtStill && imgAnim && imgAnim.in.type === 'none' && imgAnim.out.type === 'none'
+                    && TextAnimations.hasActiveWiggle(imgAnim.wiggle)) {
+                    const spec = TextAnimations.videoAnimationExpr(copy, itemBaseSize(copy, imgAsset).height);
+                    if (spec) {
+                        copy.animation_video = spec;
+                        imageWiggleExpr = true;
+                    }
+                }
+                if (!distorted && !imageWiggleExpr) {
                     await attachAnim(copy, renderImageAnimationSequence, imageAnimCache(copy, imgAsset, rtStill), imgAsset, rtStill);
                 }
                 // Không có hoạt ảnh -> attachAnim không sinh gì, mà retouch thì không diễn
@@ -25850,7 +25889,7 @@
                 if (volumeExpr) kf.volume_expr = volumeExpr;
                 // WIGGLE ĐỘ MỜ của block VIDEO/GeoCode: không bake khung nên đi chung biểu thức
                 // độ mờ (nhân lên keyframe hoặc giá trị tĩnh). Ảnh/chữ/shape đã bake vào khung.
-                if (copy?.type === 'geocode' || (copy?.type === 'media' && itemIsVideoMedia(copy))) {
+                if (copy?.type === 'geocode' || (copy?.type === 'media' && itemIsVideoMedia(copy)) || imageWiggleExpr) {
                     const wop = TextAnimations.wiggleOpacityFfmpegExpr?.(copy.animation, kf.opacity_expr,
                         normalizeTransform(copy.transform).opacity);
                     if (wop) kf.opacity_expr = wop;
