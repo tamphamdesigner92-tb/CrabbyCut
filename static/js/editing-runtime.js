@@ -2538,6 +2538,95 @@
        dưới Noto Sans KR (~10%). Sai số đó đủ để lật một dòng ở sát mép khổ — hàm hứa
        "tối đa 2 dòng" mà block vẽ ra 3 dòng, và chỉ lộ khi nhìn khung hình.
        Bỏ trống = y hệt hành vi cũ (Magic Fill, nút "+Text"). */
+    /* Từ chức năng / liên từ (viết thường, đã bỏ dấu câu bao quanh): ĐẦU một cụm tự nhiên —
+       ngắt TRƯỚC chúng là ngắt theo ý — và là thứ KHÔNG được để treo ở CUỐI mảnh ("… của" |
+       "phần còn lại"). Không có "này/đó/ấy": chúng KẾT THÚC cụm danh từ ("hạt nhân này"). */
+    const SUBTITLE_PHRASE_STARTERS = new Set([
+        'và', 'hay', 'hoặc', 'nhưng', 'mà', 'thì', 'là', 'nơi', 'khi', 'lúc', 'nếu', 'vì', 'bởi', 'do', 'nên',
+        'để', 'cho', 'của', 'với', 'từ', 'tới', 'đến', 'trong', 'trên', 'dưới', 'ngoài', 'tại', 'theo', 'bằng',
+        'qua', 'như', 'rằng', 'sau', 'trước', 'các', 'những', 'một', 'cũng', 'đã', 'đang', 'sẽ', 'được', 'bị',
+        'dựa', 'gồm', 'and', 'or', 'but', 'so', 'because', 'which', 'that', 'who', 'where', 'when',
+        'while', 'with', 'for', 'to', 'of', 'in', 'on', 'at', 'from', 'by', 'as', 'if', 'than', 'the', 'a', 'an',
+    ]);
+
+    /* Chia `tokens` (mảng chuỗi) thành ĐÚNG `count` mảnh liền nhau, ít "xấu" nhất. Trả mảng
+       [đầu, cuối) hoặc null nếu không chia được. Thuần (không đo canvas) để test chạy trong vm.
+
+       VÌ SAO KHÔNG THAM LAM: nhồi đầy 2 dòng rồi mới cắt thì phần thừa thành một block riêng —
+       câu "Lò phản ứng hạt nhân hoạt động dựa trên nguyên lý phân hạch hạt nhân" ra block thứ
+       hai chỉ có chữ "nhân" (người dùng báo 2026-10-01). Tham lam vẫn cho SỐ MẢNH ít nhất; ở
+       đây giữ đúng số đó nhưng chọn chỗ ngắt bằng quy hoạch động trên các tiêu chí:
+         - độ dài các mảnh gần bằng nhau (bình phương độ lệch so với trung bình)
+         - mảnh 1 từ phạt rất nặng, 2 từ phạt vừa (mồ côi)
+         - ngắt sau dấu kết câu / dấu phẩy được thưởng; ngắt TRƯỚC từ chức năng được thưởng,
+           để từ chức năng treo ở CUỐI mảnh bị phạt
+       `fits(i, j)`: tokens[i..j) gói vừa số dòng cho phép. Mảnh MỘT token luôn được nhận (một
+       từ dài hơn cả dòng vẫn phải hiện, như nhánh tham lam).
+       Dùng để chia câu thành block (fits = vừa `maxLines` dòng). Đừng phạt dòng cuối một chữ ở
+       tầng block: làm thế thuật toán thà ngắt giữa từ ghép ("hoạt | động") còn hơn để dòng
+       cuối một chữ, mà dòng thì vốn xếp lại được. */
+    function balancedSubtitleChunks(tokens, fits, count) {
+        const n = Array.isArray(tokens) ? tokens.length : 0;
+        const k = Math.max(1, Math.floor(Number(count) || 1));
+        if (!n || k > n) return null;
+        if (k === 1) return fits(0, n) ? [[0, n]] : null;
+        // maxEnd[i]: mảnh bắt đầu ở i dài tối đa tới đâu. Hai con trỏ: [i-1, j) vừa thì [i, j)
+        // cũng vừa, nên tổng số lần đo là O(n) chứ không phải O(n²).
+        const maxEnd = new Array(n).fill(0);
+        let j = 1;
+        for (let i = 0; i < n; i += 1) {
+            j = Math.max(j, i + 1);
+            while (j < n && fits(i, j + 1)) j += 1;
+            maxEnd[i] = j;
+        }
+        const lens = tokens.map((t) => Math.max(1, String(t).length));
+        const prefix = [0];
+        lens.forEach((len, i) => prefix.push(prefix[i] + len + (i ? 1 : 0)));
+        const target = prefix[n] / k;
+        const bare = (t) => String(t || '').toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
+        const cost = (a, b, last) => {
+            const len = prefix[b] - prefix[a] - (a ? 1 : 0);
+            let c = ((len - target) / target) ** 2 * 10;
+            const words = b - a;
+            if (words === 1) c += 60;
+            else if (words === 2) c += 15;
+            if (!last) {
+                const prev = String(tokens[b - 1]);
+                if (/[.!?…。！？]["”’»)\]]*$/u.test(prev)) c -= 12;
+                else if (/[,;:，；：、–—]["”’»)\]]*$/u.test(prev)) c -= 8;
+                if (SUBTITLE_PHRASE_STARTERS.has(bare(tokens[b]))) c -= 3;
+                if (SUBTITLE_PHRASE_STARTERS.has(bare(prev))) c += 8;
+                // Mảnh sau mở đầu bằng dấu câu ĐÓNG (，。」 tách thành token riêng ở CJK) — sai.
+                if (/^[,.;:!?…，。！？、；：)\]」』”’»]/u.test(String(tokens[b]))) c += 40;
+            }
+            return c;
+        };
+        // best[m][b]: chi phí nhỏ nhất chia tokens[0..b) thành m mảnh; from[m][b]: đầu mảnh cuối.
+        const best = Array.from({ length: k + 1 }, () => new Array(n + 1).fill(Infinity));
+        const from = Array.from({ length: k + 1 }, () => new Array(n + 1).fill(-1));
+        best[0][0] = 0;
+        for (let m = 1; m <= k; m += 1) {
+            for (let a = m - 1; a < n; a += 1) {
+                if (!Number.isFinite(best[m - 1][a])) continue;
+                const hi = Math.max(a + 1, maxEnd[a]);
+                for (let b = a + 1; b <= hi; b += 1) {
+                    // Chừa đủ token cho các mảnh còn lại phía sau.
+                    if (n - b < k - m || (m === k && b !== n)) continue;
+                    const value = best[m - 1][a] + cost(a, b, m === k);
+                    if (value < best[m][b]) { best[m][b] = value; from[m][b] = a; }
+                }
+            }
+        }
+        if (!Number.isFinite(best[k][n])) return null;
+        const ranges = [];
+        for (let m = k, b = n; m > 0; m -= 1) {
+            const a = from[m][b];
+            ranges.unshift([a, b]);
+            b = a;
+        }
+        return ranges;
+    }
+
     function splitTextToMaxLines(text, maxLines = MAGIC_FILL_MAX_LINES, styleOverrides = null) {
         const style = { ...defaultTextStyle(), ...(styleOverrides || {}) };
         const fontSize = Math.max(8, Math.min(400, Number(style.font_size) || 56));
@@ -2567,7 +2656,18 @@
             }
         }
         if (cur.length) chunks.push(join(cur));
-        return chunks.length ? chunks : [String(text == null ? '' : text)];
+        if (chunks.length <= 1) return chunks.length ? chunks : [String(text == null ? '' : text)];
+
+        /* Tham lam chỉ để biết SỐ MẢNH ít nhất; chỗ ngắt chọn lại cho cân (balancedSubtitleChunks).
+           Đo bằng ĐÚNG magicWrap ở trên nên mảnh nào được chọn cũng gói vừa `limit` dòng. */
+        const piece = (i, j) => tokens.slice(i, j).map((t, x) => (x ? t : { ...t, space: false }));
+        const wrapRange = (i, j) => magicWrap(join(piece(i, j)), fontSize, style.font_family, style.font_weight, letterPx, maxWidth);
+        const ranges = balancedSubtitleChunks(
+            tokens.map((t) => t.text),
+            (i, j) => wrapRange(i, j).lines.length <= limit,
+            chunks.length,
+        );
+        return ranges ? ranges.map(([i, j]) => join(piece(i, j))) : chunks;
     }
 
     /* `text` có nằm gọn trên MỘT dòng của textbox mặc định không — cùng phép đo (magicWrap,
