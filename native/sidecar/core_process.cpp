@@ -939,6 +939,8 @@ struct ExportInterval {
   double animInDur = 0.0;
   double animOutStart = 0.0;
   double animOutDur = 0.0;
+  // WIGGLE vị trí: dời phần lẻ dưới pixel (xem SubpixelShiftFilter) — chỉ block có Wiggle.
+  bool animSubpixel = false;
   // KEYFRAME: biểu thức FFmpeg theo thời gian (LOCALT), đơn vị native (px / % / độ).
   // Rỗng = field đó không keyframe (dùng transform tĩnh). Áp THAY cho giá trị tĩnh.
   std::string kfXExpr;
@@ -1057,6 +1059,8 @@ struct ExportOverlay {
   double animInDur = 0.0;
   double animOutStart = 0.0;
   double animOutDur = 0.0;
+  // WIGGLE vị trí: dời phần lẻ dưới pixel (xem SubpixelShiftFilter) — chỉ block có Wiggle.
+  bool animSubpixel = false;
   // KEYFRAME (xem ExportInterval): biểu thức theo LOCALT, đơn vị native, áp THAY tĩnh.
   std::string kfXExpr;
   std::string kfYExpr;
@@ -2378,6 +2382,7 @@ bool ReadExportPayload(
     item.animInDur = std::max(0.0, ExtractDoubleFieldOr(objects[i], "anim_in_dur", 0.0));
     item.animOutStart = std::max(0.0, ExtractDoubleFieldOr(objects[i], "anim_out_start", 0.0));
     item.animOutDur = std::max(0.0, ExtractDoubleFieldOr(objects[i], "anim_out_dur", 0.0));
+    item.animSubpixel = ExtractBoolField(objects[i], "anim_subpixel", false);
     item.kfXExpr = ExtractJsonStringField(objects[i], "kf_x_expr", "");
     item.kfYExpr = ExtractJsonStringField(objects[i], "kf_y_expr", "");
     item.kfScaleExpr = ExtractJsonStringField(objects[i], "kf_scale_expr", "");
@@ -2461,6 +2466,7 @@ bool ReadExportPayload(
       overlay.animInDur = std::max(0.0, ExtractDoubleFieldOr(overlayObjects[i], "anim_in_dur", 0.0));
       overlay.animOutStart = std::max(0.0, ExtractDoubleFieldOr(overlayObjects[i], "anim_out_start", 0.0));
       overlay.animOutDur = std::max(0.0, ExtractDoubleFieldOr(overlayObjects[i], "anim_out_dur", 0.0));
+      overlay.animSubpixel = ExtractBoolField(overlayObjects[i], "anim_subpixel", false);
       overlay.kfXExpr = ExtractJsonStringField(overlayObjects[i], "kf_x_expr", "");
       overlay.kfYExpr = ExtractJsonStringField(overlayObjects[i], "kf_y_expr", "");
       overlay.kfScaleExpr = ExtractJsonStringField(overlayObjects[i], "kf_scale_expr", "");
@@ -2701,6 +2707,81 @@ std::string KfOpacityFilter(const std::string& kfOpacityExpr, double start) {
   return ",format=gbrap,sendcmd=f='" + FilterPath(cmdPath.string()) + "',colorchannelmixer@" + tag + "=aa=1";
 }
 
+/* DỜI DƯỚI PIXEL cho block có WIGGLE vị trí (2026-10-22).
+ *
+ * vf_overlay đặt lớp phủ ở toạ độ NGUYÊN (cắt phần lẻ; ghép yuv420 còn kéo về số chẵn), nên rung
+ * biên độ nhỏ (vài px) thành chuỗi "đứng vài khung – nhảy 1 px" — nhìn giật. Cách làm: overlay
+ * đặt ở X0 = 2·floor(P/2) (số chẵn: đường rgb lẫn yuv420 đều giữ nguyên), còn phần lẻ
+ * f = P − X0 ∈ [0, 2) do `geq` nội suy song tuyến dời trên lớp phủ đã đệm 2 px trong suốt.
+ *
+ * Hai chỗ đặt geq:
+ *   - cỡ lớp phủ KHÔNG đổi theo thời gian: ngay trước overlay (sau fade);
+ *   - có thu phóng theo thời gian (keyframe / hoạt ảnh / wiggle Thu phóng): `scale` eval=frame đổi
+ *     cỡ khung từng khung mà pad/geq giữ cỡ khung đầu -> geq đứng TRƯỚC scale (sau rotate, cỡ cố
+ *     định), độ dời quy về px của khung trước co: f·W/w_ra (scale ánh xạ tuyến tính mép–mép).
+ *
+ * Mọi biểu thức (overlay, geq, rotate, scale) phải tính ở CÙNG một khung: overlay dùng t = mốc
+ * khung NỀN, còn các filter trên luồng lớp phủ dùng mốc khung LỚP PHỦ (sớm hơn một chút — dời sớm
+ * kOverlayTieEpsilon để khỏi hoà mốc). Cả hai quy về chỉ số khung m của lưới xuất: phía nền
+ * round(t·fps), phía lớp phủ ceil(t·fps − 1e-6). Lệch nhau một khung là nhảy 2 px đúng khung đó.
+ *
+ * Chi phí: độ dời tính MỘT lần mỗi hàng — thanh ghi st/ld của biểu thức sống suốt lát cắt geq và
+ * mỗi hàng bắt đầu ở X = 0 — nên chỉ còn phần nội suy (~2 ms/khung cho block cỡ ảnh 230 px,
+ * ~80 ms cho khung Full HD). Nhân alpha trước khi nội suy để mép không viền đen. Thanh ghi 0..3
+ * của sidecar; 4..8 là của biểu thức wiggle kiểu Điểm đích (text-animations.js). */
+std::string SubpixelGridTime(const std::string& timeVar, double fps, bool baseSide) {
+  const std::string f = FfmpegDouble(fps);
+  return baseSide ? "(round(" + timeVar + "*" + f + ")/" + f + ")"
+                  : "(ceil(" + timeVar + "*" + f + "-0.000001)/" + f + ")";
+}
+
+// Toạ độ trục (vị trí tĩnh/keyframe + offset hoạt ảnh), LOCALT theo `gridTime`.
+std::string SubpixelAxisPos(const std::string& kfPosExpr, double staticPos, const std::string& animExpr,
+                            double start, const std::string& gridTime) {
+  const std::string base = kfPosExpr.empty()
+    ? "(" + FfmpegDouble(staticPos) + ")"
+    : "(" + SubstituteLocalTimeVar(kfPosExpr, start, gridTime) + ")";
+  return animExpr.empty() ? base : base + "+(" + SubstituteLocalTimeVar(animExpr, start, gridTime) + ")";
+}
+
+struct SubpixelSpec {
+  double fps = 0.0;
+  int seqW = 1920;
+  int seqH = 1080;
+  double start = 0.0;   // mốc trừ LOCALT (overlay: timeline_start; clip lane chính: 0)
+  std::string kfX, kfY, animX, animY;
+  double posX = 0.0;
+  double posY = 0.0;
+};
+
+// Toạ độ overlay (biến w/h/t của vf_overlay): 2·floor(P/2) — phần lẻ đã dời ở geq.
+std::string SubpixelOverlayXY(const SubpixelSpec& sp) {
+  const std::string gt = SubpixelGridTime("t", sp.fps, true);
+  const std::string xd = "(" + std::to_string(sp.seqW) + "-w)/2+" + SubpixelAxisPos(sp.kfX, sp.posX, sp.animX, sp.start, gt);
+  const std::string yd = "(" + std::to_string(sp.seqH) + "-h)/2+" + SubpixelAxisPos(sp.kfY, sp.posY, sp.animY, sp.start, gt);
+  return "x='2*floor((" + xd + ")/2)':y='2*floor((" + yd + ")/2)'";
+}
+
+/* Đệm 2 px + geq dời phần lẻ. `wOut`/`hOut`: cỡ khung mà overlay sẽ thấy, viết bằng biến của geq
+ * (W/H = khung đã đệm đang xử lý): "W"/"H" khi geq đứng ngay trước overlay, biểu thức của `scale`
+ * khi geq đứng trước scale.
+ * `afterRotate`: `rotate` với canvas cỡ LẺ (hypot(iw,ih) hiếm khi chẵn) đặt nội dung lệch +½ px so
+ * với tâm khung (đo: ô 100 px -> canvas 141, tâm nội dung ở 70,5). Đường cũ không thấy vì overlay cắt
+ * phần lẻ toạ độ, vô tình bù đúng ½ px; ở đây đặt chính xác nên phải trừ lại ½ px khi khung lẻ. */
+std::string SubpixelShiftFilter(const SubpixelSpec& sp, const std::string& wOut, const std::string& hOut,
+                                bool afterRotate = false) {
+  const std::string gT = SubpixelGridTime("T", sp.fps, false);
+  const std::string px = "((" + std::to_string(sp.seqW) + "-ld(0))/2+" + SubpixelAxisPos(sp.kfX, sp.posX, sp.animX, sp.start, gT) + ")";
+  const std::string py = "((" + std::to_string(sp.seqH) + "-ld(1))/2+" + SubpixelAxisPos(sp.kfY, sp.posY, sp.animY, sp.start, gT) + ")";
+  const std::string head = "if(not(X),st(0," + wOut + ");st(1," + hOut + ");st(2," + px + ");st(3," + py + ");"
+    "st(0,(ld(2)-2*floor(ld(2)/2))*W/ld(0)" + std::string(afterRotate ? "-0.5*mod(W,2)" : "") + ");"
+    "st(1,(ld(3)-2*floor(ld(3)/2))*H/ld(1)" + std::string(afterRotate ? "-0.5*mod(H,2)" : "") + "));";
+  const auto plane = [&](const char* fn) { return head + fn + "(X-ld(0),Y-ld(1))"; };
+  return ",pad=w=iw+4:h=ih+4:x=2:y=2:color=black@0,format=gbrap,premultiply=inplace=1"
+         ",geq=r='" + plane("r") + "':g='" + plane("g") + "':b='" + plane("b") + "':a='" + plane("alpha")
+         + "':i=bilinear,unpremultiply=inplace=1";
+}
+
 // Nối chuỗi filter biến đổi theo thời gian (rotate -> scale -> opacity) cho 1 stream đã ở
 // format=rgba (gọi ngay sau format=rgba/flip). start = mốc trừ LOCALT. Thứ tự rotate
 // TRƯỚC scale để canvas rotate = đường chéo nguồn (hằng) không bị xén khi scale biến thiên.
@@ -2720,17 +2801,24 @@ void AppendKfTransformFilters(
   const std::string& kfScaleExpr, const std::string& kfRotExpr, const std::string& kfOpacityExpr,
   double staticScale, double staticRotDeg, double staticOpacity,
   const std::string& animSxExpr = "", const std::string& animSyExpr = "",
-  const std::string& animRotExpr = "", double fitScale = 1.0
+  const std::string& animRotExpr = "", double fitScale = 1.0,
+  const SubpixelSpec* subpixel = nullptr
 ) {
+  /* Wiggle vị trí (dời dưới pixel, xem SubpixelShiftFilter): rotate/scale tính ở MỐC KHUNG của lưới
+   * xuất như geq và overlay; geq chen giữa rotate và scale. Không có thì y như trước (biến `t`). */
+  const std::string tv = subpixel ? SubpixelGridTime("t", subpixel->fps, false) : "t";
+  const auto local = [&](const std::string& expr, const std::string& timeVar) {
+    return SubstituteLocalTimeVar(expr, start, timeVar);
+  };
   const bool needRotate = !kfRotExpr.empty() || !animRotExpr.empty() || std::abs(staticRotDeg) > 1e-6;
   if (needRotate) {
     // Gộp ở ĐƠN VỊ ĐỘ rồi đổi sang radian MỘT lần — trộn hai đơn vị trong cùng biểu thức
     // là chỗ rất dễ sai mà chỉ lộ ra khi có đủ cả xoay tĩnh lẫn hoạt ảnh xoay.
     std::string deg = kfRotExpr.empty()
       ? "(" + FfmpegDouble(staticRotDeg) + ")"
-      : "(" + SubstituteLocalTime(kfRotExpr, start) + ")";
+      : "(" + local(kfRotExpr, tv) + ")";
     if (!animRotExpr.empty()) {
-      deg = "((" + deg + ")+(" + SubstituteLocalTime(animRotExpr, start) + "))";
+      deg = "((" + deg + ")+(" + local(animRotExpr, tv) + "))";
     }
     // Hằng độ->radian viết thẳng đủ chữ số: FfmpegDouble chỉ in 6 số thập phân, mà ở đây
     // nó là HỆ SỐ nhân với góc (tới 180) nên chữ số bị cắt sẽ thành sai số góc thấy được.
@@ -2738,14 +2826,25 @@ void AppendKfTransformFilters(
            << "':ow='hypot(iw,ih)':oh='hypot(iw,ih)':c=black@0";
   }
   const double fit = (fitScale > 0.0) ? fitScale : 1.0;
-  const std::string sf = kfScaleExpr.empty()
-    ? "(" + FfmpegDouble(std::max(0.01, (staticScale / 100.0) * fit)) + ")"
-    : "((" + SubstituteLocalTime(kfScaleExpr, start) + ")/100*" + FfmpegDouble(fit) + ")";
-  // Hai trục tách nhau vì hoạt ảnh có hiệu ứng KHÔNG ĐẲNG HƯỚNG (lật: chỉ co trục X)
-  const std::string sfx = animSxExpr.empty()
-    ? sf : "((" + sf + ")*(" + SubstituteLocalTime(animSxExpr, start) + "))";
-  const std::string sfy = animSyExpr.empty()
-    ? sf : "((" + sf + ")*(" + SubstituteLocalTime(animSyExpr, start) + "))";
+  // Hệ số co hai trục theo một biến thời gian (`t` của scale, hoặc `T` cho geq ở nhánh dời dưới pixel).
+  const auto scaleFactors = [&](const std::string& timeVar) {
+    const std::string sf = kfScaleExpr.empty()
+      ? "(" + FfmpegDouble(std::max(0.01, (staticScale / 100.0) * fit)) + ")"
+      : "((" + local(kfScaleExpr, timeVar) + ")/100*" + FfmpegDouble(fit) + ")";
+    // Hai trục tách nhau vì hoạt ảnh có hiệu ứng KHÔNG ĐẲNG HƯỚNG (lật: chỉ co trục X)
+    const std::string sfx = animSxExpr.empty()
+      ? sf : "((" + sf + ")*(" + local(animSxExpr, timeVar) + "))";
+    const std::string sfy = animSyExpr.empty()
+      ? sf : "((" + sf + ")*(" + local(animSyExpr, timeVar) + "))";
+    return std::make_pair(sfx, sfy);
+  };
+  const auto [sfx, sfy] = scaleFactors(tv);
+  if (subpixel) {
+    // Cỡ khung ra của scale ngay dưới, viết bằng biến của geq (W/H = khung đã đệm trước co).
+    const auto [gx, gy] = scaleFactors(SubpixelGridTime("T", subpixel->fps, false));
+    script << SubpixelShiftFilter(*subpixel, "max(2,ceil(W*(" + gx + ")/2)*2)", "max(2,ceil(H*(" + gy + ")/2)*2)",
+                                  needRotate);
+  }
   script << ",scale=w='max(2,ceil(iw*(" << sfx << ")/2)*2)':h='max(2,ceil(ih*(" << sfy << ")/2)*2)'";
   // đánh giá lại w/h mỗi frame -> scale động
   if (!kfScaleExpr.empty() || !animSxExpr.empty() || !animSyExpr.empty()) script << ":eval=frame";
@@ -3843,6 +3942,16 @@ void WriteClipVideoFilters(
   // việc bỏ bước scale tĩnh phía trước format=rgba (nếu không thì scale HAI lần).
   const bool clipDynTransform = clipKf
     || HasAnimGeomExpr(item.animSxExpr, item.animSyExpr, item.animRotExpr);
+  // WIGGLE vị trí: dời phần lẻ dưới pixel như lớp phủ (xem SubpixelShiftFilter), mốc 0-based.
+  const double subpixelFps = ParseFpsValue(settings.renderFps);
+  const bool subpixel = item.animSubpixel && !item.animXExpr.empty() && subpixelFps > 0.0;
+  SubpixelSpec sub;
+  if (subpixel) {
+    sub.fps = subpixelFps; sub.seqW = seqW; sub.seqH = seqH; sub.start = 0.0;
+    sub.kfX = clipKf ? item.kfXExpr : ""; sub.kfY = clipKf ? item.kfYExpr : "";
+    sub.animX = item.animXExpr; sub.animY = item.animYExpr;
+    sub.posX = item.positionX; sub.posY = item.positionY;
+  }
   // Đường nhanh YUV (mục 1.3): không nền `color`, không RGBA, không overlay.
   const MainLaneFast fast = MainLaneFastPlan(item, settings, clipKf || clipDynTransform || clipHasAnim,
                                              scaleValue, opacityValue);
@@ -4004,7 +4113,8 @@ void WriteClipVideoFilters(
   if (clipDynTransform) {
     AppendKfTransformFilters(script, 0.0, item.kfScaleExpr, item.kfRotExpr, item.kfOpacityExpr,
                              item.scale, item.rotation, opacityValue,
-                             item.animSxExpr, item.animSyExpr, item.animRotExpr, fitScale);
+                             item.animSxExpr, item.animSyExpr, item.animRotExpr, fitScale,
+                             subpixel ? &sub : nullptr);
   } else {
     if (std::abs(rotationRad) > 0.000001) {
       const std::string angle = FfmpegDouble(rotationRad);
@@ -4025,12 +4135,16 @@ void WriteClipVideoFilters(
              << ":d=" << FfmpegDouble(item.animOutDur) << ":alpha=1";
     }
   }
+  // Cỡ clip cố định: dời dưới pixel ngay trước overlay (nhánh động đã dời trước scale).
+  if (subpixel && !clipDynTransform) script << SubpixelShiftFilter(sub, "W", "H");
   script << "[clip" << idx << "];\n";
 
   // Vùng lộ ra khi clip dịch/thu nhỏ = nền đen (color=c=black) -> "nền xanh nhấp nháy"
   // của preview KHÔNG đi vào export. Vị trí = tâm + posX/Y + offset(t) khi có hoạt ảnh/kf.
   script << "[base" << idx << "][clip" << idx << "]overlay=";
-  if (clipKf || clipHasAnim) {
+  if (subpixel) {
+    script << SubpixelOverlayXY(sub);
+  } else if (clipKf || clipHasAnim) {
     const std::string xPos = clipKf ? KfOverlayPos(item.kfXExpr, 0.0, item.positionX)
                                     : ("(" + FfmpegDouble(item.positionX) + ")");
     const std::string yPos = clipKf ? KfOverlayPos(item.kfYExpr, 0.0, item.positionY)
@@ -4729,7 +4843,10 @@ int SequenceTailFrames(const ExportOverlay& overlay) {
  * "hoà" của ảnh tĩnh không hiện ra gì. */
 void WriteOverlaySetpts(std::ostream& out, const ExportOverlay& overlay, const ExportSettings& settings) {
   const double start = overlay.timelineStart;
-  const double setptsStart = (!OverlayIsImageLike(overlay) && !OverlayIsImageSequence(overlay))
+  // Ảnh có Wiggle (dời dưới pixel) cũng lùi epsilon: geq quy mốc khung lớp phủ về khung nền bằng
+  // ceil(T·fps), cần T đứng HẲN trước mốc khung nền chứ không hoà (xem SubpixelShiftFilter).
+  const double setptsStart = ((!OverlayIsImageLike(overlay) && !OverlayIsImageSequence(overlay))
+                              || (overlay.animSubpixel && OverlayIsImageLike(overlay)))
     ? start - kOverlayTieEpsilon : start;
   const double renderFpsForSeq = ParseFpsValue(settings.renderFps);
   if (OverlayIsImageSequence(overlay) && renderFpsForSeq > 0.0) {
@@ -4835,6 +4952,15 @@ void WriteVisualOverlayFilter(
   // (xem WriteClipVideoFilters — cùng lý do, cùng cách gộp cờ).
   const bool overlayDynTransform = overlayKf
     || HasAnimGeomExpr(overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr);
+  // WIGGLE vị trí: dời phần lẻ dưới pixel (xem SubpixelShiftFilter); overlay đặt ở 2·floor(P/2).
+  const double subpixelFps = ParseFpsValue(settings.renderFps);
+  const bool subpixel = overlay.animSubpixel && hasVideoAnim && subpixelFps > 0.0;
+  SubpixelSpec sub;
+  if (subpixel) {
+    sub.fps = subpixelFps; sub.seqW = seqW; sub.seqH = seqH; sub.start = start;
+    sub.kfX = overlay.kfXExpr; sub.kfY = overlay.kfYExpr; sub.animX = overlay.animXExpr; sub.animY = overlay.animYExpr;
+    sub.posX = overlay.positionX; sub.posY = overlay.positionY;
+  }
 
   // Ảnh tĩnh một lần: `null` (setpts ở cuối chuỗi); loại khác: trim + setpts của `timing`.
   script << (stillOnce ? std::string("null") : timing.str());
@@ -4870,7 +4996,8 @@ void WriteVisualOverlayFilter(
   if (overlayDynTransform) {
     AppendKfTransformFilters(script, start, overlay.kfScaleExpr, overlay.kfRotExpr, overlay.kfOpacityExpr,
                              overlay.scale, overlay.rotation, opacityValue,
-                             overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr, overlayFit);
+                             overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr, overlayFit,
+                             subpixel ? &sub : nullptr);
   } else {
     if (std::abs(rotationRad) > 0.000001) {
       const std::string angle = FfmpegDouble(rotationRad);
@@ -4898,6 +5025,8 @@ void WriteVisualOverlayFilter(
     }
     if (fadeShift) script << ",setpts=PTS-round(1/TB)";
   }
+  // Cỡ lớp phủ cố định: dời dưới pixel ngay trước overlay (nhánh động đã dời trước scale).
+  if (subpixel && !overlayDynTransform) script << SubpixelShiftFilter(sub, "W", "H");
   // Ghép ở YUV (xem YuvCompositeEnabled). `yuvStatic` = lớp phủ đứng yên, không xoay.
   const bool yuvChain = YuvCompositeEnabled(settings);
   const bool yuvStatic = yuvChain && !overlayKf && !hasVideoAnim && !overlayDynTransform
@@ -4959,6 +5088,9 @@ void WriteVisualOverlayFilter(
     const std::string bx = "trunc((" + std::to_string(seqW) + "-(w-4))/2+" + posX + ")";
     const std::string by = "trunc((" + std::to_string(seqH) + "-(h-4))/2+" + posY + ")";
     script << "x='" << bx << "-mod(" << bx << ",2)':y='" << by << "-mod(" << by << ",2)'";
+  } else if (subpixel) {
+    // Cùng toạ độ như nhánh dưới nhưng lấy ở lưới khung rồi kéo về số chẵn — phần lẻ đã dời ở geq.
+    script << SubpixelOverlayXY(sub);
   } else if (overlayKf || hasVideoAnim) {
     // Vị trí = tâm + kf/tĩnh + offset(t) hoạt ảnh. Bọc nháy đơn vì biểu thức có dấu phẩy.
     const std::string xPos = overlayKf ? KfOverlayPos(overlay.kfXExpr, start, overlay.positionX)
@@ -5740,8 +5872,13 @@ void AppendOverlayInputArgs(
       cmd.insert(cmd.end(), {"-threads", "1", "-i", assetPath});
     } else if (OverlayIsImageLike(overlay)) {
       // Dư 1 s: lớp phủ tĩnh xén ở cuối batch dài quá mép batch (xem OverlaysForBatch).
+      cmd.insert(cmd.end(), {"-threads", "1"});
+      // Wiggle (dời dưới pixel): MỖI khung nền một khung lớp phủ — `-loop 1` mặc định 25 khung/giây
+      // thì geq tính độ dời ở mốc khung lớp phủ, lệch khung nền (xem SubpixelShiftFilter).
+      if (overlay.animSubpixel && ParseFpsValue(settings.renderFps) > 0.0) {
+        cmd.insert(cmd.end(), {"-framerate", settings.renderFps});
+      }
       cmd.insert(cmd.end(), {
-        "-threads", "1",
         "-loop", "1",
         "-t", FixedSeconds(std::max(0.05, sequenceDuration + kBatchOverlayTailSeconds)),
         "-i", assetPath

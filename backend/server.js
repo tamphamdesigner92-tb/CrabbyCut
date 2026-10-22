@@ -5633,6 +5633,8 @@ function normalizeAnimVideoExprFields(av) {
   const sx = sanitizeFfmpegExpr(av?.scale_x_expr, 4000); if (sx) out.anim_sx_expr = sx;
   const sy = sanitizeFfmpegExpr(av?.scale_y_expr, 4000); if (sy) out.anim_sy_expr = sy;
   const r = sanitizeFfmpegExpr(av?.rot_expr, 4000); if (r) out.anim_rot_expr = r;
+  // Block có Wiggle vị trí: sidecar dời phần lẻ dưới pixel (SubpixelShiftFilter) — chỉ cờ.
+  if (av?.subpixel === true) out.anim_subpixel = true;
   return out;
 }
 

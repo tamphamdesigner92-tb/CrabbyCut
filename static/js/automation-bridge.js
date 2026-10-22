@@ -756,7 +756,7 @@
      *   { position: { amp: 40, … } } -> gộp vào tham số cũ; thiếu `enabled` = bật
      * Kiểm chặt (loại / khoá lạ, số ngoài dải -> lỗi) rồi chuẩn hoá qua normalizeWiggleFx. */
     const WIGGLE_KEYS = {
-        common: ['enabled', 'freq', 'amp', 'octaves', 'amp_mult', 'seed'],
+        common: ['enabled', 'freq', 'amp', 'octaves', 'amp_mult', 'seed', 'style', 'easing', 'hold'],
         position: ['axis'],
         scale: ['uniform'],
     };
@@ -772,6 +772,7 @@
             octaves: [1, TA.WIGGLE_OCTAVES_MAX],
             amp_mult: [0, 1],
             seed: [0, TA.WIGGLE_SEED_MAX],
+            hold: [0, TA.WIGGLE_HOLD_MAX],
         };
         for (const [type, fx] of Object.entries(spec)) {
             if (!TA.WIGGLE_TYPES.includes(type)) throw new Error(`Không có wiggle "${type}" (một trong: ${TA.WIGGLE_TYPES.join(', ')})`);
@@ -785,6 +786,11 @@
                     if (typeof value !== 'boolean') throw new Error(`wiggle.${type}.${key} là true/false`);
                 } else if (key === 'axis') {
                     if (!['xy', 'x', 'y'].includes(value)) throw new Error(`wiggle.${type}.axis là "xy", "x" hoặc "y"`);
+                } else if (key === 'style') {
+                    if (!TA.WIGGLE_STYLES.includes(value)) throw new Error(`wiggle.${type}.style là một trong: ${TA.WIGGLE_STYLES.join(', ')}`);
+                } else if (key === 'easing') {
+                    const easings = TA.EASING_OPTIONS.map((o) => o.value);
+                    if (!easings.includes(value)) throw new Error(`wiggle.${type}.easing là một trong: ${easings.join(', ')}`);
                 } else {
                     const lim = key === 'amp' ? [0, TA.WIGGLE_AMP_MAX[type]] : ranges[key];
                     if (typeof value !== 'number' || !Number.isFinite(value) || value < lim[0] || value > lim[1]) {
@@ -800,7 +806,14 @@
     // Tóm tắt wiggle của block cho kết quả lệnh (null nếu không có).
     function wiggleSummary(target) {
         const w = window.TextAnimations.normalizeWiggle(target && target.animation && target.animation.wiggle);
-        return w || null;
+        if (!w) return null;
+        // Kiểu chuyển động chỉ hiện khi có nghĩa: `style` khác 'smooth'; `easing`/`hold` chỉ ở 'target'
+        // — kiểu Mượt (mặc định) tóm tắt y như trước khi có tuỳ chọn kiểu.
+        Object.values(w).forEach((fx) => {
+            if (fx.style === 'smooth') delete fx.style;
+            if (fx.style !== 'target') { delete fx.easing; delete fx.hold; }
+        });
+        return w;
     }
 
     async function setAnimation(params) {
@@ -1605,6 +1618,10 @@
                         octaves: { min: 1, max: TA.WIGGLE_OCTAVES_MAX, default: d.octaves, integer: true },
                         amp_mult: { min: 0, max: 1, default: d.amp_mult, note: 'amplitude multiplier per extra octave' },
                         seed: { min: 0, max: TA.WIGGLE_SEED_MAX, default: d.seed, integer: true, note: 'random seed; same seed = same motion' },
+                        style: { options: TA.WIGGLE_STYLES, default: d.style,
+                            note: 'smooth = sum of sine waves (default); target = like After Effects: every beat (freq per second) move to a new random target with `easing`, then rest for `hold`; step = jerky: hold still, jump instantly to a new point every beat' },
+                        easing: { options: TA.EASING_OPTIONS.map((o) => o.value), default: d.easing, note: 'style "target" only: easing of each move to the next target' },
+                        hold: { min: 0, max: TA.WIGGLE_HOLD_MAX, default: d.hold, note: 'style "target" only: fraction of each beat spent resting at the target (0 = always moving)' },
                     };
                     if (type === 'position') out.axis = { options: ['xy', 'x', 'y'], default: 'xy' };
                     if (type === 'scale') out.uniform = { default: true, note: 'false = X and Y wiggle independently' };

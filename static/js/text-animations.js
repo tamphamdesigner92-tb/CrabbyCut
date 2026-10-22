@@ -229,6 +229,13 @@
     const WIGGLE_AXES = ['xy', 'x', 'y'];
     // Mỗi KÊNH một "muối" để vị trí X, Y, xoay... không rung cùng nhịp dù chung seed.
     const WIGGLE_SALT = { px: 1, py: 2, sx: 3, sy: 4, rot: 5, op: 6 };
+    /* KIỂU CHUYỂN ĐỘNG (2026-10-22):
+     *   smooth — tổng sóng sin (mặc định, như trước);
+     *   target — như wiggle() của AE: mỗi nhịp (Tần số lần/giây) chạy tới một ĐIỂM ĐÍCH ngẫu
+     *            nhiên mới theo Easing chọn được; `hold` = phần nhịp ĐỨNG NGHỈ ở điểm đích;
+     *   step   — giật cục: đứng yên ở một điểm, tới nhịp sau NHẢY tức thì sang điểm khác. */
+    const WIGGLE_STYLES = ['smooth', 'target', 'step'];
+    const WIGGLE_HOLD_MAX = 0.9;
 
     function normalizeWiggleFx(type, raw) {
         const d = WIGGLE_DEFAULTS[type];
@@ -240,6 +247,9 @@
             octaves: Math.round(clampNumber(r.octaves, 1, WIGGLE_OCTAVES_MAX, 1)),
             amp_mult: clampNumber(r.amp_mult, 0, 1, 0.5),
             seed: Math.round(clampNumber(r.seed, 0, WIGGLE_SEED_MAX, 1)),
+            style: WIGGLE_STYLES.includes(r.style) ? r.style : 'smooth',
+            easing: EASING_VALUES.has(r.easing) ? r.easing : 'ease-in-out',
+            hold: clampNumber(r.hold, 0, WIGGLE_HOLD_MAX, 0),
         };
         if (type === 'position') out.axis = WIGGLE_AXES.includes(r.axis) ? r.axis : 'xy';
         if (type === 'scale') out.uniform = r.uniform !== false;
@@ -309,12 +319,100 @@
         return `(${waves.map((v) => `${g(v.w)}*sin(${g(v.k)}*LOCALT+${g(v.ph)})`).join('+') || '0'})`;
     }
 
+    /* ---- Kiểu ĐIỂM ĐÍCH / GIẬT CỤC ----
+     * Mỗi octave o là một lớp: nhịp r = freq·2^o điểm/giây, lệch pha `off` theo seed; điểm đích
+     * thứ k = R(k) = 2·fract(sin(k·a + b)·43758.5453) − 1 ∈ [-1, 1) — hàm băm viết được NGUYÊN
+     * VẸN bằng biểu thức FFmpeg (sin/floor), nên preview và bản xuất ra cùng một dãy điểm.
+     *   target: u = t·r + off, k = floor(u), p = u − k; đi từ R(k) tới R(k+1) theo easing của
+     *           q = clip(p / (1 − hold), 0, 1) — phần còn lại của nhịp đứng nghỉ ở R(k+1);
+     *   step  : giá trị = R(k), nhảy tức thì ở đầu mỗi nhịp.
+     * Lớp cộng theo trọng số amp_mult^o rồi chuẩn hoá (|nhiễu| ≤ 1, trừ easing vọt lố như
+     * Bật lại / Đàn hồi). Muối riêng (salt + 50) để không đụng dãy số của kiểu smooth. */
+    function wigglePointLayers(fx, salt) {
+        const rng = wiggleRng(fx.seed, salt + 50);
+        // Làm tròn 6 chữ số NGAY ĐÂY: biểu thức FFmpeg ghi đúng 6 chữ số, mà sin(k·a + b)·43758
+        // rất nhạy với a, b — engine phải dùng CÙNG con số đã làm tròn thì hai bên mới trùng.
+        const r6 = (v) => Number(v.toFixed(6));
+        const layers = [];
+        let total = 0;
+        for (let o = 0; o < fx.octaves; o += 1) {
+            const w = Math.pow(fx.amp_mult, o);
+            layers.push({ rate: r6(fx.freq * Math.pow(2, o)), off: r6(rng()), a: r6(7 + 9 * rng()), b: r6(100 * rng()), w });
+            total += w;
+        }
+        return total > 0 ? layers.map((l) => ({ ...l, w: r6(l.w / total) })) : [];
+    }
+
+    function wigglePointHash(k, a, b) {
+        const s = Math.sin(k * a + b) * 43758.5453;
+        return 2 * (s - Math.floor(s)) - 1;
+    }
+
+    function wigglePointAt(fx, salt, t) {
+        const layers = wigglePointLayers(fx, salt);
+        const ease = EASINGS[fx.easing] || EASINGS['ease-in-out'];
+        const span = 1 - Math.min(WIGGLE_HOLD_MAX, Math.max(0, Number(fx.hold) || 0));
+        let n = 0;
+        for (let i = 0; i < layers.length; i += 1) {
+            const L = layers[i];
+            const u = t * L.rate + L.off;
+            const k = Math.floor(u);
+            const r0 = wigglePointHash(k, L.a, L.b);
+            if (fx.style === 'step') {
+                n += L.w * r0;
+                continue;
+            }
+            const q = Math.min(1, Math.max(0, (u - k) / span));
+            n += L.w * (r0 + (wigglePointHash(k + 1, L.a, L.b) - r0) * ease(q));
+        }
+        return n;
+    }
+
+    /* Cùng nhiễu dưới dạng biểu thức FFmpeg. Gọn nhờ thanh ghi st/ld 4..8 (0..3 để dành cho
+     * sidecar — bước dời dưới pixel, xem SubpixelShiftFilter ở core_process.cpp). Không có `;`
+     * (backend lọc mất): tuần tự hoá bằng if(isnan(st(...)),0,phần sau) — `if` tính điều kiện
+     * TRƯỚC. Mỗi lớp tính xong trọn rồi mới tới lớp sau nên dùng lại thanh ghi được. */
+    function wigglePointExpr(fx, salt) {
+        const g = (n) => (Number(n) || 0).toFixed(6);
+        const span = 1 - Math.min(WIGGLE_HOLD_MAX, Math.max(0, Number(fx.hold) || 0));
+        const seq = (stores, result) => stores.reduceRight((acc, s) => `if(isnan(${s}),0,${acc})`, result);
+        const hash = (reg, kExpr, L) => [
+            `st(${reg},sin((${kExpr})*${g(L.a)}+${g(L.b)})*43758.5453)`,
+            `st(${reg},2*(ld(${reg})-floor(ld(${reg})))-1)`,
+        ];
+        // ffEase của spring không kẹp p = 1 như EASINGS.spring (1.0045 thay vì 1) -> kẹp ở đây,
+        // không thì đoạn nghỉ lệch điểm đích rồi giật nhẹ ở nhịp sau.
+        const easeExpr = fx.easing === 'spring'
+            ? `if(gte(ld(6),1),1,${ffEase('spring', 'ld(6)')})`
+            : ffEase(fx.easing, 'ld(6)');
+        const parts = wigglePointLayers(fx, salt).map((L) => {
+            const stores = [`st(4,LOCALT*${g(L.rate)}+${g(L.off)})`, 'st(5,floor(ld(4)))', ...hash(7, 'ld(5)', L)];
+            if (fx.style === 'step') return `${g(L.w)}*${seq(stores, 'ld(7)')}`;
+            stores.push(...hash(8, 'ld(5)+1', L), `st(6,clip((ld(4)-ld(5))/${g(span)},0,1))`);
+            return `${g(L.w)}*${seq(stores, `(ld(7)+(ld(8)-ld(7))*(${easeExpr}))`)}`;
+        });
+        return `(${parts.join('+') || '0'})`;
+    }
+
+    // Nhiễu MỘT kênh theo kiểu của fx — preview/bake (At) và biểu thức xuất (Expr).
+    function wiggleChannelAt(fx, salt, t) {
+        return fx.style === 'target' || fx.style === 'step'
+            ? wigglePointAt(fx, salt, t)
+            : wiggleNoiseAt(wiggleWaves(fx, salt), t);
+    }
+
+    function wiggleChannelExpr(fx, salt) {
+        return fx.style === 'target' || fx.style === 'step'
+            ? wigglePointExpr(fx, salt)
+            : wiggleNoiseExpr(wiggleWaves(fx, salt));
+    }
+
     /* Phần đóng góp của wiggle tại t (giây cục bộ): { dx, dy, sx, sy, rot, op } hoặc null
      * nếu không có wiggle nào đang bật. sx/sy/op là HỆ SỐ NHÂN, dx/dy/rot là SỐ CỘNG. */
     function wiggleStateAt(wiggle, t) {
         if (!hasActiveWiggle(wiggle)) return null;
         const time = Number(t) || 0;
-        const ch = (fx, salt) => wiggleNoiseAt(wiggleWaves(fx, salt), time);
+        const ch = (fx, salt) => wiggleChannelAt(fx, salt, time);
         const out = { dx: 0, dy: 0, sx: 1, sy: 1, rot: 0, op: 1 };
         const pos = wiggle.position;
         if (wiggleFxActive(pos)) {
@@ -340,7 +438,7 @@
     function wiggleFfmpegExprs(wiggle) {
         if (!hasActiveWiggle(wiggle)) return null;
         const g = (n) => (Number(n) || 0).toFixed(6);
-        const ch = (fx, salt) => wiggleNoiseExpr(wiggleWaves(fx, salt));
+        const ch = (fx, salt) => wiggleChannelExpr(fx, salt);
         const out = { x: null, y: null, sx: null, sy: null, rot: null, op: null };
         const pos = wiggle.position;
         if (wiggleFxActive(pos)) {
@@ -640,6 +738,9 @@
         if (sxExpr) out.scale_x_expr = sxExpr;
         if (syExpr) out.scale_y_expr = syExpr;
         if (rotExpr) out.rot_expr = rotExpr;
+        // Wiggle vị trí: rung vài px phải dời dưới pixel khi ghép, không thì giật từng bậc 1 px
+        // (sidecar SubpixelShiftFilter). Chỉ block có Wiggle vị trí mang cờ này.
+        if (wg.x || wg.y) out.subpixel = true;
         return out;
     }
 
@@ -1159,6 +1260,8 @@
         WIGGLE_FREQ_MAX,
         WIGGLE_OCTAVES_MAX,
         WIGGLE_SEED_MAX,
+        WIGGLE_STYLES,
+        WIGGLE_HOLD_MAX,
         normalizeWiggle,
         normalizeWiggleFx,
         hasActiveWiggle,

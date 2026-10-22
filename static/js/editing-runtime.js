@@ -14122,6 +14122,26 @@
                 : (type === 'scale'
                     ? `<div class="wgl-row"><span>${escapeHtml(_t('Đều hai trục'))}</span><input type="checkbox" ${attrs('uniform')}${fx.uniform ? ' checked' : ''}></div>`
                     : '');
+            // KIỂU CHUYỂN ĐỘNG + (riêng Điểm đích) Easing và phần nghỉ — hai dòng đó ẨN ở kiểu khác
+            // (không dùng `disabled`: vòng khoá lane của Inspector đặt lại disabled cho mọi control).
+            // "Nghỉ" hiện theo % nhưng lưu 0..0,9 — data-wiggle-scale báo handleWiggleFieldInput chia lại.
+            const targetOnly = `data-wiggle-target-only${fx.style === 'target' ? '' : ' hidden'}`;
+            const holdPct = Math.round((Number(fx.hold) || 0) * 100);
+            const holdMaxPct = Math.round((TA.WIGGLE_HOLD_MAX || 0.9) * 100);
+            const styleRows = `
+                    <div class="wgl-row"><span>${escapeHtml(_t('Kiểu chuyển động'))}</span><select ${attrs('style')}>
+                        ${[['smooth', _t('Mượt (sóng)')], ['target', _t('Điểm đích')], ['step', _t('Giật cục')]].map(([v, l]) => `<option value="${v}"${fx.style === v ? ' selected' : ''}>${escapeHtml(l)}</option>`).join('')}
+                    </select></div>
+                    <div class="wgl-row" ${targetOnly}><span>${escapeHtml(_t('Nhịp (Easing)'))}</span><select ${attrs('easing')}>
+                        ${TA.EASING_OPTIONS.map((o) => `<option value="${o.value}"${fx.easing === o.value ? ' selected' : ''}>${escapeHtml(o.label)}</option>`).join('')}
+                    </select></div>
+                    <div class="wgl-row" ${targetOnly}>
+                        <span>${escapeHtml(_t('Nghỉ ở điểm đích (%)'))}</span>
+                        <span class="wgl-slider">
+                            <input type="range" min="0" max="${holdMaxPct}" step="5" value="${holdPct}" ${attrs('hold')} data-wiggle-scale="100">
+                            <input type="text" inputmode="numeric" value="${holdPct}" ${attrs('hold')} data-wiggle-scale="100" ${scrub(1, 0, holdMaxPct)}>
+                        </span>
+                    </div>`;
             return `
                 <div class="wgl-fx${fx.enabled ? '' : ' is-off'}" data-wiggle-fx="${type}">
                     <div class="wgl-head">
@@ -14131,6 +14151,7 @@
                     </div>
                     ${slider('freq', _t('Tần số (lần/giây)'), TA.WIGGLE_FREQ_MIN, 10, TA.WIGGLE_FREQ_MAX, 0.1)}
                     ${slider('amp', `${_t('Biên độ')} (${ui.unit})`, 0, ui.ampSlider, TA.WIGGLE_AMP_MAX[type], 1)}
+                    ${styleRows}
                     ${extra}
                     ${slider('octaves', _t('Octaves'), 1, TA.WIGGLE_OCTAVES_MAX, TA.WIGGLE_OCTAVES_MAX, 1)}
                     ${slider('amp_mult', _t('Amp Multiplier'), 0, 1, 1, 0.05)}
@@ -14175,11 +14196,14 @@
         if (!TA || !TA.WIGGLE_DEFAULTS || !type || !key || !TA.WIGGLE_DEFAULTS[type]) return false;
         let value;
         if (target.type === 'checkbox') value = !!target.checked;
-        else if (key === 'axis') value = String(target.value);
+        else if (key === 'axis' || key === 'style' || key === 'easing') value = String(target.value);
         else {
             value = Number(String(target.value).replace(',', '.'));
             if (!Number.isFinite(value)) return true;   // đang gõ dở ("", "-") -> chờ
         }
+        // Ô hiển thị theo đơn vị khác lưu (Nghỉ: % trên màn hình, 0..0,9 trong dữ liệu).
+        const uiScale = Number(target.dataset.wiggleScale) || 1;
+        if (typeof value === 'number' && uiScale !== 1) value /= uiScale;
         let fxOut = null;
         // Giữ NGUYÊN in/out (và các loại wiggle khác) — chỉ thay đúng một tham số.
         const mutate = (anim) => {
@@ -14209,10 +14233,14 @@
         const box = target.closest?.('[data-wiggle-fx]');
         if (box && fxOut) {
             if (key === 'enabled') box.classList.toggle('is-off', !fxOut.enabled);
+            // Easing + Nghỉ chỉ có nghĩa với kiểu Điểm đích.
+            if (key === 'style') {
+                box.querySelectorAll('[data-wiggle-target-only]').forEach((row) => { row.hidden = fxOut.style !== 'target'; });
+            }
             box.querySelectorAll(`[data-wiggle-key="${key}"]`).forEach((el) => {
                 if (el.type === 'checkbox' || el.tagName === 'SELECT') return;
                 if (el === target && !options.commit) return;   // không giật ô đang gõ
-                const v = fxOut[key];
+                const v = fxOut[key] * (Number(el.dataset.wiggleScale) || 1);
                 el.value = String(el.type === 'range' ? Math.min(Number(el.max), v) : Number(Number(v).toFixed(2)));
             });
         }

@@ -176,6 +176,9 @@ const WIGGLE_FX = {
         octaves: { type: 'integer' },
         amp_mult: { type: 'number' },
         seed: { type: 'integer' },
+        style: { type: 'string', enum: ['smooth', 'target', 'step'] },
+        easing: { type: 'string' },
+        hold: { type: 'number' },
         axis: { type: 'string', enum: ['xy', 'x', 'y'] },
         uniform: { type: 'boolean' },
       },
@@ -184,7 +187,7 @@ const WIGGLE_FX = {
   ],
 };
 const WIGGLE_SCHEMA = {
-  description: 'After Effects style wiggle (continuous shake for the whole block, on top of in/out + keyframes). Partial update per type; types not given are kept. <type>: {freq, amp, octaves, amp_mult, seed, axis (position), uniform (scale), enabled (default true)} | true (turn on) | null/false (remove). "none" removes all. Ranges: crabbycut_catalog wiggle.',
+  description: 'After Effects style wiggle (continuous shake for the whole block, on top of in/out + keyframes). Partial update per type; types not given are kept. <type>: {freq, amp, octaves, amp_mult, seed, style (smooth | target | step), easing + hold (style target), axis (position), uniform (scale), enabled (default true)} | true (turn on) | null/false (remove). "none" removes all. Ranges: crabbycut_catalog wiggle.',
   anyOf: [
     { type: 'string', enum: ['none'] },
     { type: 'null' },
