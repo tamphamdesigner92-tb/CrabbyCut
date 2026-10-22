@@ -184,7 +184,7 @@ const WIGGLE_FX = {
   ],
 };
 const WIGGLE_SCHEMA = {
-  description: 'CrabbyStudio only. After Effects style wiggle (continuous shake for the whole block, on top of in/out + keyframes). Partial update per type; types not given are kept. <type>: {freq, amp, octaves, amp_mult, seed, axis (position), uniform (scale), enabled (default true)} | true (turn on) | null/false (remove). "none" removes all. Ranges: crabbycut_catalog wiggle.',
+  description: 'After Effects style wiggle (continuous shake for the whole block, on top of in/out + keyframes). Partial update per type; types not given are kept. <type>: {freq, amp, octaves, amp_mult, seed, axis (position), uniform (scale), enabled (default true)} | true (turn on) | null/false (remove). "none" removes all. Ranges: crabbycut_catalog wiggle.',
   anyOf: [
     { type: 'string', enum: ['none'] },
     { type: 'null' },
@@ -468,7 +468,7 @@ const TOOLS = [
   },
   {
     name: 'crabbycut_catalog',
-    description: 'Look up valid ids/values before editing: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories, geocode (languages, size presets, limits), shapes (shape types + style fields), voices (dubbing engines, voices, cloned voice profiles), text_warps (text warp types + text-on-path presets), wiggle (After Effects style wiggle types position | scale | rotation | opacity: params, ranges, defaults; CrabbyStudio only), distort (After Effects style distort effects wave | bezier | mesh | puppet | liquify: every param with its range/options/default and whether it can be keyframed).',
+    description: 'Look up valid ids/values before editing: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories, geocode (languages, size presets, limits), shapes (shape types + style fields), voices (dubbing engines, voices, cloned voice profiles), text_warps (text warp types + text-on-path presets), wiggle (After Effects style wiggle types position | scale | rotation | opacity: params, ranges, defaults), distort (After Effects style distort effects wave | bezier | mesh | puppet | liquify: every param with its range/options/default and whether it can be keyframed).',
     inputSchema: {
       type: 'object',
       properties: { kind: { type: 'string', enum: ['transitions', 'animations', 'text_styles', 'text_effects', 'luts', 'color_params', 'export_options', 'subtitle', 'library_categories', 'geocode', 'shapes', 'voices', 'text_warps', 'wiggle', 'distort'] } },
@@ -532,7 +532,7 @@ const TOOLS = [
   },
   {
     name: 'crabbycut_set_animation',
-    description: 'Editing step only. Set in/out animation of a block (main_index or item_id). Either combo (e.g. "pop_fade", "none" to clear) with optional combo_duration (total seconds), or in/out objects {type, duration 0.2-2, easing}. Values from crabbycut_catalog animations. CrabbyStudio only: wiggle = After Effects style continuous wiggle of position / scale / rotation / opacity, e.g. {"wiggle": {"position": {"freq": 2, "amp": 30}, "rotation": {"amp": 8}}}; kept when only combo/in/out change; ranges in crabbycut_catalog wiggle.',
+    description: 'Editing step only. Set in/out animation of a block (main_index or item_id). Either combo (e.g. "pop_fade", "none" to clear) with optional combo_duration (total seconds), or in/out objects {type, duration 0.2-2, easing}. Values from crabbycut_catalog animations. wiggle = After Effects style continuous wiggle of position / scale / rotation / opacity, e.g. {"wiggle": {"position": {"freq": 2, "amp": 30}, "rotation": {"amp": 8}}}; kept when only combo/in/out change; ranges in crabbycut_catalog wiggle.',
     inputSchema: {
       type: 'object',
       properties: {

@@ -91,7 +91,7 @@ Claude có hai cách làm việc. **Tool theo tính năng** gọi thẳng hàm c
 | `crabbycut_seek` / `crabbycut_playback` | Đặt playhead / phát, dừng |
 | `crabbycut_undo` | Hoàn tác / làm lại |
 | `crabbycut_select` / `crabbycut_split` / `crabbycut_delete_selected` | Chọn, cắt, xoá clip/block |
-| `crabbycut_catalog` | Tra id hợp lệ: chuyển cảnh, hoạt ảnh, kiểu chữ, hiệu ứng chữ, LUT, thông số màu, tuỳ chọn xuất, phụ đề, thư viện, GeoCode, hình (`shapes`), giọng đọc (`voices`), biến dạng chữ + mẫu đường (`text_warps`), Wiggle (`wiggle`: tham số, dải, mặc định — chỉ CrabbyStudio), Biến dạng kiểu After Effects (`distort`: tham số, dải giá trị, mặc định, có keyframe được không) |
+| `crabbycut_catalog` | Tra id hợp lệ: chuyển cảnh, hoạt ảnh, kiểu chữ, hiệu ứng chữ, LUT, thông số màu, tuỳ chọn xuất, phụ đề, thư viện, GeoCode, hình (`shapes`), giọng đọc (`voices`), biến dạng chữ + mẫu đường (`text_warps`), Wiggle (`wiggle`: tham số, dải, mặc định), Biến dạng kiểu After Effects (`distort`: tham số, dải giá trị, mặc định, có keyframe được không) |
 
 ### Dự án và media
 
@@ -111,7 +111,7 @@ Claude có hai cách làm việc. **Tool theo tính năng** gọi thẳng hàm c
 |---|---|
 | `crabbycut_update_block` | Vị trí, tỉ lệ, xoay, độ mờ, lật, âm lượng, tốc độ, thời điểm, độ dài, nội dung chữ, kiểu chữ, **keyframe**, **Biến dạng** (`distort`, block ảnh/video/Shape) |
 | `crabbycut_apply_text_preset` | Áp kiểu chữ (`p1`…) và/hoặc hiệu ứng chữ (`fx1`…) |
-| `crabbycut_set_animation` | Hoạt ảnh vào/ra, hoặc combo; **Wiggle** kiểu After Effects (`wiggle`, chỉ CrabbyStudio) — xem mục dưới |
+| `crabbycut_set_animation` | Hoạt ảnh vào/ra, hoặc combo; **Wiggle** kiểu After Effects (`wiggle`) — xem mục dưới |
 | `crabbycut_set_transition` | Chuyển cảnh giữa hai clip lane chính hoặc hai block overlay liền nhau |
 | `crabbycut_set_color` | LUT, cường độ LUT, thông số màu (`basic.exposure`, `effects.vignette`…) |
 | `crabbycut_subsequence` | Subsequence kiểu Premiere — xem mục dưới |
@@ -181,7 +181,7 @@ Block ảnh/video (`media`) và Shape nhận `distort` trong `crabbycut_update_b
 - Block Subsequence không có Biến dạng.
 - `distort` được ghi trước `keyframes`, nên thêm hiệu ứng và keyframe nó trong cùng một lượt gọi được khi đã biết id (truyền `id` cho hiệu ứng mới). Cả lượt là **một bước Hoàn tác**.
 
-#### Wiggle (chỉ CrabbyStudio)
+#### Wiggle
 
 `crabbycut_set_animation` nhận `wiggle`: rung lắc **liên tục suốt block** kiểu After Effects (Behaviors › Wiggle), chồng lên hoạt ảnh vào/ra và keyframe. Bốn loại: `position` (px), `scale` (%), `rotation` (độ), `opacity` (% mờ đi — chỉ làm mờ, chạy trong [1 − amp, 1]). Dùng cho chữ, Shape, ảnh, video, GeoCode và clip lane chính (không cho mẫu văn bản). Tra dải bằng `crabbycut_catalog wiggle`.
 
