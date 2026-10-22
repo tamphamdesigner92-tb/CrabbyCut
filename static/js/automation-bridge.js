@@ -904,6 +904,7 @@
         'split', 'select', 'delete_selected', 'seek', 'add_asset', 'import_media', 'add_media_batch',
         // GeoCode trong lô: dựng XONG rồi mới sang bước sau (lệnh lẻ thì đi job — xem startGeocodeJob).
         'add_geocode',
+        'add_shape',
     ]);
 
     function resolveRefs(value, results) {
@@ -1066,8 +1067,16 @@
                     scale_note: 'Block scale 100% = exactly width x height pixels on the sequence.',
                 };
             }
+            case 'voices':
+                return voicesCatalog();
+            case 'shapes':
+                return {
+                    shape_types: SHAPE_TYPES,
+                    style: 'width/height px (20-4000), fill_color/stroke_color #rrggbb, stroke_width 0-100, stroke_position inside|center|outside, corner_radius (rectangle/square/triangle/trapezoid/polygon), outer_corner_radius + inner_corner_radius (star), sides 3+ (polygon), points 3+ (star)',
+                    path: 'shape_type "path": path_points [{x, y, ix?, iy?, ox?, oy?, r?}] with x/y as 0..1 fractions of the width x height box, ix/iy/ox/oy Bezier handles relative to the point (same units), r corner radius px; path_closed true|false',
+                };
             default:
-                throw new Error('"kind" là một trong: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories, geocode');
+                throw new Error('"kind" là một trong: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories, geocode, shapes, voices');
         }
     }
 
@@ -1280,8 +1289,15 @@
         };
     }
 
-    async function addGeocodeNow(params = {}) {
-        requireEditing();
+    /* Nhật ký dựng GeoCode gửi về model: dựng thành công thì chỉ giữ dòng cảnh báo/lỗi (mỗi khung
+     * một dòng info là phí token mà model không dùng). `verbose_logs: true` lấy lại đủ 60 dòng cuối. */
+    function geocodeLogsOut(logs, verbose) {
+        if (verbose) return logs.slice(-60).map((l) => `${l.level}: ${l.message}`);
+        return logs.filter((l) => l.level === 'error' || l.level === 'warn' || l.level === 'warning')
+            .slice(-10).map((l) => `${l.level}: ${String(l.message).slice(0, 300)}`);
+    }
+
+    async function renderGeocode(params) {
         const spec = geocodeSpecFrom(params);
         if (spec.lang === 'python') {
             window.showToast?.(_t('MCP đang chạy mã Python (GeoCode)'), { type: 'info' });
@@ -1290,27 +1306,167 @@
         const logs = [];
         const geocode = await window.GeoCode.buildGeocode(spec, {
             loop: params.loop !== false,
-            onLog: (entry) => { logs.push(`${entry.level || 'info'}: ${entry.message}`); },
+            onLog: (entry) => { logs.push({ level: entry.level || 'info', message: entry.message }); },
         });
-        const added = await asOneUndoStep(async () => {
-            const placement = {
-                start: Number.isFinite(Number(params.start)) ? Number(params.start) : undefined,
-                trackId: params.track_id || undefined,
-                duration: Number(params.block_duration) > 0 ? Number(params.block_duration) : undefined,
-            };
-            const item = api().addGeocodeItem(geocode, placement);
-            if (!item) throw new Error('Không đặt được block GeoCode');
-            const extra = {};
-            BLOCK_EXTRA_KEYS.forEach((k) => { if (params[k] !== undefined && k !== 'volume' && k !== 'muted') extra[k] = params[k]; });
-            if (Object.keys(extra).length) await updateBlock({ item_id: item.id, ...extra });
-            if (params.animation) await setAnimation({ item_id: item.id, ...params.animation });
-            return itemResult(api().findItem(item.id));
-        });
-        return {
-            ...added,
-            geocode: { render_key: geocode.render_key, frame_count: geocode.frame_count, width: geocode.width, height: geocode.height, kind: geocode.kind },
-            logs: logs.slice(-60),
+        return { geocode, logs };
+    }
+
+    // Đặt block đã dựng + biến đổi/keyframe/hoạt ảnh. Gọi TRONG asOneUndoStep.
+    async function placeGeocode(geocode, params, start) {
+        const placement = {
+            start: Number.isFinite(Number(start)) ? Number(start) : undefined,
+            trackId: params.track_id || undefined,
+            duration: Number(params.block_duration) > 0 ? Number(params.block_duration) : undefined,
         };
+        const item = api().addGeocodeItem(geocode, placement);
+        if (!item) throw new Error('Không đặt được block GeoCode');
+        const extra = {};
+        BLOCK_EXTRA_KEYS.forEach((k) => { if (params[k] !== undefined && k !== 'volume' && k !== 'muted') extra[k] = params[k]; });
+        if (Object.keys(extra).length) await updateBlock({ item_id: item.id, ...extra });
+        if (params.animation) await setAnimation({ item_id: item.id, ...params.animation });
+        return api().findItem(item.id);
+    }
+
+    function geocodeOut(geocode) {
+        return { render_key: geocode.render_key, frame_count: geocode.frame_count, width: geocode.width, height: geocode.height, kind: geocode.kind };
+    }
+
+    async function addGeocodeNow(params = {}) {
+        requireEditing();
+        const { geocode, logs } = await renderGeocode(params);
+        const added = await asOneUndoStep(async () => itemResult(await placeGeocode(geocode, params, params.start)));
+        return { ...added, geocode: geocodeOut(geocode), logs: geocodeLogsOut(logs, params.verbose_logs === true) };
+    }
+
+    /* MẪU MÃ DÙNG CHUNG: `template` có chỗ trống {{tên}}, mỗi mục chỉ gửi `vars` — 8 block cùng
+     * một bộ CSS/khung cảnh thì CSS chỉ đi MỘT lần thay vì 8 lần. Mục có `code` riêng thì dùng code
+     * đó. Chỗ trống không có trong vars là lỗi (dễ quên tên biến hơn là cố ý để trống). */
+    function fillGeocodeTemplate(template, vars, index) {
+        const missing = new Set();
+        const code = String(template).replace(/\{\{\s*([A-Za-z_][\w-]*)\s*\}\}/g, (all, name) => {
+            if (vars && Object.prototype.hasOwnProperty.call(vars, name)) {
+                const v = vars[name];
+                return typeof v === 'string' ? v : JSON.stringify(v);
+            }
+            missing.add(name);
+            return all;
+        });
+        if (missing.size) throw new Error(`Mục ${index}: thiếu vars cho {{${Array.from(missing).join('}}, {{')}}}`);
+        return code;
+    }
+
+    /* crabbycut_add_geocode với `items`: dựng LẦN LƯỢT (ngoài bước Hoàn tác — dựng lâu), rồi đặt cả lô
+     * trong MỘT bước Hoàn tác. Mục không có `start` nối tiếp mục trước (+ gap), mục đầu ở `start`
+     * của lô hoặc playhead. */
+    // Kiểm + điền template TRƯỚC khi tạo job: sai đặc tả/thiếu biến báo ngay ở lượt gọi.
+    function prepareGeocodeItems({ items, template, defaults, on_error = 'abort' } = {}) {
+        requireEditing();
+        if (!Array.isArray(items) || !items.length) throw new Error('"items" phải là mảng có ít nhất 1 phần tử');
+        if (items.length > 50) throw new Error('Tối đa 50 block GeoCode mỗi lô');
+        if (!['abort', 'continue'].includes(on_error)) throw new Error('"on_error" là abort | continue');
+        return items.map((raw, i) => {
+            const it = withDefaults(defaults, raw);
+            if (it.code === undefined || it.code === '') {
+                if (!template) throw new Error(`Mục ${i}: cần "code" hoặc "template" + "vars"`);
+                it.code = fillGeocodeTemplate(template, it.vars, i);
+            }
+            try { geocodeSpecFrom(it); } catch (error) { throw new Error(`Mục ${i}: ${errorText(error)}`); }
+            return it;
+        });
+    }
+
+    async function addGeocodeMany(options = {}, prepared = null) {
+        const { start, gap = 0, on_error = 'abort', verbose_logs } = options;
+        const list = prepared || prepareGeocodeItems(options);
+        const built = [];
+        for (let i = 0; i < list.length; i += 1) {
+            try {
+                // eslint-disable-next-line no-await-in-loop
+                built.push(await renderGeocode(list[i]));
+            } catch (error) {
+                if (on_error !== 'continue') throw new Error(`Mục ${i}: ${errorText(error)}`);
+                built.push({ error: errorText(error) });
+            }
+        }
+        const gapSec = Math.max(0, Number(gap) || 0);
+        return asOneUndoStep(async () => {
+            let cursor = Number.isFinite(Number(start)) ? Number(start) : playhead();
+            const results = [];
+            for (let i = 0; i < list.length; i += 1) {
+                const it = list[i];
+                if (built[i].error) { results.push({ index: i, error: built[i].error }); continue; }
+                const snapshot = snapshotForItem(on_error);
+                try {
+                    const at = typeof it.start === 'number' ? it.start : (results.some((r) => r.item_id) ? cursor + gapSec : cursor);
+                    // eslint-disable-next-line no-await-in-loop
+                    const item = await placeGeocode(built[i].geocode, it, at);
+                    cursor = (Number(item.timeline_start) || 0) + (Number(item.duration) || 0);
+                    const logs = geocodeLogsOut(built[i].logs, verbose_logs === true);
+                    results.push({
+                        index: i, item_id: item.id, track_id: item.track_id,
+                        timeline_start: round3(item.timeline_start), duration: round3(item.duration),
+                        render_key: built[i].geocode.render_key, ...(logs.length ? { logs } : {}),
+                    });
+                } catch (error) {
+                    if (on_error !== 'continue') throw new Error(`Mục ${i}: ${errorText(error)} — đã hoàn nguyên cả lô`);
+                    rollbackItem(snapshot);
+                    results.push({ index: i, error: errorText(error) });
+                }
+            }
+            const created = results.filter((r) => r.item_id).length;
+            if (!created) throw new Error(`Không đặt được block nào: ${results.map((r) => `#${r.index} ${r.error}`).join('; ')}`);
+            return { items: results, created, failed: results.length - created, undo_steps: 1 };
+        });
+    }
+
+    /* crabbycut_update_geocode: sửa block GeoCode ĐANG CÓ mà không gửi lại cả mã — `replace`
+     * [{find, with, all}] vá trên mã đang lưu trong block, hoặc `code` mới; đổi cỡ/độ dài/fps/nền
+     * thì dựng lại. Giữ vị trí, biến đổi, keyframe, hoạt ảnh (updateGeocodeItem). `read: true` mà
+     * không đổi gì = trả mã hiện tại để xem. */
+    const GEOCODE_SPEC_KEYS = ['lang', 'width', 'height', 'kind', 'fps', 'duration', 'bg'];
+
+    async function updateGeocode(params = {}) {
+        requireEditing();
+        const item = api().findItem(String(params.item_id || ''));
+        if (!item || item.type !== 'geocode') throw new Error(`Không có block GeoCode id "${params.item_id}"`);
+        if (isLocked(item.track_id)) throw new Error(`Track ${item.track_id} đang khoá`);
+        const gc = item.geocode || {};
+        const specChanged = GEOCODE_SPEC_KEYS.filter((k) => params[k] !== undefined && params[k] !== gc[k]);
+        const wantsRebuild = params.code !== undefined || (Array.isArray(params.replace) && params.replace.length)
+            || specChanged.length
+            || ((params.kind || gc.kind) === 'video' && params.loop !== undefined && (params.loop !== false) !== (gc.loop === true));
+        if (!wantsRebuild) {
+            if (params.block_duration === undefined && !params.read) throw new Error('Không có gì để đổi — truyền code / replace / width / height / kind / fps / duration / bg / loop / block_duration, hoặc read: true');
+            const out = { item_id: item.id };
+            if (params.block_duration !== undefined) {
+                await updateBlock({ item_id: item.id, duration: params.block_duration });
+                out.duration = round3(api().findItem(item.id).duration);
+            }
+            if (params.read) out.geocode = { ...Object.fromEntries(GEOCODE_SPEC_KEYS.map((k) => [k, gc[k]])), loop: gc.loop === true, code: gc.code || '' };
+            return out;
+        }
+        let code = params.code !== undefined ? String(params.code) : String(gc.code || '');
+        (Array.isArray(params.replace) ? params.replace : []).forEach((r, i) => {
+            const find = String(r?.find ?? '');
+            if (!find) throw new Error(`replace[${i}]: thiếu "find"`);
+            if (!code.includes(find)) throw new Error(`replace[${i}]: không thấy "${find.slice(0, 80)}" trong mã của block`);
+            const repl = String(r?.with ?? '');
+            code = r?.all ? code.split(find).join(repl) : code.replace(find, () => repl);
+        });
+        const spec = { ...Object.fromEntries(GEOCODE_SPEC_KEYS.map((k) => [k, params[k] !== undefined ? params[k] : gc[k]])), code };
+        const { geocode, logs } = await renderGeocode({ ...spec, loop: params.loop !== undefined ? params.loop !== false : gc.loop === true });
+        const updated = await asOneUndoStep(async () => {
+            const it = api().updateGeocodeItem(item.id, geocode);
+            if (!it) throw new Error('Không cập nhật được block GeoCode');
+            if (params.block_duration !== undefined) await updateBlock({ item_id: item.id, duration: params.block_duration });
+            return api().findItem(item.id);
+        });
+        const out = {
+            item_id: updated.id, timeline_start: round3(updated.timeline_start), duration: round3(updated.duration),
+            geocode: geocodeOut(geocode), logs: geocodeLogsOut(logs, params.verbose_logs === true),
+        };
+        if (params.read) out.code = geocode.code || code;
+        return out;
     }
 
     async function startGeocodeJob(options) {
@@ -1323,13 +1479,266 @@
         return job;
     }
 
+    // Lô GeoCode (items) và sửa GeoCode: dựng lâu nên đi job như add_geocode lẻ.
+    function startGeocodeTask(kind, run, summary) {
+        requireEditing();
+        const job = newJob(kind, { options: summary });
+        run()
+            .then((result) => finish(job, 'complete', { progress: 100, message: 'Xong', result }))
+            .catch((error) => finish(job, 'failed', { error: errorText(error) }));
+        return job;
+    }
+
+    /* =====================================================================
+     * SHAPE (Hình học › Hình dạng) — crabbycut_add_shape: một hình (trường ở cấp trên) hoặc `items`,
+     * cả lô MỘT bước Hoàn tác. Style theo đúng mô hình của inspector (normalizeShapeStyle).
+     * ===================================================================== */
+    const SHAPE_TYPES = ['rectangle', 'square', 'circle', 'triangle', 'trapezoid', 'polygon', 'star', 'line', 'path'];
+    const SHAPE_STYLE_KEYS = ['shape_type', 'width', 'height', 'fill_color', 'stroke_color', 'stroke_width',
+        'stroke_position', 'corner_radius', 'outer_corner_radius', 'inner_corner_radius', 'sides', 'points',
+        'path_points', 'path_closed'];
+
+    async function addShapes({ items, defaults, start, gap = 0, track_id, on_error = 'abort', ...single } = {}) {
+        requireEditing();
+        const many = Array.isArray(items) && items.length > 0;
+        const raw = many ? items : [single];
+        if (raw.length > MAX_BATCH) throw new Error(`Tối đa ${MAX_BATCH} hình mỗi lô`);
+        if (!['abort', 'continue'].includes(on_error)) throw new Error('"on_error" là abort | continue');
+        const list = raw.map((it, i) => {
+            const merged = withDefaults(defaults, it);
+            const style = { ...(merged.style && typeof merged.style === 'object' ? merged.style : {}) };
+            SHAPE_STYLE_KEYS.forEach((k) => { if (merged[k] !== undefined) style[k] = merged[k]; });
+            if (!style.shape_type) style.shape_type = 'rectangle';
+            if (!SHAPE_TYPES.includes(style.shape_type)) throw new Error(`Mục ${i}: "shape_type" là ${SHAPE_TYPES.join(' | ')}`);
+            if (style.shape_type === 'path' && !(Array.isArray(style.path_points) && style.path_points.length >= 2)) {
+                throw new Error(`Mục ${i}: shape_type "path" cần path_points (>= 2 đỉnh {x, y} theo tỉ lệ 0..1 của box)`);
+            }
+            return { ...merged, style };
+        });
+        const gapSec = Math.max(0, Number(gap) || 0);
+        return asOneUndoStep(async () => {
+            let cursor = Number.isFinite(Number(start)) ? Number(start) : playhead();
+            const results = [];
+            for (let i = 0; i < list.length; i += 1) {
+                const it = list[i];
+                const snapshot = snapshotForItem(on_error);
+                try {
+                    let at;
+                    if (typeof it.start === 'number') at = it.start;
+                    else if (it.start === undefined || it.start === 'after_previous') at = results.some((r) => r.item_id) ? cursor + gapSec : cursor;
+                    else throw new Error('"start" là số giây hoặc "after_previous"');
+                    const item = api().addShapeItemWithStyle(it.style, {
+                        start: at,
+                        trackId: it.track_id || track_id || undefined,
+                        duration: Number(it.duration) > 0 ? Number(it.duration) : undefined,
+                    });
+                    if (!item) throw new Error('Không thêm được hình');
+                    const extra = {};
+                    BLOCK_EXTRA_KEYS.forEach((k) => { if (it[k] !== undefined && k !== 'volume' && k !== 'muted') extra[k] = it[k]; });
+                    // eslint-disable-next-line no-await-in-loop
+                    if (Object.keys(extra).length) await updateBlock({ item_id: item.id, ...extra });
+                    // eslint-disable-next-line no-await-in-loop
+                    if (it.animation) await setAnimation({ item_id: item.id, ...it.animation });
+                    cursor = (Number(item.timeline_start) || 0) + (Number(item.duration) || 0);
+                    results.push({
+                        index: i, item_id: item.id, track_id: item.track_id,
+                        timeline_start: round3(item.timeline_start), duration: round3(item.duration),
+                    });
+                } catch (error) {
+                    if (on_error !== 'continue') throw new Error(`${many ? `Mục ${i}: ` : ''}${errorText(error)}${many ? ' — đã hoàn nguyên cả lô' : ''}`);
+                    rollbackItem(snapshot);
+                    results.push({ index: i, error: errorText(error) });
+                }
+            }
+            if (!many) {
+                if (results[0].error) throw new Error(results[0].error);
+                const { index, ...one } = results[0];
+                return one;
+            }
+            const created = results.filter((r) => r.item_id).length;
+            if (!created) throw new Error(`Không thêm được hình nào: ${results.map((r) => `#${r.index} ${r.error}`).join('; ')}`);
+            return { items: results, created, failed: results.length - created, undo_steps: 1 };
+        });
+    }
+
+    /* =====================================================================
+     * LỒNG TIẾNG (Âm thanh › Lồng tiếng) — crabbycut_dub: đọc văn bản / danh sách câu / câu có mốc
+     * thành giọng AI rồi đặt lên lane "Lồng tiếng" (+ phụ đề khớp tiếng khi đọc văn bản). Cùng server
+     * (/api/dubbing/jobs), cùng cách đặt (addDubbingAudio) và cùng phụ đề (LocalSubtitlePanel) với
+     * panel. Giọng/engine bỏ trống = lựa chọn người dùng đang để ở panel. Kết quả GỌN: mốc từng câu
+     * (đủ để canh hình/chữ theo lời đọc) — không trả lại chữ đã gửi.
+     * ===================================================================== */
+    async function ttsApi(method, path, body) {
+        const resp = await fetch(`${typeof API_BASE !== 'undefined' ? API_BASE : '/api'}${path}`, {
+            method,
+            headers: body ? { 'Content-Type': 'application/json' } : undefined,
+            body: body ? JSON.stringify(body) : undefined,
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.detail || `Lỗi máy chủ (${resp.status})`);
+        return data;
+    }
+
+    const DUB_TIMING = ['auto_fit', 'dynamic_shift', 'fixed_duration'];
+
+    function dubCuesFrom(options) {
+        if (Array.isArray(options.cues) && options.cues.length) {
+            const cues = options.cues.map((c, i) => {
+                const s = Number(c?.start);
+                const e = Number(c?.end);
+                const text = String(c?.text || '').trim();
+                if (!(s >= 0) || !(e > s) || !text) throw new Error(`cues[${i}]: cần { start, end > start, text }`);
+                return { start: s, end: e, text };
+            });
+            return { cues, textMode: false };
+        }
+        let sentences = null;
+        if (Array.isArray(options.sentences) && options.sentences.length) sentences = options.sentences.map((s) => String(s || '').trim()).filter(Boolean);
+        else if (typeof options.text === 'string' && options.text.trim()) {
+            const split = window.DubbingPanel?.splitSentences;
+            sentences = typeof split === 'function' ? split(options.text) : options.text.split(/(?<=[.!?…])\s+|\n+/).map((s) => s.trim()).filter(Boolean);
+        }
+        if (!sentences || !sentences.length) throw new Error('Cần "text", "sentences" hoặc "cues" (câu có mốc { start, end, text })');
+        return { cues: sentences.map((text, i) => ({ start: i, end: i + 1, text })), textMode: true };
+    }
+
+    async function startDubJob(options = {}) {
+        requireEditing();
+        const { cues, textMode } = dubCuesFrom(options);
+        const prefs = window.DubbingPanel?.state || {};
+        const status = await ttsApi('GET', '/tts/status');
+        if (!status?.env?.ready) throw new Error('Chưa cài thư viện lồng tiếng — người dùng bấm "Cài thư viện lồng tiếng" ở tab Âm thanh › Lồng tiếng.');
+        const engineId = String(options.engine || prefs.engine || 'vieneu3');
+        const engine = (status.engines || []).find((e) => e.id === engineId);
+        if (!engine) throw new Error(`Không có engine "${engineId}" (xem crabbycut_catalog kind "voices")`);
+        if (!engine.available) throw new Error(engine.reason || `Engine ${engineId} không chạy được trên máy này`);
+        if (engine.env_id && engine.env_id !== 'main' && !engine.env_ready) throw new Error(`${engine.label || engineId} cần cài thêm thư viện riêng ở tab Lồng tiếng`);
+        if (!(Number(rt().timelineDuration?.()) > 0)) throw new Error('Timeline chưa có video nào — lồng tiếng được đặt theo mốc của timeline.');
+        const timing = options.timing_mode || 'auto_fit';
+        if (!textMode && !DUB_TIMING.includes(timing)) throw new Error(`"timing_mode" là ${DUB_TIMING.join(' | ')}`);
+        const defaultVoice = engineId === prefs.engine && prefs.voice ? prefs.voice : (engine.voices || [])[0] || '';
+        const name = String(options.name || 'MCP').slice(0, 80);
+        // voxcpm "giọng" là câu mô tả (panel: state.describe); engine_options mặc định như panel.
+        const panelVoice = engineId === 'voxcpm' ? (prefs.describe || '') : defaultVoice;
+        const body = {
+            engine: engineId,
+            voice: options.voice_profile ? '' : String(options.voice || panelVoice),
+            speed: Number(options.speed) > 0 ? Number(options.speed) : 1,
+            timing_mode: textMode ? 'sequential' : timing,
+            max_speed: Number(options.max_speed) > 0 ? Number(options.max_speed) : 1.45,
+            split_clips: options.split === true,
+            name: `${name} (lồng tiếng)`,
+            cues,
+        };
+        if (textMode) body.gap = Number.isFinite(Number(options.gap)) ? Math.max(0, Number(options.gap)) : 0.4;
+        if (options.voice_profile) body.voice_profile = String(options.voice_profile);
+        if (options.engine_options && typeof options.engine_options === 'object') body.engine_options = options.engine_options;
+        else if (engineId === 'qwen3') body.engine_options = { mode: prefs.qwenMode || 'custom', language: prefs.languages?.qwen3 || 'Auto', instruct: prefs.instruct || '' };
+        else if (engineId === 'chatterbox') body.engine_options = { language: prefs.languages?.chatterbox || 'en', exaggeration: prefs.exaggeration ?? 0.5, cfg_weight: prefs.cfgWeight ?? 0.5 };
+        const offset = Math.max(0, Number(options.start) || 0);
+        window.ModelDownloadStatus?.kick?.();
+        // Tạo job SAU khi server nhận lệnh: POST lỗi thì lỗi trả thẳng về, không để job "running" mồ côi.
+        const remote = await ttsApi('POST', '/dubbing/jobs', body);
+        const job = newJob('dub', { options: { engine: engineId, voice: body.voice || body.voice_profile || '', sentences: cues.length, text_mode: textMode } });
+        const remoteId = remote.job_id;
+        job._cancel = async () => {
+            try { await ttsApi('POST', `/dubbing/jobs/${encodeURIComponent(remoteId)}/cancel`); } catch (_) { /* poll sẽ thấy */ }
+            finish(job, 'cancelled', { message: 'Đã huỷ' });
+        };
+        const place = async (result, warnings) => {
+            const clips = (result.clips || []).filter((c) => Number(c.duration) > 0);
+            const entries = options.split === true
+                ? clips.filter((c) => c.path).map((c) => ({ path: c.path, start: c.start + offset, duration: c.duration }))
+                : [{ path: result.full?.path, start: (Number(result.full?.start) || 0) + offset, duration: result.full?.duration }];
+            const out = await asOneUndoStep(async () => {
+                const placed = await rt().addDubbingAudio(entries, { sourceKey: `mcp:${name}`, replace: options.replace !== false });
+                let subtitles = 0;
+                if (textMode && options.make_subtitles !== false && window.LocalSubtitlePanel?.importCues && window.DubbingPanel?.subtitleCuesFromClips) {
+                    const subs = window.DubbingPanel.subtitleCuesFromClips(clips, offset);
+                    if (subs.length) subtitles = window.LocalSubtitlePanel.importCues(subs, { fileName: `${name} (lồng tiếng).srt` }).count || 0;
+                }
+                return { placed, subtitles };
+            });
+            const notes = [...(warnings || [])];
+            const skipped = Object.values(result.skipped || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+            if (skipped) notes.push(`${skipped} câu không đọc (rỗng/chỉ ký hiệu)`);
+            if (out.placed.skipped) notes.push(`${out.placed.skipped} đoạn nằm sau cuối timeline bị bỏ`);
+            if (out.placed.clamped) notes.push(`${out.placed.clamped} đoạn bị cắt ở cuối timeline`);
+            const s = result.summary || {};
+            if (s.sped_up) notes.push(`${s.sped_up} câu được đọc nhanh hơn (tối đa ${s.max_speed}x)`);
+            const fullStart = (Number(result.full?.start) || 0) + offset;
+            return {
+                sentences: s.count || clips.length,
+                start: round3(fullStart),
+                end: round3(fullStart + (Number(result.full?.duration) || 0)),
+                // Mốc từng câu trên timeline (i = thứ tự câu đã gửi) — canh GeoCode/chữ theo lời đọc.
+                clips: clips.map((c, i) => ({ i, start: round3(c.start + offset), end: round3(c.start + offset + c.duration) })),
+                audio_blocks: out.placed.placed, replaced_blocks: out.placed.removed, subtitles: out.subtitles,
+                ...(notes.length ? { notes } : {}),
+            };
+        };
+        const poll = async () => {
+            if (job.state !== 'running') return;
+            try {
+                const r = await ttsApi('GET', `/dubbing/jobs/${encodeURIComponent(remoteId)}`);
+                if (Number(r.total) > 0) job.progress = Math.round((Number(r.done) || 0) * 100 / Number(r.total));
+                job.message = r.message || r.stage || '';
+                if (r.stage === 'models') window.ModelDownloadStatus?.kick?.();
+                if (r.state === 'done') {
+                    finish(job, 'complete', { progress: 100, message: 'Đã lồng tiếng', result: await place(r.result || {}, r.warnings) });
+                    return;
+                }
+                if (r.state === 'error' || r.state === 'cancelled') {
+                    finish(job, r.state === 'error' ? 'failed' : 'cancelled', { error: r.error || '' });
+                    return;
+                }
+            } catch (error) {
+                finish(job, 'failed', { error: errorText(error) });
+                return;
+            }
+            setTimeout(poll, 800);
+        };
+        setTimeout(poll, 800);
+        return job;
+    }
+
+    // catalog kind "voices": engine + giọng có sẵn + hồ sơ giọng nhân bản, gọn (chỉ tên).
+    async function voicesCatalog() {
+        const status = await ttsApi('GET', '/tts/status');
+        const profiles = await ttsApi('GET', '/voice-profiles').then((d) => d.profiles || []).catch(() => []);
+        const prefs = window.DubbingPanel?.state || {};
+        return {
+            ready: !!status?.env?.ready,
+            default: { engine: prefs.engine || 'vieneu3', voice: prefs.voice || '' },
+            engines: (status.engines || []).map((e) => ({
+                id: e.id, label: e.label, available: !!e.available,
+                ...(e.available ? {} : { reason: e.reason || '' }),
+                ...(e.env_id && e.env_id !== 'main' && !e.env_ready ? { needs_setup: true } : {}),
+                clone: !!e.clone,
+                ...(Array.isArray(e.modes) ? { modes: e.modes.map((m) => m.id) } : {}),
+                ...(Array.isArray(e.languages) ? { languages: e.languages } : {}),
+                voices: (Array.isArray(e.voice_details) && e.voice_details.length ? e.voice_details.map((v) => v.id) : (e.voices || [])),
+            })),
+            profiles: profiles.map((p) => ({ id: p.id, name: p.name })),
+        };
+    }
+
     async function startJob({ kind, options = {} } = {}) {
         let job;
         if (kind === 'auto_subtitle') job = await startAutoSubtitle(options);
         else if (kind === 'magic_fill') job = await startMagicFill(options);
         else if (kind === 'export') job = await startExport(options);
-        else if (kind === 'geocode') job = await startGeocodeJob(options);
-        else throw new Error('"kind" là auto_subtitle | magic_fill | export | geocode');
+        else if (kind === 'geocode') {
+            if (Array.isArray(options.items) && options.items.length) {
+                const prepared = prepareGeocodeItems(options);
+                job = startGeocodeTask('geocode', () => addGeocodeMany(options, prepared), { items: prepared.length });
+            } else {
+                job = await startGeocodeJob(options);
+            }
+        } else if (kind === 'geocode_update') {
+            job = startGeocodeTask('geocode_update', () => updateGeocode(options), { item_id: options.item_id });
+        } else if (kind === 'dub') job = await startDubJob(options);
+        else throw new Error('"kind" là auto_subtitle | magic_fill | export | geocode | geocode_update | dub');
         return publicJob(job);
     }
 
@@ -1449,6 +1858,8 @@
         add_media_batch: addMediaBatch,
         batch: runBatch,
         add_geocode: addGeocodeNow,
+        add_shape: addShapes,
+        update_geocode: updateGeocode,
         list_assets: listAssets,
         add_main_videos: addMainVideos,
         new_project: newProject,

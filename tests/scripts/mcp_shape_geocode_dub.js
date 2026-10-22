@@ -1,0 +1,400 @@
+/* =====================================================================
+ * MCP: LỆNH SHAPE / GEOCODE / LỒNG TIẾNG — ít lượt gọi, kết quả gọn (giảm token của model).
+ *
+ * A. Cầu nối renderer (static/js/automation-bridge.js THẬT trong vm; shape dựng bằng
+ *    addShapeItemWithStyle + normalizeShapeStyle bóc thẳng từ editing-runtime.js):
+ *    - add_shape: một hình / cả lô = MỘT bước Hoàn tác, style chuẩn hoá, nối tiếp theo gap,
+ *      path thiếu đỉnh bị từ chối, chạy được trong batch;
+ *    - GeoCode lô: template {{vars}} điền đúng, thiếu biến báo lỗi, đặt cả lô MỘT bước Hoàn tác,
+ *      log info không gửi về; update_geocode vá find/replace trên mã đã lưu, giữ biến đổi, read;
+ *    - dub: văn bản -> câu, gửi đúng body cho /api/dubbing/jobs, đặt audio + phụ đề MỘT bước
+ *      Hoàn tác, trả mốc từng câu (cộng start).
+ * B. MCP server THẬT (stdio) với app giả qua HTTP: tool mới có trong tools/list, crabbycut_add_geocode
+ *    / crabbycut_dub TỰ CHỜ job trong server (một lượt gọi, không cần crabbycut_job_status), hết hạn chờ
+ *    thì trả job_id; update_geocode chỉ đọc thì không tạo job.
+ *
+ * Chạy: npm run test:mcp-shape-geocode-dub
+ * ================================================================== */
+const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const http = require('http');
+const vm = require('vm');
+const { spawn } = require('child_process');
+
+const ROOT = path.resolve(__dirname, '..', '..');
+const runtimeJs = fs.readFileSync(path.join(ROOT, 'static', 'js', 'editing-runtime.js'), 'utf8');
+const bridgeJs = fs.readFileSync(path.join(ROOT, 'static', 'js', 'automation-bridge.js'), 'utf8');
+const TextAnimations = require(path.join(ROOT, 'static', 'js', 'text-animations.js'));
+const ColorAdjust = require(path.join(ROOT, 'static', 'js', 'color-adjust.js'));
+
+const ok = (msg) => console.log(`  ok  ${msg}`);
+const plain = (v) => JSON.parse(JSON.stringify(v));
+
+function extractFunction(src, name) {
+    const start = src.indexOf(`function ${name}(`);
+    assert.notStrictEqual(start, -1, `không tìm thấy hàm ${name}()`);
+    const bodyStart = src.indexOf('{', src.indexOf(')', start));
+    let depth = 0;
+    for (let i = bodyStart; i < src.length; i += 1) {
+        if (src[i] === '{') depth += 1;
+        else if (src[i] === '}') {
+            depth -= 1;
+            if (depth === 0) return src.slice(start, i + 1);
+        }
+    }
+    throw new Error(`hàm ${name}() không đóng ngoặc`);
+}
+
+function makeApp() {
+    const fetchLog = [];
+    const sandbox = {
+        console, TextAnimations, ColorAdjust, setTimeout, clearTimeout, setInterval, clearInterval,
+        navigator: { platform: 'MacIntel' },
+        currentMode: 'FINAL', currentStepId: 'step4', latestTimeline: [], undoStack: [], redoStack: [],
+        playheadTime: 2, API_BASE: '/api', _t: (s) => s, fetchLog,
+    };
+    sandbox.window = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(`
+        function captureFullState() { return JSON.parse(JSON.stringify({ items: rtState.editingItems })); }
+        function saveHistoryState() { undoStack.push(captureFullState()); redoStack = []; }
+        function restoreHistoryState(state) { rtState.editingItems.splice(0, Infinity, ...JSON.parse(JSON.stringify(state.items))); }
+        function updateUndoRedoButtons() {}
+        function getCurrentTimelineTime() { return playheadTime; }
+        function clipSequenceDuration(clip) { return Number(clip.end) - Number(clip.start); }
+        function clampTransformValue(field, value) { return Number(value); }
+        var rtState = { editingItems: [], editingAssets: [], editingTracks: [{ id: 'track_shape_1', type: 'shape' }, { id: 'track_text_1', type: 'text' }] };
+        var editingItems = rtState.editingItems;
+        var idSeq = 0;
+        let historySuspended = 0;
+        let renderSuspendDepth = 0;
+        const renderDirty = { all: false, panel: false };
+        let renderAllRuns = 0;
+        const KF_EPS = 0.02;
+        const MAX_POLYGON_SIDES = 64;
+        const MAX_STAR_POINTS = 32;
+        const MAX_PATH_POINTS = 500;
+        function clamp(value, min, max) { const n = Number(value); return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : min; }
+        ${extractFunction(runtimeJs, 'recordHistory')}
+        ${extractFunction(runtimeJs, 'beginHistoryBatch')}
+        ${extractFunction(runtimeJs, 'suspendHistory')}
+        ${extractFunction(runtimeJs, 'renderGated')}
+        ${extractFunction(runtimeJs, 'suspendRender')}
+        ${extractFunction(runtimeJs, 'upsertKeyframe')}
+        ${extractFunction(runtimeJs, 'defaultShapeStyle')}
+        ${extractFunction(runtimeJs, 'normalizeShapeStyle')}
+        ${extractFunction(runtimeJs, 'normalizePathPoints')}
+        ${extractFunction(runtimeJs, 'addShapeItemWithStyle')}
+        function renderAll() { if (renderGated('all')) return; renderAllRuns += 1; }
+        function renderEditPanel() { if (renderGated('panel')) return; }
+        function renderPreviewOverlays() {}
+        function nextId(prefix) { return prefix + '_' + (++idSeq); }
+        function defaultTransform() { return { position_x: 0, position_y: 0, scale: 100, rotation: 0, opacity: 100, flip_x: false, flip_y: false }; }
+        function findItem(id) { return rtState.editingItems.find((it) => it.id === id) || null; }
+        function selectEditingItem() {}
+        function selectItem(id) { renderAll(); }
+        // Bản giả của chọn track: track Hình khối duy nhất, start/duration như bản thật.
+        function resolveNewItemPlacement(type, want, placement) {
+            const start = placement && Number.isFinite(Number(placement.start)) ? Number(placement.start) : playheadTime;
+            return { start: Math.max(0, start), duration: Math.max(0.2, Number(want) || 1), track: { id: (placement && placement.trackId) || 'track_shape_1' } };
+        }
+        function addGeocodeItem(geocode, placement) {
+            const p = resolveNewItemPlacement('geocode', (placement && placement.duration) || geocode.duration || 5, placement);
+            recordHistory();
+            const item = { id: nextId('item'), type: 'geocode', track_id: p.track.id, timeline_start: p.start, duration: p.duration, transform: defaultTransform(), geocode: { ...geocode } };
+            rtState.editingItems.push(item);
+            renderAll();
+            return item;
+        }
+        function updateGeocodeItem(id, geocode) {
+            const item = findItem(id);
+            recordHistory();
+            item.geocode = { ...geocode };
+            renderAll();
+            return item;
+        }
+        var subtitleImports = [];
+        var dubbingBlocks = [];
+        var EditingRuntime = {
+            beginHistoryBatch, renderAll, renderEditingTimeline: renderAll, renderPreviewOverlays, selectItem,
+            getState: () => rtState,
+            timelineDuration: () => 60,
+            async addDubbingAudio(entries, options) {
+                const end = beginHistoryBatch();
+                entries.forEach((e) => { rtState.editingItems.push({ id: nextId('item_audio'), type: 'audio', track_id: 'track_dub', timeline_start: e.start, duration: e.duration, dubbing_source: options.sourceKey }); });
+                end();
+                renderAll();
+                return { placed: entries.length, skipped: 0, clamped: 0, removed: 0 };
+            },
+            automation: {
+                findItem, findTrack: (id) => ({ id }), isTrackLocked: () => false, clampItemTiming: () => {}, itemSourceDurationLimit: () => Infinity,
+                itemSupportsAnimation: () => true,
+                applyTransformToSelected: () => {},
+                normalizeVolumePercent: (v) => Number(v),
+                mainClipSequenceSpans: () => [],
+                suspendRender, suspendHistory, upsertKeyframe,
+                addGeocodeItem, updateGeocodeItem, addShapeItemWithStyle, normalizeShapeStyle,
+                renderStats: () => ({ renderAll: renderAllRuns, suspended: renderSuspendDepth }),
+            },
+        };
+        var GeoCode = {
+            available: () => true,
+            presetSize: () => null,
+            builds: [],
+            async buildGeocode(spec, opts) {
+                this.builds.push(spec);
+                opts.onLog({ level: 'info', message: 'frame 1/30' });
+                opts.onLog({ level: 'info', message: 'frame 2/30' });
+                if (/WARN/.test(spec.code)) opts.onLog({ level: 'warn', message: 'font fallback' });
+                return { ...spec, loop: opts.loop !== false, render_key: 'k' + this.builds.length, frame_count: spec.kind === 'video' ? 30 : 1 };
+            },
+        };
+        var DubbingPanel = {
+            state: { engine: 'vieneu3', voice: 'Hải Đăng' },
+            splitSentences: (text) => String(text).split(/(?<=[.!?])\\s+/).map((s) => s.trim()).filter(Boolean),
+            subtitleCuesFromClips: (clips, offset) => clips.map((c) => ({ start: c.start + offset, end: c.start + offset + c.duration, text: c.text })),
+        };
+        var LocalSubtitlePanel = {
+            importCues(cues, opts) { recordHistory(); subtitleImports.push({ cues, opts }); return { count: cues.length }; },
+        };
+        var desktopEnv = { onAutomationCall(fn) { this.handler = fn; }, setAutomationEnabled: async () => ({ enabled: true }) };
+    `, sandbox);
+    // fetch giả: server lồng tiếng.
+    sandbox.fetch = async (url, init = {}) => {
+        const body = init.body ? JSON.parse(init.body) : null;
+        fetchLog.push({ url, method: init.method || 'GET', body });
+        const reply = (data) => ({ ok: true, status: 200, json: async () => data });
+        if (url === '/api/tts/status') return reply({ env: { ready: true }, engines: [{ id: 'vieneu3', label: 'VieNeu v3', available: true, voices: ['Hải Đăng', 'Ngọc'] }] });
+        if (url === '/api/voice-profiles') return reply({ profiles: [{ id: 'p1', name: 'Giọng tôi', path: '/x' }] });
+        if (url === '/api/dubbing/jobs') return reply({ job_id: 'remote1', state: 'queued' });
+        if (url === '/api/dubbing/jobs/remote1') {
+            const cues = fetchLog.find((f) => f.url === '/api/dubbing/jobs').body.cues;
+            let at = 0.1;
+            const clips = cues.map((c) => { const clip = { start: at, duration: 1.5, text: c.text, path: `/tmp/c${at}.wav` }; at += 2; return clip; });
+            return reply({ state: 'done', result: { full: { path: '/tmp/full.wav', start: 0.1, duration: at - 0.5 }, clips, summary: { count: clips.length } } });
+        }
+        return { ok: false, status: 404, json: async () => ({ detail: `no route ${url}` }) };
+    };
+    vm.runInContext(bridgeJs, sandbox, { filename: 'automation-bridge.js' });
+    const call = (method, params) => sandbox.desktopEnv.handler(method, params);
+    const waitJob = async (job) => {
+        for (let i = 0; i < 100; i += 1) {
+            const j = await call('job_status', { job_id: job.id });
+            if (j.state !== 'running') return j;
+            await new Promise((r) => setTimeout(r, 50));
+        }
+        throw new Error('job không xong');
+    };
+    return { sandbox, call, waitJob, state: sandbox.rtState };
+}
+
+async function partA() {
+    // ---- Shape
+    {
+        const app = makeApp();
+        const one = await app.call('add_shape', { shape_type: 'star', points: 7, fill_color: '#ff0000', start: 1, duration: 3, transform: { position_x: 100 }, animation: { in: { type: 'fade', duration: 0.5 } } });
+        assert.ok(one.item_id && one.timeline_start === 1 && one.duration === 3, `một hình: ${JSON.stringify(one)}`);
+        const star = app.state.editingItems[0];
+        assert.strictEqual(star.style.shape_type, 'star');
+        assert.strictEqual(star.style.points, 7);
+        assert.strictEqual(star.style.width, 360, 'sao mặc định vuông 360×360 như nút bấm');
+        assert.strictEqual(star.style.fill_color, '#ff0000');
+        assert.strictEqual(app.sandbox.undoStack.length, 1, 'một hình = một bước Hoàn tác');
+
+        const many = await app.call('add_shape', {
+            start: 10, gap: 0.5, defaults: { shape_type: 'circle', width: 120, height: 120, duration: 2 },
+            items: [{ fill_color: '#00ff00' }, { shape_type: 'rectangle', corner_radius: 40 }, { start: 30, shape_type: 'polygon', sides: 8 }],
+        });
+        assert.strictEqual(many.created, 3);
+        assert.deepStrictEqual(plain(many.items.map((r) => r.timeline_start)), [10, 12.5, 30], 'nối tiếp theo gap, start riêng thắng');
+        assert.strictEqual(app.sandbox.undoStack.length, 2, 'cả lô = MỘT bước Hoàn tác');
+        const rect = app.state.editingItems.find((it) => it.style.shape_type === 'rectangle');
+        assert.strictEqual(rect.style.width, 120, 'defaults áp cho từng mục');
+        assert.strictEqual(rect.style.corner_radius, 40);
+        await assert.rejects(app.call('add_shape', { shape_type: 'path', path_points: [{ x: 0, y: 0 }] }), /path_points/);
+        await assert.rejects(app.call('add_shape', { shape_type: 'heart' }), /shape_type/);
+        const batch = await app.call('batch', { ops: [{ tool: 'crabbycut_add_shape', args: { shape_type: 'line', start: 40 } }, { tool: 'update_block', args: { item_id: '$0.item_id', duration: 4 } }] });
+        assert.strictEqual(batch.ok_count, 2, 'add_shape chạy được trong batch + tham chiếu $0.item_id');
+        const shapes = await app.call('catalog', { kind: 'shapes' });
+        assert.ok(shapes.shape_types.includes('path'));
+        ok('add_shape: một hình / cả lô một bước Hoàn tác, style chuẩn hoá, nối theo gap, chạy trong batch');
+    }
+
+    // ---- GeoCode
+    {
+        const app = makeApp();
+        const G = app.sandbox.GeoCode;
+        const single = await app.call('add_geocode', { lang: 'html', code: '<b>hi</b>', width: 400, height: 200, start: 3 });
+        assert.deepStrictEqual(plain(single.logs), [], 'dựng xong không lỗi: không gửi log info về model');
+        const job = await app.call('start_job', {
+            kind: 'geocode',
+            options: {
+                template: '<style>.box{color:{{color}}}</style><div class="box">{{title}}</div>',
+                defaults: { lang: 'html', width: 1080, height: 1920, kind: 'video', duration: 2, fps: 30, animation: { in: { type: 'fade', duration: 0.3 } } },
+                start: 0, gap: 0,
+                items: [{ vars: { color: 'red', title: 'Một' } }, { vars: { color: 'blue', title: 'Hai' }, block_duration: 3 }, { code: '<i>WARN</i>' }],
+            },
+        });
+        const done = await app.waitJob(job);
+        assert.strictEqual(done.state, 'complete', JSON.stringify(done));
+        assert.strictEqual(G.builds[1].code, '<style>.box{color:red}</style><div class="box">Một</div>', 'template điền đúng vars');
+        assert.strictEqual(G.builds[3].code, '<i>WARN</i>', 'mục có code riêng dùng code đó');
+        assert.deepStrictEqual(plain(done.result.items.map((r) => [r.timeline_start, r.duration])), [[0, 2], [2, 3], [5, 2]], 'nối tiếp nhau');
+        assert.deepStrictEqual(plain(done.result.items[2].logs), ['warn: font fallback'], 'chỉ cảnh báo được gửi về');
+        assert.ok(!('logs' in done.result.items[0]), 'mục không cảnh báo: không có trường logs');
+        const undoBefore = app.sandbox.undoStack.length;
+        assert.strictEqual(undoBefore, 2, 'lẻ + cả lô = 2 bước Hoàn tác');
+        const bad = await app.call('start_job', { kind: 'geocode', options: { template: '{{a}}{{b}}', defaults: { lang: 'html', width: 100, height: 100 }, items: [{ vars: { a: 1 } }] } }).catch((e) => e);
+        assert.ok(/thiếu vars cho \{\{b\}\}/.test(String(bad && bad.message)), `thiếu biến phải báo lỗi: ${bad && bad.message}`);
+
+        const target = done.result.items[0].item_id;
+        app.state.editingItems.find((it) => it.id === target).transform.position_x = 77;
+        const upd = await app.waitJob(await app.call('start_job', { kind: 'geocode_update', options: { item_id: target, replace: [{ find: 'color:red', with: 'color:gold' }] } }));
+        assert.strictEqual(upd.state, 'complete', JSON.stringify(upd));
+        const after = app.state.editingItems.find((it) => it.id === target);
+        assert.ok(after.geocode.code.includes('color:gold') && !after.geocode.code.includes('color:red'), 'vá find/replace trên mã đã lưu');
+        assert.strictEqual(after.transform.position_x, 77, 'giữ biến đổi của block');
+        assert.strictEqual(app.sandbox.undoStack.length, undoBefore + 1, 'sửa = một bước Hoàn tác');
+        const notFound = await app.waitJob(await app.call('start_job', { kind: 'geocode_update', options: { item_id: target, replace: [{ find: 'nope', with: 'x' }] } }));
+        assert.ok(notFound.state === 'failed' && /không thấy/.test(notFound.error), 'find không có trong mã phải báo lỗi');
+        const read = await app.call('update_geocode', { item_id: target, read: true });
+        assert.ok(read.geocode.code.includes('color:gold') && read.geocode.width === 1080, 'read trả mã + đặc tả hiện tại');
+        assert.strictEqual(G.builds.length, 5, 'read không dựng lại');
+        ok('GeoCode: lô dùng template {{vars}}, một bước Hoàn tác, log gọn; update_geocode vá find/replace, giữ biến đổi, read không dựng lại');
+    }
+
+    // ---- Lồng tiếng
+    {
+        const app = makeApp();
+        const job = await app.call('start_job', { kind: 'dub', options: { text: 'Câu một. Câu hai! Câu ba?', start: 5, name: 'Intro', gap: 0.3 } });
+        const done = await app.waitJob(job);
+        assert.strictEqual(done.state, 'complete', JSON.stringify(done));
+        const post = app.sandbox.fetchLog.find((f) => f.url === '/api/dubbing/jobs');
+        assert.strictEqual(post.body.timing_mode, 'sequential', 'văn bản = đọc nối tiếp');
+        assert.strictEqual(post.body.voice, 'Hải Đăng', 'giọng mặc định = lựa chọn ở panel');
+        assert.strictEqual(post.body.gap, 0.3);
+        assert.deepStrictEqual(plain(post.body.cues.map((c) => c.text)), ['Câu một.', 'Câu hai!', 'Câu ba?']);
+        const r = done.result;
+        assert.deepStrictEqual(plain(r.clips), [{ i: 0, start: 5.1, end: 6.6 }, { i: 1, start: 7.1, end: 8.6 }, { i: 2, start: 9.1, end: 10.6 }], 'mốc từng câu đã cộng start');
+        assert.strictEqual(r.subtitles, 3, 'sinh phụ đề khớp tiếng');
+        assert.ok(!JSON.stringify(r).includes('Câu một'), 'kết quả không trả lại chữ đã gửi');
+        assert.strictEqual(app.sandbox.undoStack.length, 1, 'audio + phụ đề = MỘT bước Hoàn tác');
+        assert.strictEqual(app.state.editingItems[0].dubbing_source, 'mcp:Intro');
+        await assert.rejects(app.call('start_job', { kind: 'dub', options: {} }), /text/);
+        await assert.rejects(app.call('start_job', { kind: 'dub', options: { text: 'x', engine: 'nope' } }), /Không có engine/);
+        const voices = await app.call('catalog', { kind: 'voices' });
+        assert.deepStrictEqual(plain(voices.engines[0].voices), ['Hải Đăng', 'Ngọc']);
+        assert.deepStrictEqual(plain(voices.profiles), [{ id: 'p1', name: 'Giọng tôi' }], 'hồ sơ giọng chỉ id + tên');
+        ok('dub: văn bản -> câu, giọng mặc định của panel, audio + phụ đề một bước Hoàn tác, trả mốc từng câu');
+    }
+}
+
+// ---------------------------------------------------------------- B. MCP server thật
+async function partB() {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'crabby-mcp-'));
+    const calls = [];
+    const jobs = new Map();
+    let seq = 0;
+    const token = 'tkn';
+    const server = http.createServer((req, res) => {
+        let raw = '';
+        req.on('data', (c) => { raw += c; });
+        req.on('end', () => {
+            assert.strictEqual(req.headers.authorization, `Bearer ${token}`);
+            const { method, params } = JSON.parse(raw);
+            calls.push(method);
+            let result;
+            if (method === 'start_job') {
+                const id = `job_${++seq}`;
+                // "slow" chạy mãi; job khác xong sau 2 lượt hỏi.
+                jobs.set(id, { id, kind: params.kind, polls: params.options.slow ? Infinity : 2 });
+                result = { id, state: 'running', kind: params.kind };
+            } else if (method === 'job_status') {
+                const j = jobs.get(params.job_id);
+                j.polls -= 1;
+                result = j.polls > 0 ? { id: j.id, state: 'running', progress: 10 } : { id: j.id, state: 'complete', result: { item_id: 'item_x', kind: j.kind } };
+            } else if (method === 'update_geocode') {
+                result = { item_id: params.item_id, geocode: { code: 'abc' } };
+            } else if (method === 'add_shape') {
+                result = { item_id: 'item_shape_1' };
+            }
+            res.end(JSON.stringify({ ok: true, result }));
+        });
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const dir = path.join(home, 'automation');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `bridge-${process.pid}.json`), JSON.stringify({
+        pid: process.pid, port: server.address().port, token, version: 'test', packaged: false, platform: process.platform, startedAt: new Date().toISOString(),
+    }));
+    const child = spawn(process.execPath, [path.join(ROOT, 'mcp', 'crabbycut-mcp.js')], { env: { ...process.env, CRAB_APP_DATA_DIR: home, CRABBYCUT_TARGET: '' }, stdio: ['pipe', 'pipe', 'inherit'] });
+    let buf = '';
+    const waiters = new Map();
+    child.stdout.on('data', (d) => {
+        buf += d;
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+            if (!line.trim()) continue;
+            const msg = JSON.parse(line);
+            waiters.get(msg.id)?.(msg);
+        }
+    });
+    let rid = 0;
+    const request = (method, params) => new Promise((resolve) => {
+        const id = ++rid;
+        waiters.set(id, resolve);
+        child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+    });
+    const tool = async (name, args) => {
+        const msg = await request('tools/call', { name, arguments: args });
+        const text = msg.result?.content?.[0]?.text || '';
+        return { isError: !!msg.result?.isError, data: msg.result?.isError ? text : JSON.parse(text) };
+    };
+    try {
+        await request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } });
+        const list = await request('tools/list', {});
+        const names = list.result.tools.map((t) => t.name);
+        for (const n of ['crabbycut_add_shape', 'crabbycut_update_geocode', 'crabbycut_dub', 'crabbycut_add_geocode']) assert.ok(names.includes(n), `thiếu tool ${n}`);
+        const geo = list.result.tools.find((t) => t.name === 'crabbycut_add_geocode');
+        assert.ok(geo.inputSchema.properties.items && geo.inputSchema.properties.template, 'add_geocode nhận items + template');
+
+        calls.length = 0;
+        const g = await tool('crabbycut_add_geocode', { lang: 'html', code: '<b>x</b>', width: 100, height: 100 });
+        assert.ok(!g.isError && g.data.state === 'complete' && g.data.item_id === 'item_x', `add_geocode phải tự chờ job xong: ${JSON.stringify(g)}`);
+        assert.deepStrictEqual(calls, ['start_job', 'job_status', 'job_status'], 'server tự hỏi job_status, model chỉ gọi MỘT lần');
+        const d = await tool('crabbycut_dub', { text: 'Xin chào.' });
+        assert.ok(d.data.state === 'complete' && d.data.kind === 'dub', JSON.stringify(d));
+        const slow = await tool('crabbycut_dub', { text: 'x', slow: true, wait_seconds: 1 }).catch((e) => e);
+        // "slow" không có trong schema nhưng server không chặn trường lạ — đủ để giả job chạy lâu.
+        assert.ok(slow.data && slow.data.state === 'running' && /crabbycut_job_status/.test(slow.data.next), `hết hạn chờ phải trả job_id: ${JSON.stringify(slow)}`);
+        calls.length = 0;
+        const read = await tool('crabbycut_update_geocode', { item_id: 'item_x', read: true });
+        assert.deepStrictEqual(calls, ['update_geocode'], 'chỉ đọc mã: gọi thẳng, không tạo job');
+        assert.strictEqual(read.data.geocode.code, 'abc');
+        calls.length = 0;
+        await tool('crabbycut_update_geocode', { item_id: 'item_x', replace: [{ find: 'a', with: 'b' }] });
+        assert.strictEqual(calls[0], 'start_job', 'vá mã = job dựng lại');
+        const sh = await tool('crabbycut_add_shape', { shape_type: 'circle' });
+        assert.strictEqual(sh.data.item_id, 'item_shape_1');
+        ok('MCP server: tool mới có trong danh sách, add_geocode/dub tự chờ job (một lượt gọi), hết hạn chờ trả job_id, read không tạo job');
+    } finally {
+        child.kill();
+        server.close();
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+}
+
+(async () => {
+    try {
+        await partA();
+        await partB();
+        console.log('mcp_shape_geocode_dub: OK');
+        process.exit(0);
+    } catch (error) {
+        console.error(error);
+        process.exit(1);
+    }
+})();

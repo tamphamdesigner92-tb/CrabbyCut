@@ -77,7 +77,7 @@ Mặc định server dùng bản nào bật cầu nối gần nhất. Muốn ch�
 
 `crabbycut_status` liệt kê mọi bản đang chạy.
 
-## Tool (35)
+## Tool (38)
 
 Claude có hai cách làm việc. **Tool theo tính năng** gọi thẳng hàm của app: nhanh, chính xác, mỗi lệnh là một bước hoàn tác. **Tool giao diện** bấm, gõ và kéo như người dùng thật, dùng cho mọi thứ chưa có tool riêng.
 
@@ -175,11 +175,32 @@ Mục không có `start` nối ngay sau mục trước (+ `gap`); mục đầu b
 
 `on_error`: `abort` (mặc định) — một bước lỗi là hoàn nguyên cả lô, không để lại bước Hoàn tác nào; `continue` — chỉ bước lỗi bị quay lui, kết quả ghi `error` cho bước đó. Lệnh giao diện (`ui_*`), chụp màn hình và job không chạy trong lô.
 
-### GeoCode — dựng hình từ mã
+### GeoCode, Shape, Lồng tiếng — ít lượt gọi, kết quả gọn
+
+Ba nhóm này hay bị dùng nhiều lần liên tiếp, nên tool được thiết kế để **một lượt gọi làm trọn việc**. Tool dựng lâu (GeoCode, lồng tiếng) **tự chờ job ngay trong server** (`wait_seconds`, mặc định 50 s) rồi mới trả kết quả cuối. Model không phải gọi `crabbycut_job_status` nhiều lần; chỉ khi hết hạn chờ mà job còn chạy thì mới nhận `job_id` để hỏi tiếp.
 
 | Tool | Việc nó làm |
 |---|---|
-| `crabbycut_add_geocode` | Viết mã (`html` / `canvas` / `python`) → ảnh hoặc video đúng `width`×`height` px (hoặc `preset`), nền trong suốt, đặt thành block trên lane Hình khối; kèm `transform`, `keyframes`, `animation`. Chạy dạng **job** (`crabbycut_job_status`); trong `crabbycut_batch` dùng tool `add_geocode` (chờ dựng xong). Tra ngôn ngữ/preset/giới hạn bằng `crabbycut_catalog geocode` |
+| `crabbycut_add_geocode` | Viết mã (`html` / `canvas` / `python`) → ảnh hoặc video đúng `width`×`height` px (hoặc `preset`), nền trong suốt, đặt thành block trên lane Hình khối; kèm `transform`, `keyframes`, `animation`. **Nhiều block một lượt**: `items[]` + `defaults`, phần mã chung gửi **một lần** trong `template` có chỗ trống `{{tên}}`, mỗi mục chỉ gửi `vars` (hoặc `code` riêng); mục không có `start` nối tiếp mục trước (+ `gap`). Cả lô một bước Hoàn tác. Log chỉ trả dòng cảnh báo/lỗi (`verbose_logs` để lấy đủ). Trong `crabbycut_batch` dùng tool `add_geocode` (một block). Tra ngôn ngữ/preset/giới hạn bằng `crabbycut_catalog geocode` |
+| `crabbycut_update_geocode` | Sửa block GeoCode **không cần gửi lại mã**: `replace: [{find, with, all}]` vá trên mã đang lưu trong block (hoặc `code` mới), đổi `width`/`height`/`kind`/`fps`/`duration`/`bg`/`loop` → dựng lại tại chỗ, giữ vị trí/biến đổi/keyframe/hoạt ảnh. `block_duration` chỉ đổi độ dài block (không dựng lại). `read: true` trả mã hiện tại |
+| `crabbycut_add_shape` | Một hình (trường ở cấp trên) hoặc `items[]` + `defaults`, một bước Hoàn tác: `shape_type` rectangle / square / circle / triangle / trapezoid / polygon / star / line / path, cỡ, màu tô/viền, độ dày viền, bo góc, số cạnh/cánh, `path_points` cho path; kèm `start`, `duration`, `track_id`, `transform`, `keyframes`, `animation`. Dùng được trong `crabbycut_batch` (`add_shape`). Tra trường bằng `crabbycut_catalog shapes` |
+| `crabbycut_dub` | Lồng tiếng lên lane "Lồng tiếng": `text` (tự tách câu, đọc nối tiếp, `gap` giây nghỉ, bắt đầu ở `start`) hoặc `sentences[]` (đúng từng câu) — hai cách này sinh kèm phụ đề khớp tiếng (`make_subtitles: false` để tắt); hoặc `cues[]` `{start, end, text}` có mốc (`timing_mode`). `engine`/`voice` bỏ trống = lựa chọn đang để ở panel Lồng tiếng; xem bằng `crabbycut_catalog voices` (`voice_profile` = giọng nhân bản). `replace` (mặc định bật) thay bản lồng cũ cùng `name`. Trả **mốc timeline của từng câu** (`clips[i]`) để canh GeoCode/chữ/hình theo lời đọc mà không phải đọc lại timeline |
+
+Ví dụ 3 block minh hoạ cùng một khung cảnh, gửi CSS một lần:
+
+```json
+{
+  "template": "<style>/* CSS chung dài */ .t{color:{{color}}}</style><h1 class=\"t\">{{title}}</h1>",
+  "defaults": { "lang": "html", "width": 1080, "height": 1920, "kind": "video", "duration": 6, "fps": 30,
+                "animation": { "in": { "type": "fade", "duration": 0.3 }, "out": { "type": "fade", "duration": 0.3 } } },
+  "start": 0,
+  "items": [
+    { "vars": { "title": "Mở đầu", "color": "#ffd166" } },
+    { "vars": { "title": "Phần 1", "color": "#06d6a0" }, "block_duration": 8 },
+    { "vars": { "title": "Kết", "color": "#ef476f" } }
+  ]
+}
+```
 
 > ⚠️ `lang: "python"` chạy bằng **Python thật của máy với toàn quyền người dùng** (HTML/JS thì chạy trong sandbox: không đọc tệp, không gọi localhost). App hiện thông báo mỗi lần MCP chạy Python. Chỉ bật cầu nối MCP khi bạn tin chương trình đang điều khiển nó.
 

@@ -31,7 +31,7 @@ const { ipcMain, screen } = require('electron');
 const RPC_TIMEOUT_MS = 30_000;
 /* Lệnh chạy lâu: nhập/chép cả loạt tệp, lệnh gộp hàng trăm thao tác. MCP server gửi kèm
  * `timeout_ms` (và tự chờ HTTP lâu hơn chừng đó một chút); bảng này là mặc định khi không có. */
-const LONG_RPC_TIMEOUT_MS = { batch: 300_000, add_media_batch: 300_000, import_media: 300_000, add_geocode: 300_000 };
+const LONG_RPC_TIMEOUT_MS = { batch: 300_000, add_media_batch: 300_000, import_media: 300_000, add_geocode: 300_000, add_shape: 300_000 };
 const MAX_RPC_TIMEOUT_MS = 600_000;
 const MAX_BODY_BYTES = 1024 * 1024;
 const SCREENSHOT_MAX_WIDTH = 1600;

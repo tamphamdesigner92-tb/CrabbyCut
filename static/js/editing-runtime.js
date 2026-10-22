@@ -3982,6 +3982,39 @@
         renderAll();
     }
 
+    /* Shape cho cầu nối tự động hoá (MCP crabby_add_shape): như addShapeItem nhưng nhận sẵn style +
+     * độ dài, chọn track theo ĐÚNG độ dài muốn có, trả về block. Cỡ mặc định theo cùng luật nút bấm. */
+    function addShapeItemWithStyle(style = {}, placement = null) {
+        const shapeType = String(style?.shape_type || 'rectangle');
+        const base = defaultShapeStyle();
+        base.shape_type = shapeType;
+        if (!['rectangle', 'line'].includes(shapeType)) {
+            base.width = 360;
+            base.height = 360;
+        }
+        const want = Number(placement?.duration) > 0 ? Number(placement.duration) : 5;
+        const { start, duration, track } = resolveNewItemPlacement('shape', want, placement);
+        recordHistory();
+        const item = {
+            id: nextId('item_shape'),
+            type: 'shape',
+            track_id: track.id,
+            timeline_start: start,
+            duration,
+            asset_id: '',
+            source_start: 0,
+            muted: true,
+            volume: 0,
+            transform: defaultTransform(),
+            text: '',
+            style: normalizeShapeStyle({ ...base, ...(style || {}) }),
+        };
+        editingItems.push(item);
+        selectEditingItem(item.id);
+        renderAll();
+        return item;
+    }
+
     /* LỚP ĐIỀU CHỈNH (adjustment layer) — như CapCut / Adjustment Layer của Premiere.
      *
      * KHÔNG VẼ GÌ CẢ: nó chỉ mang một bộ `adjustments` và áp bộ đó lên MỌI LỚP NẰM
@@ -27754,6 +27787,8 @@
             suspendHistory,
             addGeocodeItem,
             updateGeocodeItem,
+            addShapeItemWithStyle,
+            normalizeShapeStyle,
             renderStats: () => ({ renderAll: renderAllRuns, suspended: renderSuspendDepth }),
             // Keyframe qua MCP: cùng hàm chèn/gộp mốc mà nút ◆ dùng.
             upsertKeyframe,
