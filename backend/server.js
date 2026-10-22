@@ -394,6 +394,9 @@ const ColorAdjust = require(path.join(STATIC_DIR, 'js', 'color-adjust.js'));
  * và ở đây còn gắt hơn: ba phía (file nối do backend dựng, sprite preview, filtergraph
  * export) phải dùng ĐÚNG MỘT phép tính, lệch một pixel là bản xuất ra sai im lặng. */
 const MainLane = require(path.join(STATIC_DIR, 'js', 'main-lane.js'));
+/* BIẾN DẠNG: thứ tự 24 số của mặt Bezier và lưới Mesh mặc định lấy từ CHÍNH distort.js — spec gửi
+ * sidecar phải trùng từng số với thứ preview dựng. */
+const Distort = require(path.join(STATIC_DIR, 'js', 'distort.js'));
 const subtitleJobs = require('./subtitle-jobs.js');
 /* LỒNG TIẾNG (tab Âm thanh) + SỔ TẢI MODEL AI cho thanh trạng thái — xem đầu hai tệp. */
 const ttsService = require('./tts-service.js');
@@ -5434,6 +5437,94 @@ function normalizeVideoMaskFields(raw) {
   }
 }
 
+/* BIẾN DẠNG (Distort) của VIDEO lớp phủ -> tệp spec dạng dòng chữ cho sidecar (DistortVideoPrepass).
+ * Frontend gửi `distort_spec` (Distort.exportSpec ở static/js/distort.js): tham số của TỪNG khung đã
+ * nội suy keyframe. Ở đây chỉ DỰNG LẠI từ số đã kẹp — không chuỗi nào của client đi thẳng vào tệp.
+ * Hai bảng dưới phải trùng thứ tự WAVE_SHAPES / WAVE_PINNING của distort.js và các `case` của
+ * DistortWaveShape / DistortPinWeight trong sidecar. */
+const DISTORT_WAVE_SHAPES = ['sine', 'square', 'triangle', 'sawtooth', 'circle', 'semicircle', 'uncircle', 'noise', 'smooth_noise'];
+const DISTORT_WAVE_PINNING = ['none', 'all_edges', 'center', 'left', 'top', 'right', 'bottom', 'horizontal_edges', 'vertical_edges'];
+const DISTORT_MAX_CELLS = 512;
+function distortSpecText(spec) {
+  if (!spec || typeof spec !== 'object') return null;
+  const num = (v, lo, hi, d) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d;
+  };
+  const boxW = num(spec.box?.w, 1, 100000, 0);
+  const boxH = num(spec.box?.h, 1, 100000, 0);
+  const stacks = Array.isArray(spec.stacks) ? spec.stacks.slice(0, 200000) : [];
+  const frames = Array.isArray(spec.frames) ? spec.frames.slice(0, 1000000) : [];
+  if (!(boxW > 0 && boxH > 0) || !stacks.length || !frames.length) return null;
+  // Bảng lưới Mesh (mỗi lưới keyframe một lần, xem meshMixAt ở distort.js).
+  const meshes = (Array.isArray(spec.meshes) ? spec.meshes.slice(0, 4096) : [])
+    .map((m) => (Array.isArray(m) && m.length <= 64 * 64 * 10 ? m.map((v) => num(v, -50, 50, 0)) : []));
+  const lines = [
+    'CRDS 1',
+    `box ${boxW} ${boxH}`,
+    `ext ${num(spec.ext?.hx, 1, 1e6, boxW / 2)} ${num(spec.ext?.hy, 1, 1e6, boxH / 2)}`,
+    `grid ${Math.round(num(spec.grid?.cols, 1, DISTORT_MAX_CELLS, 8))} ${Math.round(num(spec.grid?.rows, 1, DISTORT_MAX_CELLS, 8))}`,
+    `fps ${num(spec.fps, 1, 240, 30)}`,
+    `stacks ${stacks.length}`,
+  ];
+  for (const stack of stacks) {
+    const effects = (Array.isArray(stack) ? stack : [])
+      .filter((fx) => fx && ['wave', 'bezier', 'mesh'].includes(fx.type)).slice(0, 8);
+    lines.push(`stack ${effects.length}`);
+    for (const fx of effects) {
+      const p = fx.params && typeof fx.params === 'object' ? fx.params : {};
+      if (fx.type === 'bezier' || fx.type === 'mesh') {
+        // Chuẩn hoá lại qua distort.js (kẹp, điểm thiếu về mặc định) rồi mới lấy số.
+        const norm = Distort.normalizeEffect({ id: 'x', type: fx.type, params: p }).params;
+        if (fx.type === 'bezier') {
+          lines.push(`bezier ${Distort.bezierPatch(norm).map((v) => num(v, -50, 50, 0)).join(' ')}`);
+        } else {
+          // Lưới = trộn hai lưới của bảng `meshdata` (xem meshMixAt): chỉ số a, b và hệ số k.
+          const ref = Array.isArray(fx.mesh_ref) ? fx.mesh_ref : [0, 0, 0];
+          const len = Distort.meshLength(norm.rows, norm.cols);
+          const idx = (v) => {
+            const i = Math.round(num(v, 0, meshes.length - 1, 0));
+            return meshes[i] && meshes[i].length === len ? i : -1;
+          };
+          const ia = idx(ref[0]);
+          const ib = idx(ref[1]);
+          if (ia < 0 || ib < 0) {
+            // Không có lưới hợp lệ -> lưới đều (không biến dạng), đưa vào bảng như một lưới mới.
+            meshes.push(Distort.meshIdentity(norm.rows, norm.cols));
+            lines.push(`mesh ${norm.rows} ${norm.cols} ${meshes.length - 1} ${meshes.length - 1} 0`);
+          } else {
+            lines.push(`mesh ${norm.rows} ${norm.cols} ${ia} ${ib} ${num(ref[2], -2, 3, 0)}`);
+          }
+        }
+        continue;
+      }
+      const shape = Math.max(0, DISTORT_WAVE_SHAPES.indexOf(String(p.wave_type)));
+      const pin = Math.max(0, DISTORT_WAVE_PINNING.indexOf(String(p.pinning)));
+      lines.push(['wave', num(fx.t, 0, 1e6, 0), shape, num(p.height, -2000, 2000, 0), num(p.width, 1, 4000, 40),
+        num(p.direction, -3600, 3600, 90), num(p.speed, -100, 100, 0), pin, num(p.phase, -36000, 36000, 0)].join(' '));
+    }
+  }
+  const last = stacks.length - 1;
+  lines.push(`frames ${frames.length}`);
+  lines.push(frames.map((f) => Math.round(num(f, 0, last, 0))).join(' '));
+  // Bảng lưới đặt CUỐI (có thể vừa thêm lưới đều ở trên); sidecar tra chỉ số lúc dựng lưới.
+  if (meshes.length) {
+    lines.push(`meshdata ${meshes.length}`);
+    meshes.forEach((m) => lines.push(`m ${m.length} ${m.join(' ')}`));
+  }
+  return `${lines.join('\n')}\n`;
+}
+function normalizeDistortFields(spec, itemId, index) {
+  const text = distortSpecText(spec);
+  if (!text) return {};
+  const safeId = String(itemId || `item_${index}`).replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 80) || `item_${index}`;
+  const dir = path.join(TEMP_DIR, 'distort_specs');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${safeId}_${index}.txt`);
+  fs.writeFileSync(file, text, 'utf8');
+  return { distort_spec_path: file };
+}
+
 /* XOÁ VẬT THỂ của block -> field phẳng cho sidecar:
  *   - `logo_mode` + `logo_rects` ("x:y:w:h:p|..." — pixel NGUYÊN của stream mà chuỗi filter
  *     chạy trên đó, p = bán kính mờ hoặc cạnh ô khảm) cho vùng CỐ ĐỊNH xoá bằng công thức.
@@ -6095,6 +6186,8 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
       overlays.push({
         ...baseOverlay, ...(animVideoFields || {}), ...kfFields, ...adjFields, ...maskFields,
         ...normalizeLogoRemovalFields(item.logo_removal_px),
+        // Biến dạng chỉ cho VIDEO lớp phủ (ảnh/Shape đã được frontend uốn sẵn vào PNG).
+        ...(type === 'media' && item.distort_spec ? normalizeDistortFields(item.distort_spec, item.id, index) : {}),
         index: overlayIndex++,
       });
     }
@@ -8371,4 +8464,6 @@ module.exports = {
   exportOutputFrame,
   // Test khoá ô "Bitrate" (mục 1.20): mức, số Mbps, lùi về Khuyến nghị, suy từ `quality` cũ.
   normalizeExportSettings,
+  // Test so khớp Distort JS <-> sidecar: spec dạng dòng chữ mà sidecar đọc.
+  distortSpecText,
 };

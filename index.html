@@ -57,6 +57,8 @@
     <script src="/static/js/geocode.js?v=geocode-p2"></script>
     <!-- Văn bản → Biến dạng chữ (Warp) + Chữ theo đường. editing-runtime.js gọi vào lúc đo/vẽ chữ. -->
     <script src="/static/js/text-deform.js?v=tdeform-p1"></script>
+    <!-- Biến dạng kiểu After Effects (Wave/Bezier/Mesh/Puppet/Liquify) cho ảnh, video, Shape. -->
+    <script src="/static/js/distort.js?v=distort-p0"></script>
     <!-- Thanh trạng thái: tiến trình tải model AI lần đầu (góc trái). -->
     <script src="/static/js/model-download-status.js?v=mdl-p1"></script>
     <style>
@@ -5919,6 +5921,7 @@
             text: { label: _t('Văn bản'), subs: { basic: _t('Cơ bản'), template: _t('Mẫu'), effect: _t('Hiệu ứng'), transform: _t('Biến đổi') } },
             anim: { label: _t('Hiệu ứng động'), subs: { in: _t('Vào'), out: _t('Ra'), combo: _t('Kết hợp') } },
             shape: { label: _t('Hình dạng'), subs: { basic: _t('Cơ bản'), transform: _t('Biến đổi') } },
+            distort: { label: _t('Biến dạng'), subs: { basic: _t('Hiệu ứng') } },
             retouch: { label: _t('Retouch'), subs: { basic: _t('Làm đẹp'), logo: _t('Xoá vật thể') } },
             adjust: {
                 label: _t('Điều chỉnh'),
@@ -5935,13 +5938,13 @@
         const INSPECTOR_KIND_TABS = {
             main: ['video'],                             // block chính (step3)
             main4: ['video', 'audio', 'speed', 'anim', 'adjust', 'retouch'], // block chính (step4): + Tốc độ, + Hiệu ứng động, + Điều chỉnh màu, + Retouch
-            media: ['video', 'audio', 'speed', 'anim', 'adjust', 'retouch'], // 'anim' chỉ hiện với ẢNH (video chưa dựng section anim)
+            media: ['video', 'audio', 'speed', 'anim', 'adjust', 'retouch', 'distort'], // 'anim' chỉ hiện với ẢNH (video chưa dựng section anim)
             // LỚP ĐIỀU CHỈNH: chỉ tab Điều chỉnh. Nó không vẽ hình nên Video/Tốc độ/
             // Hiệu ứng động/Retouch đều vô nghĩa với nó.
             adjust: ['adjust'],
             audio: ['audio', 'speed'],
             text: ['text', 'anim'],
-            shape: ['shape', 'anim'],
+            shape: ['shape', 'anim', 'distort'],
             // GeoCode: chỉ Biến đổi/Hiển thị (khối tĩnh, tab Video) + Hiệu ứng động.
             geocode: ['video', 'anim'],
         };

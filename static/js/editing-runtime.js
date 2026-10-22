@@ -14316,6 +14316,308 @@
         }
     }
 
+    /* ===== INSPECTOR › BIẾN DẠNG (static/js/distort.js) =====
+     * Mỗi thông số có ◂ ◆ ▸ như mọi thông số keyframe-được khác. Khoá dữ liệu 'dst.<id>.<param>'
+     * nằm chung item.keyframes (namespace song song như 'adj.*' của màu) nên Hoàn tác, .crab,
+     * hình thoi trên block timeline và kéo đổi mốc đều tự có. */
+    function kfGroupHtml(field, label) {
+        const attrs = `data-kf-field="${escapeHtml(field)}"`;
+        return `<div class="kf-group">`
+            + `<button type="button" class="kf-nav" ${attrs} data-kf-dir="prev" aria-label="${_t('Keyframe trước')}">◂</button>`
+            + `<button type="button" class="kf-diamond" ${attrs} aria-label="${escapeHtml(_t('Keyframe {label}', { label }))}">◆</button>`
+            + `<button type="button" class="kf-nav" ${attrs} data-kf-dir="next" aria-label="${_t('Keyframe sau')}">▸</button>`
+            + `</div>`;
+    }
+
+    function distortSectionHtml(item) {
+        if (!window.Distort || !Distort.supportsItem(item) || itemIsNest(item)) return '';
+        const box = distortBoxSize(item);
+        return Distort.inspectorHtml(item, overlayLocalTime(item), {
+            kfGroup: kfGroupHtml,
+            box: { w: Number(box.width) || 1, h: Number(box.height) || 1 },
+            editingId: distortEdit && distortEdit.itemId === item.id ? distortEdit.effectId : null,
+        });
+    }
+
+    // Ghi MỘT thông số Distort (giá trị đã chuẩn hoá). Thông số đã có keyframe -> ghi keyframe TẠI
+    // playhead (auto-keyframe như bảng transform / màu), đồng thời giữ giá trị tĩnh = giá trị mới nhất.
+    function applyDistortValue(item, effectId, key, value) {
+        const stack = Distort.normalizeStack(item.distort);
+        const fx = stack.find((f) => f.id === effectId);
+        if (!fx || value == null) return false;
+        const def = Distort.paramDef(fx.type, key);
+        if (!def) return false;
+        const field = Distort.kfField(effectId, key);
+        if (!def.noKf && fieldHasKeyframes(item, field)) {
+            item.keyframes[field] = upsertKeyframe(item.keyframes[field], overlayLocalTime(item), value);
+        }
+        fx.params[key] = value;
+        /* Đổi số hàng/cột của Mesh Warp: lưới cũ (và keyframe của nó) không còn khớp -> đặt lại,
+         * như AE. */
+        if (fx.type === 'mesh' && (key === 'rows' || key === 'cols')) {
+            fx.params.mesh = null;
+            if (item.keyframes) delete item.keyframes[Distort.kfField(effectId, 'mesh')];
+        }
+        item.distort = stack;
+        return true;
+    }
+
+    function applyDistortParam(item, effectId, key, raw, axis = null) {
+        const fx = Distort.normalizeStack(item.distort).find((f) => f.id === effectId);
+        if (!fx) return false;
+        const box = distortBoxSize(item);
+        const value = Distort.fieldValue(item, fx, { key, raw, axis },
+            { w: Number(box.width) || 1, h: Number(box.height) || 1 }, overlayLocalTime(item));
+        return applyDistortValue(item, effectId, key, value);
+    }
+
+    // Nút ◆ của một thông số Distort: bật/tắt keyframe tại playhead (giá trị hiệu dụng hiện tại).
+    function toggleDistortKeyframe(field) {
+        const item = selectedEditingItem();
+        const parsed = window.Distort ? Distort.parseKfField(field) : null;
+        if (!item || !parsed || isTrackLocked(itemTrack(item))) return;
+        const fx = Distort.normalizeStack(item.distort).find((f) => f.id === parsed.effectId);
+        if (!fx || !Distort.paramDef(fx.type, parsed.key)) return;
+        recordHistory();
+        const t = overlayLocalTime(item);
+        const kfs = objectKeyframes(item);
+        const list = Array.isArray(kfs[field]) ? kfs[field] : [];
+        if (list.some((k) => Math.abs(Number(k.t) - t) <= KF_EPS)) {
+            kfs[field] = removeKeyframeAt(list, t);
+            if (!kfs[field].length) delete kfs[field];
+        } else {
+            kfs[field] = upsertKeyframe(list, t, Distort.effectParamsAt(item, fx, t)[parsed.key]);
+        }
+        renderAll();
+    }
+
+    // Nút Thêm / ↑ / ↓ / × của mục Biến dạng. Trả true nếu đã xử lý cú bấm.
+    function handleDistortClick(event) {
+        const btn = event.target.closest?.('[data-distort-action]');
+        if (!btn || !window.Distort) return false;
+        if (btn.disabled) return true;
+        const item = selectedEditingItem();
+        if (!item || !Distort.supportsItem(item) || isTrackLocked(itemTrack(item))) return true;
+        const action = btn.dataset.distortAction;
+        const id = btn.dataset.distortId;
+        // ✎ Sửa trên preview: chỉ đổi chế độ xem, không phải một bước Hoàn tác.
+        if (action === 'edit') {
+            const same = distortEdit && distortEdit.itemId === item.id && distortEdit.effectId === id;
+            distortEdit = same ? null : { itemId: item.id, effectId: id, vertex: null };
+            renderAll();
+            return true;
+        }
+        const stack = Distort.normalizeStack(item.distort);
+        recordHistory();
+        if (action === 'reset-mesh') {
+            const fx = stack.find((f) => f.id === id);
+            if (fx && fx.type === 'mesh') {
+                // Đặt lại = về lưới đều; đang có keyframe thì ghi keyframe lưới đều tại playhead.
+                item.distort = stack;
+                applyDistortValue(item, id, 'mesh', Distort.meshIdentity(fx.params.rows, fx.params.cols));
+            }
+            renderAll();
+            return true;
+        }
+        if (action === 'add') {
+            const type = btn.closest('[data-distort-section]')?.querySelector('[data-distort-add-type]')?.value;
+            const fx = stack.length < Distort.MAX_EFFECTS ? Distort.createEffect(item, type) : null;
+            if (fx) stack.push(fx);
+        } else {
+            const at = stack.findIndex((f) => f.id === id);
+            if (at < 0) return true;
+            if (action === 'remove') {
+                stack.splice(at, 1);
+                // Keyframe của hiệu ứng đi theo hiệu ứng.
+                const kfs = item.keyframes || {};
+                Object.keys(kfs).forEach((k) => { if (k.startsWith(`${Distort.KF_PREFIX}${id}.`)) delete kfs[k]; });
+            } else if (action === 'up' && at > 0) {
+                [stack[at - 1], stack[at]] = [stack[at], stack[at - 1]];
+            } else if (action === 'down' && at < stack.length - 1) {
+                [stack[at + 1], stack[at]] = [stack[at], stack[at + 1]];
+            }
+        }
+        if (stack.length) item.distort = stack;
+        else delete item.distort;
+        renderAll();
+        return true;
+    }
+
+    // Ô của mục Biến dạng bám playhead (giá trị hiệu dụng), như syncAdjustPanelValues.
+    function syncDistortPanelValues() {
+        if (!window.Distort) return;
+        const root = document.querySelector('#editingInspectorExtra [data-distort-section]');
+        const item = selectedEditingItem();
+        if (!root || !item) return;
+        const box = distortBoxSize(item);
+        Distort.syncPanelValues(root, item, overlayLocalTime(item), { w: Number(box.width) || 1, h: Number(box.height) || 1 });
+    }
+
+    /* ===== TAY NẮM BIẾN DẠNG TRÊN PREVIEW (Bezier / Mesh Warp) =====
+     * Bấm ✎ ở hiệu ứng -> một lớp SVG phủ đúng HỘP NGUỒN của block (cùng left/top/transform với phần
+     * tử preview, viewBox = đơn vị hộp) nên toạ độ con trỏ đổi ngược bằng getScreenCTM là ra ngay
+     * đơn vị hộp, đúng cả khi block xoay / lật / phóng. Kéo = ghi qua applyDistortValue (auto-
+     * keyframe), cả cú kéo là MỘT bước Hoàn tác. Mesh: tay cầm chỉ hiện ở đỉnh vừa chọn cho đỡ rối.
+     * Esc / chọn block khác / bấm ✎ lần nữa để thoát. */
+    let distortEdit = null;      // { itemId, effectId, vertex }
+    let distortDrag = null;      // { pointerId, handleId }
+
+    function distortEditTarget() {
+        if (!distortEdit || !window.Distort) return null;
+        const item = findItem(distortEdit.itemId);
+        if (!item || selectedEditingItemId !== item.id || !itemHasDistort(item) || isTrackLocked(itemTrack(item))) return null;
+        const fx = Distort.normalizeStack(item.distort).find((f) => f.id === distortEdit.effectId);
+        if (!fx || !fx.enabled || !Distort.EFFECT_DEFS[fx.type].handles) return null;
+        return { item, fx };
+    }
+
+    function renderDistortHandles(root, previewScale) {
+        const target = distortEditTarget();
+        let svg = document.getElementById('editingDistortHandles');
+        if (!target) {
+            if (distortEdit && !distortDrag) distortEdit = null;
+            svg?.remove();
+            // Hiện lại khung transform mà chế độ sửa tay nắm đã ẩn (khung được dùng lại, không dựng mới).
+            const hidden = document.getElementById('editingSelectionBox');
+            if (hidden && hidden.dataset.distortHidden) {
+                hidden.style.display = '';
+                delete hidden.dataset.distortHidden;
+            }
+            return;
+        }
+        const { item, fx } = target;
+        const el = document.getElementById(`preview_${item.id}`);
+        if (!el) { svg?.remove(); return; }
+        /* Đang sửa tay nắm: ẩn khung transform (như AE khi chọn một Effect có tay nắm) — các góc co
+         * giãn của nó trùng đúng bốn đỉnh Bezier và nằm trên, nên sẽ nuốt cú kéo. Khung được dựng lại
+         * mỗi lượt vẽ nên thoát chế độ là nó tự hiện lại. */
+        const selBox = document.getElementById('editingSelectionBox');
+        if (selBox) { selBox.style.display = 'none'; selBox.dataset.distortHidden = '1'; }
+        const box = distortBoxSize(item);
+        const bw = Math.max(1, Number(box.width) || 1);
+        const bh = Math.max(1, Number(box.height) || 1);
+        const NS = 'http://www.w3.org/2000/svg';
+        if (!svg) {
+            svg = document.createElementNS(NS, 'svg');
+            svg.id = 'editingDistortHandles';
+            svg.style.position = 'absolute';
+            svg.style.overflow = 'visible';
+            svg.style.pointerEvents = 'none';
+            svg.style.zIndex = '40';
+            svg.addEventListener('pointerdown', onDistortHandleDown);
+        }
+        root.appendChild(svg);
+        // Cùng chỗ đặt với phần tử preview (tâm + transform), cỡ = hộp NGUỒN.
+        svg.style.left = el.style.left;
+        svg.style.top = el.style.top;
+        svg.style.transform = el.style.transform;
+        svg.style.width = `${bw * previewScale}px`;
+        svg.style.height = `${bh * previewScale}px`;
+        svg.setAttribute('viewBox', `0 0 ${bw} ${bh}`);
+        svg.setAttribute('preserveAspectRatio', 'none');
+        const t = overlayLocalTime(item);
+        const p = Distort.effectParamsAt(item, fx, t);
+        const model = Distort.handleModel(fx, p);
+        // Tay nắm cỡ cố định trên MÀN HÌNH: chia cho hệ số phóng hiệu dụng.
+        const tr = normalizeTransform(item.transform);
+        const k = Math.max(0.01, previewScale * Math.abs(Number(tr.scale) || 100) / 100);
+        // Lưới Mesh dày đỉnh -> ô nhỏ hơn cho đỡ che hình.
+        const R = (fx.type === 'mesh' ? 3.5 : 5) / k;
+        const showTangent = (h) => fx.type === 'bezier' || (distortEdit.vertex && h.vertex === distortEdit.vertex);
+        const X = (x) => (x * bw).toFixed(3);
+        const Y = (y) => (y * bh).toFixed(3);
+        let html = `<g fill="none" stroke="#f4b942" stroke-width="1" vector-effect="non-scaling-stroke">`;
+        html += `<path d="${model.segs.map((s) => `M${X(s[0])} ${Y(s[1])}C${X(s[2])} ${Y(s[3])} ${X(s[4])} ${Y(s[5])} ${X(s[6])} ${Y(s[7])}`).join('')}"/>`;
+        model.handles.filter((h) => h.kind === 'tangent' && showTangent(h)).forEach((h) => {
+            html += `<line x1="${X(h.ax)}" y1="${Y(h.ay)}" x2="${X(h.x)}" y2="${Y(h.y)}" stroke-opacity=".7"/>`;
+        });
+        html += '</g>';
+        model.handles.forEach((h) => {
+            if (h.kind === 'tangent' && !showTangent(h)) return;
+            const sel = distortEdit.vertex && h.vertex === distortEdit.vertex && h.kind === 'vertex';
+            const common = `data-distort-handle="${h.id}" style="pointer-events:all;cursor:move" stroke="#1b1b1b" stroke-width="1" vector-effect="non-scaling-stroke"`;
+            html += h.kind === 'vertex'
+                ? `<rect x="${(h.x * bw - R).toFixed(3)}" y="${(h.y * bh - R).toFixed(3)}" width="${(2 * R).toFixed(3)}" height="${(2 * R).toFixed(3)}" fill="${sel ? '#f4b942' : '#ffffff'}" ${common}/>`
+                : `<circle cx="${X(h.x)}" cy="${Y(h.y)}" r="${(R * 0.8).toFixed(3)}" fill="#f4b942" ${common}/>`;
+        });
+        svg.innerHTML = html;
+    }
+
+    // Toạ độ con trỏ -> điểm CHUẨN HOÁ của hộp (đảo đúng transform hiện có của lớp SVG).
+    function distortPointerToNorm(svg, event) {
+        const ctm = svg.getScreenCTM();
+        if (!ctm) return null;
+        const pt = new DOMPoint(event.clientX, event.clientY).matrixTransform(ctm.inverse());
+        const vb = svg.viewBox.baseVal;
+        return [pt.x / Math.max(1e-6, vb.width), pt.y / Math.max(1e-6, vb.height)];
+    }
+
+    function onDistortHandleDown(event) {
+        const node = event.target.closest?.('[data-distort-handle]');
+        const target = distortEditTarget();
+        if (!node || !target || (event.button !== undefined && event.button !== 0)) return;
+        // Đang kéo bằng một con trỏ khác (cảm ứng/bút thứ hai): bỏ qua, không ghi đè cú kéo dở.
+        if (distortDrag) { event.preventDefault(); event.stopPropagation(); return; }
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+        const handleId = node.dataset.distortHandle;
+        const model = Distort.handleModel(target.fx, Distort.effectParamsAt(target.item, target.fx, overlayLocalTime(target.item)));
+        const handle = model.handles.find((h) => h.id === handleId);
+        if (handle && handle.kind === 'vertex') distortEdit.vertex = handle.vertex;
+        const svg = event.currentTarget;
+        // Nghe trên window: con trỏ rời khỏi lớp SVG (pointer-events: none) vẫn kéo tiếp được.
+        distortDrag = { pointerId: event.pointerId, handleId, recorded: false };
+        const move = (ev) => {
+            // Cú kéo đã bị huỷ từ chỗ khác (rời bước dựng) -> tự gỡ listener, không rò.
+            if (!distortDrag) { detach(); return; }
+            if (ev.pointerId !== distortDrag.pointerId) return;
+            // Nhả chuột ngoài cửa sổ (không có pointerup) -> lần rê kế tiếp không còn nút nào giữ.
+            if (ev.pointerType === 'mouse' && ev.buttons === 0) { up(ev); return; }
+            const cur = distortEditTarget();
+            const n = cur && distortPointerToNorm(svg, ev);
+            if (!n) return;
+            // Bước Hoàn tác ghi ở lần dời ĐẦU — chỉ bấm chọn đỉnh thì không sinh bước rỗng.
+            if (!distortDrag.recorded) { recordHistory(); distortDrag.recorded = true; }
+            const p = Distort.effectParamsAt(cur.item, cur.fx, overlayLocalTime(cur.item));
+            const patch = Distort.dragHandle(cur.fx, p, distortDrag.handleId, n[0], n[1]);
+            Object.keys(patch).forEach((key) => applyDistortValue(cur.item, cur.fx.id, key, patch[key]));
+            renderPreviewOverlays();
+        };
+        const detach = () => {
+            window.removeEventListener('pointermove', move, true);
+            window.removeEventListener('pointerup', up, true);
+            window.removeEventListener('pointercancel', up, true);
+        };
+        const up = (ev) => {
+            if (!distortDrag) { detach(); return; }
+            if (ev.pointerId !== distortDrag.pointerId) return;
+            distortDrag = null;
+            detach();
+            renderAll();
+        };
+        window.addEventListener('pointermove', move, true);
+        window.addEventListener('pointerup', up, true);
+        window.addEventListener('pointercancel', up, true);
+        renderPreviewOverlays();
+    }
+
+    // Esc thoát chế độ sửa tay nắm (bắt ở pha capture để không lọt xuống phím tắt bỏ chọn).
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+        document.addEventListener('keydown', (event) => {
+            if (event.key !== 'Escape' || !distortEdit) return;
+            /* Esc đang thuộc về chỗ khác thì để yên: ô đang gõ (huỷ sửa tên, ô số…) hoặc hộp thoại
+             * đang mở (Cài đặt, Xuất, Chụp khung…) — cùng danh sách mà phím thoát Nest tôn trọng. */
+            if (window.Shortcuts && Shortcuts.isTypingTarget(document.activeElement)) return;
+            if (['export-modal-open', 'settings-modal-open', 'capture-modal-open', 'cut-prompt-open']
+                .some((cls) => document.body.classList.contains(cls))) return;
+            distortEdit = null;
+            event.preventDefault();
+            event.stopPropagation();
+            renderAll();
+        }, true);
+    }
+
     function syncOverlayInspector(item) {
         const extra = ensureInspectorExtra();
         if (!extra) return;
@@ -14613,6 +14915,7 @@
                     ` : ''}
                 </div>
             ` : ''}
+            ${distortSectionHtml(item)}
         `;
         extra.querySelectorAll('input, textarea, select').forEach((input) => {
             // data-anim-disabled: control hoạt ảnh bị tắt vì hiệu ứng = 'none',
@@ -15602,6 +15905,26 @@
             renderAll();
             return;
         }
+        // Biến dạng (Inspector › Biến dạng) — static/js/distort.js.
+        if (target.dataset && (target.dataset.distortParam || target.dataset.distortEnable)
+            && window.Distort && Distort.supportsItem(item)) {
+            if (target.dataset.distortEnable) {
+                const stack = Distort.normalizeStack(item.distort);
+                const fx = stack.find((f) => f.id === target.dataset.distortEnable);
+                if (fx) {
+                    fx.enabled = !!target.checked;
+                    item.distort = stack;
+                }
+            } else {
+                const field = Distort.readField(target);
+                if (field) applyDistortParam(item, field.effectId, field.key, field.raw, field.axis);
+                Distort.syncTwin(target);
+            }
+            if (options.commit) inspectorEditInProgress = false;
+            if (!options.commit) { renderPreviewOverlays(); return; }
+            renderAll();
+            return;
+        }
         // Hoạt ảnh In/Out: ghi item.animation qua normalize (kẹp giá trị hợp lệ)
         const animFieldMatch = /^editingAnim(In|Out)(Type|Duration|Easing)$/.exec(target.id || '');
         if (animFieldMatch && itemSupportsAnimation(item) && window.TextAnimations) {
@@ -15856,6 +16179,8 @@
             // trong block.adjustments chứ không phải trong transform.
             if (String(field).startsWith(ColorAdjust.KEYFRAME_PREFIX)) {
                 toggleAdjustKeyframe(field.slice(ColorAdjust.KEYFRAME_PREFIX.length));
+            } else if (window.Distort && Distort.isKfField(field)) {
+                toggleDistortKeyframe(field);
             } else {
                 toggleKeyframeForSelected(field);
             }
@@ -16930,6 +17255,124 @@
         const ok = entry.renderer.draw(src, w, h);
         canvas.dataset.fxPainted = ok ? '1' : '0';
         return ok;
+    }
+
+    /* ===== BIẾN DẠNG (Distort kiểu After Effects) — static/js/distort.js =====
+     *
+     * Block ảnh/video/Shape có hiệu ứng Distort BẬT thì phần tử preview là một <canvas> WebGL2:
+     * nguồn (media ẩn `previewsrc_<id>`, hoặc ảnh raster của Shape) được kéo lên lưới tam giác đã
+     * biến dạng (Distort.MeshRenderer). Thứ tự giống AE và giống khâu xuất: màu -> mặt nạ -> biến
+     * dạng -> transform. Mặt nạ vì thế cắt trên NGUỒN trước khi uốn (không dùng CSS mask nữa —
+     * CSS mask áp lên hình ĐÃ uốn là sai chỗ).
+     * Canvas có cỡ = hộp ĐỐI XỨNG quanh tâm chứa trọn hình đã uốn (Distort.maxExtents), nên
+     * translate(-50%,-50%) vẫn đặt tâm block đúng position_x/y. */
+    const distortRenderers = new Map();       // itemId -> { renderer, canvas, grid, pix }
+    const distortColorCanvases = new Map();   // itemId -> canvas trung gian của chuỗi màu
+    const distortShapeRasters = new Map();    // itemId -> { key, img, ready, canvas, canvasKey }
+
+    /* Block Subsequence (nest) CHƯA nhận Distort: preview của nó vẽ nội dung bên trong theo đường
+     * riêng (renderNestPreviewChildren). Loại ở ĐÂY để preview, xuất và mục Inspector cùng một luật. */
+    function itemHasDistort(item) {
+        return !!window.Distort && Distort.isActive(item) && !itemIsNest(item);
+    }
+
+    function releaseDistortFx(itemId) {
+        const entry = distortRenderers.get(itemId);
+        if (entry) {
+            try { entry.renderer.destroy(); } catch (_) {}
+            distortRenderers.delete(itemId);
+        }
+        distortColorCanvases.delete(itemId);
+        distortShapeRasters.delete(itemId);
+    }
+
+    /* Ảnh raster của Shape ở mật độ `k` pixel / đơn vị hộp (vẽ lại SVG ở đúng cỡ đó cho nét).
+     * Trả null khi SVG chưa nạp xong — nạp xong tự xin một lượt vẽ lại. */
+    function distortShapeSource(item, k) {
+        const style = normalizeShapeStyle(item.style);
+        const markup = shapeSvgMarkup(style);
+        let entry = distortShapeRasters.get(item.id);
+        if (!entry || entry.key !== markup) {
+            entry = { key: markup, img: new Image(), ready: false, canvas: null, canvasKey: '' };
+            const own = entry;
+            own.img.onload = () => { own.ready = true; requestPreviewOverlayRefresh(); };
+            own.img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(markup)}`;
+            distortShapeRasters.set(item.id, entry);
+        }
+        if (!entry.ready) return null;
+        const size = shapeCanvasSize(style);
+        const w = Math.max(2, Math.round(size.width * k));
+        const h = Math.max(2, Math.round(size.height * k));
+        const canvasKey = `${w}x${h}`;
+        if (!entry.canvas || entry.canvasKey !== canvasKey) {
+            entry.canvas = entry.canvas || document.createElement('canvas');
+            entry.canvas.width = w;
+            entry.canvas.height = h;
+            const ctx = entry.canvas.getContext('2d');
+            ctx.clearRect(0, 0, w, h);
+            ctx.drawImage(entry.img, 0, 0, w, h);
+            entry.canvasKey = canvasKey;
+        }
+        return entry.canvas;
+    }
+
+    /* Hộp của block trong ĐƠN VỊ HỘP (px sequence ở scale 100 %) mà lưới Distort phủ lên: Shape =
+     * cả canvas SVG (gồm phần viền tràn), media = cỡ gốc của asset. */
+    function distortBoxSize(item) {
+        return item.type === 'shape' ? shapeCanvasSize(item.style) : itemBaseSize(item, findAsset(item.asset_id));
+    }
+
+    /* Vẽ một khung biến dạng lên canvas preview. Luôn trả cỡ hiển thị (đơn vị hộp) để caller đặt
+     * cỡ phần tử, kể cả khi nguồn chưa sẵn sàng (ok = false). */
+    function paintDistortCanvas(item, canvas, srcEl, previewScale, absScale, localT, useColorFx) {
+        const box = distortBoxSize(item);
+        const boxW = Math.max(1, Number(box.width) || 1);
+        const boxH = Math.max(1, Number(box.height) || 1);
+        const ext = Distort.maxExtents(item, boxW, boxH);
+        const dpr = window.devicePixelRatio || 1;
+        const want = Math.max(0.05, previewScale * Math.max(0.01, absScale) * dpr);
+        let source = null;
+        let sw = 0;
+        let sh = 0;
+        if (item.type === 'shape') {
+            const kS = Math.min(4, Math.max(0.25, Math.round(want * 4) / 4));
+            source = distortShapeSource(item, kS);
+            if (source) { sw = source.width; sh = source.height; }
+        } else if (previewMediaReady(srcEl)) {
+            sw = srcEl.tagName === 'VIDEO' ? srcEl.videoWidth : srcEl.naturalWidth;
+            sh = srcEl.tagName === 'VIDEO' ? srcEl.videoHeight : srcEl.naturalHeight;
+            source = srcEl;
+            if (useColorFx) {
+                let off = distortColorCanvases.get(item.id);
+                if (!off) {
+                    off = document.createElement('canvas');
+                    distortColorCanvases.set(item.id, off);
+                }
+                if (paintColorFxCanvas(item, off, srcEl)) source = off;
+            }
+            source = videoMaskedDrawable(source, sw, sh, item.video_mask, `dst:${item.id}`);
+        }
+        const k = sw > 0 ? Math.min(sw / boxW, want) : want;
+        const size = Distort.outputSize(ext, k);
+        const shown = { width: size.width / k, height: size.height / k, ok: false };
+        if (!source || !(sw > 0 && sh > 0)) return shown;
+        if (canvas.width !== size.width) canvas.width = size.width;
+        if (canvas.height !== size.height) canvas.height = size.height;
+        let entry = distortRenderers.get(item.id);
+        if (!entry || entry.canvas !== canvas) {
+            if (entry) { try { entry.renderer.destroy(); } catch (_) {} }
+            let renderer = null;
+            try { renderer = new Distort.MeshRenderer(canvas); } catch (error) { console.warn('[distort] WebGL2:', error); }
+            entry = { renderer, canvas, grid: null, pix: null };
+            distortRenderers.set(item.id, entry);
+        }
+        if (!entry.renderer || !entry.renderer.ok) return shown;
+        const spec = Distort.gridSpec(item, boxW, boxH);
+        entry.grid = Distort.evalGrid(Distort.stackAt(item, localT), boxW, boxH, spec, localT, entry.grid);
+        entry.pix = Distort.gridToPixels(entry.grid, k, size.width, size.height, entry.pix);
+        shown.ok = entry.renderer.draw(source, sw, sh, spec.cols, spec.rows, entry.pix);
+        canvas.dataset.fxPainted = shown.ok ? '1' : '0';
+        return shown;
     }
 
     // ===== ỐNG HÚT MÀU CHO MEDIA OVERLAY =====
@@ -18818,7 +19261,9 @@
     }
 
     function overlayHasInkAt(el, item, clientX, clientY) {
-        if (!item || (item.type !== 'geocode' && item.type !== 'media')) return true;
+        // Shape đã biến dạng là canvas lớn hơn hình -> cũng dò alpha để bấm vùng trống xuyên xuống.
+        const distortedShape = item && item.type === 'shape' && el && el.tagName === 'CANVAS';
+        if (!item || (item.type !== 'geocode' && item.type !== 'media' && !distortedShape)) return true;
         const a = overlayAlphaAt(el, clientX, clientY);
         return a === null || a > 24;
     }
@@ -19052,6 +19497,9 @@
             // phần tử vì loại thẻ đổi (canvas <-> video/img).
             // Màu của block Subsequence áp lên nội dung bên trong (renderNestPreviewChildren).
             const useColorFx = !nestAsset && itemHasColorAdjust(item);
+            // BIẾN DẠNG: cũng đổi loại thẻ (canvas WebGL2), cùng lý do với useColorFx.
+            const useDistort = (item.type === 'media' || item.type === 'shape') && !nestAsset && itemHasDistort(item);
+            const fxMode = useDistort ? (useColorFx ? 'd1' : 'd0') : (useColorFx ? '1' : '0');
             const srcId = `previewsrc_${item.id}`;
             /* THAY MEDIA CỦA BLOCK (kéo-thả từ panel): item.id KHÔNG đổi nên phần tử preview
                cũ được dùng lại nguyên si, mà `src` chỉ được gán lúc TẠO -> preview vẫn hiện
@@ -19074,10 +19522,11 @@
                 el.remove();
                 el = null;
             }
-            if (el && (el.dataset.fx !== (useColorFx ? '1' : '0') || (el.dataset.mediaKey || '') !== mediaKey)) {
+            if (el && ((el.dataset.fx || '0') !== fxMode || (el.dataset.mediaKey || '') !== mediaKey)) {
                 el.remove();
                 document.getElementById(srcId)?.remove();
                 releaseColorFx(item.id);
+                releaseDistortFx(item.id);
                 el = null;
             }
             const makeMediaEl = () => {
@@ -19107,11 +19556,13 @@
             if (!el) {
                 if (item.type === 'text') {
                     el = document.createElement(wantTemplateCanvas ? 'canvas' : 'div');
-                } else if (item.type === 'shape') {
+                } else if (item.type === 'shape' && !useDistort) {
                     el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                } else if (item.type === 'shape') {
+                    el = document.createElement('canvas');
                 } else if (item.type === 'geocode') {
                     el = document.createElement('canvas');
-                } else if (useColorFx) {
+                } else if (useColorFx || useDistort) {
                     el = document.createElement('canvas');
                     const srcEl = makeMediaEl();
                     srcEl.id = srcId;
@@ -19129,12 +19580,12 @@
                     el = makeMediaEl();
                 }
                 el.id = id;
-                el.dataset.fx = useColorFx ? '1' : '0';
+                el.dataset.fx = fxMode;
                 el.dataset.mediaKey = mediaKey;
                 el.setAttribute('class', nestAsset ? 'editing-preview-item editing-preview-nest' : 'editing-preview-item');
                 root.appendChild(el);
             }
-            if (useColorFx) activeIds.add(srcId);
+            if ((useColorFx || useDistort) && item.type === 'media') activeIds.add(srcId);
             if (item.type === 'shape') el.setAttribute('class', 'editing-preview-item');
             root.appendChild(el);
 
@@ -19189,7 +19640,8 @@
             // chính là hộp chưa biến đổi này, không phải khung sequence.
             if (item.type === 'media') {
                 const box = itemBaseSize(item, findAsset(item.asset_id));
-                applyVideoMaskCss(setCached, item.video_mask,
+                // Có biến dạng: mặt nạ đã cắt trên NGUỒN trong paintDistortCanvas -> gỡ CSS mask.
+                applyVideoMaskCss(setCached, useDistort ? null : item.video_mask,
                     Math.max(2, Math.round(box.width)), Math.max(2, Math.round(box.height)));
             }
             setCached('left', `${frameW / 2 + (transform.position_x * previewScale)}px`);
@@ -19366,11 +19818,22 @@
                 }
                 el.classList.remove('is-text-overlay', 'is-editing-text');
                 el.contentEditable = 'false';
-                if (item.type === 'shape') setShapeSvgElement(el, item);
+                if (item.type === 'shape' && !useDistort) setShapeSvgElement(el, item);
                 if (item.type === 'geocode') {
                     paintGeocodeCanvas(el, item, seqTime, previewScale, Math.abs(Number(transform.scale) || 100) / 100);
                 }
                 // Shape: element = canvas SVG (gồm phần stroke tràn) để không bị xén; box chọn vẫn = W×H (giữa)
+                if (useDistort) {
+                    // BIẾN DẠNG: nguồn ẩn vẫn tua/phát như thường; canvas cỡ theo hộp đã uốn.
+                    const srcEl = item.type === 'media' ? document.getElementById(srcId) : null;
+                    if (srcEl && srcEl.tagName === 'VIDEO') syncMediaElement(srcEl, item, seqTime);
+                    const shown = paintDistortCanvas(item, el, srcEl, previewScale,
+                        Math.abs(Number(transform.scale) || 100) / 100,
+                        Math.max(0, seqTime - Number(item.timeline_start || 0)), useColorFx);
+                    el.style.width = `${Math.max(1, shown.width * previewScale)}px`;
+                    el.style.height = `${Math.max(1, shown.height * previewScale)}px`;
+                    return;
+                }
                 const size = item.type === 'shape' ? shapeCanvasSize(item.style) : itemBaseSize(item, asset);
                 el.style.width = `${Math.max(1, size.width * previewScale)}px`;
                 el.style.height = `${Math.max(1, size.height * previewScale)}px`;
@@ -19392,12 +19855,17 @@
 
         Array.from(root.children).forEach((child) => {
             if (child.id === 'editingSelectionBox' || child.id === 'transitionPreviewCanvas' || child.id === 'mainTransitionCanvas') return;
+            // Lớp tay nắm Distort tự quản (renderDistortHandles) — gỡ ở đây là đứt cú kéo đang dở.
+            if (child.id === 'editingDistortHandles') return;
             if (!activeIds.has(child.id)) {
                 if (child.tagName === 'VIDEO' || child.tagName === 'AUDIO') child.pause();
                 // Khung bọc Subsequence: phần tử con nằm bên trong cũng phải dừng + trả context.
                 if (child.dataset?.nest === '1') releaseNestPreviewTree(child);
                 // Canvas fx bị gỡ -> trả context WebGL về (mỗi tab chỉ có ~16 context)
-                if (child.id.startsWith('preview_')) releaseColorFx(child.id.slice('preview_'.length));
+                if (child.id.startsWith('preview_')) {
+                    releaseColorFx(child.id.slice('preview_'.length));
+                    releaseDistortFx(child.id.slice('preview_'.length));
+                }
                 child.remove();
             }
         });
@@ -19413,6 +19881,10 @@
             stopOverlayPreviewLoop();
             root.querySelectorAll('video,audio').forEach((el) => el.pause());
             document.getElementById('editingSelectionBox')?.remove();
+            // Rời bước dựng: thoát luôn chế độ sửa tay nắm Distort (không để nó treo nuốt Esc ở màn khác).
+            distortEdit = null;
+            distortDrag = null;
+            document.getElementById('editingDistortHandles')?.remove();
             cancelPenTool();
             if (video) video.muted = false;
             return;
@@ -19447,6 +19919,7 @@
         renderOverlayTransitionComposite(overlayTrans, root, frameW, frameH, previewScale);
         renderMainTransitionComposite(mainTrans, root, frameW, frameH, previewScale);
         renderSelectionBox(root, frameW, frameH, previewScale, seqTime);
+        renderDistortHandles(root, previewScale);
         renderMaskOverlay(root);
         renderLogoOverlay(root);
         // KEYFRAME: bảng thông số + nút hình thoi/mũi tên phải theo SÁT playhead — nếu
@@ -19466,6 +19939,7 @@
         // Đặt NGOÀI guard hasInspectorTarget() vì clip lane chính không đi qua guard đó nhưng
         // vẫn có panel Điều chỉnh.
         if (!inspectorEditInProgress) syncAdjustPanelValues();
+        if (!inspectorEditInProgress) syncDistortPanelValues();
         if (isMainPreviewPlaying()) startOverlayPreviewLoop();
         else stopOverlayPreviewLoop();
     }
@@ -22321,7 +22795,16 @@
     }
 
     // SHAPE: rasterize SVG 1 lần rồi vẽ ảnh đó vào hộp mỗi frame.
-    async function renderShapeAnimationSequence(item, resolved, fps) {
+    /* `override` = { image, width, height }: ảnh ĐÃ dựng sẵn thay cho SVG (Shape có Biến dạng — ảnh
+     * đã uốn, cỡ hộp đã nở; xem exportDistortShape). */
+    async function renderShapeAnimationSequence(item, resolved, fps, override = null) {
+        if (override && override.image) {
+            const ow = Math.max(2, Math.ceil(override.width));
+            const oh = Math.max(2, Math.ceil(override.height));
+            const boxH = shapeCanvasSize(normalizeShapeStyle(item.style)).height;
+            return renderAnimationSequence(item, resolved, fps, ow, oh, { boxHeight: boxH, fontSize: 0, charCount: 0 },
+                (ctx) => ctx.drawImage(override.image, 0, 0, ow, oh));
+        }
         const style = normalizeShapeStyle(item.style);
         const size = shapeCanvasSize(style);
         const baseW = Math.max(2, Math.ceil(size.width));
@@ -24334,6 +24817,182 @@
      *                 nhiều chuyển cảnh — xem khối "ĐÓNG GÓI CHUỖI KHUNG CHUYỂN CẢNH KHI
      *                 EXPORT"); KHÔNG có thì rơi về data URL nội tuyến như trước.
      */
+    /* ===== XUẤT BIẾN DẠNG (Distort) =====
+     * Ảnh và Shape: uốn NGAY Ở ĐÂY bằng Distort.warpToCanvas (CPU, cùng phép toán với WebGL của
+     * preview và C++ của sidecar), rồi đi đúng các đường PNG / chuỗi khung có sẵn. Hộp nở ĐỐI XỨNG
+     * quanh tâm nên backend/sidecar đặt theo tâm như cũ. Video: chỉ gửi spec tham số theo khung
+     * (Distort.exportSpec) — sidecar tự uốn (DistortVideoPrepass). */
+    const DISTORT_SEQ_MAX_FRAMES = 3600;   // trần số khung của materializeAnimationFrameFiles (backend)
+
+    /* Chuỗi khung PHỦ TRỌN block cho biến dạng đổi theo thời gian (keyframe / sóng chạy), gồm cả
+     * hoạt ảnh In/Out (vẽ theo đúng cách renderAnimationSequence vẽ). Khung đi qua multipart
+     * (bakedFrameSink) — chuỗi dài không nhét PNG vào JSON. `info.sourceAt(t)` = nguồn đã chỉnh
+     * màu + cắt mặt nạ tại giây cục bộ t; `info.srcCache` = {} khi nguồn không đổi theo thời gian. */
+    async function renderDistortSequence(item, fps, info, collect) {
+        if (!window.Distort || typeof collect !== 'function') return null;
+        const dur = Math.max(0.05, Number(item.duration) || 0);
+        let rate = fps;
+        let frameCount = Math.max(2, Math.round(dur * rate));
+        if (frameCount > DISTORT_SEQ_MAX_FRAMES) {
+            // Block quá dài: hạ nhịp khung của chuỗi (backend nhận 10..60 fps) thay vì cụt đuôi.
+            rate = Math.max(10, DISTORT_SEQ_MAX_FRAMES / dur);
+            frameCount = Math.min(DISTORT_SEQ_MAX_FRAMES, Math.max(2, Math.round(dur * rate)));
+        }
+        const { boxW, boxH, srcW, srcH } = info;
+        const ext = Distort.maxExtents(item, boxW, boxH);
+        const spec = Distort.gridSpec(item, boxW, boxH);
+        const k = srcW / boxW;
+        const warpSize = Distort.outputSize(ext, k);
+        const baseW = Math.max(2, Math.ceil(warpSize.width / k));
+        const baseH = Math.max(2, Math.ceil(warpSize.height / k));
+        const IDENT = { hidden: false, opacityMul: 1, dx: 0, dy: 0, scaleX: 1, scaleY: 1, rotate: 0 };
+        const hasAnim = !!(window.TextAnimations && TextAnimations.hasAnimation(item));
+        const metrics = { boxHeight: boxH, fontSize: 0, charCount: 0 };
+        const stateAt = (t) => (hasAnim && TextAnimations.animationStateAt(item, t, metrics)) || IDENT;
+        const sxOf = (st) => Math.max(0.001, st.scaleX != null ? st.scaleX : (st.scaleMul != null ? st.scaleMul : 1));
+        const syOf = (st) => Math.max(0.001, st.scaleY != null ? st.scaleY : (st.scaleMul != null ? st.scaleMul : 1));
+        const sampleTime = (i) => (i + 0.5) / rate;
+        // Canvas chứa trọn mọi khung kể cả khi hoạt ảnh xoay/phóng/dời (như renderAnimationSequence).
+        let maxHalfW = baseW / 2;
+        let maxHalfH = baseH / 2;
+        let maxAbsDx = 0;
+        let maxAbsDy = 0;
+        if (hasAnim) {
+            for (let i = 0; i < frameCount; i += 1) {
+                const st = stateAt(sampleTime(i));
+                const halfW = (baseW * sxOf(st)) / 2;
+                const halfH = (baseH * syOf(st)) / 2;
+                const rad = (st.rotate || 0) * Math.PI / 180;
+                const c = Math.abs(Math.cos(rad));
+                const sn = Math.abs(Math.sin(rad));
+                maxHalfW = Math.max(maxHalfW, halfW * c + halfH * sn);
+                maxHalfH = Math.max(maxHalfH, halfW * sn + halfH * c);
+                maxAbsDx = Math.max(maxAbsDx, Math.abs(st.dx || 0));
+                maxAbsDy = Math.max(maxAbsDy, Math.abs(st.dy || 0));
+            }
+        }
+        const even = (v) => Math.ceil(v / 2) * 2;
+        const canvasW = even(Math.ceil(2 * (maxHalfW + maxAbsDx)) + 2);
+        const canvasH = even(Math.ceil(2 * (maxHalfH + maxAbsDy)) + 2);
+        const canvas = document.createElement('canvas');
+        canvas.width = canvasW;
+        canvas.height = canvasH;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return null;
+        const warpCanvas = document.createElement('canvas');
+        const sink = bakedFrameSink(collect, `dst_${String(item.id).replace(/[^\w-]+/g, '_')}`, 'image/png', undefined, { pipeline: true });
+        for (let i = 0; i < frameCount; i += 1) {
+            const t = sampleTime(i);
+            const st = stateAt(t);
+            const warped = Distort.warpToCanvas(item, info.sourceAt(t), srcW, srcH, boxW, boxH, t,
+                { extents: ext, spec, canvas: warpCanvas, srcCache: info.srcCache || null });
+            ctx.clearRect(0, 0, canvasW, canvasH);
+            ctx.save();
+            ctx.globalAlpha = Math.min(1, Math.max(0, st.opacityMul != null ? st.opacityMul : 1));
+            if (!st.hidden && ctx.globalAlpha > 0.001) {
+                ctx.translate(canvasW / 2 + (st.dx || 0), canvasH / 2 + (st.dy || 0));
+                const rad = (st.rotate || 0) * Math.PI / 180;
+                if (rad) ctx.rotate(rad);
+                ctx.scale(sxOf(st), syOf(st));
+                ctx.drawImage(warped.canvas, -baseW / 2, -baseH / 2, baseW, baseH);
+            }
+            ctx.restore();
+            await sink.push(canvas, i);
+            if (i % 10 === 9) await new Promise((resolve) => window.setTimeout(resolve, 0));
+        }
+        await sink.flush();
+        const seq = sink.seq(dur, canvasW, canvasH, frameCount);
+        return bakedSeqHasFrames(seq) ? { fps: rate, seq } : null;
+    }
+
+    // Shape có Biến dạng -> rendered_shape_png đã uốn (+ chuỗi khung nếu đổi theo thời gian / có
+    // hoạt ảnh). Trả true nếu đã lo xong item (caller bỏ qua đường Shape thường).
+    async function exportDistortShape(copy, fps, collect, attachAnim, cache) {
+        if (!itemHasDistort(copy)) return false;
+        const style = normalizeShapeStyle(copy.style);
+        const size = shapeCanvasSize(style);
+        const boxW = Math.max(2, Math.ceil(size.width));
+        const boxH = Math.max(2, Math.ceil(size.height));
+        const url = URL.createObjectURL(new Blob([shapeSvgMarkup(style)], { type: 'image/svg+xml;charset=utf-8' }));
+        let image;
+        try {
+            image = await loadImageEl(url);
+        } finally {
+            URL.revokeObjectURL(url);
+        }
+        const source = document.createElement('canvas');
+        source.width = boxW;
+        source.height = boxH;
+        source.getContext('2d').drawImage(image, 0, 0, boxW, boxH);
+        const still = Distort.warpToCanvas(copy, source, boxW, boxH, boxW, boxH, 0);
+        copy.rendered_shape_png = still.canvas.toDataURL('image/png');
+        copy.rendered_shape_width = still.width;
+        copy.rendered_shape_height = still.height;
+        if (Distort.isTimeVarying(copy)) {
+            const anim = await renderDistortSequence(copy, fps,
+                { boxW, boxH, srcW: boxW, srcH: boxH, sourceAt: () => source, srcCache: {} }, collect);
+            if (anim) copy.animation_render = anim;
+        } else {
+            await attachAnim(copy, renderShapeAnimationSequence, cache,
+                { image: still.canvas, width: still.width, height: still.height });
+        }
+        return true;
+    }
+
+    /* Ảnh có Biến dạng -> chuỗi khung ĐÃ chỉnh màu + cắt mặt nạ + uốn (thứ tự của preview). Màu được
+     * bake vào khung (không phải 'raw') vì phép uốn phải chạy SAU màu. Trả true nếu đã lo xong. */
+    async function exportDistortImage(copy, fps, collect, asset, rtStill) {
+        if (!itemHasDistort(copy)) return false;
+        const src = asset?.url || '';
+        if (!src && !rtStill) return false;
+        const image = rtStill || await loadImageEl(src);
+        const texW = image.naturalWidth || image.width || 0;
+        const texH = image.naturalHeight || image.height || 0;
+        if (!(texW > 0 && texH > 0)) return false;
+        const box = itemBaseSize(copy, asset);
+        const boxW = Math.max(1, Number(box.width) || texW);
+        const boxH = Math.max(1, Number(box.height) || texH);
+        const itemStart = Number(copy.timeline_start) || 0;
+        const itemEnd = itemStart + (Number(copy.duration) || 0);
+        const layerTouches = editingItems.some((it) => adjustLayerIsActive(it)
+            && adjustLayerAppliesTo(it, copy)
+            && it.timeline_start < itemEnd && it.timeline_start + it.duration > itemStart);
+        const layerAt = (t) => (layerTouches ? activeAdjustmentLayerAdjustmentsList(itemStart + (Number(t) || 0), copy) : []);
+        const animatedColor = !!window.ColorAdjust && (ColorAdjust.hasAdjustKeyframes(copy.keyframes) || layerTouches);
+        const key = `dstimg:${copy.id}`;
+        const sourceAt = (t) => {
+            const colored = applyAdjustmentLayers(
+                colorAdjustedDrawable(image, texW, texH, effectiveAdjustments(copy, t), key), texW, texH, layerAt(t), key);
+            return videoMaskedDrawable(colored, texW, texH, copy.video_mask, `${key}:cut`);
+        };
+        // Nguồn không đổi theo thời gian: chụp RIÊNG một lần (canvas trong pool sẽ bị block sau dùng lại).
+        let staticSource = null;
+        if (!animatedColor) {
+            staticSource = document.createElement('canvas');
+            staticSource.width = texW;
+            staticSource.height = texH;
+            staticSource.getContext('2d').drawImage(sourceAt(0), 0, 0, texW, texH);
+        }
+        const hasAnim = !!(window.TextAnimations && TextAnimations.hasAnimation(copy));
+        if (!Distort.isTimeVarying(copy) && !hasAnim && !animatedColor) {
+            const still = Distort.warpToCanvas(copy, staticSource, texW, texH, boxW, boxH, 0);
+            // Chuỗi 2 khung = ảnh tĩnh (eof giữ khung cuối) — như bakeRetouchedStillSeq.
+            const sink = bakedFrameSink(collect, `dststill_${String(copy.id).replace(/[^\w-]+/g, '_')}`, 'image/png');
+            await sink.push(still.canvas, 0);
+            await sink.push(still.canvas, 1);
+            const seq = sink.seq(Math.max(0.05, Number(copy.duration) || 0), still.width, still.height, 2);
+            if (bakedSeqHasFrames(seq)) copy.animation_render = { fps, seq };
+            return true;
+        }
+        const anim = await renderDistortSequence(copy, fps, {
+            boxW, boxH, srcW: texW, srcH: texH,
+            sourceAt: animatedColor ? sourceAt : () => staticSource,
+            srcCache: animatedColor ? null : {},
+        }, collect);
+        if (anim) copy.animation_render = anim;
+        return true;
+    }
+
     /* ===== SUBSEQUENCE KHI XUẤT ===============================================
      * Mỗi Subsequence được DỰNG bằng chính đường xuất (sidecar) thành một tệp trung gian ProRes
      * 4444 có alpha, rồi đi vào payload như một block video bình thường — trim, tốc độ, keyframe,
@@ -24647,6 +25306,9 @@
                     await attachAnim(copy, renderTextAnimationSequence,
                         { kind: 'text_anim', parts: itemSeqParts(copy, { density: bakeDensity }) });
                 }
+            } else if (copy?.type === 'shape' && itemHasDistort(copy) && await timed('distort', () => exportDistortShape(
+                copy, exportFps, collectFile, attachAnim, { kind: 'shape_anim', parts: itemSeqParts(copy) }))) {
+                // Shape có Biến dạng: đã uốn sẵn PNG / chuỗi khung (exportDistortShape).
             } else if (copy?.type === 'shape') {
                 const rendered = await timed('shape_png', () => renderShapeItemToPng(copy));
                 if (rendered) {
@@ -24674,10 +25336,16 @@
                 // RETOUCH cho ảnh tĩnh: bake MỘT LẦN (ảnh không đổi theo thời gian) rồi
                 // dùng cho cả hai đường bên dưới.
                 const rtStill = await timed('retouch', () => sourceFxStillCanvas(copy, imgAsset));
-                await attachAnim(copy, renderImageAnimationSequence, imageAnimCache(copy, imgAsset, rtStill), imgAsset, rtStill);
+                // BIẾN DẠNG: chuỗi khung đã chỉnh màu + cắt mặt nạ + uốn, thay cho hai đường dưới.
+                // (Có animation_render nên khối màu/mặt nạ phía sau tự bỏ qua — đã bake vào khung.)
+                const distorted = itemHasDistort(copy)
+                    && await timed('distort', () => exportDistortImage(copy, exportFps, collectFile, imgAsset, rtStill));
+                if (!distorted) {
+                    await attachAnim(copy, renderImageAnimationSequence, imageAnimCache(copy, imgAsset, rtStill), imgAsset, rtStill);
+                }
                 // Không có hoạt ảnh -> attachAnim không sinh gì, mà retouch thì không diễn
                 // đạt được bằng filter FFmpeg. Đẩy ảnh đã retouch qua đường chuỗi khung.
-                if (!copy.animation_render && rtStill) {
+                if (!distorted && !copy.animation_render && rtStill) {
                     const seq = await timed('retouch', () => bakeRetouchedStillSeq(copy, rtStill, exportFps, collectFile));
                     if (seq) copy.animation_render = { fps: exportFps, seq, color_source: 'raw' };
                 }
@@ -24689,6 +25357,12 @@
                     const boxH = itemNativeSize(copy, findAsset(copy.asset_id)).height;
                     const spec = TextAnimations.videoAnimationExpr(copy, boxH);
                     if (spec) copy.animation_video = spec;
+                }
+                // BIẾN DẠNG: tham số từng khung cho sidecar (DistortVideoPrepass) uốn trước.
+                if (itemHasDistort(copy)) {
+                    const box = itemBaseSize(copy, findAsset(copy.asset_id));
+                    copy.distort_spec = Distort.exportSpec(copy, Number(box.width) || 1, Number(box.height) || 1,
+                        exportFps, Number(copy.duration) || 0);
                 }
             }
             // KEYFRAME (mọi loại): biểu thức FFmpeg theo thời gian cho scale/vị trí/xoay/
@@ -27049,6 +27723,7 @@
             if (handleAnimFxCardClick(event)) return;
             if (handleAdjustClick(event)) return;
             if (handleSpeedPresetClick(event)) return;
+            if (handleDistortClick(event)) return;
             handleTextInspectorClick(event);
         });
         refreshLutCatalog();
