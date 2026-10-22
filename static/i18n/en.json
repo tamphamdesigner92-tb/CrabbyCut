@@ -2482,5 +2482,10 @@
   "Vị trí": "Position",
   "Thu phóng": "Scale",
   "Độ mờ": "Opacity",
-  "Thêm": "Add"
+  "Thêm": "Add",
+  "Alt + Shift + lăn chuột": "Alt + Shift + scroll wheel",
+  "Cuộn dọc giữa các lane timeline": "Scroll the timeline lanes vertically",
+  "Lăn chuột trên cột tên lane": "Scroll wheel over the lane name column",
+  "Giữ chuột giữa + kéo": "Hold middle mouse button + drag",
+  "Kéo khung nhìn timeline (dọc lẫn ngang)": "Pan the timeline view (vertically and horizontally)"
 }

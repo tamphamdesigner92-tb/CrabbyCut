@@ -2182,5 +2182,10 @@
   "Vị trí": "位置",
   "Thu phóng": "缩放",
   "Độ mờ": "不透明度",
-  "Thêm": "添加"
+  "Thêm": "添加",
+  "Alt + Shift + lăn chuột": "Alt + Shift + 滚轮",
+  "Cuộn dọc giữa các lane timeline": "上下滚动时间线轨道",
+  "Lăn chuột trên cột tên lane": "在轨道名称栏上滚动滚轮",
+  "Giữ chuột giữa + kéo": "按住鼠标中键 + 拖动",
+  "Kéo khung nhìn timeline (dọc lẫn ngang)": "拖动时间线视图（上下和左右）"
 }

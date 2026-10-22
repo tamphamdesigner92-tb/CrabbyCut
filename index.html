@@ -11679,8 +11679,15 @@
         lastProgrammaticScrollLeft = timelineOuter.scrollLeft;
         releaseProgrammaticScroll(60);
     }
+    /* scrollLeft của lượt 'scroll' trước. Cuộn DỌC giữa các lane cũng bắn 'scroll' — nếu
+       không lọc ra thì mỗi nấc cuộn dọc lại tua video về tâm khung nhìn (và hít mép block
+       khi giữ Shift) dù playhead không hề dịch chuyển. */
+    let lastTimelineScrollLeft = timelineOuter.scrollLeft;
     timelineOuter.addEventListener('scroll', () => {
+        const horizontalMoved = timelineOuter.scrollLeft !== lastTimelineScrollLeft;
+        lastTimelineScrollLeft = timelineOuter.scrollLeft;
         if (!timelineClockReady() || isProgrammaticScroll) return;
+        if (!horizontalMoved) return;
         /* CHỐT CHẶN THEO VỊ TRÍ, KHÔNG THEO THỜI GIAN.
          *
          * `isProgrammaticScroll` ở trên được xoá bởi một `setTimeout` 60 ms, nhưng Chromium
@@ -11743,8 +11750,34 @@
         return { x: e.deltaX * k, y: e.deltaY * k };
     }
 
+    /* ===== CUỘN DỌC GIỮA CÁC LANE (2026-10-22) =====
+       Lăn chuột trên timeline vốn luôn là cuộn NGANG (Shift = hít mốc, Alt/Ctrl/⌘ = zoom),
+       nên dự án nhiều lane không có cách nào lên/xuống ngoài kéo thanh cuộn. Thêm:
+         - lăn chuột khi con trỏ ở CỘT TÊN LANE (bên trái) -> cuộn dọc, như Premiere/CapCut;
+         - Alt + Shift + lăn ở bất kỳ đâu trên timeline -> cuộn dọc. Lấy trục trội hơn vì
+           macOS đổi lăn dọc của chuột thành deltaX khi giữ Shift;
+         - nhấn giữ CHUỘT GIỮA rồi kéo -> kéo khung nhìn tự do (xem handler mousedown dưới).
+       Cuộn dọc chỉ đổi scrollTop: không đụng zoom, không tua video, không dựng lại block
+       (vùng ảo hoá block tính theo trục ngang). */
+    function timelineVerticalWheelStep(e, wheelPx) {
+        if (e.ctrlKey || e.metaKey) return null;
+        if (e.altKey) {
+            if (!e.shiftKey) return null;
+            return Math.abs(wheelPx.y) >= Math.abs(wheelPx.x) ? wheelPx.y : wheelPx.x;
+        }
+        if (!e.target?.closest?.('.editing-lane-label')) return null;
+        // Vuốt NGANG trên trackpad ở cột tên lane vẫn là cuộn ngang như cũ.
+        return Math.abs(wheelPx.y) >= Math.abs(wheelPx.x) ? wheelPx.y : null;
+    }
+
     timelineOuter.addEventListener('wheel', (e) => {
         if (!timelineClockReady()) return;
+        const verticalStep = timelineVerticalWheelStep(e, wheelDeltaPx(e));
+        if (verticalStep !== null) {
+            e.preventDefault();
+            timelineOuter.scrollTop += verticalStep;
+            return;
+        }
         timelineScrollSnapActive = e.shiftKey;
         const wheelPx = wheelDeltaPx(e);
 
@@ -11806,6 +11839,36 @@
             timelineOuter.scrollLeft = clampTimelineScrollLeft(timelineOuter.scrollLeft + wheelStep);
         }
     }, { passive: false });
+
+    /* Nhấn giữ CHUỘT GIỮA + kéo = kéo khung nhìn timeline cả dọc lẫn ngang (bàn tay).
+       Pha CAPTURE + chặn lan truyền: chuột giữa không được rơi xuống block (kéo block),
+       khung quét chọn hay tua playhead. preventDefault tắt luôn autoscroll của Windows.
+       Phần ngang đi đúng đường cuộn tay của người dùng (handler 'scroll' tua theo tâm). */
+    timelineOuter.addEventListener('mousedown', (e) => {
+        if (e.button !== 1 || !timelineClockReady()) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const startX = e.clientX;
+        const startY = e.clientY;
+        const startLeft = timelineOuter.scrollLeft;
+        const startTop = timelineOuter.scrollTop;
+        const prevCursor = document.body.style.cursor;
+        document.body.style.cursor = 'grabbing';
+        const onMove = (ev) => {
+            timelineOuter.scrollTop = startTop - (ev.clientY - startY);
+            const nextLeft = clampTimelineScrollLeft(startLeft - (ev.clientX - startX));
+            if (Math.abs(nextLeft - timelineOuter.scrollLeft) >= 1) timelineOuter.scrollLeft = nextLeft;
+        };
+        const onUp = () => {
+            window.removeEventListener('mousemove', onMove, true);
+            window.removeEventListener('mouseup', onUp, true);
+            document.body.style.cursor = prevCursor;
+        };
+        window.addEventListener('mousemove', onMove, true);
+        window.addEventListener('mouseup', onUp, true);
+    }, true);
+    // Chặn "bấm chuột giữa" mặc định (mở liên kết / dán trên Linux) sau cú kéo.
+    timelineOuter.addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefault(); });
 
     function updatePlayhead() {
         if(!timelineClockReady()) return;

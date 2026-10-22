@@ -361,7 +361,9 @@
 
     /* Vẽ cột biên độ vào ctx trong hình chữ nhật rect {x,y,w,h}.
      * Dáng CapCut: envelope PEAK đối xứng quanh trục giữa + lõi RMS đậm hơn ở trong.
-     * opts: {gain, peakColor, rmsColor, baselineColor, alpha} */
+     * opts: {gain, peakColor, rmsColor, baselineColor, alpha, dbRange}
+     * dbRange > 0: chiều cao theo THANG dB (0 dBFS = đầy, -dbRange dB = 0) thay vì tuyến
+     * tính — tiếng nhỏ vẫn thấy được dáng sóng. Bỏ trống/0 = tuyến tính như trước. */
     function drawColumns(ctx, rect, cols, opts) {
         if (!ctx || !rect || !cols || !cols.count) return;
         const o = opts || {};
@@ -370,7 +372,13 @@
            quay thực tế hiếm khi chạm đỉnh 0 dB nên ở gain 1.0 sóng vẽ ra thấp lè tè, khó
            canh điểm cắt. Nhân thêm ở ĐÂY (bộ vẽ dùng chung) để mọi giai đoạn cùng một dáng
            sóng; Math.min(1, ...) bên dưới vẫn chặn nên chỗ to nhất chỉ chạm mép dải. */
-        const gain = (o.gain == null ? 1 : Math.max(0, o.gain)) * DISPLAY_GAIN;
+        const dbRange = o.dbRange > 0 ? o.dbRange : 0;
+        // Thang dB đã tự nâng tiếng nhỏ (caller chuẩn hoá theo đỉnh nguồn) -> không nhân thêm
+        // DISPLAY_GAIN, kẻo phần to bị kẹp phẳng ở mép dải.
+        const gain = (o.gain == null ? 1 : Math.max(0, o.gain)) * (dbRange ? 1 : DISPLAY_GAIN);
+        const level = dbRange
+            ? (v) => Math.max(0, 1 + (20 * Math.log10(Math.min(1, v))) / dbRange)
+            : (v) => Math.min(1, v);
         const centerY = rect.y + rect.h / 2;
         const half = rect.h / 2;
         const colWidth = rect.w / cols.count;
@@ -399,7 +407,9 @@
             for (let i = 0; i < cols.count; i += 1) {
                 const value = cols.values[i * 2 + offset] * gain;
                 if (value <= 0) continue;
-                const h = Math.max(minHalf, Math.min(1, value) * half);
+                const lv = level(value);
+                if (dbRange && lv <= 0) continue;
+                const h = Math.max(minHalf, lv * half);
                 const x = rect.x + i * colWidth;
                 const left = snap(x);
                 const width = Math.max(minWidth, snap(x + barWidth) - left);
@@ -506,6 +516,7 @@
                 baselineColor,
                 // ctx đang ở toạ độ NỘI DUNG: setTransform(dpr) rồi translate(-scrollLeft).
                 grid: { scale: dpr, offset: -scrollLeft },
+                dbRange: target.dbRange,
             });
             stats.drawn += 1;
         }
@@ -573,7 +584,7 @@
                + `:${r2(mp.x)},${r2(mp.w)}`
                + `:${r2(t.srcStart)},${r2(t.srcEnd)}`
                + `:${t.gain == null ? 1 : r2(t.gain)},${t.alpha == null ? 1 : r2(t.alpha)}`
-               + `:${t.peakColor || ''},${t.rmsColor || ''},${t.baselineColor || ''}`
+               + `:${t.peakColor || ''},${t.rmsColor || ''},${t.baselineColor || ''},${t.dbRange || 0}`
                + `:${statusOf(t.key)}`;
         }
         return s;
