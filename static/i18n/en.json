@@ -2481,5 +2481,6 @@
   "Rung suốt block, chồng lên hiệu ứng Vào/Ra và keyframe — như wiggle() của After Effects.": "Shakes for the whole block, on top of In/Out animations and keyframes — like After Effects' wiggle().",
   "Vị trí": "Position",
   "Thu phóng": "Scale",
-  "Độ mờ": "Opacity"
+  "Độ mờ": "Opacity",
+  "Thêm": "Add"
 }

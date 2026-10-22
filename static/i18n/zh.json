@@ -2181,5 +2181,6 @@
   "Rung suốt block, chồng lên hiệu ứng Vào/Ra và keyframe — như wiggle() của After Effects.": "在整个片段持续晃动，叠加在入场/出场动画和关键帧之上 — 类似 After Effects 的 wiggle()。",
   "Vị trí": "位置",
   "Thu phóng": "缩放",
-  "Độ mờ": "不透明度"
+  "Độ mờ": "不透明度",
+  "Thêm": "添加"
 }
