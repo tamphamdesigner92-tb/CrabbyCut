@@ -1862,8 +1862,29 @@
             .dst-slider input[type=range] { flex: 1; min-width: 0; }
             .dst-slider input[type=text] { width: 56px; }
             .dst-empty { font-size: 12px; opacity: .7; margin: 6px 0; }
+            .dst-edit { margin: 6px 0 8px; }
+            .dst-edit button { width: 100%; }
+            .dst-edit button.is-active { background: var(--accent, #f4b942); color: #1b1b1b; border-color: transparent; }
+            .dst-hint { font-size: 11px; opacity: .7; margin-top: 4px; line-height: 1.35; }
         `;
         document.head.appendChild(el);
+    }
+
+    /* Bezier / Mesh / Puppet / Liquify chỉ UỐN khi thao tác trên preview (như AE): Rows/Columns,
+     * Triangles, Distortion Percentage… một mình không làm hình đổi. Thanh "Sửa trên preview" + một dòng
+     * hướng dẫn cho từng hiệu ứng để người dùng không tưởng hiệu ứng hỏng. */
+    const EFFECT_HINTS = {
+        bezier: 'Kéo 4 đỉnh vuông và 8 tiếp tuyến tròn trên preview để uốn.',
+        mesh: 'Kéo đỉnh lưới trên preview (bấm một đỉnh để hiện tay cầm của nó). Rows/Columns chỉ chia lưới, chưa uốn.',
+        puppet: 'Bấm lên hình để đặt ghim (ít nhất 2), rồi kéo ghim để uốn. Triangles/Expansion chỉ dựng lưới.',
+        liquify: 'Vẽ cọ lên hình trên preview. Distortion Percentage chỉ nhân độ uốn của các nét đã vẽ.',
+    };
+    function editBarHtml(fx, active) {
+        return `
+                    <div class="dst-edit">
+                        <button type="button" class="btn btn-secondary${active ? ' is-active' : ''}" data-distort-action="edit" data-distort-id="${fx.id}" title="${esc(_t('Sửa trên preview (Esc để thoát)'))}">${esc(active ? _t('✎ Đang sửa trên preview — Esc để thoát') : _t('✎ Sửa trên preview'))}</button>
+                        <div class="dst-hint">${esc(_t(EFFECT_HINTS[fx.type] || ''))}</div>
+                    </div>`;
     }
 
     const scrubAttrs = (def) => `data-scrub-axis="x" data-scrub-step="${def.step}" data-scrub-min="${def.min}" data-scrub-max="${def.max}"${Number.isInteger(def.step) ? ' data-scrub-integer="1"' : ''}`;
@@ -1956,11 +1977,11 @@
                     <div class="dst-head">
                         <input type="checkbox" data-distort-enable="${fx.id}"${fx.enabled ? ' checked' : ''} title="${esc(_t('Bật/tắt hiệu ứng'))}">
                         <span class="dst-name">${esc(_t(def.label))}</span>
-                        ${def.handles ? `<button type="button" class="btn btn-secondary${helpers.editingId === fx.id ? ' is-active' : ''}" data-distort-action="edit" data-distort-id="${fx.id}" title="${esc(_t('Sửa trên preview (Esc để thoát)'))}">✎</button>` : ''}
                         <button type="button" class="btn btn-secondary" data-distort-action="up" data-distort-id="${fx.id}" ${index === 0 ? 'disabled' : ''} title="${esc(_t('Lên trên'))}">↑</button>
                         <button type="button" class="btn btn-secondary" data-distort-action="down" data-distort-id="${fx.id}" ${index === stack.length - 1 ? 'disabled' : ''} title="${esc(_t('Xuống dưới'))}">↓</button>
                         <button type="button" class="btn btn-secondary" data-distort-action="remove" data-distort-id="${fx.id}" title="${esc(_t('Xoá hiệu ứng'))}">×</button>
                     </div>
+                    ${def.handles ? editBarHtml(fx, helpers.editingId === fx.id) : ''}
                     ${rows}
                 </div>`;
         }).join('');
@@ -1969,7 +1990,7 @@
                 <div class="ins-sec-head"><span class="ins-sec-title">${esc(_t('Biến dạng (Distort)'))}</span></div>
                 <div class="dst-add">
                     <select data-distort-add-type>
-                        ${TYPE_IDS.map((id) => `<option value="${id}">${esc(_t(EFFECT_DEFS[id].label))}</option>`).join('')}
+                        ${TYPE_IDS.map((id) => `<option value="${id}"${id === helpers.addType ? ' selected' : ''}>${esc(_t(EFFECT_DEFS[id].label))}</option>`).join('')}
                     </select>
                     <button type="button" class="btn btn-secondary" data-distort-action="add" ${stack.length >= MAX_EFFECTS ? 'disabled' : ''}>${esc(_t('Thêm'))}</button>
                 </div>

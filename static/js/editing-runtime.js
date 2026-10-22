@@ -14329,6 +14329,9 @@
             + `</div>`;
     }
 
+    // Loại hiệu ứng đang chọn ở ô cạnh nút "Thêm" — giữ qua các lượt dựng lại Inspector.
+    let distortAddType = 'wave';
+
     function distortSectionHtml(item) {
         if (!window.Distort || !Distort.supportsItem(item) || itemIsNest(item)) return '';
         const box = distortBoxSize(item);
@@ -14336,6 +14339,7 @@
             kfGroup: kfGroupHtml,
             box: { w: Number(box.width) || 1, h: Number(box.height) || 1 },
             editingId: distortEdit && distortEdit.itemId === item.id ? distortEdit.effectId : null,
+            addType: distortAddType,
         });
     }
 
@@ -14446,6 +14450,9 @@
             const type = btn.closest('[data-distort-section]')?.querySelector('[data-distort-add-type]')?.value;
             const fx = stack.length < Distort.MAX_EFFECTS ? Distort.createEffect(item, type) : null;
             if (fx) stack.push(fx);
+            /* Hiệu ứng uốn bằng thao tác trên preview (Bezier/Mesh/Puppet/Liquify): vào thẳng chế độ sửa —
+             * thông số của chúng một mình không làm hình đổi, người dùng tưởng hiệu ứng hỏng (báo 2026-10-18). */
+            if (fx && Distort.EFFECT_DEFS[fx.type].handles) distortEdit = { itemId: item.id, effectId: fx.id, vertex: null };
         } else {
             const at = stack.findIndex((f) => f.id === id);
             if (at < 0) return true;
@@ -14652,7 +14659,11 @@
         const tr = normalizeTransform(item.transform);
         const k = Math.max(0.01, previewScale * Math.abs(Number(tr.scale) || 100) / 100);
         // Lưới Mesh dày đỉnh -> ô nhỏ hơn cho đỡ che hình.
-        const R = (fx.type === 'mesh' ? 3.5 : 5) / k;
+        /* Ô đỉnh Mesh co theo khoảng cách giữa hai đỉnh TRÊN MÀN HÌNH (2..4 px) — hình nhỏ trên preview
+         * mà ô cố định thì các ô che kín cả ảnh, không thấy mình đang uốn gì. */
+        const meshGap = fx.type === 'mesh'
+            ? Math.min(bw / Math.max(1, p.cols), bh / Math.max(1, p.rows)) * k : 0;
+        const R = (fx.type === 'mesh' ? Math.max(2, Math.min(4, meshGap * 0.18)) : 5) / k;
         const showTangent = (h) => fx.type === 'bezier' || (distortEdit.vertex && h.vertex === distortEdit.vertex);
         const X = (x) => (x * bw).toFixed(3);
         const Y = (y) => (y * bh).toFixed(3);
@@ -15995,6 +16006,13 @@
     function updateEditingInspectorField(target, options = {}) {
         const item = selectedEditingItem();
         if (!target) return;
+        /* Ô chọn LOẠI hiệu ứng Biến dạng (cạnh nút "Thêm") không phải thuộc tính của block: chỉ ghi
+         * nhớ lựa chọn. Để nó đi tiếp xuống dưới là ghi một bước Hoàn tác rỗng rồi dựng lại Inspector
+         * — ô chọn bị dựng lại về Wave Warp nên bấm "Thêm" lúc nào cũng ra Wave (lỗi báo 2026-10-18). */
+        if (target.dataset && target.dataset.distortAddType !== undefined) {
+            distortAddType = target.value;
+            return;
+        }
         const rememberInspectorEdit = () => {
             if (!inspectorEditInProgress) {
                 recordHistory();
