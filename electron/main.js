@@ -722,6 +722,7 @@ ipcMain.handle('save-frame-image', async (_event, { dataBase64, suggestedName })
 const EXPORT_OUTPUT_KINDS = {
   mp4: { filter: () => _t('Video MP4'), title: () => _t('Lưu video xuất') },
   mov: { filter: () => _t('Video QuickTime'), title: () => _t('Lưu video xuất') },
+  gif: { filter: () => _t('Ảnh động GIF'), title: () => _t('Lưu ảnh GIF xuất') },
   mp3: { filter: () => _t('Âm thanh MP3'), title: () => _t('Lưu âm thanh xuất') },
   wav: { filter: () => _t('Âm thanh WAV'), title: () => _t('Lưu âm thanh xuất') },
   m4a: { filter: () => _t('Âm thanh AAC'), title: () => _t('Lưu âm thanh xuất') },

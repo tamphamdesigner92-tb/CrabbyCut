@@ -1957,6 +1957,61 @@ function runProcess(command, args, options = {}) {
   });
 }
 
+/* MP4 (bản render của sidecar) -> GIF chất lượng cao, cùng thuật toán với Convert2GIF:
+ * fps + scale lanczos -> (tua ngược / boomerang) -> palettegen (stats_mode=diff) + paletteuse.
+ * Tiến độ đọc từ `-progress pipe:1` và báo qua setStatus như các khâu khác của lượt xuất. */
+function exportGifFromVideo(inputPath, outputPath, gif) {
+  const chain = [`fps=${gif.fps}`];
+  if (gif.width > 0) chain.push(`scale=${gif.width}:-1:flags=lanczos`);
+  let effectChain = chain.join(',');
+  if (gif.effect === 'reverse') effectChain += ',reverse';
+  if (gif.effect === 'boomerang') {
+    effectChain += ',split[main][rev];[rev]reverse[rev_out];[main][rev_out]concat=n=2:v=1:a=0';
+  }
+  const paletteUse = gif.dither === 'none' ? 'paletteuse=dither=none'
+    : gif.dither === 'bayer' ? 'paletteuse=dither=bayer:bayer_scale=3'
+      : `paletteuse=dither=${gif.dither}`;
+  const filter = `[0:v]${effectChain},split[s0][s1];`
+    + `[s0]palettegen=max_colors=${gif.max_colors}:stats_mode=diff[p];[s1][p]${paletteUse}`;
+  const sourceSeconds = Number(mediaDurationSeconds(inputPath)) || 0;
+  const expectedSeconds = sourceSeconds * (gif.effect === 'boomerang' ? 2 : 1);
+  const args = ['-y', '-hide_banner', '-i', inputPath, '-filter_complex', filter, '-an',
+    '-loop', String(gif.loop), '-progress', 'pipe:1', '-nostats', '-f', 'gif', outputPath];
+  setStatus(_t('Đang chuyển sang GIF...'));
+  return new Promise((resolve, reject) => {
+    const child = spawn('ffmpeg', args, { cwd: PROJECT_ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    activeChildProcesses.add(child);
+    const stderr = [];
+    let lastPct = -1;
+    let pending = '';
+    child.stdout.on('data', (chunk) => {
+      pending += chunk.toString('utf8');
+      const lines = pending.split('\n');
+      pending = lines.pop();
+      for (const line of lines) {
+        const m = /^out_time_(?:us|ms)=(\d+)/.exec(line.trim());
+        if (!m || expectedSeconds <= 0) continue;
+        const pct = Math.min(99, Math.max(0, Math.floor((Number(m[1]) / 1e6 / expectedSeconds) * 100)));
+        if (pct !== lastPct) {
+          lastPct = pct;
+          setStatus(_t('Đang chuyển sang GIF... {pct}%', { pct }));
+        }
+      }
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr.push(chunk.toString('utf8'));
+      if (stderr.length > 200) stderr.splice(0, stderr.length - 200);
+    });
+    child.on('error', (error) => { activeChildProcesses.delete(child); reject(error); });
+    child.on('exit', (code) => {
+      activeChildProcesses.delete(child);
+      if (code === 0 && fs.existsSync(outputPath)) return resolve();
+      const tail = stderr.join('').trim().split(/\r?\n/).filter(Boolean).slice(-6).join('\n');
+      reject(new Error(_t('Chuyển sang GIF thất bại: {detail}', { detail: tail || `ffmpeg exited with code ${code}` })));
+    });
+  });
+}
+
 async function createOrGetThumbnail(videoPath) {
   fs.mkdirSync(THUMBNAIL_DIR, { recursive: true });
   const key = thumbnailCacheKey(videoPath);
@@ -4846,7 +4901,27 @@ function exportOutputFrame(sequenceWidth, sequenceHeight, preset, mode = EXPORT_
       && frame.output_content_width === sw && frame.output_content_height === sh) return null;
   return frame;
 }
-const EXPORT_CODEC_VALUES = new Set(['h264', 'hevc', 'prores']);
+const EXPORT_CODEC_VALUES = new Set(['h264', 'hevc', 'prores', 'gif']);
+/* XUẤT GIF (theo app Convert2GIF): sidecar KHÔNG biết GIF — nó render MP4 tạm (H.264, mức "Cao hơn")
+ * như mọi lượt xuất, rồi exportGifFromVideo chuyển sang GIF bằng 2-pass palette. Dải giá trị như
+ * Convert2GIF; giá trị lạ -> mặc định. */
+const GIF_WIDTH_VALUES = new Set([0, 320, 480, 640, 720, 1080]);
+const GIF_FPS_VALUES = new Set([10, 12, 15, 20, 24, 30]);
+const GIF_COLOR_VALUES = new Set([64, 128, 256]);
+const GIF_DITHER_VALUES = new Set(['sierra2_4a', 'floyd_steinberg', 'bayer', 'none']);
+const GIF_EFFECT_VALUES = new Set(['normal', 'reverse', 'boomerang']);
+
+function normalizeGifSettings(raw = {}) {
+  const pick = (set, value, fallback) => (set.has(value) ? value : fallback);
+  return {
+    width: pick(GIF_WIDTH_VALUES, Number(raw.width), 480),
+    fps: pick(GIF_FPS_VALUES, Number(raw.fps), 15),
+    max_colors: pick(GIF_COLOR_VALUES, Number(raw.max_colors), 256),
+    dither: pick(GIF_DITHER_VALUES, String(raw.dither || ''), 'sierra2_4a'),
+    effect: pick(GIF_EFFECT_VALUES, String(raw.effect || ''), 'normal'),
+    loop: Number(raw.loop) === -1 ? -1 : 0,
+  };
+}
 const EXPORT_QUALITY_VALUES = new Set(['small', 'balanced', 'high']);
 /* Ô "Bitrate" kiểu CapCut (mục 1.20 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md, người dùng chốt
  * 2026-10-01) thay ô "Chất lượng": ba mức là CHẤT LƯỢNG CỐ ĐỊNH có trần, "custom" là bitrate trung
@@ -4945,6 +5020,7 @@ function normalizeExportSettings(body = {}) {
     rate_mode: rateMode,
     ...(rateMode === 'custom' ? { rate_mbps: rateMbps } : {}),
     audio_bitrate: audioBitrate,
+    ...(codec === 'gif' ? { gif: normalizeGifSettings(raw.gif && typeof raw.gif === 'object' ? raw.gif : {}) } : {}),
   };
 }
 
@@ -6036,6 +6112,7 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
 }
 
 function exportOutputName(settings) {
+  if (settings.codec === 'gif') return 'final_cut.gif';
   return settings.codec === 'prores' ? 'final_cut.mov' : 'final_cut.mp4';
 }
 
@@ -7932,6 +8009,14 @@ function createApp() {
         sdrAssetOverrides,
       ));
       const timelineFile = path.join(TEMP_DIR, 'export_timeline.json');
+      /* GIF: sidecar render MP4 tạm bằng H.264 mức "Cao hơn" (bản trung gian nên ưu tiên chất lượng).
+       * Bỏ khoá `gif` khỏi settings gửi sidecar: nó dò khoá theo tên trong cả tệp (width/fps...). */
+      const gifSettings = exportSettings.codec === 'gif' ? exportSettings.gif : null;
+      const { gif: _gifSettings, ...sidecarSettings } = exportSettings;
+      if (gifSettings) {
+        Object.assign(sidecarSettings, { codec: 'h264', rate_mode: 'higher', quality: 'high' });
+        delete sidecarSettings.rate_mbps;
+      }
       /* KHÔNG ghi `editingItems`: sidecar không đọc nó (lớp phủ đã chuẩn hoá nằm ở `overlays`), mà item thô
        * còn nguyên ảnh chữ base64 + khung hoạt ảnh — "Bin Tom" 92 MB: backend stringify + ghi 92 MB, sidecar
        * quét cả tệp mất ~1 s mỗi lượt xuất (đo 2026-10-03, khâu dò nguồn 1,4 s so với 0,6 s của dự án khác). */
@@ -7943,7 +8028,7 @@ function createApp() {
         assets: editingPayload.assets,
         main_audio_volume: editingPayload.mainAudioVolume,
         overlays: editingPayload.overlays,
-        settings: exportSettings,
+        settings: sidecarSettings,
       })), 'utf8');
       const audioFormat = exportSettings.audio_file_format;
       const audioOnly = !exportSettings.export_video;
@@ -7958,6 +8043,9 @@ function createApp() {
             ? path.join(path.dirname(userOutputPath), `${path.basename(userOutputPath, path.extname(userOutputPath))}${exportAudioExt(audioFormat)}`)
             : path.join(TEMP_DIR, `final_cut${exportAudioExt(audioFormat)}`));
       const audioPart = audioTarget ? (audioOnly ? outputPath : exportPartPath(audioTarget)) : null;
+      // GIF: sidecar ghi MP4 tạm này, khâu chuyển GIF ghi ra outputPath. Còn lại: sidecar ghi thẳng outputPath.
+      const renderPath = gifSettings && !audioOnly ? path.join(TEMP_DIR, 'final_cut_gif_source.mp4') : outputPath;
+      if (renderPath !== outputPath) await fsp.rm(renderPath, { force: true });
       const clientStartedAt = parseClientStartedAtMs(req.body.client_started_at_ms);
       const renderStartedAt = clientStartedAt || Date.now();
       const serverRenderStartedAt = Date.now();
@@ -7975,7 +8063,7 @@ function createApp() {
       const sidecarEvents = audioOnly ? [] : await timeStage('sidecar_ms', () => runSidecar([
         'export-video',
         sourceVideoPath,
-        outputPath,
+        renderPath,
         timelineFile,
         TEMP_DIR,
         exportSettings.resolution,
@@ -7996,13 +8084,20 @@ function createApp() {
       const allowedShortfall = Math.max(0.5, expectedDuration * 0.02);
       let actualDuration = null;
       if (!audioOnly) {
-        actualDuration = await timeStage('verify_ms', () => mediaDurationSeconds(outputPath));
+        actualDuration = await timeStage('verify_ms', () => mediaDurationSeconds(renderPath));
         if (Number.isFinite(actualDuration) && expectedDuration > 0
           && actualDuration < expectedDuration - allowedShortfall) {
           throw new Error(
             _t('Video xuất ra bị thiếu: chỉ dài {actual}s trong khi timeline là {expected}s. Nhiều khả năng các video nguồn khác thông số nhau nên bản nối bị đứt giữa chừng — hãy thử "Dự án mới" rồi thêm lại video, hoặc báo lỗi kèm tệp .crab.',
             { actual: actualDuration.toFixed(2), expected: expectedDuration.toFixed(2) }),
           );
+        }
+        if (renderPath !== outputPath) {
+          try {
+            await timeStage('gif_ms', () => exportGifFromVideo(renderPath, outputPath, gifSettings));
+          } finally {
+            await fsp.rm(renderPath, { force: true }).catch(() => {});
+          }
         }
       }
       /* TỆP ÂM THANH (ô "Audio"): một lượt sidecar `export-audio` — cùng bộ trộn với lượt tiếng của

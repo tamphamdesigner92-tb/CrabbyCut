@@ -113,6 +113,7 @@
     "test:export-batch-time-varying": "node tests/scripts/export_batch_time_varying.js",
     "test:export-output-path": "node tests/scripts/export_output_path.js",
     "test:export-audio-file": "node tests/scripts/export_audio_file.js",
+    "test:export-gif": "node tests/scripts/export_gif.js",
     "test:export-blob-release": "node tests/scripts/export_blob_release.js",
     "test:export-auto-hevc": "node tests/scripts/export_auto_hevc.js",
     "test:export-resolution": "node tests/scripts/export_resolution.js",

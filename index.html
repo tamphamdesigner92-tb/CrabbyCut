@@ -4022,7 +4022,73 @@
                     <option value="h264" selected>H.264 MP4</option>
                     <option value="hevc">H.265 MP4</option>
                     <option value="prores">ProRes MOV</option>
+                    <option value="gif">GIF (ảnh động)</option>
                 </select>
+            </div>
+        </div>
+        <!-- XUẤT GIF (theo app Convert2GIF): sidecar render MP4 tạm như mọi lượt xuất, rồi backend
+             chuyển sang GIF bằng 2-pass palette (palettegen + paletteuse) — xem exportGifFromVideo
+             (backend/server.js). Khối này chỉ hiện khi Codec = GIF (syncExportGifUi). -->
+        <div id="exportGifOptions" hidden>
+            <div class="transcribe-options-grid">
+                <div class="form-group">
+                    <label for="exportGifWidth">Chiều rộng GIF</label>
+                    <select id="exportGifWidth">
+                        <option value="0">Theo kích thước video</option>
+                        <option value="320">320 px</option>
+                        <option value="480" selected>480 px</option>
+                        <option value="640">640 px</option>
+                        <option value="720">720 px</option>
+                        <option value="1080">1080 px</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="exportGifFps">FPS của GIF</label>
+                    <select id="exportGifFps">
+                        <option value="10">10 fps</option>
+                        <option value="12">12 fps</option>
+                        <option value="15" selected>15 fps</option>
+                        <option value="20">20 fps</option>
+                        <option value="24">24 fps</option>
+                        <option value="30">30 fps</option>
+                    </select>
+                </div>
+            </div>
+            <div class="transcribe-options-grid">
+                <div class="form-group">
+                    <label for="exportGifColors">Số màu tối đa</label>
+                    <select id="exportGifColors">
+                        <option value="256" selected>256 màu</option>
+                        <option value="128">128 màu</option>
+                        <option value="64">64 màu</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="exportGifDither">Dithering</label>
+                    <select id="exportGifDither">
+                        <option value="sierra2_4a" selected>Sierra2_4a</option>
+                        <option value="floyd_steinberg">Floyd-Steinberg</option>
+                        <option value="bayer">Bayer</option>
+                        <option value="none">Không dither</option>
+                    </select>
+                </div>
+            </div>
+            <div class="transcribe-options-grid">
+                <div class="form-group">
+                    <label for="exportGifEffect">Hiệu ứng</label>
+                    <select id="exportGifEffect">
+                        <option value="normal" selected>Bình thường</option>
+                        <option value="reverse">Tua ngược</option>
+                        <option value="boomerang">Boomerang (tiến + lùi)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="exportGifLoop">Lặp lại</label>
+                    <select id="exportGifLoop">
+                        <option value="0" selected>Lặp vô hạn</option>
+                        <option value="-1">Phát một lần</option>
+                    </select>
+                </div>
             </div>
         </div>
         <div class="transcribe-options-grid">
@@ -16366,7 +16432,7 @@
         // Có Video -> hỏi chỗ lưu video (tệp âm thanh riêng, nếu chọn, nằm cạnh nó); chỉ Audio -> đuôi âm thanh.
         const picked = await window.desktopEnv.pickExportOutput({
             suggestedName,
-            ext: kind.video ? (codec === 'prores' ? 'mov' : 'mp4') : EXPORT_AUDIO_EXT[kind.format],
+            ext: kind.video ? exportVideoExt(codec) : EXPORT_AUDIO_EXT[kind.format],
             projectPath: currentProjectPath || '',
         });
         if (picked?.canceled) return false;
@@ -16626,6 +16692,7 @@
             export_audio: exportKind.audio,
             audio_file_format: exportKind.format,
             audio_file_bitrate: exportKind.bitrate,
+            ...(exportCodec === 'gif' ? { gif: readExportGifOptions() } : {}),
         };
         const exportFileNameRaw = document.getElementById('exportFileName')?.value || '';
         // Cùng bộ lọc với tên dự án: ô này nhận tên tiếng Việt có dấu, nhưng ký tự cấm của
@@ -16690,7 +16757,7 @@
         console.info('[export-timing]', exportTiming);
         const a = document.createElement("a");
         a.href = URL.createObjectURL(exportBlob);
-        a.download = `${exportFileName}.${audioOnly ? EXPORT_AUDIO_EXT[exportKind.format] : (exportCodec === 'prores' ? 'mov' : 'mp4')}`;
+        a.download = `${exportFileName}.${audioOnly ? EXPORT_AUDIO_EXT[exportKind.format] : exportVideoExt(exportCodec)}`;
         // Job xuất của MCP chờ đúng lượt tải này xong mới báo tệp nằm ở đâu (automation-bridge.js).
         exportTiming.download_url = a.href;
         a.click();
@@ -16747,6 +16814,22 @@
     /* HAI Ô VIDEO / AUDIO (kiểu CapCut, người dùng chốt 2026-10-11) — xem ghi chú ở markup.
      * Đuôi tệp phải khớp EXPORT_AUDIO_FORMATS (backend/server.js) và EXPORT_OUTPUT_KINDS (main.js). */
     const EXPORT_AUDIO_EXT = { mp3: 'mp3', wav: 'wav', aac: 'm4a', flac: 'flac' };
+    // Đuôi tệp video theo Codec — phải khớp exportOutputName (backend/server.js) và EXPORT_OUTPUT_KINDS (main.js).
+    function exportVideoExt(codec) {
+        return codec === 'prores' ? 'mov' : codec === 'gif' ? 'gif' : 'mp4';
+    }
+    // Tuỳ chọn GIF (khối #exportGifOptions) — backend kiểm lại từng giá trị (normalizeGifSettings).
+    function readExportGifOptions() {
+        const val = (id, fallback) => document.getElementById(id)?.value || fallback;
+        return {
+            width: Number(val('exportGifWidth', '480')),
+            fps: Number(val('exportGifFps', '15')),
+            max_colors: Number(val('exportGifColors', '256')),
+            dither: val('exportGifDither', 'sierra2_4a'),
+            effect: val('exportGifEffect', 'normal'),
+            loop: Number(val('exportGifLoop', '0')),
+        };
+    }
     function readExportKind() {
         const format = document.getElementById('exportAudioFormat')?.value || 'mp3';
         return {
@@ -16822,10 +16905,21 @@
         const row = document.getElementById('exportBitrateCustomRow');
         const input = document.getElementById('exportBitrateMbps');
         if (!select || !row || !input) return;
-        const prores = document.getElementById('exportCodec')?.value === 'prores';
-        select.disabled = prores;
-        input.disabled = prores;
-        select.title = prores ? _t('ProRes không dùng bitrate (chất lượng cố định theo profile).') : '';
+        const codec = document.getElementById('exportCodec')?.value;
+        const prores = codec === 'prores';
+        const gif = codec === 'gif';
+        select.disabled = prores || gif;
+        input.disabled = prores || gif;
+        select.title = prores ? _t('ProRes không dùng bitrate (chất lượng cố định theo profile).')
+            : gif ? _t('GIF không dùng bitrate (chất lượng theo số màu và dithering).') : '';
+        // GIF không có tiếng: khoá ô bitrate tiếng trong video, hiện khối tuỳ chọn GIF.
+        const audioRate = document.getElementById('exportAudioBitrate');
+        if (audioRate) {
+            audioRate.disabled = gif;
+            audioRate.title = gif ? _t('GIF không có âm thanh.') : '';
+        }
+        const gifBox = document.getElementById('exportGifOptions');
+        if (gifBox) gifBox.hidden = !gif;
         const custom = select.value === 'custom';
         row.hidden = !custom;
         if (custom && !exportBitrateMbpsTouched) input.value = String(recommendedExportMbps());
@@ -16863,7 +16957,7 @@
     function syncExportCodecForFrame() {
         if (!exportAutoHevc || exportCodecTouched) return;
         const select = document.getElementById('exportCodec');
-        if (!select || select.value === 'prores') return;
+        if (!select || select.value === 'prores' || select.value === 'gif') return;
         const want = exportFrameIs4k() ? 'hevc' : 'h264';
         if (select.value === want) return;
         select.value = want;
