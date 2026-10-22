@@ -5077,8 +5077,14 @@ void WriteVisualOverlayFilter(
       const long long n1 = static_cast<long long>(std::ceil(end * fps)) + 2;
       span = static_cast<double>(std::max(1LL, n1 - n0)) / fps;
     }
+    /* `settb=AVTB` SAU khi dời số khung nguyên: để nguyên timebase 1/r thì vf_overlay (framesync)
+     * quy mốc khung LỚP PHỦ về 1/r, làm tròn tới khung GẦN NHẤT — khung video lệch lưới 0,1 khung
+     * (đặt ở 0,37 s trên nhịp 30) bị coi là trùng khung nền trước và ghép SỚM một khung. Đường CPU
+     * không mắc vì luồng chính ở timebase µs. Lộ ra ở Wiggle dời dưới pixel: geq lấy phần lẻ theo
+     * mốc thật của khung video (khung sau), overlay lấy toạ độ chẵn theo khung nền -> nhảy 2 px
+     * (test:wiggle-styles, ca video, đồ thị GPU). */
     script << "color=c=black@0:s=" << seqW << "x" << seqH << ":r=" << settings.renderFps
-           << ":d=" << FixedSeconds(span) << ",format=rgba,setpts=PTS+" << n0 << "[cv" << id << "];\n";
+           << ":d=" << FixedSeconds(span) << ",format=rgba,setpts=PTS+" << n0 << ",settb=AVTB[cv" << id << "];\n";
     script << "[cv" << id << "][ov" << id << "]overlay=";
   } else {
     script << inputLabel << "[ov" << id << "]" << (gpu == OverlayGpu::CpuYuv ? "crabblend_cuda=" : "overlay=");
