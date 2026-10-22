@@ -4158,7 +4158,7 @@
         renderAll();
     }
 
-    /* Shape cho cầu nối tự động hoá (MCP crabby_add_shape): như addShapeItem nhưng nhận sẵn style +
+    /* Shape cho cầu nối tự động hoá (MCP crabbycut_add_shape): như addShapeItem nhưng nhận sẵn style +
      * độ dài, chọn track theo ĐÚNG độ dài muốn có, trả về block. Cỡ mặc định theo cùng luật nút bấm. */
     function addShapeItemWithStyle(style = {}, placement = null) {
         const shapeType = String(style?.shape_type || 'rectangle');
