@@ -30301,12 +30301,16 @@
         /* ---- SUBSEQUENCE (NEST) ---- index.html + cầu nối tự động hoá gọi vào. */
         createNestFromSelection,
         enterNest,
+        enterNestFromMainRow,
         exitNest,
         exitAllNests,
         unnestItem,
         duplicateNestItem,
         makeNestItemUnique,
+        renameNestAsset,
         isInsideNest,
+        // Đường Subsequence đang mở (cấp ngoài cùng trước) — cầu nối tự động hoá báo cho MCP.
+        nestPath: () => nestStack.map((f) => ({ assetId: f.assetId, instanceItemId: f.instanceItemId })),
         // latestTimeline của TIMELINE GỐC (đang trong Subsequence thì biến toàn cục là []).
         rootLatestTimeline,
         projectItemsDeep,

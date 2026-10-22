@@ -50,6 +50,35 @@
         return out;
     }
 
+    /* ---- Subsequence (Nest): nhận diện + đường đang mở (xem lệnh subsequence bên dưới) ---- */
+    function nestAssetById(id) {
+        if (!id || !window.NestSequence) return null;
+        const asset = window.EditingRuntime?.automation?.findAsset?.(String(id));
+        return NestSequence.isNestAsset(asset) ? asset : null;
+    }
+
+    function nestRef(asset) {
+        return { asset_id: asset.id, name: asset.name || '' };
+    }
+
+    // Đang sửa bên trong Subsequence nào: timeline đọc/sửa lúc này là của sequence con.
+    function subsequenceState() {
+        const path = window.EditingRuntime?.nestPath?.() || [];
+        if (!path.length) return { in_subsequence: false };
+        return {
+            in_subsequence: true,
+            subsequence_path: path.map((f) => ({ asset_id: f.assetId, name: nestAssetById(f.assetId)?.name || '', instance: f.instanceItemId })),
+        };
+    }
+
+    // Trở về timeline gốc (chốt nội dung đang sửa). Trả true nếu đã phải ra.
+    function leaveSubsequences() {
+        const r = window.EditingRuntime;
+        if (!r?.isInsideNest?.()) return false;
+        r.exitAllNests();
+        return true;
+    }
+
     // Block vừa tạo: có `item_id` để lệnh gộp tham chiếu kiểu "$0.item_id".
     function itemResult(item) {
         return { item_id: item.id, ...flatFields(item) };
@@ -77,6 +106,8 @@
                 timeline_end: round3(cursor + duration),
                 ...flatFields(clip),
             };
+            const nest = clip?.nest_asset_id ? nestAssetById(clip.nest_asset_id) : null;
+            if (nest) row.subsequence = nestRef(nest);
             cursor += duration;
             return row;
         });
@@ -87,10 +118,14 @@
         if (!state) return { tracks: [], items: [] };
         return {
             tracks: (state.editingTracks || []).map(flatFields),
-            items: (state.editingItems || []).map((item) => ({
-                ...flatFields(item),
-                timeline_end: round3((Number(item.timeline_start) || 0) + (Number(item.duration) || 0)),
-            })),
+            items: (state.editingItems || []).map((item) => {
+                const nest = item?.type === 'media' ? nestAssetById(item.asset_id) : null;
+                return {
+                    ...flatFields(item),
+                    timeline_end: round3((Number(item.timeline_start) || 0) + (Number(item.duration) || 0)),
+                    ...(nest ? { subsequence: nestRef(nest) } : {}),
+                };
+            }),
             selected_item_ids: state.selectedEditingItemIds || [],
             selected_main_indexes: state.selectedMainClipIndexes || [],
         };
@@ -111,6 +146,7 @@
             undo_available: typeof undoStack !== 'undefined' ? undoStack.length : null,
             redo_available: typeof redoStack !== 'undefined' ? redoStack.length : null,
             editing_ready: currentMode === 'FINAL' && currentStepId === 'step4',
+            ...subsequenceState(),
         };
     }
 
@@ -255,12 +291,13 @@
      * `joinSince`: historyMark() chụp TRƯỚC KHI lệnh bắt đầu. Có mốc mới ghi từ đó (bước nhập tệp
      * tự ghi) thì phần này nhập chung vào mốc đó thay vì thêm bước thứ hai — nhập + đặt block là
      * MỘT lần Ctrl+Z. Gọi lồng (trong lệnh gộp) thì lịch sử đang treo: không ghi gì thêm. */
-    async function asOneUndoStep(fn, { joinSince } = {}) {
+    async function asOneUndoStep(fn, { joinSince, liveRender = false } = {}) {
         const runtime = rt();
         const mark = joinSince || historyMark();
         const joined = !!joinSince && historyTop() !== joinSince.top;
         const endHistory = joined ? runtime.automation.suspendHistory() : runtime.beginHistoryBatch();
-        const releaseRender = runtime.automation.suspendRender();
+        // liveRender: thao tác chờ lâu (dựng Subsequence lane chính) tự vẽ giữa chừng — không treo vẽ.
+        const releaseRender = liveRender ? () => {} : runtime.automation.suspendRender();
         try {
             return await fn();
         } catch (error) {
@@ -840,7 +877,9 @@
     }
 
     function assetSummary(asset) {
-        return flatFields(asset);
+        const out = flatFields(asset);
+        if (nestAssetById(asset?.id) === asset) out.subsequence = true;
+        return out;
     }
 
     async function importMedia({ paths, kind = 'media', mode = 'copy', add_to_timeline = false, start, track_id } = {}) {
@@ -1171,6 +1210,8 @@
         const list = pathList(paths);
         if (!list.length) throw new Error('"paths" phải là danh sách đường dẫn video tuyệt đối');
         if (currentStepId !== 'step4') throw new Error('Mở/tạo dự án ở bước Editing trước (new_project)');
+        // Lane chính chỉ có ở timeline gốc — đang trong Subsequence thì trở ra trước (như các lệnh lane chính của UI).
+        leaveSubsequences();
         const ok = await need(window.addSourcePathsToMainLane, 'addSourcePathsToMainLane')(list);
         if (!ok) throw new Error(document.getElementById('statusText')?.textContent || 'Không thêm được video vào lane chính');
         return getState();
@@ -1190,6 +1231,223 @@
         }
         if (Array.isArray(video_paths) && video_paths.length) return addMainVideos({ paths: video_paths });
         return getState();
+    }
+
+    /* =====================================================================
+     * SUBSEQUENCE (Nest) QUA MCP — gọi đúng các hàm mà menu chuột phải / bấm đúp dùng
+     * (editing-runtime.js). Hộp thoại của chúng (confirm khi bung mất hiệu ứng, prompt đổi tên)
+     * được trả lời thay bằng tham số; lý do thất bại (toast / dòng trạng thái) được gửi về model.
+     * Mỗi thao tác sửa = MỘT bước Hoàn tác; vào/ra chỉ là điều hướng, không ghi lịch sử.
+     * ===================================================================== */
+
+    /* Gom toast cảnh báo/lỗi trong lúc một lệnh chạy (có thể chờ lâu và chạy CHỒNG nhau): MỘT wrapper
+     * dùng chung, mỗi lượt đăng ký một ngăn gom; ngăn cuối rời đi mới trả window.showToast — không
+     * bao giờ "trả lại" nhầm wrapper của lượt khác. */
+    const toastCollectors = new Set();
+    let toastOrig = null;
+    function toastWrapper(msg, opts) {
+        // Chỉ cảnh báo/lỗi: toast thông tin của việc khác chạy cùng lúc không thành "lý do thất bại".
+        if (opts && ['warning', 'error'].includes(opts.type)) toastCollectors.forEach((notes) => notes.push(String(msg)));
+        return toastOrig.apply(this, arguments);
+    }
+    function collectToasts(notes) {
+        if (!toastCollectors.size) {
+            if (typeof window.showToast !== 'function') return () => {};
+            toastOrig = window.showToast;
+            window.showToast = toastWrapper;
+        }
+        toastCollectors.add(notes);
+        return () => {
+            toastCollectors.delete(notes);
+            if (!toastCollectors.size && window.showToast === toastWrapper) window.showToast = toastOrig;
+        };
+    }
+
+    /* Chạy fn, gom lý do thất bại (toast + dòng trạng thái). `dialogs` trả lời confirm/prompt thay
+     * người dùng — CHỈ cho hàm ĐỒNG BỘ (unnestItem, renameNestAsset): thay rồi trả ngay trong cùng
+     * lượt chạy, không để hộp thoại của người dùng bị tự trả lời trong lúc chờ. */
+    async function withUiAnswers(fn, dialogs = null) {
+        const notes = [];
+        const asked = [];
+        const status = document.getElementById('statusText');
+        const statusBefore = (status?.textContent || '').trim();
+        const stopToasts = collectToasts(notes);
+        try {
+            let ok;
+            if (dialogs) {
+                const orig = { confirm: window.confirm, prompt: window.prompt };
+                window.confirm = (msg) => { asked.push(String(msg)); return !!dialogs.confirm; };
+                window.prompt = (msg) => { asked.push(String(msg)); return dialogs.prompt ?? null; };
+                try {
+                    ok = fn();
+                } finally {
+                    window.confirm = orig.confirm;
+                    window.prompt = orig.prompt;
+                }
+                if (ok && typeof ok.then === 'function') throw new Error('withUiAnswers: hộp thoại chỉ trả lời cho hàm đồng bộ');
+            } else {
+                ok = await fn();
+            }
+            const statusAfter = (status?.textContent || '').trim();
+            if (!ok && statusAfter && statusAfter !== statusBefore) notes.push(statusAfter);
+            return { ok, notes, asked };
+        } finally {
+            stopToasts();
+        }
+    }
+
+    function nestRuntime() {
+        const r = rt();
+        if (!window.NestSequence || typeof r.createNestFromSelection !== 'function') throw new Error('Bản này chưa có Subsequence');
+        return r;
+    }
+
+    // Đích là block Subsequence (item_id) hoặc row Subsequence lane chính (main_index) hoặc asset_id.
+    function nestTarget({ item_id, main_index, asset_id } = {}, { allowMain = true, allowAsset = false } = {}) {
+        if (item_id !== undefined && item_id !== null && item_id !== '') {
+            const item = api().findItem(String(item_id));
+            if (!item) throw new Error(`Không có block id "${item_id}" ở timeline đang mở${subsequenceState().in_subsequence ? ' (đang ở trong Subsequence — exit để về cấp cha)' : ''}`);
+            const asset = item.type === 'media' ? nestAssetById(item.asset_id) : null;
+            if (!asset) throw new Error(`Block "${item_id}" không phải Subsequence`);
+            if (isLocked(item.track_id)) throw new Error(`Track ${item.track_id} đang khoá`);
+            return { kind: 'item', item, asset };
+        }
+        if (main_index !== undefined && main_index !== null) {
+            if (!allowMain) throw new Error('Thao tác này chỉ cho block Subsequence trên lane overlay ("item_id")');
+            const index = Number(main_index);
+            const row = Number.isInteger(index) ? latestTimeline?.[index] : null;
+            if (!row) throw new Error(`Không có clip lane chính ${main_index}${subsequenceState().in_subsequence ? ' (trong Subsequence không có lane chính)' : ''}`);
+            const asset = nestAssetById(row.nest_asset_id);
+            if (!asset) throw new Error(`Clip lane chính ${index} không phải Subsequence`);
+            return { kind: 'main', index, asset };
+        }
+        if (allowAsset && asset_id) {
+            const asset = nestAssetById(asset_id);
+            if (!asset) throw new Error(`Không có Subsequence asset "${asset_id}"`);
+            return { kind: 'asset', asset };
+        }
+        throw new Error(`Cần "item_id" (block Subsequence)${allowMain ? ' hoặc "main_index" (row Subsequence lane chính)' : ''}${allowAsset ? ' hoặc "asset_id"' : ''}`);
+    }
+
+    function failNest(res, fallback) {
+        const why = res.notes.filter(Boolean).pop();
+        return new Error(why || fallback);
+    }
+
+    function nestInstances(assetId) {
+        const deep = rt().projectItemsDeep?.() || rt().getState().editingItems;
+        const items = deep.filter((it) => it && it.type === 'media' && String(it.asset_id) === String(assetId)).length;
+        const rows = (rt().rootLatestTimeline?.() || latestTimeline || []).filter((r) => r?.nest_asset_id === assetId).length;
+        return items + rows;
+    }
+
+    function nestDetails(asset) {
+        return { ...nestRef(asset), duration: round3(Number(asset.duration) || 0), has_audio: !!asset.has_audio, instances: nestInstances(asset.id) };
+    }
+
+    async function subsequence(params = {}) {
+        requireEditing();
+        const r = nestRuntime();
+        const action = String(params.action || '');
+        const done = (extra) => ({ action, ...extra, ...subsequenceState() });
+        switch (action) {
+            case 'list': {
+                const assets = rt().getState().editingAssets.filter((a) => nestAssetById(a.id) === a);
+                return done({ subsequences: assets.map(nestDetails) });
+            }
+            case 'create': {
+                const itemIds = Array.isArray(params.item_ids) ? params.item_ids.map(String) : [];
+                const mainIndexes = Array.isArray(params.main_indexes) ? params.main_indexes.map(Number) : [];
+                if (!itemIds.length && !mainIndexes.length) throw new Error('Cần "item_ids" và/hoặc "main_indexes" (các block gói vào Subsequence)');
+                itemIds.forEach((id) => {
+                    const item = api().findItem(id);
+                    if (!item) throw new Error(`Không có block id "${id}"`);
+                    if (isLocked(item.track_id)) throw new Error(`Track ${item.track_id} đang khoá`);
+                });
+                mainIndexes.forEach((i) => {
+                    if (!Number.isInteger(i) || !latestTimeline?.[i]) throw new Error(`Không có clip lane chính ${i}${subsequenceState().in_subsequence ? ' (trong Subsequence không có lane chính)' : ''}`);
+                });
+                if (params.name !== undefined && !String(params.name).trim()) throw new Error('"name" không được rỗng');
+                const before = new Set(rt().getState().editingAssets.map((a) => a.id));
+                return asOneUndoStep(async () => {
+                    const res = await withUiAnswers(() => r.createNestFromSelection({ itemIds, mainIndexes }));
+                    if (!res.ok) throw failNest(res, 'Không tạo được Subsequence');
+                    const asset = rt().getState().editingAssets.find((a) => !before.has(a.id) && nestAssetById(a.id) === a);
+                    if (!asset) throw new Error('Không tìm thấy Subsequence vừa tạo');
+                    if (params.name !== undefined) {
+                        const renamed = await withUiAnswers(() => r.renameNestAsset(asset), { prompt: String(params.name) });
+                        if (!renamed.ok) throw failNest(renamed, 'Không đổi được tên');
+                    }
+                    const item = rt().getState().editingItems.find((it) => it.type === 'media' && it.asset_id === asset.id);
+                    const mainIndex = (latestTimeline || []).findIndex((row) => row?.nest_asset_id === asset.id);
+                    return done({
+                        subsequence: nestDetails(asset),
+                        ...(item ? { item_id: item.id, timeline_start: round3(item.timeline_start), duration: round3(item.duration), track_id: item.track_id } : {}),
+                        ...(!item && mainIndex >= 0 ? { main_index: mainIndex } : {}),
+                    });
+                }, { liveRender: mainIndexes.length > 0 });
+            }
+            case 'enter': {
+                const target = nestTarget(params);
+                const res = await withUiAnswers(() => (target.kind === 'item' ? r.enterNest(target.item.id) : r.enterNestFromMainRow(target.index)));
+                if (!res.ok) throw failNest(res, `Không mở được "${target.asset.name}" (đã đang mở nó ở một cấp ngoài?)`);
+                return done({ entered: nestRef(target.asset), note: 'Timeline commands now edit the inside of this Subsequence (get_timeline shows its content); exit to go back.' });
+            }
+            case 'exit': {
+                if (!r.isInsideNest()) return done({ exited: 0 });
+                const depth = (r.nestPath?.() || []).length;
+                const levels = params.all ? depth : Math.max(1, Math.min(depth, Math.round(Number(params.levels) || 1)));
+                r.exitNest(levels);
+                return done({ exited: levels });
+            }
+            case 'rename': {
+                const name = String(params.name ?? '').trim();
+                if (!name) throw new Error('Cần "name" (tên mới, tối đa 60 ký tự)');
+                const target = nestTarget(params, { allowAsset: true });
+                return asOneUndoStep(async () => {
+                    const res = await withUiAnswers(() => r.renameNestAsset(target.asset), { prompt: name });
+                    if (!res.ok) throw failNest(res, 'Không đổi được tên');
+                    return done({ subsequence: nestRef(target.asset) });
+                });
+            }
+            case 'duplicate': {
+                const target = nestTarget(params, { allowMain: false });
+                return asOneUndoStep(async () => {
+                    const res = await withUiAnswers(() => r.duplicateNestItem(target.item.id, !!params.independent));
+                    if (!res.ok) throw failNest(res, 'Không nhân bản được');
+                    const copy = api().findItem(rt().getState().selectedEditingItemId);
+                    if (!copy || copy.id === target.item.id) throw new Error('Không tìm thấy bản sao');
+                    return done({
+                        item_id: copy.id, timeline_start: round3(copy.timeline_start), track_id: copy.track_id,
+                        subsequence: nestDetails(nestAssetById(copy.asset_id)), shared_content: copy.asset_id === target.asset.id,
+                    });
+                });
+            }
+            case 'make_unique': {
+                const target = nestTarget(params, { allowMain: false });
+                return asOneUndoStep(async () => {
+                    const res = await withUiAnswers(() => r.makeNestItemUnique(target.item.id));
+                    if (!res.ok) throw failNest(res, 'Không tách được');
+                    return done({ item_id: target.item.id, subsequence: nestDetails(nestAssetById(api().findItem(target.item.id).asset_id)) });
+                });
+            }
+            case 'unnest': {
+                const target = nestTarget(params, { allowMain: false });
+                return asOneUndoStep(async () => {
+                    const res = await withUiAnswers(() => r.unnestItem(target.item.id), { confirm: !!params.discard_effects, prompt: null });
+                    if (!res.ok) {
+                        if (res.asked.length && !params.discard_effects) {
+                            throw new Error('Block Subsequence có biến đổi/hiệu ứng/màu/âm lượng riêng — bung ra sẽ mất. Truyền discard_effects: true để vẫn bung.');
+                        }
+                        throw failNest(res, 'Không bung được Subsequence');
+                    }
+                    const placed = rt().getState().selectedEditingItemIds || [];
+                    return done({ item_ids: placed, count: placed.length });
+                });
+            }
+            default:
+                throw new Error('"action" là một trong: list, create, enter, exit, rename, duplicate, make_unique, unnest');
+        }
     }
 
     /* ---- Danh mục cho model tự tra ---- */
@@ -1275,11 +1533,20 @@
             case 'distort': {
                 const D = window.Distort;
                 if (!D) throw new Error('Module Biến dạng (distort.js) chưa nạp');
+                // Như dòng hướng dẫn ở Inspector: hiệu ứng nào chưa làm hình đổi cho tới khi đặt điểm/lưới/ghim.
+                const notes = {
+                    wave: 'Bends as soon as it is added (height != 0); speed != 0 makes the wave move on its own.',
+                    bezier: 'Defaults = no change. Move the 4 vertices / 8 tangents (box fractions) to bend.',
+                    mesh: 'rows/cols only split the grid; nothing bends until params.mesh (or its keyframes) moves vertices/handles.',
+                    puppet: 'Nothing bends until pins exist and some pin pos differs from its rest; use 2+ pins (one pin only drags the whole shape).',
+                    liquify: 'Brush settings are for painting in the UI; nothing bends until params.field holds a displacement (percent scales it, offset shifts it).',
+                };
                 const effects = {};
                 D.TYPE_IDS.forEach((type) => {
                     const def = D.EFFECT_DEFS[type];
                     effects[type] = {
                         label: def.label,
+                        note: notes[type] || '',
                         params: def.params.map((p) => {
                             const out = { key: p.key, label: p.label, kind: p.kind, keyframable: !p.noKf && p.kind !== 'pins' };
                             if (p.def !== undefined) out.default = p.def;
@@ -1406,6 +1673,9 @@
         requireEditing();
         if (typeof videoExportInFlight !== 'undefined' && videoExportInFlight) throw new Error('Đang có một lượt xuất video chạy');
         if (!options.output_path) throw new Error('"output_path" (đường dẫn tuyệt đối của tệp xuất) là bắt buộc');
+        /* Xuất luôn là xuất TIMELINE CHÍNH (như openExportModal): đang sửa trong Subsequence thì
+         * chốt nội dung và trở ra trước, nếu không payload là của sequence con. */
+        leaveSubsequences();
         // Chuẩn bị y như bấm nút "Xuất video" mở hộp thoại, rồi điền các ô theo options.
         if (typeof syncExportFileNameFromProject === 'function') syncExportFileNameFromProject();
         if (typeof syncExportBitrateUi === 'function') syncExportBitrateUi();
@@ -2148,6 +2418,7 @@
 
     Object.assign(METHODS, {
         update_block: updateBlock,
+        subsequence,
         apply_text_preset: applyTextPreset,
         set_animation: setAnimation,
         set_transition: setTransition,

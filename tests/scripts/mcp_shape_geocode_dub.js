@@ -28,6 +28,7 @@ const runtimeJs = fs.readFileSync(path.join(ROOT, 'static', 'js', 'editing-runti
 const bridgeJs = fs.readFileSync(path.join(ROOT, 'static', 'js', 'automation-bridge.js'), 'utf8');
 const textDeformJs = fs.readFileSync(path.join(ROOT, 'static', 'js', 'text-deform.js'), 'utf8');
 const distortJs = fs.readFileSync(path.join(ROOT, 'static', 'js', 'distort.js'), 'utf8');
+const nestJs = fs.readFileSync(path.join(ROOT, 'static', 'js', 'nest-sequence.js'), 'utf8');
 const TextAnimations = require(path.join(ROOT, 'static', 'js', 'text-animations.js'));
 const ColorAdjust = require(path.join(ROOT, 'static', 'js', 'color-adjust.js'));
 
@@ -213,6 +214,110 @@ function makeApp() {
         throw new Error('job không xong');
     };
     return { sandbox, call, waitJob, state: sandbox.rtState };
+}
+
+/* App giả có Subsequence: NestSequence THẬT (nhận diện tài sản), các hàm runtime giả lập đúng
+ * hợp đồng của editing-runtime.js (tự ghi lịch sử, báo lỗi bằng toast/dòng trạng thái, hỏi bằng
+ * window.confirm / window.prompt, vào/ra hoán đổi kho đang sửa). */
+function makeNestApp() {
+    const app = makeApp();
+    const sb = app.sandbox;
+    sb.toasts = [];
+    sb.statusEl = { textContent: '' };
+    sb.document = { getElementById: (id) => (id === 'statusText' ? sb.statusEl : null) };
+    sb.showToast = (msg) => { sb.toasts.push(String(msg)); };
+    vm.runInContext(nestJs, sb, { filename: 'nest-sequence.js' });
+    vm.runInContext(`
+        var nestStack = [];
+        // Sửa kho TẠI CHỖ: hàm bóc từ runtime (addShapeItemWithStyle) giữ tham chiếu mảng editingItems.
+        function setItems(list) { rtState.editingItems.splice(0, Infinity, ...list); }
+        rtState.selectedEditingItemId = '';
+        rtState.selectedEditingItemIds = [];
+        EditingRuntime.automation.findAsset = (id) => rtState.editingAssets.find((a) => a.id === id) || null;
+        function nestAssetOf(item) { const a = item && EditingRuntime.automation.findAsset(item.asset_id); return NestSequence.isNestAsset(a) ? a : null; }
+        function makeNest(name, items) {
+            const asset = { id: nextId('nest'), type: 'media_video', item_type: 'media', source: 'nest', name, duration: 4, url: '', path: '', nest: { tracks: [], items } };
+            rtState.editingAssets.push(asset);
+            return asset;
+        }
+        function instance(asset, start) {
+            const it = { id: nextId('item'), type: 'media', track_id: 'track_media_1', timeline_start: start, duration: asset.duration, asset_id: asset.id, transform: defaultTransform() };
+            rtState.editingItems.push(it);
+            return it;
+        }
+        Object.assign(EditingRuntime, {
+            createNestFromSelection(opts) {
+                const items = (opts.itemIds || []).map((id) => findItem(id)).filter(Boolean);
+                if ((opts.mainIndexes || []).length) { showToast('Chỉ gói được các clip lane chính NẰM LIỀN NHAU.', { type: 'warning' }); return Promise.resolve(false); }
+                if (window.slowCreate) return new Promise((resolve) => setTimeout(() => { window.slowCreate = false; resolve(EditingRuntime.createNestFromSelection(opts)); }, 40));
+                if (!items.length) { statusText.textContent = 'Chọn ít nhất một block để tạo Subsequence.'; return false; }
+                recordHistory();
+                const asset = makeNest('Subsequence ' + (rtState.editingAssets.length + 1), JSON.parse(JSON.stringify(items)));
+                setItems(rtState.editingItems.filter((it) => !items.includes(it)));
+                const it = instance(asset, Math.min(...items.map((x) => x.timeline_start)));
+                rtState.selectedEditingItemId = it.id;
+                renderAll();
+                return true;
+            },
+            enterNest(id) {
+                const item = findItem(id); const asset = nestAssetOf(item);
+                if (!asset || nestStack.some((f) => f.assetId === asset.id)) return false;
+                nestStack.push({ assetId: asset.id, instanceItemId: id, parentItems: rtState.editingItems.slice() });
+                setItems(JSON.parse(JSON.stringify(asset.nest.items)));
+                return true;
+            },
+            enterNestFromMainRow() { return false; },
+            exitNest(levels = 1) {
+                for (let n = 0; n < levels && nestStack.length; n += 1) {
+                    const f = nestStack.pop();
+                    EditingRuntime.automation.findAsset(f.assetId).nest.items = rtState.editingItems.slice();
+                    setItems(f.parentItems);
+                }
+                return true;
+            },
+            exitAllNests() { return nestStack.length ? EditingRuntime.exitNest(nestStack.length) : false; },
+            isInsideNest: () => nestStack.length > 0,
+            nestPath: () => nestStack.map((f) => ({ assetId: f.assetId, instanceItemId: f.instanceItemId })),
+            rootLatestTimeline: () => latestTimeline,
+            projectItemsDeep: () => [...rtState.editingItems, ...rtState.editingAssets.flatMap((a) => (a.nest ? a.nest.items : []))],
+            unnestItem(id) {
+                const item = findItem(id); const asset = nestAssetOf(item);
+                if (!asset) return false;
+                if (item.transform.scale !== 100 && !window.confirm('Biến đổi... sẽ mất khi bung ra. Tiếp tục?')) return false;
+                recordHistory();
+                setItems(rtState.editingItems.filter((x) => x !== item));
+                const placed = asset.nest.items.map((c) => ({ ...JSON.parse(JSON.stringify(c)), id: nextId('item') }));
+                rtState.editingItems.push(...placed);
+                rtState.selectedEditingItemIds = placed.map((x) => x.id);
+                return true;
+            },
+            duplicateNestItem(id, independent) {
+                const item = findItem(id); let asset = nestAssetOf(item);
+                if (!asset) return false;
+                recordHistory();
+                if (independent) asset = makeNest('Subsequence copy', JSON.parse(JSON.stringify(asset.nest.items)));
+                const copy = instance(asset, item.timeline_start + item.duration);
+                rtState.selectedEditingItemId = copy.id;
+                return true;
+            },
+            makeNestItemUnique(id) {
+                const item = findItem(id); const asset = nestAssetOf(item);
+                if (!asset) return false;
+                recordHistory();
+                item.asset_id = makeNest(asset.name + ' 2', JSON.parse(JSON.stringify(asset.nest.items))).id;
+                return true;
+            },
+            renameNestAsset(asset) {
+                const next = window.prompt('Tên Subsequence', asset.name);
+                if (next === null || !String(next).trim()) return false;
+                recordHistory();
+                asset.name = String(next).trim().slice(0, 60);
+                return true;
+            },
+        });
+        var statusText = window.statusEl;
+    `, sb);
+    return app;
 }
 
 async function partA() {
@@ -414,6 +519,103 @@ async function partA() {
         ok('distort: update_block ghi danh sách + keyframe dst.* một bước Hoàn tác, gộp theo id, dọn keyframe, lỗi rõ ràng không để dở; chạy trong batch; catalog distort');
     }
 
+    // ---- Subsequence (Nest)
+    {
+        const app = makeNestApp();
+        const sb = app.sandbox;
+        const st = () => app.state;
+        const a = await app.call('add_shape', { shape_type: 'circle', start: 1, duration: 2 });
+        const b = await app.call('add_shape', { shape_type: 'square', start: 2, duration: 2 });
+        const nativeConfirm = sb.confirm;
+        const u0 = sb.undoStack.length;
+        const c = await app.call('subsequence', { action: 'create', item_ids: [a.item_id, b.item_id], name: 'Intro' });
+        assert.strictEqual(sb.undoStack.length, u0 + 1, 'tạo + đặt tên = MỘT bước Hoàn tác');
+        assert.ok(c.item_id && c.subsequence.name === 'Intro' && c.subsequence.instances === 1, JSON.stringify(c));
+        assert.strictEqual(sb.confirm, nativeConfirm, 'trả lại window.confirm/prompt sau lệnh');
+        const tl = await app.call('get_timeline', {});
+        const blk = tl.items.find((it) => it.id === c.item_id);
+        assert.deepStrictEqual(plain(blk.subsequence), { asset_id: c.subsequence.asset_id, name: 'Intro' }, 'get_timeline đánh dấu block Subsequence');
+        assert.strictEqual(tl.in_subsequence, false);
+        const assets = await app.call('list_assets', {});
+        assert.ok(assets.project_assets.some((x) => x.id === c.subsequence.asset_id && x.subsequence === true), 'list_assets đánh dấu tài sản Subsequence');
+
+        // Lỗi: lý do của app được gửi về, không để lại bước Hoàn tác.
+        const u1 = sb.undoStack.length;
+        await assert.rejects(app.call('subsequence', { action: 'create', main_indexes: [0] }), /Không có clip lane chính 0/);
+        sb.latestTimeline.push({ start: 0, end: 3, text: 'a' }, { start: 3, end: 5, text: 'b' });
+        await assert.rejects(app.call('subsequence', { action: 'create', main_indexes: [0, 1] }), /LIỀN NHAU/, 'toast của app thành lỗi MCP');
+        await assert.rejects(app.call('subsequence', { action: 'enter', item_id: 'nope' }), /Không có block/);
+        await assert.rejects(app.call('subsequence', { action: 'enter', main_index: 0 }), /không phải Subsequence/);
+        await assert.rejects(app.call('subsequence', { action: 'duplicate', main_index: 0 }), /chỉ cho block Subsequence trên lane overlay/);
+        await assert.rejects(app.call('subsequence', { action: 'rename', item_id: c.item_id }), /Cần "name"/);
+        await assert.rejects(app.call('subsequence', { action: 'fly' }), /"action" là một trong/);
+        assert.strictEqual(sb.undoStack.length, u1, 'lệnh lỗi không thêm bước Hoàn tác');
+
+        // Vào / ra: get_state + get_timeline báo đang ở trong; lệnh sửa làm việc với nội dung bên trong.
+        const e = await app.call('subsequence', { action: 'enter', item_id: c.item_id });
+        assert.strictEqual(e.in_subsequence, true);
+        assert.deepStrictEqual(plain(e.subsequence_path), [{ asset_id: c.subsequence.asset_id, name: 'Intro', instance: c.item_id }]);
+        assert.strictEqual(sb.undoStack.length, u1, 'vào = điều hướng, không ghi lịch sử');
+        const inner = await app.call('get_timeline', {});
+        assert.ok(inner.in_subsequence && inner.items.length === 2 && inner.items.every((it) => it.type === 'shape'), 'timeline = nội dung bên trong');
+        const innerId = inner.items[0].id;
+        await app.call('update_block', { item_id: innerId, keyframes: { opacity: [{ t: 0, v: 50 }] } });
+        const x = await app.call('subsequence', { action: 'exit' });
+        assert.ok(x.exited === 1 && x.in_subsequence === false, JSON.stringify(x));
+        assert.strictEqual((await app.call('get_state', {})).in_subsequence, false);
+
+        // Xuất + thêm video lane chính khi đang ở trong: tự trở về timeline gốc TRƯỚC.
+        await app.call('subsequence', { action: 'enter', item_id: c.item_id });
+        let insideAtExport = null;
+        sb.performVideoExport = async () => { insideAtExport = sb.EditingRuntime.isInsideNest(); };
+        const job = await app.call('start_job', { kind: 'export', options: { output_path: '/tmp/x.mp4' } });
+        await app.waitJob(job);
+        assert.strictEqual(insideAtExport, false, 'xuất = timeline gốc (đã ra khỏi Subsequence)');
+        await app.call('subsequence', { action: 'enter', item_id: c.item_id });
+        let insideAtMain = null;
+        sb.addSourcePathsToMainLane = async () => { insideAtMain = sb.EditingRuntime.isInsideNest(); return true; };
+        await app.call('add_main_videos', { paths: ['/v/a.mp4'] });
+        assert.strictEqual(insideAtMain, false, 'thêm video lane chính = timeline gốc');
+
+        // Đổi tên, nhân bản (dùng chung / độc lập), tách, bung.
+        const r = await app.call('subsequence', { action: 'rename', asset_id: c.subsequence.asset_id, name: '  Mở đầu  ' });
+        assert.strictEqual(r.subsequence.name, 'Mở đầu');
+        const d1 = await app.call('subsequence', { action: 'duplicate', item_id: c.item_id });
+        assert.ok(d1.shared_content && d1.subsequence.instances === 2, JSON.stringify(d1));
+        const d2 = await app.call('subsequence', { action: 'duplicate', item_id: c.item_id, independent: true });
+        assert.ok(!d2.shared_content && d2.subsequence.asset_id !== c.subsequence.asset_id);
+        const mu = await app.call('subsequence', { action: 'make_unique', item_id: d1.item_id });
+        assert.notStrictEqual(mu.subsequence.asset_id, c.subsequence.asset_id);
+        const list = await app.call('subsequence', { action: 'list' });
+        assert.strictEqual(list.subsequences.length, 3);
+        st().editingItems.find((it) => it.id === c.item_id).transform.scale = 150;
+        const u2 = sb.undoStack.length;
+        await assert.rejects(app.call('subsequence', { action: 'unnest', item_id: c.item_id }), /discard_effects: true/, 'hộp confirm của app thành lỗi có hướng dẫn');
+        assert.strictEqual(sb.undoStack.length, u2);
+        const un = await app.call('subsequence', { action: 'unnest', item_id: c.item_id, discard_effects: true });
+        assert.strictEqual(un.count, 2);
+        assert.ok(un.item_ids.every((id) => st().editingItems.some((it) => it.id === id)) && !st().editingItems.some((it) => it.id === c.item_id));
+        assert.ok(st().editingItems.some((it) => it.keyframes && it.keyframes.opacity), 'sửa bên trong được giữ khi ra');
+        assert.strictEqual(sb.undoStack.length, u2 + 1, 'bung = MỘT bước Hoàn tác');
+
+        // Hai lệnh chạy CHỒNG nhau (tạo chờ lâu + đổi tên): confirm/prompt/showToast trả về đúng bản gốc.
+        const nativePrompt = sb.prompt;
+        const nativeToast = sb.showToast;
+        const s1 = await app.call('add_shape', { shape_type: 'circle', start: 20, duration: 1 });
+        sb.slowCreate = true;
+        const slow = app.call('subsequence', { action: 'create', item_ids: [s1.item_id] });
+        await new Promise((r) => setTimeout(r, 10));   // lệnh tạo đã vào tới chỗ chờ
+        assert.notStrictEqual(sb.showToast, nativeToast, 'đang chờ: toast được gom');
+        assert.strictEqual(sb.confirm, nativeConfirm, 'đang chờ lệnh tạo: hộp xác nhận của người dùng KHÔNG bị tự trả lời');
+        await app.call('subsequence', { action: 'rename', item_id: d2.item_id, name: 'Song song' });
+        await slow;
+        assert.ok(sb.confirm === nativeConfirm && sb.prompt === nativePrompt && sb.showToast === nativeToast, 'chạy chồng không rò wrapper');
+
+        // Biến dạng không áp cho block Subsequence.
+        await assert.rejects(app.call('update_block', { item_id: d2.item_id, distort: [{ type: 'wave' }] }), /Subsequence/);
+        ok('subsequence: tạo/đặt tên một bước Hoàn tác, vào/ra báo trong get_state/get_timeline, xuất + lane chính tự trở ra, đổi tên/nhân bản/tách/bung, lỗi của app gửi về');
+    }
+
     // ---- Lồng tiếng
     {
         const app = makeApp();
@@ -526,6 +728,8 @@ async function partB() {
         calls.length = 0;
         await tool('crabbycut_update_geocode', { item_id: 'item_x', replace: [{ find: 'a', with: 'b' }] });
         assert.strictEqual(calls[0], 'start_job', 'vá mã = job dựng lại');
+        const ss = list.result.tools.find((t) => t.name === 'crabbycut_subsequence');
+        assert.ok(ss && ss.inputSchema.properties.action.enum.includes('unnest'), 'có tool crabbycut_subsequence');
         const ub = list.result.tools.find((t) => t.name === 'crabbycut_update_block');
         assert.deepStrictEqual(ub.inputSchema.properties.distort.items.properties.type.enum, ['wave', 'bezier', 'mesh', 'puppet', 'liquify'], 'update_block nhận distort');
         assert.ok(list.result.tools.find((t) => t.name === 'crabbycut_catalog').inputSchema.properties.kind.enum.includes('distort'), 'catalog có kind distort');

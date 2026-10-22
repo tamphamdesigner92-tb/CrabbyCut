@@ -27,7 +27,7 @@ const HTTP_TIMEOUT_MS = 35_000;
 // Lệnh chạy lâu (nhập cả loạt tệp, lệnh gộp): app chờ renderer chừng này, HTTP chờ thêm 5 s.
 // PHẢI khớp LONG_RPC_TIMEOUT_MS ở electron/automation-bridge.js.
 const LONG_TIMEOUT_MS = 300_000;
-const LONG_METHODS = new Set(['batch', 'add_media_batch', 'import_media', 'add_geocode', 'add_shape']);
+const LONG_METHODS = new Set(['batch', 'add_media_batch', 'import_media', 'add_geocode', 'add_shape', 'subsequence']);
 
 /* ---- Tìm app ---- */
 
@@ -210,7 +210,7 @@ const SHAPE_PROPS = {
 const TOOLS = [
   {
     name: 'crabbycut_status',
-    description: 'Check the connection to the running CrabbyCut app and return a short project state: step, mode, project path/name, unsaved flag, duration, playhead, playing, clip counts, undo/redo depth. Call this first.',
+    description: 'Check the connection to the running CrabbyCut app and return a short project state: step, mode, project path/name, unsaved flag, duration, playhead, playing, clip counts, undo/redo depth, and in_subsequence / subsequence_path when the user (or you) is editing inside a Subsequence. Call this first.',
     inputSchema: NO_ARGS,
     run: async () => {
       const ping = await rpc('ping');
@@ -220,7 +220,7 @@ const TOOLS = [
   },
   {
     name: 'crabbycut_get_timeline',
-    description: 'Return the timeline: main-lane clips (index, timeline_start/end in sequence seconds, source start/end, text) and, optionally, overlay tracks and items (text/media/audio blocks with id, track_id, timeline_start, duration). Times are in seconds.',
+    description: 'Return the timeline: main-lane clips (index, timeline_start/end in sequence seconds, source start/end, text) and, optionally, overlay tracks and items (text/media/audio blocks with id, track_id, timeline_start, duration). Times are in seconds. Subsequence (nest) blocks and main-lane rows carry subsequence {asset_id, name}. When in_subsequence is true this is the INSIDE of the open Subsequence (no main lane) — crabbycut_subsequence exit to return.',
     inputSchema: {
       type: 'object',
       properties: { include_overlays: { type: 'boolean', default: true } },
@@ -549,6 +549,29 @@ const TOOLS = [
       additionalProperties: false,
     },
     run: async (args) => json(await rpc('set_color', args)),
+  },
+  {
+    name: 'crabbycut_subsequence',
+    description: 'Editing step only. Subsequences (Premiere-style nested sequences): action "list" (all Subsequences with instance counts); "create" packs item_ids (any overlay lanes) and/or main_indexes (adjacent main-lane clips; slow — renders a file) into ONE Subsequence block, optional name; "enter" opens one (item_id or main_index) so every timeline/editing tool then works INSIDE it; "exit" goes back (levels, or all: true); "rename" (item_id | main_index | asset_id, name); "duplicate" an item_id (independent: false = shares content, true = own copy); "make_unique" gives an item_id its own copy of the content; "unnest" puts the content back on this timeline (discard_effects: true needed when the block has its own transform/effects/colour/volume, which are lost). Each edit is one undo step; enter/exit are navigation only. Export and crabbycut_add_main_videos leave Subsequences automatically.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['list', 'create', 'enter', 'exit', 'rename', 'duplicate', 'make_unique', 'unnest'] },
+        item_ids: { type: 'array', items: { type: 'string' }, description: 'create: overlay blocks to pack.' },
+        main_indexes: { type: 'array', items: { type: 'integer', minimum: 0 }, description: 'create: adjacent main-lane clips to pack.' },
+        item_id: { type: 'string', description: 'The Subsequence block.' },
+        main_index: { type: 'integer', minimum: 0, description: 'A Subsequence row on the main lane (enter, rename).' },
+        asset_id: { type: 'string', description: 'rename: the Subsequence asset (from list / subsequence_path).' },
+        name: { type: 'string', maxLength: 60 },
+        levels: { type: 'integer', minimum: 1, default: 1 },
+        all: { type: 'boolean', description: 'exit: back to the root timeline.' },
+        independent: { type: 'boolean', default: false },
+        discard_effects: { type: 'boolean', default: false },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('subsequence', args)),
   },
 
   /* ---- Lệnh gộp: cả lô = MỘT bước Hoàn tác + MỘT lượt vẽ ---- */
@@ -942,6 +965,8 @@ async function handle(message) {
           + 'To draw graphics (buttons, lower thirds, animated badges, charts) at an exact pixel size, write code '
           + 'with crabbycut_add_geocode (HTML/CSS/JS, canvas or Python) — several blocks in ONE call via items + a shared '
           + 'template with {{vars}}; fix one later with crabbycut_update_geocode (find/replace, no need to resend the code). '
+          + 'Subsequences (nested sequences): crabbycut_subsequence; crabbycut_status shows in_subsequence '
+          + 'when the user is editing inside one — timeline tools then act on its content. '
           + 'Vector shapes: crabbycut_add_shape. Voice-over: crabbycut_dub (returns the timeline time of every sentence — '
           + 'time visuals to it without re-reading the timeline). These wait for their render themselves. '
           + 'look up valid ids with crabbycut_catalog. For anything without a dedicated tool, drive the UI '
