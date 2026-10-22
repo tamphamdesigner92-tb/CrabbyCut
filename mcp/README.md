@@ -91,7 +91,7 @@ Claude có hai cách làm việc. **Tool theo tính năng** gọi thẳng hàm c
 | `crabbycut_seek` / `crabbycut_playback` | Đặt playhead / phát, dừng |
 | `crabbycut_undo` | Hoàn tác / làm lại |
 | `crabbycut_select` / `crabbycut_split` / `crabbycut_delete_selected` | Chọn, cắt, xoá clip/block |
-| `crabbycut_catalog` | Tra id hợp lệ: chuyển cảnh, hoạt ảnh, kiểu chữ, hiệu ứng chữ, LUT, thông số màu, tuỳ chọn xuất, phụ đề, thư viện, GeoCode, hình (`shapes`), giọng đọc (`voices`), biến dạng chữ + mẫu đường (`text_warps`) |
+| `crabbycut_catalog` | Tra id hợp lệ: chuyển cảnh, hoạt ảnh, kiểu chữ, hiệu ứng chữ, LUT, thông số màu, tuỳ chọn xuất, phụ đề, thư viện, GeoCode, hình (`shapes`), giọng đọc (`voices`), biến dạng chữ + mẫu đường (`text_warps`), Biến dạng kiểu After Effects (`distort`: tham số, dải giá trị, mặc định, có keyframe được không) |
 
 ### Dự án và media
 
@@ -109,7 +109,7 @@ Claude có hai cách làm việc. **Tool theo tính năng** gọi thẳng hàm c
 
 | Tool | Việc nó làm |
 |---|---|
-| `crabbycut_update_block` | Vị trí, tỉ lệ, xoay, độ mờ, lật, âm lượng, tốc độ, thời điểm, độ dài, nội dung chữ, kiểu chữ, **keyframe** |
+| `crabbycut_update_block` | Vị trí, tỉ lệ, xoay, độ mờ, lật, âm lượng, tốc độ, thời điểm, độ dài, nội dung chữ, kiểu chữ, **keyframe**, **Biến dạng** (`distort`, block ảnh/video/Shape) |
 | `crabbycut_apply_text_preset` | Áp kiểu chữ (`p1`…) và/hoặc hiệu ứng chữ (`fx1`…) |
 | `crabbycut_set_animation` | Hoạt ảnh vào/ra, hoặc combo |
 | `crabbycut_set_transition` | Chuyển cảnh giữa hai clip lane chính hoặc hai block overlay liền nhau |
@@ -136,6 +136,30 @@ Claude có hai cách làm việc. **Tool theo tính năng** gọi thẳng hàm c
 - `e`: easing của đoạn RỜI mốc này — `linear`, `ease-in`, `ease-out`, `ease-in-out` (mặc định), `back`, `spring`, `bounce`.
 - Thông số màu keyframe được: `basic.exposure/contrast/saturation/temperature/tint`, `wheels.{lift,gamma,gain}.{r,g,b}`, `tone.*`, `lut.intensity`, `effects.blur`, `effects.vignette` (viết `basic.exposure` hay `adj.basic.exposure` đều được).
 - `keyframe_mode`: `merge` (mặc định) chèn/ghi đè từng mốc; `replace` thay trọn danh sách của field được nêu — `[]` là xoá keyframe field đó.
+
+#### Biến dạng (Distort)
+
+Block ảnh/video (`media`) và Shape nhận `distort` trong `crabbycut_update_block` — danh sách hiệu ứng kiểu After Effects, áp từ trên xuống: `wave` (Wave Warp), `bezier` (Bezier Warp), `mesh` (Mesh Warp), `puppet` (Puppet Pin), `liquify` (Liquify). Không áp cho clip lane chính, block chữ hay Subsequence. Tra tham số bằng `crabbycut_catalog distort`.
+
+```json
+{
+  "item_id": "item_…",
+  "distort": [
+    { "type": "wave", "params": { "wave_type": "sine", "height": 20, "width": 120, "speed": 1 } },
+    { "type": "bezier", "params": { "tl_vertex": [0.1, 0], "br_vertex": [0.9, 1] } }
+  ],
+  "keyframes": {
+    "dst.d1.height": [{ "t": 0, "v": 0 }, { "t": 2, "v": 40 }],
+    "dst.d2.tl_vertex": [{ "t": 0, "v": [0, 0] }, { "t": 2, "v": [0.1, 0] }]
+  }
+}
+```
+
+- `distort` là **toàn bộ danh sách mới**: mục có `id` trùng hiệu ứng đang có thì giữ thông số + keyframe cũ, chỉ ghi đè `params` được nêu (`[{ "id": "d1", "enabled": false }]` = tắt d1 và bỏ mọi hiệu ứng khác); mục không có `id` là hiệu ứng mới (id tự cấp `d1`, `d2`…, trả trong `distort` của kết quả); hiệu ứng không còn trong danh sách bị xoá kèm keyframe; `[]` bỏ hết. Tối đa 8 hiệu ứng.
+- Thông số sai (khoá lạ, giá trị enum không có, lưới Mesh sai cỡ, ghim trùng id) là **lỗi**, không lặng lẽ về mặc định. Số vượt dải bị kẹp về dải.
+- Toạ độ (`vec2`, đỉnh/tiếp tuyến Bezier, ghim Puppet) là tỉ lệ `[x, y]` của hộp block (0..1, gốc trên-trái). Mesh: mảng `(rows+1)×(cols+1)×10` số; Liquify: trường dời 65×65×2 số; `null` = chưa uốn. Đổi `rows`/`cols` của Mesh thì lưới và keyframe lưới được đặt lại (như Inspector).
+- Keyframe: khoá `dst.<id hiệu ứng>.<thông số>` trong `keyframes` (cùng `t`/`e`/`keyframe_mode`); `v` là số, chuỗi (enum — giữ giá trị, không nội suy) hoặc `[x, y]`. Vị trí ghim Puppet: `dst.<id>.pin_<id ghim>`. Thông số có `keyframable: false` trong catalog (Quality, Rows, Columns, cọ Liquify, Triangles…) không keyframe được.
+- `distort` được ghi trước `keyframes`, nên thêm hiệu ứng và keyframe nó trong cùng một lượt gọi được khi đã biết id (truyền `id` cho hiệu ứng mới). Cả lượt là **một bước Hoàn tác**.
 
 ### Lệnh gộp (một lượt gọi, một bước hoàn tác)
 

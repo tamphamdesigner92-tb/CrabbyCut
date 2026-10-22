@@ -387,8 +387,9 @@
         let touchedColor = false;
         for (const [name, list] of Object.entries(spec)) {
             if (!Array.isArray(list)) throw new Error(`keyframes.${name} phải là mảng [{t, v, e}]`);
-            const info = keyframeFieldOf(name);
-            checkKeyframeTarget(info.kind, sel);
+            const dst = distortKeyframeInfo(sel, name);
+            const info = dst || keyframeFieldOf(name);
+            if (!dst) checkKeyframeTarget(info.kind, sel);
             if (mode === 'replace') info.fields.forEach((f) => { kfs[f] = []; });
             for (const entry of list) {
                 if (!entry || typeof entry !== 'object') throw new Error(`keyframes.${name}: mỗi mốc là { t, v, e }`);
@@ -405,6 +406,8 @@
                 if (info.kind === 'position') {
                     const pair = Array.isArray(entry.v) ? entry.v : [entry.x, entry.y];
                     values = info.fields.map((f, i) => [f, keyframeValue(info.kind, f, pair[i])]);
+                } else if (info.kind === 'distort') {
+                    values = [[info.fields[0], info.value(entry)]];
                 } else {
                     values = [[info.fields[0], keyframeValue(info.kind, info.fields[0], entry.v)]];
                 }
@@ -426,6 +429,192 @@
         if (touchedPosition) window.TextAnimations?.pairPositionKeyframes?.(target);
         if (touchedColor && window.ColorAdjust) target.adjustments = ColorAdjust.normalize(target.adjustments);
         return changed;
+    }
+
+    /* =====================================================================
+     * BIẾN DẠNG (Distort) QUA MCP
+     * distort = [{ id?, type, enabled?, params? }] — danh sách MỚI, đúng thứ tự áp (static/js/
+     * distort.js). Mục có id trùng hiệu ứng đang có thì GIỮ thông số + keyframe cũ và chỉ ghi đè
+     * các params được nêu; mục không có id là hiệu ứng mới; hiệu ứng không còn trong danh sách
+     * bị xoá cùng keyframe 'dst.<id>.*' (như nút × của Inspector). [] = bỏ hết.
+     * Thông số sai (khoá lạ, enum không có, số không hợp lệ, lưới sai cỡ) BÁO LỖI thay vì lặng lẽ
+     * về mặc định như normalizeStack — model cần biết mình truyền sai.
+     * ===================================================================== */
+
+    const DISTORT_ID_RE = /^[A-Za-z0-9_-]{1,24}$/;
+
+    function requireDistort(sel) {
+        const D = window.Distort;
+        if (!D) throw new Error('Module Biến dạng (distort.js) chưa nạp');
+        const { kind, target } = sel;
+        if (kind !== 'item' || !D.supportsItem(target)) throw new Error('Biến dạng (distort) chỉ cho block ảnh/video (media) hoặc Shape');
+        if (window.NestSequence?.isNestAsset?.(api().findAsset?.(target.asset_id))) throw new Error('Block Subsequence (Nest) không có Biến dạng');
+        return D;
+    }
+
+    function distortParamKeys(type) {
+        return window.Distort.EFFECT_DEFS[type].params.map((p) => p.key);
+    }
+
+    // Kiểm + chuẩn hoá MỘT giá trị thông số; `fx` (rows/cols) để đối chiếu cỡ lưới Mesh.
+    function distortValue(def, raw, where, fx) {
+        const D = window.Distort;
+        if (def.kind === 'enum') {
+            const ids = def.options.map((o) => o.id);
+            if (!ids.includes(String(raw))) throw new Error(`${where} là một trong: ${ids.join(', ')}`);
+            return String(raw);
+        }
+        if (def.kind === 'num') {
+            if (raw === null || raw === '' || !Number.isFinite(Number(raw))) throw new Error(`${where} phải là số (${def.min}..${def.max})`);
+            return D.normalizeParam(def, raw);
+        }
+        if (def.kind === 'vec2') {
+            if (!Array.isArray(raw) || raw.length !== 2 || !raw.every((n) => Number.isFinite(Number(n)))) {
+                throw new Error(`${where} phải là [x, y] (tỉ lệ 0..1 của hộp block, gốc trên-trái)`);
+            }
+            return D.normalizeParam(def, raw);
+        }
+        if (def.kind === 'mesh') {
+            if (raw === null) return null;
+            const want = D.meshLength(fx.params.rows, fx.params.cols);
+            if (!Array.isArray(raw) || raw.length !== want || !raw.every((n) => Number.isFinite(Number(n)))) {
+                throw new Error(`${where} phải là mảng ${want} số = (rows+1)×(cols+1)×${D.MESH_STRIDE} (x, y, rồi tay cầm trái/phải/lên/xuống tương đối), hoặc null = lưới đều`);
+            }
+            return D.normalizeParam(def, raw);
+        }
+        if (def.kind === 'field') {
+            if (raw === null) return null;
+            if (!Array.isArray(raw) || raw.length !== D.FIELD_LEN || !raw.every((n) => Number.isFinite(Number(n)))) {
+                throw new Error(`${where} phải là mảng ${D.FIELD_LEN} số (trường dời ${D.FIELD_N + 1}×${D.FIELD_N + 1} đỉnh × dx,dy), hoặc null = không dời`);
+            }
+            return D.normalizeParam(def, raw);
+        }
+        if (def.kind === 'pins') {
+            if (!Array.isArray(raw)) throw new Error(`${where} phải là mảng [{id, rest: [x, y], pos?: [x, y]}]`);
+            const seen = new Set();
+            raw.forEach((pin, i) => {
+                const id = String(pin?.id ?? '');
+                if (!/^[A-Za-z0-9-]{1,24}$/.test(id)) throw new Error(`${where}[${i}].id phải là 1-24 ký tự chữ/số/-`);
+                if (seen.has(id)) throw new Error(`${where}: trùng id ghim "${id}"`);
+                seen.add(id);
+                distortValue({ kind: 'vec2' }, pin.rest, `${where}[${i}].rest`);
+                if (pin.pos !== undefined) distortValue({ kind: 'vec2' }, pin.pos, `${where}[${i}].pos`);
+            });
+            if (raw.length > 64) throw new Error(`${where}: tối đa 64 ghim`);
+            return D.normalizeParam(def, raw);
+        }
+        throw new Error(`${where}: không ghi được`);
+    }
+
+    // Ghi trọn danh sách hiệu ứng. Trả về danh sách hiệu ứng mới (đã chuẩn hoá).
+    function applyDistort(sel, list) {
+        const D = requireDistort(sel);
+        const { target } = sel;
+        if (!Array.isArray(list)) throw new Error('"distort" phải là mảng [{type, enabled, params}] ([] = bỏ hết)');
+        if (list.length > D.MAX_EFFECTS) throw new Error(`"distort": tối đa ${D.MAX_EFFECTS} hiệu ứng`);
+        const old = D.normalizeStack(target.distort);
+        const kfs = target.keyframes && typeof target.keyframes === 'object' ? target.keyframes : {};
+        const dropKf = (prefix) => Object.keys(kfs).forEach((k) => { if (k.startsWith(prefix)) delete kfs[k]; });
+        const listed = new Set(list.map((raw) => (raw && raw.id !== undefined ? String(raw.id) : null)).filter(Boolean));
+        const taken = new Set([...old.map((f) => f.id), ...listed]);
+        const freshId = () => {
+            for (let n = 1; ; n += 1) if (!taken.has(`d${n}`)) { taken.add(`d${n}`); return `d${n}`; }
+        };
+        const used = new Set();
+        const next = list.map((raw, i) => {
+            const where = `distort[${i}]`;
+            if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`${where} phải là object {type, enabled, params}`);
+            const unknown = Object.keys(raw).filter((k) => !['id', 'type', 'enabled', 'params'].includes(k));
+            if (unknown.length) throw new Error(`${where}: khoá lạ ${unknown.join(', ')} (có: id, type, enabled, params)`);
+            let id = null;
+            if (raw.id !== undefined) {
+                id = String(raw.id);
+                if (!DISTORT_ID_RE.test(id)) throw new Error(`${where}.id phải là 1-24 ký tự chữ/số/_/-`);
+                if (used.has(id)) throw new Error(`${where}: trùng id "${id}"`);
+            }
+            const prev = id ? old.find((f) => f.id === id) : null;
+            const type = raw.type !== undefined ? String(raw.type) : prev?.type;
+            if (!D.EFFECT_DEFS[type]) throw new Error(`${where}.type là một trong: ${D.TYPE_IDS.join(', ')}`);
+            if (prev && prev.type !== type) throw new Error(`${where}: hiệu ứng "${id}" là ${prev.type}, không đổi loại được (bỏ id để thêm hiệu ứng mới)`);
+            if (raw.params !== undefined && (!raw.params || typeof raw.params !== 'object' || Array.isArray(raw.params))) {
+                throw new Error(`${where}.params phải là object`);
+            }
+            if (raw.enabled !== undefined && typeof raw.enabled !== 'boolean') throw new Error(`${where}.enabled phải là true/false`);
+            id = id || freshId();
+            used.add(id);
+            const fx = { id, type, enabled: raw.enabled !== undefined ? raw.enabled : (prev ? prev.enabled : true), params: prev ? { ...prev.params } : {} };
+            const given = raw.params || {};
+            const keys = distortParamKeys(type);
+            Object.keys(given).forEach((key) => {
+                if (!keys.includes(key)) {
+                    const hint = type === 'puppet' && /^pin_/.test(key) ? ' (ghim đặt qua params.pins; keyframe vị trí ghim: keyframes "dst.<id>.pin_<pinId>")' : '';
+                    throw new Error(`${where}.params.${key} không có ở ${type}. Có: ${keys.join(', ')}${hint}`);
+                }
+            });
+            // rows/cols trước: lưới Mesh đối chiếu theo cỡ MỚI.
+            const order = keys.filter((k) => k in given).sort((a, b) => (a === 'mesh') - (b === 'mesh'));
+            order.forEach((key) => {
+                fx.params[key] = distortValue(D.paramDef(type, key), given[key], `${where}.params.${key}`, fx);
+            });
+            const norm = D.normalizeEffect(fx, i);
+            norm.id = id;
+            if (prev && type === 'mesh' && (norm.params.rows !== prev.params.rows || norm.params.cols !== prev.params.cols)) {
+                // Đổi số hàng/cột: lưới cũ và keyframe của nó không còn khớp -> đặt lại (như Inspector / AE).
+                if (!('mesh' in given)) norm.params.mesh = null;
+                delete kfs[D.kfField(id, 'mesh')];
+            }
+            if (prev && type === 'puppet') {
+                const alive = new Set((norm.params.pins || []).map((p) => p.id));
+                (prev.params.pins || []).forEach((p) => { if (!alive.has(p.id)) delete kfs[D.kfField(id, `pin_${p.id}`)]; });
+            }
+            return norm;
+        });
+        old.forEach((f) => { if (!used.has(f.id)) dropKf(`${D.KF_PREFIX}${f.id}.`); });
+        if (next.length) target.distort = next;
+        else delete target.distort;
+        return next;
+    }
+
+    // Khoá keyframe 'dst.<id>.<param>' -> { kind: 'distort', fields, value(entry) }; null nếu không phải khoá Distort.
+    function distortKeyframeInfo(sel, name) {
+        const raw = String(name || '');
+        if (!raw.startsWith('dst.')) return null;
+        const D = requireDistort(sel);
+        const parsed = D.parseKfField(raw);
+        if (!parsed) throw new Error(`keyframes.${raw}: khoá Biến dạng là "dst.<id hiệu ứng>.<thông số>"`);
+        const fx = D.normalizeStack(sel.target.distort).find((f) => f.id === parsed.effectId);
+        if (!fx) {
+            const ids = D.normalizeStack(sel.target.distort).map((f) => `${f.id} (${f.type})`);
+            throw new Error(`keyframes.${raw}: block không có hiệu ứng "${parsed.effectId}". Có: ${ids.join(', ') || '(chưa có — thêm bằng "distort")'}`);
+        }
+        const def = D.paramDef(fx.type, parsed.key);
+        const kfKeys = D.EFFECT_DEFS[fx.type].params.filter((p) => !p.noKf && p.kind !== 'pins').map((p) => p.key);
+        if (fx.type === 'puppet') kfKeys.push('pin_<pinId>');
+        if (!def || def.noKf || def.kind === 'pins') throw new Error(`keyframes.${raw}: "${parsed.key}" của ${fx.type} không keyframe được. Có: ${kfKeys.join(', ')}`);
+        if (/^pin_/.test(parsed.key) && D.getParam(fx.params, parsed.key) === null) throw new Error(`keyframes.${raw}: không có ghim "${parsed.key.slice(4)}"`);
+        return {
+            kind: 'distort',
+            fields: [raw],
+            value: (entry) => {
+                const v = def.kind === 'vec2' && entry.v === undefined && entry.x !== undefined ? [entry.x, entry.y] : entry.v;
+                const out = distortValue(def, v, `keyframes.${raw}`, fx);
+                if (out === null) throw new Error(`keyframes.${raw}: mốc cần giá trị thật (không nhận null)`);
+                return out;
+            },
+        };
+    }
+
+    // Tóm tắt gọn cho kết quả: lưới Mesh / trường Liquify (hàng nghìn số) chỉ báo độ dài.
+    function distortSummary(item) {
+        if (!window.Distort || !Array.isArray(item.distort)) return [];
+        return Distort.normalizeStack(item.distort).map((fx) => {
+            const params = {};
+            Object.entries(fx.params).forEach(([k, v]) => {
+                params[k] = (k === 'mesh' || k === 'field') && Array.isArray(v) ? `[${v.length} numbers]` : v;
+            });
+            const keyframed = Object.keys(item.keyframes || {}).filter((k) => k.startsWith(`${Distort.KF_PREFIX}${fx.id}.`));
+            return { id: fx.id, type: fx.type, enabled: fx.enabled, params, ...(keyframed.length ? { keyframes: keyframed } : {}) };
+        });
     }
 
     async function updateBlock(params) {
@@ -474,8 +663,13 @@
                     else target.style = { ...(target.style || {}), ...params.style };
                     changed.push('style');
                 }
+                if (params.distort !== undefined) {
+                    applyDistort(sel, params.distort);
+                    changed.push('distort');
+                }
                 a.clampItemTiming(target);
             } else {
+                if (params.distort !== undefined) requireDistort(sel);
                 for (const key of ['timeline_start', 'duration', 'text', 'style', 'muted']) {
                     if (params[key] !== undefined) throw new Error(`"${key}" không áp cho clip lane chính (dùng split/trim bằng giao diện)`);
                 }
@@ -484,9 +678,11 @@
             if (params.keyframes !== undefined) {
                 changed.push(...applyKeyframes(sel, params.keyframes, { mode: params.keyframe_mode, time: params.keyframe_time }));
             }
-            if (!changed.length) throw new Error('Không có gì để đổi — truyền transform/keyframes/volume/speed/timeline_start/duration/text/style/muted');
+            if (!changed.length) throw new Error('Không có gì để đổi — truyền transform/keyframes/volume/speed/timeline_start/duration/text/style/muted/distort');
             if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
-            return { changed, block: describeTarget(sel) };
+            const result = { changed, block: describeTarget(sel) };
+            if (changed.some((c) => c === 'distort' || c.startsWith('keyframes.dst.'))) result.distort = distortSummary(target);
+            return result;
         });
     }
 
@@ -1076,8 +1272,40 @@
                     style: 'width/height px (20-4000), fill_color/stroke_color #rrggbb, stroke_width 0-100, stroke_position inside|center|outside, corner_radius (rectangle/square/triangle/trapezoid/polygon), outer_corner_radius + inner_corner_radius (star), sides 3+ (polygon), points 3+ (star)',
                     path: 'shape_type "path": path_points [{x, y, ix?, iy?, ox?, oy?, r?}] with x/y as 0..1 fractions of the width x height box, ix/iy/ox/oy Bezier handles relative to the point (same units), r corner radius px; path_closed true|false',
                 };
+            case 'distort': {
+                const D = window.Distort;
+                if (!D) throw new Error('Module Biến dạng (distort.js) chưa nạp');
+                const effects = {};
+                D.TYPE_IDS.forEach((type) => {
+                    const def = D.EFFECT_DEFS[type];
+                    effects[type] = {
+                        label: def.label,
+                        params: def.params.map((p) => {
+                            const out = { key: p.key, label: p.label, kind: p.kind, keyframable: !p.noKf && p.kind !== 'pins' };
+                            if (p.def !== undefined) out.default = p.def;
+                            if (p.kind === 'num') Object.assign(out, { min: p.min, max: p.max, step: p.step, unit: p.unit || '' });
+                            if (p.kind === 'enum') out.options = p.options.map((o) => o.id);
+                            return out;
+                        }),
+                    };
+                });
+                return {
+                    applies_to: 'overlay blocks of type media (image/video) and shape; not main-lane clips, text or Subsequence (Nest) blocks',
+                    max_effects: D.MAX_EFFECTS,
+                    effects,
+                    usage: 'crabbycut_update_block distort: [{id?, type, enabled?, params?}] = the NEW ordered stack (applied top to bottom). An entry whose id matches an existing effect keeps its params/keyframes and only overwrites the params given; an entry without id is a new effect (missing params = defaults); effects left out are removed with their keyframes; [] removes all. The result lists every effect id.',
+                    keyframes: 'crabbycut_update_block keyframes {"dst.<effect id>.<param>": [{t, v, e}]} for params with keyframable true; enum params hold (no interpolation). Puppet pin position: "dst.<id>.pin_<pinId>" with v [x, y].',
+                    units: {
+                        vec2: '[x, y] as fractions of the block box (0..1, origin top-left; values outside allowed, clamped to -50..50)',
+                        bezier: '12 points: tl_vertex, tl_tangent, tr_tangent, rt_vertex, rt_tangent, rb_tangent, br_vertex, br_tangent, bl_tangent, lb_vertex, lb_tangent, lt_tangent (vertices at the corners, tangents at 1/3 and 2/3 of each edge by default)',
+                        mesh: `array of (rows+1)*(cols+1)*${D.MESH_STRIDE} numbers, row-major vertices: x, y (box fractions) then left/right/up/down handles (dx, dy relative to the vertex); null = undistorted grid. Changing rows/cols resets the mesh and its keyframes.`,
+                        field: `Liquify displacement: array of ${D.FIELD_LEN} numbers = (${D.FIELD_N}+1)^2 vertices x (dx, dy) in box fractions; null = none. Brushes (tool, brush_size, brush_pressure) only matter for painting in the UI.`,
+                        pins: 'Puppet: pins [{id (1-24 letters/digits/-), rest: [x, y] (where the pin sits on the source), pos: [x, y] (where it is dragged to; default = rest)}], max 64. Pins pull the image like the After Effects Puppet Pin tool.',
+                    },
+                };
+            }
             default:
-                throw new Error('"kind" là một trong: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories, geocode, shapes, voices, text_warps');
+                throw new Error('"kind" là một trong: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories, geocode, shapes, voices, text_warps, distort');
         }
     }
 

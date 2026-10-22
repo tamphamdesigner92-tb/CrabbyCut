@@ -27,6 +27,7 @@ const ROOT = path.resolve(__dirname, '..', '..');
 const runtimeJs = fs.readFileSync(path.join(ROOT, 'static', 'js', 'editing-runtime.js'), 'utf8');
 const bridgeJs = fs.readFileSync(path.join(ROOT, 'static', 'js', 'automation-bridge.js'), 'utf8');
 const textDeformJs = fs.readFileSync(path.join(ROOT, 'static', 'js', 'text-deform.js'), 'utf8');
+const distortJs = fs.readFileSync(path.join(ROOT, 'static', 'js', 'distort.js'), 'utf8');
 const TextAnimations = require(path.join(ROOT, 'static', 'js', 'text-animations.js'));
 const ColorAdjust = require(path.join(ROOT, 'static', 'js', 'color-adjust.js'));
 
@@ -200,6 +201,7 @@ function makeApp() {
         return { ok: false, status: 404, json: async () => ({ detail: `no route ${url}` }) };
     };
     vm.runInContext(textDeformJs, sandbox, { filename: 'text-deform.js' });
+    vm.runInContext(distortJs, sandbox, { filename: 'distort.js' });
     vm.runInContext(bridgeJs, sandbox, { filename: 'automation-bridge.js' });
     const call = (method, params) => sandbox.desktopEnv.handler(method, params);
     const waitJob = async (job) => {
@@ -311,6 +313,105 @@ async function partA() {
         assert.ok(read.geocode.code.includes('color:gold') && read.geocode.width === 1080, 'read trả mã + đặc tả hiện tại');
         assert.strictEqual(G.builds.length, 5, 'read không dựng lại');
         ok('GeoCode: lô dùng template {{vars}}, một bước Hoàn tác, log gọn; update_geocode vá find/replace, giữ biến đổi, read không dựng lại');
+    }
+
+    // ---- Biến dạng (Distort) qua update_block + catalog
+    {
+        const app = makeApp();
+        const D = app.sandbox.Distort;
+        const sh = await app.call('add_shape', { shape_type: 'rectangle', start: 0, duration: 4 });
+        const item = () => app.state.editingItems.find((it) => it.id === sh.item_id);
+        const undo0 = app.sandbox.undoStack.length;
+        const r = await app.call('update_block', {
+            item_id: sh.item_id,
+            distort: [
+                { id: 'w', type: 'wave', params: { wave_type: 'square', height: 25, width: 9999 } },
+                { type: 'bezier', params: { tl_vertex: [0.1, 0.05] } },
+            ],
+            keyframes: {
+                'dst.w.height': [{ t: 0, v: 0 }, { t: 2, v: 40, e: 'linear' }],
+                'dst.w.wave_type': [{ t: 0, v: 'sine' }, { t: 1, v: 'triangle' }],
+                'dst.d1.br_vertex': [{ t: 0, x: 1, y: 1 }, { t: 3, v: [0.8, 0.9] }],
+            },
+        });
+        assert.strictEqual(app.sandbox.undoStack.length, undo0 + 1, 'distort + keyframes = MỘT bước Hoàn tác');
+        const st = item().distort;
+        assert.deepStrictEqual(plain(st.map((f) => [f.id, f.type, f.enabled])), [['w', 'wave', true], ['d1', 'bezier', true]], 'thứ tự giữ, id tự cấp d1');
+        assert.strictEqual(st[0].params.wave_type, 'square');
+        assert.strictEqual(st[0].params.width, 4000, 'số vượt dải bị kẹp');
+        assert.strictEqual(st[0].params.speed, 1, 'thông số không nêu = mặc định');
+        assert.deepStrictEqual(plain(st[1].params.tl_vertex), [0.1, 0.05]);
+        const kf = item().keyframes;
+        assert.deepStrictEqual(plain(kf['dst.w.height'].map((k) => [k.t, k.v, k.e])), [[0, 0, 'ease-in-out'], [2, 40, 'linear']]);
+        assert.deepStrictEqual(plain(kf['dst.d1.br_vertex'].map((k) => k.v)), [[1, 1], [0.8, 0.9]], 'vec2 nhận x/y hoặc v [x, y]');
+        assert.strictEqual(D.effectParamsAt(item(), D.normalizeStack(item().distort)[0], 1).height, 20, 'keyframe nội suy được bằng distort.js');
+        assert.strictEqual(D.effectParamsAt(item(), D.normalizeStack(item().distort)[0], 0.5).wave_type, 'sine', 'enum giữ (hold)');
+        assert.ok(r.changed.includes('distort') && r.distort.length === 2 && r.distort[0].keyframes.includes('dst.w.height'), `kết quả tóm tắt distort: ${JSON.stringify(r.distort)}`);
+
+        // Gộp theo id: chỉ ghi đè params được nêu, giữ keyframe; hiệu ứng bị bỏ thì keyframe đi theo.
+        await app.call('update_block', { item_id: sh.item_id, distort: [{ id: 'w', enabled: false, params: { phase: 90 } }, { type: 'mesh', params: { rows: 2, cols: 3 } }] });
+        const st2 = item().distort;
+        assert.deepStrictEqual(plain(st2.map((f) => [f.id, f.type, f.enabled])), [['w', 'wave', false], ['d2', 'mesh', true]], 'id cũ d1 không bị dùng lại');
+        assert.deepStrictEqual([st2[0].params.wave_type, st2[0].params.height, st2[0].params.phase], ['square', 25, 90], 'giữ thông số cũ, ghi đè phase');
+        assert.ok(item().keyframes['dst.w.height'], 'giữ keyframe của hiệu ứng còn lại');
+        assert.ok(!item().keyframes['dst.d1.br_vertex'], 'bỏ bezier -> keyframe của nó bị xoá');
+
+        // Mesh: lưới sai cỡ là lỗi; đổi rows/cols đặt lại lưới + keyframe lưới.
+        const len = D.meshLength(2, 3);
+        await assert.rejects(app.call('update_block', { item_id: sh.item_id, distort: [{ id: 'w' }, { id: 'd2', params: { mesh: [1, 2, 3] } }] }), new RegExp(`${len} số`));
+        const mesh = D.meshIdentity(2, 3);
+        mesh[0] = 0.2;
+        await app.call('update_block', { item_id: sh.item_id, distort: [{ id: 'w' }, { id: 'd2', params: { mesh } }], keyframes: { 'dst.d2.mesh': [{ t: 0, v: mesh }, { t: 2, v: D.meshIdentity(2, 3) }] } });
+        assert.strictEqual(item().distort[1].params.mesh[0], 0.2);
+        await app.call('update_block', { item_id: sh.item_id, distort: [{ id: 'w' }, { id: 'd2', params: { rows: 4 } }] });
+        assert.strictEqual(item().distort[1].params.mesh, null, 'đổi rows -> lưới về đều');
+        assert.ok(!item().keyframes['dst.d2.mesh'], 'đổi rows -> bỏ keyframe lưới');
+
+        // Puppet: ghim + keyframe vị trí ghim; bỏ ghim thì keyframe ghim đi theo.
+        await app.call('update_block', {
+            item_id: sh.item_id,
+            distort: [{ id: 'p', type: 'puppet', params: { pins: [{ id: 'a', rest: [0.5, 0.2] }, { id: 'b', rest: [0.5, 0.8], pos: [0.6, 0.9] }] } }],
+            keyframes: { 'dst.p.pin_a': [{ t: 0, v: [0.5, 0.2] }, { t: 1, v: [0.3, 0.1] }] },
+        });
+        assert.deepStrictEqual(plain(item().distort.map((f) => f.id)), ['p'], 'danh sách mới thay trọn danh sách cũ');
+        assert.ok(!Object.keys(item().keyframes).some((k) => k.startsWith('dst.w.')), 'bỏ wave -> keyframe wave bị xoá');
+        assert.deepStrictEqual(plain(item().distort[0].params.pins[0].pos), [0.5, 0.2], 'pos mặc định = rest');
+        await app.call('update_block', { item_id: sh.item_id, distort: [{ id: 'p', params: { pins: [{ id: 'b', rest: [0.5, 0.8] }] } }] });
+        assert.ok(!item().keyframes['dst.p.pin_a'], 'bỏ ghim a -> keyframe ghim a bị xoá');
+
+        // Lỗi rõ ràng, không để lại thay đổi dở và không thêm bước Hoàn tác.
+        const before = JSON.stringify(item());
+        const undoN = app.sandbox.undoStack.length;
+        await assert.rejects(app.call('update_block', { item_id: sh.item_id, distort: [{ type: 'twirl' }] }), /wave, bezier, mesh, liquify, puppet|type là một trong/);
+        await assert.rejects(app.call('update_block', { item_id: sh.item_id, distort: [{ type: 'wave', params: { wave_type: 'zigzag' } }] }), /wave_type là một trong/);
+        await assert.rejects(app.call('update_block', { item_id: sh.item_id, distort: [{ type: 'wave', params: { amplitude: 3 } }] }), /amplitude không có ở wave/);
+        await assert.rejects(app.call('update_block', { item_id: sh.item_id, distort: [{ id: 'p', type: 'wave' }] }), /không đổi loại/);
+        await assert.rejects(app.call('update_block', { item_id: sh.item_id, keyframes: { 'dst.p.triangles': [{ t: 0, v: 100 }] } }), /không keyframe được/);
+        await assert.rejects(app.call('update_block', { item_id: sh.item_id, keyframes: { 'dst.zz.height': [{ t: 0, v: 1 }] } }), /không có hiệu ứng "zz"/);
+        await assert.rejects(app.call('update_block', { item_id: sh.item_id, distort: [], keyframes: { 'dst.p.pin_b': [{ t: 0, v: [0, 0] }] } }), /không có hiệu ứng "p"/);
+        assert.strictEqual(JSON.stringify(item()), before, 'lệnh lỗi quay lui trọn vẹn');
+        assert.strictEqual(app.sandbox.undoStack.length, undoN, 'lệnh lỗi không để lại bước Hoàn tác');
+
+        await app.call('update_block', { item_id: sh.item_id, distort: [] });
+        assert.ok(!('distort' in item()) && !Object.keys(item().keyframes || {}).some((k) => k.startsWith('dst.')), '[] bỏ hết hiệu ứng + keyframe');
+        const txt = await app.call('add_text', { text: 'x' });
+        await assert.rejects(app.call('update_block', { item_id: txt.item_id, distort: [{ type: 'wave' }] }), /chỉ cho block ảnh\/video/);
+
+        // Trong batch: thêm shape + distort cùng MỘT bước Hoàn tác.
+        const undoB = app.sandbox.undoStack.length;
+        const b = await app.call('batch', { ops: [{ tool: 'add_shape', args: { shape_type: 'circle', start: 5 } }, { tool: 'update_block', args: { item_id: '$0.item_id', distort: [{ id: 'lq', type: 'liquify', params: { percent: 150 } }], keyframes: { 'dst.lq.offset': [{ t: 0, v: [0, 0] }, { t: 1, v: [0.1, 0] }] } } }] });
+        assert.strictEqual(b.ok_count, 2, JSON.stringify(b));
+        assert.strictEqual(app.sandbox.undoStack.length, undoB + 1, 'batch = MỘT bước Hoàn tác');
+
+        const cat = await app.call('catalog', { kind: 'distort' });
+        assert.deepStrictEqual(Object.keys(cat.effects).sort(), ['bezier', 'liquify', 'mesh', 'puppet', 'wave']);
+        const wt = cat.effects.wave.params.find((p) => p.key === 'wave_type');
+        assert.ok(wt.options.includes('smooth_noise') && wt.keyframable && wt.default === 'sine');
+        const h = cat.effects.wave.params.find((p) => p.key === 'height');
+        assert.deepStrictEqual([h.min, h.max, h.default], [-2000, 2000, 10]);
+        assert.strictEqual(cat.effects.mesh.params.find((p) => p.key === 'rows').keyframable, false);
+        assert.strictEqual(cat.max_effects, 8);
+        ok('distort: update_block ghi danh sách + keyframe dst.* một bước Hoàn tác, gộp theo id, dọn keyframe, lỗi rõ ràng không để dở; chạy trong batch; catalog distort');
     }
 
     // ---- Lồng tiếng
@@ -425,6 +526,9 @@ async function partB() {
         calls.length = 0;
         await tool('crabbycut_update_geocode', { item_id: 'item_x', replace: [{ find: 'a', with: 'b' }] });
         assert.strictEqual(calls[0], 'start_job', 'vá mã = job dựng lại');
+        const ub = list.result.tools.find((t) => t.name === 'crabbycut_update_block');
+        assert.deepStrictEqual(ub.inputSchema.properties.distort.items.properties.type.enum, ['wave', 'bezier', 'mesh', 'puppet', 'liquify'], 'update_block nhận distort');
+        assert.ok(list.result.tools.find((t) => t.name === 'crabbycut_catalog').inputSchema.properties.kind.enum.includes('distort'), 'catalog có kind distort');
         const sh = await tool('crabbycut_add_shape', { shape_type: 'circle' });
         assert.strictEqual(sh.data.item_id, 'item_shape_1');
         ok('MCP server: tool mới có trong danh sách, add_geocode/dub tự chờ job (một lượt gọi), hết hạn chờ trả job_id, read không tạo job');

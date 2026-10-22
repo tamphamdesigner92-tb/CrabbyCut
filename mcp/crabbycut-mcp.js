@@ -440,10 +440,10 @@ const TOOLS = [
   },
   {
     name: 'crabbycut_catalog',
-    description: 'Look up valid ids/values before editing: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories, geocode (languages, size presets, limits), shapes (shape types + style fields), voices (dubbing engines, voices, cloned voice profiles), text_warps (text warp types + text-on-path presets).',
+    description: 'Look up valid ids/values before editing: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories, geocode (languages, size presets, limits), shapes (shape types + style fields), voices (dubbing engines, voices, cloned voice profiles), text_warps (text warp types + text-on-path presets), distort (After Effects style distort effects wave | bezier | mesh | puppet | liquify: every param with its range/options/default and whether it can be keyframed).',
     inputSchema: {
       type: 'object',
-      properties: { kind: { type: 'string', enum: ['transitions', 'animations', 'text_styles', 'text_effects', 'luts', 'color_params', 'export_options', 'subtitle', 'library_categories', 'geocode', 'shapes', 'voices', 'text_warps'] } },
+      properties: { kind: { type: 'string', enum: ['transitions', 'animations', 'text_styles', 'text_effects', 'luts', 'color_params', 'export_options', 'subtitle', 'library_categories', 'geocode', 'shapes', 'voices', 'text_warps', 'distort'] } },
       required: ['kind'],
       additionalProperties: false,
     },
@@ -453,7 +453,7 @@ const TOOLS = [
   /* ---- Sửa block ---- */
   {
     name: 'crabbycut_update_block',
-    description: 'Editing step only. Change properties of ONE block: a main-lane clip (main_index) or an overlay item (item_id). transform: position_x, position_y, scale, rotation, opacity, flip_x, flip_y (fields with keyframes get a keyframe at the playhead). keyframes animates fields over time, e.g. {"position": [{"t": 0, "x": -400, "y": 0}, {"t": 2, "x": 0, "y": 0, "e": "ease-out"}], "scale": [{"t": 0, "v": 80}, {"t": 2, "v": 100}]}. volume is percent (100 = original). speed is a rate (1 = normal). Overlay items also accept timeline_start, duration, muted, text (text blocks) and style (text: font_family, font_size, color, font_weight, letter_spacing, font_kerning auto|none, line_height, align, stroke_*, bg_*, shadow_*, warp_*, path_*). One undo step.',
+    description: 'Editing step only. Change properties of ONE block: a main-lane clip (main_index) or an overlay item (item_id). transform: position_x, position_y, scale, rotation, opacity, flip_x, flip_y (fields with keyframes get a keyframe at the playhead). keyframes animates fields over time, e.g. {"position": [{"t": 0, "x": -400, "y": 0}, {"t": 2, "x": 0, "y": 0, "e": "ease-out"}], "scale": [{"t": 0, "v": 80}, {"t": 2, "v": 100}]}. volume is percent (100 = original). speed is a rate (1 = normal). Overlay items also accept timeline_start, duration, muted, text (text blocks) and style (text: font_family, font_size, color, font_weight, letter_spacing, font_kerning auto|none, line_height, align, stroke_*, bg_*, shadow_*, warp_*, path_*). Media (image/video) and shape items also accept distort: the After Effects style distort stack [{id?, type wave|bezier|mesh|puppet|liquify, enabled, params}] in order — entries with an existing id keep their other params and keyframes, entries without id are new effects, effects left out are removed ([] clears); animate a param with keyframes {"dst.<effect id>.<param>": [{t, v, e}]} (ids are returned in the result; params, ranges and keyframable flags: crabbycut_catalog distort). One undo step.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -471,6 +471,21 @@ const TOOLS = [
         muted: { type: 'boolean' },
         text: { type: 'string' },
         style: { type: 'object' },
+        distort: {
+          type: 'array',
+          maxItems: 8,
+          description: 'Distort effects (media/shape items only), the whole new stack in order. See crabbycut_catalog distort.',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'Existing effect id to keep/modify (e.g. "d1"); omit for a new effect.' },
+              type: { type: 'string', enum: ['wave', 'bezier', 'mesh', 'puppet', 'liquify'], description: 'Required for a new effect.' },
+              enabled: { type: 'boolean' },
+              params: { type: 'object', description: 'Only the params to set, e.g. wave {"wave_type": "sine", "height": 20, "width": 120, "direction": 90, "speed": 1, "pinning": "none", "phase": 0}; bezier {"tl_vertex": [0, 0], ...} as box fractions; puppet {"pins": [{"id": "a", "rest": [0.5, 0.2], "pos": [0.6, 0.1]}]}.' },
+            },
+            additionalProperties: false,
+          },
+        },
       },
       additionalProperties: false,
     },
