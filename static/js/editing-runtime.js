@@ -14157,6 +14157,15 @@
         return { ...next, wiggle: prev.wiggle };
     }
 
+    /* Ô "Không có" của Kết hợp: bỏ combo đang áp = đưa Vào + Ra về "Không có" (giữ Wiggle).
+     * Chỉ khi Vào/Ra hiện tại ĐÚNG là một combo — Vào/Ra tự chọn riêng từng bên (ô Kết hợp
+     * vốn đang sáng "Không có") thì không đụng tới. Trả undefined = không đổi gì. */
+    function clearComboOf(cur) {
+        if (!window.TextAnimations || !TextAnimations.matchCombo(cur)) return undefined;
+        const none = { type: 'none', duration: 0.4, delay: 0, easing: 'ease-in-out' };
+        return withWiggleOf({ in: { ...none }, out: { ...none } }, cur);
+    }
+
     // Ghi MỘT tham số Wiggle cho block đang chọn (overlay) hoặc các clip lane chính đang chọn.
     // Trả true nếu target là control Wiggle (đã xử lý).
     function handleWiggleFieldInput(target, item, options, rememberInspectorEdit) {
@@ -16277,6 +16286,13 @@
                 if (rl) rl.textContent = `${Math.round(ratio * 100)}%`;
                 // Combo chỉ thay Vào/Ra — giữ Wiggle của clip.
                 if (comboVal) applyMain((cur) => withWiggleOf(TextAnimations.applyCombo(comboVal, total, ratio), cur));
+                else if (target.id === 'editingAnimComboType') {
+                    // Chọn "Không có" -> bỏ combo (Vào + Ra về "Không có").
+                    applyMain((cur) => {
+                        const cleared = clearComboOf(cur);
+                        return cleared === undefined ? cur : cleared;
+                    });
+                }
             }
             if (typeof updateSequencePreviewTransform === 'function') updateSequencePreviewTransform();
             if (!options.commit) return;
@@ -16385,6 +16401,10 @@
                 // Combo chỉ thay Vào/Ra — giữ Wiggle của block.
                 const applied = withWiggleOf(TextAnimations.applyCombo(comboVal, total, ratio), item.animation);
                 if (applied) item.animation = applied;
+            } else if (target.id === 'editingAnimComboType') {
+                // Chọn "Không có" -> bỏ combo (Vào + Ra về "Không có").
+                const cleared = clearComboOf(item.animation);
+                if (cleared !== undefined) item.animation = cleared;
             }
             renderPreviewOverlays();
             if (!options.commit) return;
