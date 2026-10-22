@@ -177,6 +177,13 @@
     const libraryCache = {};
     let idCounter = 1;
     let overlayPreviewFrameId = 0;
+    /* SUBSEQUENCE trong preview: trong lúc dựng nội dung một block Subsequence (đồng bộ, xem
+     * renderNestPreviewChildren) các giá trị này mang "giờ bên trong", hệ số tốc độ và âm
+     * lượng của các cấp bọc ngoài. Ngoài lượt đó luôn là null / 1. */
+    let nestPreviewTimeOverride = null;
+    let nestPreviewRateMul = 1;
+    let nestPreviewGainMul = 1;
+    const nestPreviewAncestors = [];
     // Phiên "Xem thử" hoạt ảnh: phát In rồi nhảy sang Out (bỏ đoạn hold) bằng
     // rAF loop riêng vì loop overlay chính chỉ chạy khi video đang play
     let animReplaySession = null; // { itemId, startMs, segs: [{from,to}] }
@@ -327,6 +334,7 @@
     }
 
     function currentSequenceTime() {
+        if (nestPreviewTimeOverride !== null) return nestPreviewTimeOverride;
         return typeof getCurrentTimelineTime === 'function'
             ? clamp(getCurrentTimelineTime(), 0, timelineDuration())
             : 0;
@@ -1137,7 +1145,7 @@
         const list = (assetIds || []).map((id) => findAsset(id)).filter(Boolean);
         if (!list.length) return false;
         const idSet = new Set(list.map((a) => String(a.id)));
-        const usedCount = editingItems.filter((it) => idSet.has(String(it.asset_id))).length;
+        const usedCount = projectItemsDeep().filter((it) => idSet.has(String(it.asset_id))).length;
         const sourcePaths = Array.from(new Set(list.map((a) => String(a.source_path || '')).filter(Boolean)));
         const lanePaths = mainLaneSourcePathSet();
         const onLaneCount = sourcePaths.filter((p) => lanePaths.has(p)).length;
@@ -1153,6 +1161,7 @@
         }
         recordHistory();
         editingItems = editingItems.filter((it) => !idSet.has(String(it.asset_id)));
+        purgeAssetsFromNests(idSet);
         editingAssets = editingAssets.filter((a) => !idSet.has(String(a.id)));
         idSet.forEach((id) => panelSelectedAssetIds.delete(id));
         if (selectedEditingItemId && !findItem(selectedEditingItemId)) selectedEditingItemId = '';
@@ -1212,10 +1221,14 @@
         const wanted = new Map(list.filter((v) => v && v.source_path).map((v) => [v.source_path, v]));
         // Bỏ những asset nguồn không còn trong thư viện Upload — TRỪ khi timeline còn block
         // dùng nó (bỏ đi là block hoá trống, người dùng không hiểu vì sao).
+        // Quét SÂU (projectItemsDeep): block nằm trong Subsequence cũng là người dùng asset.
+        const usedIds = new Set(projectItemsDeep().map((it) => String(it.asset_id)));
         editingAssets = editingAssets.filter((a) => a.source !== 'project'
             || wanted.has(a.source_path)
-            || editingItems.some((it) => String(it.asset_id) === String(a.id)));
+            || usedIds.has(String(a.id)));
         for (const [sourcePath, video] of wanted) {
+            // Tệp dựng của Subsequence trên lane chính (nest_cache) là nội bộ — không thành thẻ panel.
+            if (/[\\/]nest_cache[\\/]/.test(sourcePath)) continue;
             const groupPath = [PROJECT_SOURCE_FOLDER, ...(Array.isArray(video.group_path) ? video.group_path : [])];
             /* Tệp đã có sẵn trong kho (người dùng tự bấm "Nhập" rồi mới đưa lên
              * lane chính — đường đi thường gặp nhất từ 2026-08-16) thì KHÔNG dựng thêm thẻ
@@ -5986,6 +5999,9 @@
                    người dùng đang canh — chọn và tua là hai ý định khác nhau. */
                 setPrimaryMainSelection(span.index, { seek: false });
             });
+            block.addEventListener('contextmenu', (event) => openTimelineBlockContextMenu(event, { mainIndex: span.index }));
+            // SUBSEQUENCE trên lane chính: cùng màu; bấm đúp -> handleNestBlockDblClick.
+            if (mainRowNestAsset(span.clip)) block.classList.add('is-nest');
             if (block.classList.contains('is-selected')) {
                 appendKeyframeMarkers(block, span.clip, `main:${span.index}`, span.start, span.duration, mainTrackLocked);
             }
@@ -6062,6 +6078,9 @@
             rightHandle.className = 'editing-resize-handle right';
             block.append(leftHandle, rightHandle);
             block.addEventListener('mousedown', (event) => startItemDrag(event, item, block));
+            block.addEventListener('contextmenu', (event) => openTimelineBlockContextMenu(event, { itemId: item.id }));
+            // SUBSEQUENCE: màu riêng (như Premiere); bấm đúp -> handleNestBlockDblClick.
+            if (itemIsNest(item)) block.classList.add('is-nest');
             if (selectedEditingItemIds.has(item.id)) {
                 appendKeyframeMarkers(block, item, item.id, item.timeline_start, item.duration, isTrackLocked(itemTrackRef));
             }
@@ -9091,6 +9110,823 @@
         return splitItemAtTime(itemId, start + (Math.max(0, Math.min(1, Number(ratio))) * duration));
     }
 
+    /* =========================================================================
+     * SUBSEQUENCE (NEST) — kiểu Premiere Pro
+     *
+     * Mô hình dữ liệu và lý do chọn nó: xem đầu static/js/nest-sequence.js. Tóm lại: một
+     * Subsequence là một TÀI SẢN `media_video` mang nội dung riêng (`asset.nest`), block trên
+     * timeline là một item `media` trỏ vào nó — nên trim / kéo / tốc độ / âm lượng / keyframe
+     * / hoạt ảnh / màu / mặt nạ đi đúng đường của block video.
+     *
+     * VÀO SỬA BÊN TRONG (bấm đúp): runtime TẠM HOÁN ĐỔI kho đang sửa —
+     *   editingTracks / editingItems  <- nội dung Subsequence
+     *   latestTimeline                <- [] (sequence con không có lane chính nam châm)
+     * Trạng thái của cấp cha cất vào `nestStack`. Mọi tính năng sửa block chạy y nguyên vì
+     * chúng chỉ biết "kho đang sửa". Ra ngoài thì ghi nội dung về tài sản rồi trả kho cha.
+     *
+     * UNDO / .crab LUÔN Ở DẠNG GỐC: getHistoryState() ghi nội dung đang sửa về tài sản rồi
+     * trả kho của TIMELINE GỐC + `nestPath` (đang mở tới đâu). Khôi phục thì nạp dạng gốc rồi
+     * mở lại đúng đường đó. Nhờ vậy mọi chỗ đọc snapshot (mở dự án, relink, đóng gói) chỉ
+     * phải biết một dạng dữ liệu.
+     * ======================================================================= */
+    let nestStack = [];   // [{ assetId, instanceItemId, parentTracks, parentItems, parentLatestTimeline, parentSelection, parentTime }]
+
+    function isNestAsset(asset) {
+        return !!(window.NestSequence && NestSequence.isNestAsset(asset));
+    }
+
+    function nestAssetOfItem(item) {
+        if (!item || item.type !== 'media') return null;
+        const asset = findAsset(item.asset_id);
+        return isNestAsset(asset) ? asset : null;
+    }
+
+    function itemIsNest(item) {
+        return !!nestAssetOfItem(item);
+    }
+
+    function isInsideNest() {
+        return nestStack.length > 0;
+    }
+
+    // Số đo của tài sản suy từ nội dung: độ dài, có tiếng không, khung = khung Sequence.
+    function refreshNestAssetMeta(asset) {
+        if (!isNestAsset(asset)) return;
+        const seq = payloadSequence();
+        asset.duration = NestSequence.contentDuration(asset.nest);
+        asset.has_audio = NestSequence.contentHasAudio(asset.nest, editingAssets);
+        asset.width = Number(seq.width) || 1920;
+        asset.height = Number(seq.height) || 1080;
+    }
+
+    // Kho của TIMELINE GỐC, dù đang đứng ở cấp nào.
+    function rootEditingItems() {
+        return nestStack.length ? nestStack[0].parentItems : editingItems;
+    }
+
+    function rootEditingTracks() {
+        return nestStack.length ? nestStack[0].parentTracks : editingTracks;
+    }
+
+    function rootLatestTimeline() {
+        return nestStack.length ? nestStack[0].parentLatestTimeline : latestTimeline;
+    }
+
+    /* MỌI item của dự án: timeline gốc + các cấp đang mở + nội dung mọi Subsequence (sâu).
+     * Dùng ở chỗ hỏi "asset này còn ai dùng không" — chỉ quét editingItems là bỏ sót block
+     * nằm trong Subsequence và xoá nhầm asset của nó. */
+    function projectItemsDeep() {
+        const roots = [editingItems];
+        nestStack.forEach((frame) => roots.push(frame.parentItems));
+        const flat = [].concat(...roots);
+        return window.NestSequence ? NestSequence.collectDeepItems(flat, editingAssets) : flat;
+    }
+
+    // Ghi nội dung đang sửa (nếu đang ở trong một Subsequence) về tài sản của nó.
+    function commitNestContent() {
+        const frame = nestStack[nestStack.length - 1];
+        if (!frame) return;
+        const asset = findAsset(frame.assetId);
+        if (!isNestAsset(asset)) return;
+        asset.nest = {
+            tracks: deepClone(editingTracks.filter((t) => t.type !== 'main')),
+            items: deepClone(editingItems),
+        };
+        refreshNestAssetMeta(asset);
+    }
+
+    // Xoá asset khỏi dự án: block dùng nó nằm trong Subsequence / cấp cha đang cất cũng phải đi.
+    function purgeAssetsFromNests(idSet) {
+        const keep = (it) => !idSet.has(String(it?.asset_id));
+        nestStack.forEach((frame) => { frame.parentItems = frame.parentItems.filter(keep); });
+        editingAssets.forEach((asset) => {
+            if (!isNestAsset(asset) || idSet.has(String(asset.id))) return;
+            const before = (asset.nest.items || []).length;
+            asset.nest.items = (asset.nest.items || []).filter(keep);
+            if (asset.nest.items.length !== before) refreshNestAssetMeta(asset);
+        });
+    }
+
+    function nestInstancesOf(assetId) {
+        return projectItemsDeep().filter((it) => it && it.type === 'media' && String(it.asset_id) === String(assetId));
+    }
+
+    function stopPreviewPlaybackForNest() {
+        try { if (video && !video.paused) video.pause(); } catch (_) {}
+        try { window.stopVirtualClock?.(); } catch (_) {}
+    }
+
+    /* Item mới trỏ vào một tài sản Subsequence — cùng khuôn với addItemForAsset. */
+    function makeNestInstanceItem(asset, trackId, start) {
+        return {
+            id: nextId('item'),
+            type: 'media',
+            track_id: trackId,
+            timeline_start: Math.max(0, Number(start) || 0),
+            duration: Math.max(0.2, Number(asset.duration) || 0.2),
+            asset_id: asset.id,
+            source_start: 0,
+            muted: false,
+            volume: 100,
+            transform: defaultTransform(),
+            text: '',
+            style: defaultTextStyle(),
+        };
+    }
+
+    // Lane video trống trên đoạn [start, start+duration]; ưu tiên các lane trong `prefer`.
+    function freeMediaTrackForRange(start, duration, prefer = []) {
+        const free = (track) => track && track.type === 'media' && !isTrackLocked(track)
+            && !trackHasOverlapAtRange(track.id, start, duration);
+        const hit = prefer.map((id) => findTrack(id)).find(free);
+        if (hit) return hit;
+        return tracksOfType('media').slice().reverse().find(free) || createTrack('media');
+    }
+
+    /* GÓI các block đang chọn thành một Subsequence (Premiere: Nest…). */
+    /* `options.itemIds` / `options.mainIndexes` (cầu nối tự động hoá, test): gói đúng các block
+     * này thay vì vùng đang chọn. */
+    function createNestFromSelection(options = {}) {
+        if (currentMode !== 'FINAL' || currentStepId !== 'step4') return false;
+        if (!window.NestSequence) return false;
+        if (Array.isArray(options?.itemIds) || Array.isArray(options?.mainIndexes)) {
+            selectedEditingItemIds = new Set((options.itemIds || []).map(String).filter((id) => findItem(id)));
+            selectedMainClipIndexes = new Set((options.mainIndexes || []).map(Number).filter((i) => Number.isInteger(i) && latestTimeline?.[i]));
+            selectedEditingItemId = selectedEditingItemIds.values().next().value || '';
+        }
+        const items = selectedItemsArray().filter((it) => !isTrackLocked(itemTrack(it)));
+        const mainIndexes = selectedMainIndexesArray();
+        if (mainIndexes.length) {
+            if (isTrackLocked(findTrack('track_main'))) {
+                showToast(_t('Lane chính đang khoá.'), { type: 'warning' });
+                return false;
+            }
+            return createNestWithMainClips(mainIndexes, items);
+        }
+        if (!items.length) {
+            if (typeof setStatusText === 'function') setStatusText(_t('Chọn ít nhất một block để tạo Subsequence.'), false);
+            return false;
+        }
+        recordHistory();
+        const plan = NestSequence.planNest(items, editingTracks, (type) => nextId(`track_${type}`));
+        const asset = {
+            id: nextId('nest'),
+            type: 'media_video',
+            item_type: 'media',
+            source: NestSequence.NEST_SOURCE,
+            name: NestSequence.nextNestName(editingAssets),
+            url: '',
+            path: '',
+            thumbnail_url: '',
+            nest: { tracks: plan.tracks, items: plan.items },
+        };
+        editingAssets.push(asset);
+        refreshNestAssetMeta(asset);
+        // Premiere đặt block Nest ở lane VIDEO thấp nhất trong số lane được chọn.
+        const preferTracks = items
+            .map((it) => itemTrack(it))
+            .filter((t) => t && t.type === 'media')
+            .sort((a, b) => (Number(b.order) || 0) - (Number(a.order) || 0))
+            .map((t) => t.id);
+        editingItems = editingItems.filter((it) => !plan.movedIds.has(String(it.id)));
+        NestSequence.dropDanglingTransitions(editingItems, plan.movedIds);
+        const track = freeMediaTrackForRange(plan.t0, asset.duration, preferTracks);
+        const nestItem = makeNestInstanceItem(asset, track.id, plan.t0);
+        editingItems.push(nestItem);
+        setPrimaryItemSelection(nestItem.id);
+        renderAll();
+        if (typeof setStatusText === 'function') {
+            setStatusText(_t('Đã tạo "{name}" từ {n} block — bấm đúp để sửa bên trong.', { name: asset.name, n: items.length }), false);
+        }
+        return true;
+    }
+
+    /* ===== SUBSEQUENCE TRÊN LANE CHÍNH =====================================
+     * Lane chính là MỘT file ghép (temp_input.mp4) mà mỗi clip là một khoảng cắt; nó không có
+     * chỗ cho "một block chứa cả sequence". Nên Subsequence trên lane chính được DỰNG thành một
+     * tệp H.264 (renderNestAssetFile, alpha: false) rồi nối vào file ghép như một video nguồn;
+     * row của nó mang `nest_asset_id`. Mọi tính năng của clip lane chính (trim ripple, tốc độ,
+     * màu, keyframe, chuyển cảnh, xuất) chạy y nguyên trên row đó.
+     * Nội dung đổi (sửa bên trong, hoàn tác, mở dự án) -> syncMainLaneNests dựng lại và thay
+     * nguồn: bản dựng mới được NỐI THÊM vào cuối file ghép (appendSourcesToMainConcat ở index.html,
+     * không gom gọn — bản chụp hoàn tác vẫn trỏ đúng bản cũ) và row dời sang đoạn mới, giữ nguyên
+     * vị trí trong đoạn. */
+    const nestMainRenderSig = new Map();   // đường dẫn tệp đã dựng -> chữ ký nội dung lúc dựng
+    let nestMainSyncChain = Promise.resolve();
+
+    function nestContentSig(asset) {
+        const seq = payloadSequence();
+        const text = JSON.stringify([asset?.nest || null, seq.width, seq.height, seq.fps || '', seq.source_fps || '']);
+        return stableAssetId('ns', text);
+    }
+
+    function mainRowNestAsset(row) {
+        const asset = row?.nest_asset_id ? findAsset(row.nest_asset_id) : null;
+        return isNestAsset(asset) ? asset : null;
+    }
+
+    // Đoạn của file ghép chứa row lane chính.
+    function mainRowSegment(row) {
+        if (!window.MainLane || !Array.isArray(mainConcatSegments)) return null;
+        return MainLane.segmentAt(mainConcatSegments, Number(row?.start) || 0);
+    }
+
+    // Asset video (đúng TỆP NGUỒN) cho một nguồn lane chính — dùng lại thẻ đã có nếu được.
+    function sourceAssetForMainPath(sourcePath, seg) {
+        const existing = editingAssets.find((a) => assetIsVideo(a) && !isNestAsset(a)
+            && (a.source_path === sourcePath || (!a.source_path && a.path === sourcePath)));
+        if (existing) return existing;
+        const lib = (typeof window.getProjectSourceVideos === 'function' ? window.getProjectSourceVideos() : [])
+            .find((v) => v.source_path === sourcePath) || {};
+        const content = seg?.content || {};
+        return addAssetRecord({
+            id: stableAssetId('psrc', sourcePath),
+            type: 'media_video',
+            name: lib.name || sourcePath.split(/[\\/]/).pop(),
+            url: sourceFileUrl(sourcePath),
+            thumbnail_url: lib.thumbnail_url || '',
+            path: sourcePath,
+            source_path: sourcePath,
+            source: 'project',
+            linked: true,
+            group_path: [PROJECT_SOURCE_FOLDER],
+            width: lib.width || Number(content.width) || null,
+            height: lib.height || Number(content.height) || null,
+            duration: seg ? Math.max(0, Number(seg.end) - Number(seg.start)) : null,
+            has_audio: true,
+        });
+    }
+
+    /* Clip lane chính -> block video bên trong Subsequence. Lane chính hiểu scale 100% = VỪA
+     * KHUNG, block overlay hiểu 100% = cỡ gốc của tệp -> nhân hệ số vừa khung vào scale (cả
+     * keyframe scale) để hình không đổi. */
+    function mainRowToNestItem(row, span, seg, t0, trackId) {
+        const asset = sourceAssetForMainPath(String(row.source_path || seg.source_path), seg);
+        const seq = payloadSequence();
+        const fit = window.MainLane
+            ? MainLane.fitScale({ width: Number(asset.width) || 0, height: Number(asset.height) || 0 }, seq.width, seq.height)
+            : 1;
+        const transform = normalizeTransform(deepClone(row.transform || defaultTransform()));
+        transform.scale = (Number(transform.scale) || 100) * fit;
+        const keyframes = row.keyframes ? deepClone(row.keyframes) : null;
+        if (keyframes) scaleKeyframeField(keyframes, 'scale', fit);
+        const item = {
+            id: nextId('item'),
+            type: 'media',
+            track_id: trackId,
+            timeline_start: Math.max(0, span.start - t0),
+            duration: Math.max(0.2, span.duration),
+            asset_id: asset.id,
+            source_start: Math.max(0, Number(row.start) - Number(seg.start)),
+            muted: false,
+            volume: ensureMainClipAudioVolume(row),
+            transform,
+            text: '',
+            style: defaultTextStyle(),
+        };
+        if (keyframes) item.keyframes = keyframes;
+        ['animation', 'adjustments', 'video_mask', 'audio_denoise', 'speed', 'retouch', 'logo_removal']
+            .forEach((key) => { if (row[key] != null) item[key] = deepClone(row[key]); });
+        return item;
+    }
+
+    /* GÓI clip lane chính (LIỀN NHAU) + các block overlay đang chọn. Block Subsequence nằm
+     * NGAY trên lane chính, đúng chỗ các clip cũ — các clip phía sau không xê dịch. */
+    async function createNestWithMainClips(mainIndexes, items) {
+        if (!window.MainLane || typeof window.appendSourcesToMainConcat !== 'function') return false;
+        if (typeof isDesktopVideoEnv === 'function' && !isDesktopVideoEnv()) {
+            showToast(_t('Gói clip lane chính vào Subsequence cần bản desktop.'), { type: 'warning' });
+            return false;
+        }
+        const idx = mainIndexes.slice().sort((a, b) => a - b);
+        if (idx.some((value, k) => value !== idx[0] + k)) {
+            showToast(_t('Chỉ gói được các clip lane chính NẰM LIỀN NHAU.'), { type: 'warning' });
+            return false;
+        }
+        const spans = mainClipSequenceSpans();
+        const rows = idx.map((i) => latestTimeline[i]);
+        const segs = rows.map(mainRowSegment);
+        if (rows.some((row, k) => !segs[k] || !(row.source_path || segs[k].source_path))) {
+            showToast(_t('Không xác định được video nguồn của clip lane chính — không gói được.'), { type: 'warning' });
+            return false;
+        }
+        if (rows.some((row) => row.nest_asset_id)) {
+            showToast(_t('Clip lane chính đã là Subsequence — chọn nó cùng block khác để lồng thêm một cấp chưa được hỗ trợ.'), { type: 'warning' });
+            return false;
+        }
+        const mainStart = spans[idx[0]].start;
+        const mainEnd = spans[idx[idx.length - 1]].end;
+        const t0 = Math.min(mainStart, ...items.map((it) => Number(it.timeline_start) || 0));
+        const plan = NestSequence.planNest(items, editingTracks, (type) => nextId(`track_${type}`), { t0, extraEnd: mainEnd - t0 });
+        const mainTrack = {
+            id: nextId('track_media'),
+            type: 'media',
+            name: _t('Video (lane chính)'),
+            order: plan.tracks.length,
+            locked: false,
+            muted: false,
+            volume: 100,
+            visible: true,
+        };
+        const converted = rows.map((row, k) => mainRowToNestItem(row, spans[idx[k]], segs[k], t0, mainTrack.id));
+        // Chuyển cảnh giữa hai clip cùng được gói -> chuyển cảnh overlay giữa hai block kề nhau.
+        rows.forEach((row, k) => {
+            if (row.transition && k < rows.length - 1) converted[k].transition = deepClone(row.transition);
+        });
+        const asset = {
+            id: nextId('nest'),
+            type: 'media_video',
+            item_type: 'media',
+            source: NestSequence.NEST_SOURCE,
+            name: NestSequence.nextNestName(editingAssets),
+            url: '',
+            path: '',
+            thumbnail_url: '',
+            nest: { tracks: [...plan.tracks, mainTrack], items: [...plan.items, ...converted] },
+        };
+        const endBatch = beginHistoryBatch();
+        editingAssets.push(asset);
+        refreshNestAssetMeta(asset);
+        let file;
+        try {
+            file = await renderNestAssetFile(asset, { alpha: false, fpsChoice: 'source' });
+        } catch (error) {
+            editingAssets = editingAssets.filter((a) => a !== asset);
+            endBatch();
+            showToast(error?.message || String(error), { type: 'error' });
+            return false;
+        }
+        try {
+            // NỐI THÊM (không gom gọn): mốc của mọi row và mọi bản chụp hoàn tác giữ nguyên.
+            await window.appendSourcesToMainConcat([file.path]);
+            const seg = mainConcatSegments.find((s) => s.source_path === file.path);
+            if (!seg) throw new Error(_t('Không nối được Subsequence vào lane chính.'));
+            const nestRow = {
+                start: Number(seg.start) + (mainStart - t0),
+                end: Math.min(Number(seg.end), Number(seg.start) + (mainEnd - t0)),
+                text: asset.name,
+                matched_text: asset.name,
+                source_path: file.path,
+                nest_asset_id: asset.id,
+                transform: defaultTransform(),
+                audio_volume: 100,
+            };
+            latestTimeline.splice(idx[0], idx.length, nestRow);
+            if (typeof normalizeTimelineTransforms === 'function') latestTimeline = normalizeTimelineTransforms(latestTimeline);
+            nestMainRenderSig.set(file.path, nestContentSig(asset));
+            editingItems = editingItems.filter((it) => !plan.movedIds.has(String(it.id)));
+            NestSequence.dropDanglingTransitions(editingItems, plan.movedIds);
+            selectedEditingItemIds = new Set();
+            selectedEditingItemId = '';
+            selectedMainClipIndexes = new Set([idx[0]]);
+            selectedTimelineClipIndex = idx[0];
+            if (typeof renderWordLevelTranscript === 'function') renderWordLevelTranscript(latestTimeline, 'FINAL');
+            renderEditPanel();
+            renderAll();
+            if (typeof setStatusText === 'function') {
+                setStatusText(_t('Đã tạo "{name}" trên lane chính — bấm đúp để sửa bên trong.', { name: asset.name }), false);
+            }
+            return true;
+        } catch (error) {
+            showToast(error?.message || String(error), { type: 'error' });
+            return false;
+        } finally {
+            endBatch();
+        }
+    }
+
+    /* Dựng lại + thay nguồn cho mọi row Subsequence trên lane chính mà nội dung đã đổi so với
+     * tệp đang nối. Chạy NỐI ĐUÔI (không chồng lượt) và chỉ ở timeline gốc. */
+    function syncMainLaneNests() {
+        nestMainSyncChain = nestMainSyncChain.then(async () => {
+            if (nestStack.length || !Array.isArray(latestTimeline)) return;
+            if (typeof isDesktopVideoEnv === 'function' && !isDesktopVideoEnv()) return;
+            const groups = new Map();   // source_path -> asset
+            latestTimeline.forEach((row) => {
+                const asset = mainRowNestAsset(row);
+                if (asset && row.source_path) groups.set(String(row.source_path), asset);
+            });
+            for (const [oldPath, asset] of groups) {
+                const sig = nestContentSig(asset);
+                if (nestMainRenderSig.get(oldPath) === sig) continue;
+                try {
+                    const file = await renderNestAssetFile(asset, { alpha: false, fpsChoice: 'source' });
+                    nestMainRenderSig.set(file.path, sig);
+                    if (file.path !== oldPath) {
+                        /* NỐI THÊM bản dựng mới vào cuối file ghép (bản cũ ở lại: bản chụp hoàn tác
+                         * còn trỏ vào nó) rồi dời row sang đoạn mới, giữ nguyên vị trí TRONG đoạn. */
+                        const keepTime = currentSequenceTime();
+                        const oldSeg = mainConcatSegments.find((seg) => seg.source_path === oldPath);
+                        await window.appendSourcesToMainConcat([file.path]);
+                        const newSeg = mainConcatSegments.find((seg) => seg.source_path === file.path);
+                        if (oldSeg && newSeg) {
+                            latestTimeline = latestTimeline.map((row) => {
+                                if (String(row?.source_path || '') !== oldPath) return row;
+                                const startIn = Math.max(0, Number(row.start) - Number(oldSeg.start));
+                                const endIn = Math.max(startIn + 0.05, Number(row.end) - Number(oldSeg.start));
+                                return {
+                                    ...row,
+                                    source_path: file.path,
+                                    start: Number(newSeg.start) + startIn,
+                                    end: Math.min(Number(newSeg.end), Number(newSeg.start) + endIn),
+                                };
+                            });
+                        }
+                        setSequenceTime(keepTime);
+                    }
+                    // Tên row luôn theo tên Subsequence.
+                    latestTimeline.forEach((row) => {
+                        if (row.nest_asset_id === asset.id) { row.text = asset.name; row.matched_text = asset.name; }
+                    });
+                    if (typeof renderWordLevelTranscript === 'function') renderWordLevelTranscript(latestTimeline, 'FINAL');
+                    renderAll();
+                } catch (error) {
+                    console.warn('[nest] dựng lại Subsequence lane chính lỗi', error);
+                    showToast(_t('Dựng lại Subsequence "{name}" thất bại: {error}', { name: asset.name, error: error?.message || error }), { type: 'error' });
+                }
+            }
+        }).catch((error) => console.warn('[nest] sync', error));
+        return nestMainSyncChain;
+    }
+
+    // Block Subsequence có hiệu ứng riêng (bung ra thì mất) không?
+    function nestItemHasOwnEffects(item) {
+        const tr = normalizeTransform(item.transform);
+        const def = normalizeTransform(defaultTransform());
+        const moved = ['position_x', 'position_y', 'scale', 'rotation', 'opacity', 'flip_x', 'flip_y']
+            .some((k) => tr[k] !== def[k]);
+        return moved
+            || !!(window.TextAnimations && TextAnimations.hasKeyframes(item.keyframes))
+            || !!(window.TextAnimations && TextAnimations.hasAnimation(item))
+            || itemHasColorAdjust(item)
+            || !!item.video_mask
+            || (Number(item.volume) !== 100 && item.volume != null)
+            || item.muted === true;
+    }
+
+    /* BUNG Subsequence: nội dung trở lại timeline cha đúng chỗ và đúng phần đang hiện. */
+    function unnestItem(itemId) {
+        const item = findItem(itemId);
+        const asset = nestAssetOfItem(item);
+        if (!item || !asset || isTrackLocked(itemTrack(item))) return false;
+        const advances = (child) => child.type === 'audio' || (child.type === 'media' && assetIsVideo(findAsset(child.asset_id)));
+        const plan = NestSequence.planUnnest(item, asset.nest, advances);
+        if (!plan) {
+            showToast(_t('Không bung được Subsequence đang đổi tốc độ — đưa tốc độ về 1× trước.'), { type: 'warning' });
+            return false;
+        }
+        if (nestItemHasOwnEffects(item) && typeof window.confirm === 'function'
+            && !window.confirm(_t('Biến đổi, hiệu ứng, màu và âm lượng đặt trên block Subsequence sẽ mất khi bung ra. Tiếp tục?'))) {
+            return false;
+        }
+        recordHistory();
+        editingItems = editingItems.filter((it) => it.id !== item.id);
+        /* XẾP TỪ DƯỚI LÊN để giữ đúng thứ tự chồng lớp bên trong: lane thấp nhất của mỗi nhóm
+         * (hình / tiếng) nhận lane của block Subsequence (hoặc một lane trống cùng loại), mỗi
+         * lane kế tiếp phải nằm TRÊN lane vừa dùng — không vừa thì mở lane mới ngay phía trên. */
+        const anchor = itemTrack(item);
+        const sourceTracks = (asset.nest.tracks || []).slice()
+            .sort((a, b) => (Number(b.order) || 0) - (Number(a.order) || 0));
+        const placed = [];
+        const lastByGroup = {};
+        sourceTracks.forEach((srcTrack) => {
+            const entries = plan.filter((p) => p.sourceTrackId === String(srcTrack.id));
+            if (!entries.length) return;
+            const group = trackGroup(srcTrack.type);
+            const fits = (track) => track && track.type === srcTrack.type && !isTrackLocked(track)
+                && entries.every((p) => !trackHasOverlapAtRange(track.id, p.item.timeline_start, p.item.duration));
+            const below = lastByGroup[group];
+            let target = null;
+            if (!below) {
+                target = (anchor && fits(anchor)) ? anchor : null;
+                if (!target && group === 'audio') target = tracksOfType(srcTrack.type).find(fits) || null;
+            }
+            if (!target) {
+                target = createTrack(srcTrack.type);
+                const ref = below || (anchor && trackGroup(anchor.type) === group ? anchor : null);
+                if (ref) placeTrackAbove(target, ref);
+            }
+            lastByGroup[group] = target;
+            entries.forEach((p) => {
+                p.item.id = nextId('item');
+                p.item.track_id = target.id;
+                editingItems.push(p.item);
+                placed.push(p.item.id);
+            });
+        });
+        // Block con có lane không còn trong danh sách lane (dữ liệu lạ) -> lane hợp loại.
+        plan.filter((p) => !placed.includes(p.item.id) && !editingItems.includes(p.item)).forEach((p) => {
+            p.item.id = nextId('item');
+            p.item.track_id = trackForNewItemAtRange(p.item.type, p.item.timeline_start, p.item.duration).id;
+            editingItems.push(p.item);
+            placed.push(p.item.id);
+        });
+        selectedEditingItemIds = new Set(placed);
+        selectedEditingItemId = placed[0] || '';
+        selectedMainClipIndexes = new Set();
+        selectedTimelineClipIndex = -1;
+        renderAll();
+        if (typeof setStatusText === 'function') setStatusText(_t('Đã bung "{name}" ra {n} block.', { name: asset.name, n: placed.length }), false);
+        return true;
+    }
+
+    /* NHÂN BẢN block Subsequence. `independent`:
+     *   false -> bản sao DÙNG CHUNG nội dung (Premiere: Alt+kéo một nested sequence);
+     *   true  -> bản sao có tài sản RIÊNG, sửa bên trong không ảnh hưởng bản gốc. */
+    function duplicateNestItem(itemId, independent) {
+        const item = findItem(itemId);
+        const asset = nestAssetOfItem(item);
+        if (!item || !asset) return false;
+        recordHistory();
+        const copy = cloneEditingItem(item);
+        copy.id = nextId('item');
+        delete copy.transition;
+        if (independent) {
+            const fresh = cloneNestAsset(asset);
+            copy.asset_id = fresh.id;
+        }
+        const start = itemEnd(item);
+        copy.timeline_start = start;
+        const track = itemTrack(item);
+        copy.track_id = (track && !trackHasOverlapAtRange(track.id, start, copy.duration))
+            ? track.id
+            : freeMediaTrackForRange(start, copy.duration, track ? [track.id] : []).id;
+        editingItems.push(copy);
+        setPrimaryItemSelection(copy.id);
+        renderAll();
+        return true;
+    }
+
+    function cloneNestAsset(asset) {
+        const fresh = deepClone(asset);
+        fresh.id = nextId('nest');
+        fresh.name = NestSequence.nextNestName(editingAssets);
+        fresh.nest = NestSequence.cloneContent(asset.nest, (type) => nextId(`track_${type}`), () => nextId('item'));
+        editingAssets.push(fresh);
+        refreshNestAssetMeta(fresh);
+        return fresh;
+    }
+
+    // Tách MỘT instance khỏi nội dung dùng chung (Premiere: "Make Subsequence unique").
+    function makeNestItemUnique(itemId) {
+        const item = findItem(itemId);
+        const asset = nestAssetOfItem(item);
+        if (!item || !asset) return false;
+        recordHistory();
+        item.asset_id = cloneNestAsset(asset).id;
+        renderAll();
+        return true;
+    }
+
+    function renameNestOfItem(itemId) {
+        return renameNestAsset(nestAssetOfItem(findItem(itemId)));
+    }
+
+    function renameNestAsset(asset) {
+        if (!asset) return false;
+        const next = window.prompt(_t('Tên Subsequence'), asset.name || '');
+        if (next === null) return false;
+        const cleaned = String(next).trim().slice(0, 60);
+        if (!cleaned) return false;
+        recordHistory();
+        asset.name = cleaned;
+        (rootLatestTimeline() || []).forEach((row) => {
+            if (row?.nest_asset_id === asset.id) { row.text = cleaned; row.matched_text = cleaned; }
+        });
+        if (!nestStack.length && typeof renderWordLevelTranscript === 'function') renderWordLevelTranscript(latestTimeline, 'FINAL');
+        renderAll();
+        renderNestBreadcrumb();
+        return true;
+    }
+
+    /* VÀO SỬA BÊN TRONG một block Subsequence (bấm đúp). Không ghi lịch sử: đây là điều
+     * hướng, không phải chỉnh sửa — snapshot nào cũng nhớ đang đứng ở đâu (nestPath). */
+    function enterNest(itemId, options = {}) {
+        const item = findItem(itemId);
+        const asset = nestAssetOfItem(item);
+        if (!item || !asset) return false;
+        const parentTime = options.parentTime != null ? Number(options.parentTime) : currentSequenceTime();
+        return enterNestAsset(asset, {
+            instanceItemId: item.id,
+            parentTime,
+            innerTime: options.seek === false ? null : NestSequence.childTimeAt(item, parentTime),
+        });
+    }
+
+    // Bấm đúp row Subsequence trên lane chính: giờ bên trong = vị trí trong tệp đã dựng.
+    function enterNestFromMainRow(index) {
+        const row = latestTimeline?.[index];
+        const asset = mainRowNestAsset(row);
+        if (!asset) return false;
+        const span = mainClipSequenceSpans().find((s) => s.index === index);
+        const seg = mainRowSegment(row);
+        const parentTime = currentSequenceTime();
+        const local = span ? clamp(parentTime - span.start, 0, span.duration) : 0;
+        const innerTime = (Number(row.start) - Number(seg?.start || 0)) + local * speedRate(row);
+        return enterNestAsset(asset, { instanceItemId: `main:${index}`, parentTime, innerTime });
+    }
+
+    function enterNestAsset(asset, options = {}) {
+        if (!isNestAsset(asset)) return false;
+        if (nestStack.some((f) => f.assetId === asset.id)) return false;   // vòng tham chiếu
+        if (nestStack.length >= (NestSequence.MAX_DEPTH || 16)) return false;
+        if (editingTextSession) finishPreviewTextEdit(true);
+        stopPreviewPlaybackForNest();
+        commitNestContent();   // đang ở trong một cấp khác -> chốt cấp đó trước khi đi sâu
+        const parentTime = options.parentTime != null ? Number(options.parentTime) : currentSequenceTime();
+        nestStack.push({
+            assetId: asset.id,
+            instanceItemId: String(options.instanceItemId || ''),
+            parentTracks: editingTracks,
+            parentItems: editingItems,
+            parentLatestTimeline: latestTimeline,
+            parentSelection: {
+                itemId: selectedEditingItemId,
+                itemIds: Array.from(selectedEditingItemIds),
+                mainIndexes: Array.from(selectedMainClipIndexes),
+                clipIndex: selectedTimelineClipIndex,
+            },
+            parentTime,
+        });
+        editingTracks = deepClone(asset.nest.tracks || []);
+        editingItems = deepClone(asset.nest.items || []);
+        latestTimeline = [];
+        ensureDefaultTracks();
+        clearEditingSelection();
+        if (typeof renderWordLevelTranscript === 'function') renderWordLevelTranscript(latestTimeline, 'FINAL');
+        renderAll();
+        renderNestBreadcrumb();
+        if (options.innerTime != null && Number.isFinite(Number(options.innerTime))) {
+            setSequenceTime(clamp(Number(options.innerTime), 0, Math.max(0, Number(asset.duration) || 0)));
+        }
+        return true;
+    }
+
+    /* RA một cấp (hoặc `levels` cấp). Nội dung vừa sửa được ghi về tài sản trước khi trả kho
+     * cha — mọi instance của tài sản đó (kể cả ở cấp cha) thấy ngay bản mới. */
+    function exitNest(levels = 1) {
+        let n = Math.max(1, Number(levels) || 1);
+        if (!nestStack.length) return false;
+        if (editingTextSession) finishPreviewTextEdit(true);
+        stopPreviewPlaybackForNest();
+        let lastFrame = null;
+        while (n > 0 && nestStack.length) {
+            commitNestContent();
+            const frame = nestStack.pop();
+            editingTracks = frame.parentTracks;
+            editingItems = frame.parentItems;
+            latestTimeline = frame.parentLatestTimeline;
+            selectedEditingItemId = frame.parentSelection.itemId || '';
+            selectedEditingItemIds = new Set(frame.parentSelection.itemIds || []);
+            selectedMainClipIndexes = new Set(frame.parentSelection.mainIndexes || []);
+            selectedTimelineClipIndex = Number.isInteger(frame.parentSelection.clipIndex) ? frame.parentSelection.clipIndex : -1;
+            lastFrame = frame;
+            n -= 1;
+        }
+        ensureDefaultTracks();
+        if (typeof renderWordLevelTranscript === 'function') renderWordLevelTranscript(latestTimeline, 'FINAL');
+        const exitedAsset = lastFrame ? findAsset(lastFrame.assetId) : null;
+        renderAll();
+        renderNestBreadcrumb();
+        if (lastFrame) setSequenceTime(lastFrame.parentTime);
+        // Về tới timeline gốc: row Subsequence trên lane chính nào có nội dung vừa đổi thì dựng lại.
+        if (exitedAsset && !nestStack.length) syncMainLaneNests();
+        return true;
+    }
+
+    function exitAllNests() {
+        return nestStack.length ? exitNest(nestStack.length) : false;
+    }
+
+    // Khôi phục snapshot: mở lại đúng đường Subsequence đang đứng lúc chụp, không ghi lịch sử.
+    function reenterNestPath(path) {
+        nestStack = [];
+        (Array.isArray(path) ? path : []).forEach((entry) => {
+            const asset = findAsset(entry?.assetId);
+            if (!isNestAsset(asset)) return;
+            if (nestStack.some((f) => f.assetId === asset.id)) return;
+            nestStack.push({
+                assetId: asset.id,
+                instanceItemId: String(entry.instanceItemId || ''),
+                parentTracks: editingTracks,
+                parentItems: editingItems,
+                parentLatestTimeline: latestTimeline,
+                parentSelection: { itemId: '', itemIds: [], mainIndexes: [], clipIndex: -1 },
+                parentTime: Number(entry.parentTime) || 0,
+            });
+            editingTracks = deepClone(asset.nest.tracks || []);
+            editingItems = deepClone(asset.nest.items || []);
+            latestTimeline = [];
+            ensureDefaultTracks();
+        });
+        renderNestBreadcrumb();
+    }
+
+    /* THANH ĐƯỜNG DẪN phía trên timeline: "Timeline chính › Subsequence 1 › …". Chỉ hiện
+     * khi đang ở trong một Subsequence. Bấm một mục để lên đúng cấp đó; Esc lên một cấp. */
+    function renderNestBreadcrumb() {
+        const area = document.querySelector('.timeline-area');
+        const frame = area?.querySelector('.timeline-track-frame');
+        let bar = document.getElementById('nestBreadcrumb');
+        if (!nestStack.length) {
+            bar?.remove();
+            document.body.classList.remove('is-inside-nest');
+            return;
+        }
+        if (!area || !frame) return;
+        if (!bar) {
+            bar = document.createElement('div');
+            bar.id = 'nestBreadcrumb';
+            bar.className = 'nest-breadcrumb';
+            bar.addEventListener('click', (event) => {
+                const btn = event.target.closest('[data-nest-level]');
+                if (!btn) return;
+                const level = Number(btn.dataset.nestLevel);
+                if (Number.isInteger(level) && level < nestStack.length) exitNest(nestStack.length - level);
+            });
+            area.insertBefore(bar, frame);
+        }
+        document.body.classList.add('is-inside-nest');
+        const parts = [`<button type="button" class="nest-crumb" data-nest-level="0">${escapeHtml(_t('Timeline chính'))}</button>`];
+        nestStack.forEach((f, index) => {
+            const name = findAsset(f.assetId)?.name || 'Subsequence';
+            const last = index === nestStack.length - 1;
+            parts.push('<span class="nest-crumb-sep" aria-hidden="true">›</span>');
+            parts.push(last
+                ? `<span class="nest-crumb is-current">${escapeHtml(name)}</span>`
+                : `<button type="button" class="nest-crumb" data-nest-level="${index + 1}">${escapeHtml(name)}</button>`);
+        });
+        parts.push(`<span class="nest-crumb-hint">${escapeHtml(_t('Đang sửa bên trong Subsequence — Esc để ra ngoài'))}</span>`);
+        bar.innerHTML = parts.join('');
+    }
+
+    /* BẤM ĐÚP block Subsequence -> vào sửa bên trong. Gắn MỘT lần ở #segmentsTrack (uỷ quyền):
+     * cú bấm đầu chọn block và lượt vẽ lại thay phần tử block bằng phần tử mới, nên listener gắn
+     * trên từng block không bao giờ nhận được dblclick khi block chưa được chọn từ trước. */
+    function handleNestBlockDblClick(event) {
+        if (currentMode !== 'FINAL' || currentStepId !== 'step4') return;
+        if (event.target.closest?.('.editing-resize-handle')) return;
+        const block = event.target.closest?.('.editing-block.is-nest');
+        if (!block) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (block.dataset.itemId) enterNest(block.dataset.itemId);
+        else if (block.dataset.index != null) enterNestFromMainRow(Number(block.dataset.index));
+    }
+
+    function installNestDblClick() {
+        const track = document.getElementById('segmentsTrack');
+        if (!track || track.__nestDblClick) return;
+        track.__nestDblClick = true;
+        track.addEventListener('dblclick', handleNestBlockDblClick);
+    }
+
+    /* MENU CHUỘT PHẢI trên block timeline (overlay lẫn lane chính). */
+    function openTimelineBlockContextMenu(event, target) {
+        if (currentMode !== 'FINAL' || currentStepId !== 'step4') return;
+        event.preventDefault();
+        event.stopPropagation();
+        // Chuột phải vào block NGOÀI vùng chọn -> chọn riêng nó (nếp mọi trình dựng phim).
+        if (target.itemId && !selectedEditingItemIds.has(target.itemId)) setPrimaryItemSelection(target.itemId);
+        if (Number.isInteger(target.mainIndex) && !selectedMainClipIndexes.has(target.mainIndex)) {
+            setPrimaryMainSelection(target.mainIndex, { seek: false });
+        }
+        const count = selectionCount();
+        const single = count === 1 && target.itemId ? findItem(target.itemId) : null;
+        const nestAsset = nestAssetOfItem(single);
+        const mainNest = count === 1 && Number.isInteger(target.mainIndex) ? mainRowNestAsset(latestTimeline?.[target.mainIndex]) : null;
+        if (mainNest) {
+            // Row Subsequence trên lane chính: mở / đổi tên. (Nhân bản = Alt + kéo, dùng chung nội dung.)
+            const index = target.mainIndex;
+            openPanelContextMenu(event.clientX, event.clientY, [
+                { label: _t('Mở Subsequence'), hint: _t('Sửa nội dung bên trong (bấm đúp block)'), run: () => enterNestFromMainRow(index) },
+                { label: _t('Đổi tên Subsequence…'), run: () => renameNestAsset(mainNest) },
+            ]);
+            return;
+        }
+        const nestKey = window.Shortcuts ? Shortcuts.formatCombo(editingKeymap()?.['edit.nest'] || '') : '';
+        const entries = [{
+            label: count > 1 ? _t('Tạo Subsequence từ {n} block', { n: count }) : _t('Tạo Subsequence (Nest)'),
+            hint: nestKey ? `${_t('Gói các block đang chọn thành một Subsequence')} (${nestKey})` : _t('Gói các block đang chọn thành một Subsequence'),
+            disabled: count === 0,
+            run: () => createNestFromSelection(),
+        }];
+        if (nestAsset) {
+            const shared = nestInstancesOf(nestAsset.id).length > 1;
+            entries.push(
+                { sep: true },
+                { label: _t('Mở Subsequence'), hint: _t('Sửa nội dung bên trong (bấm đúp block)'), run: () => enterNest(single.id) },
+                { label: _t('Đổi tên Subsequence…'), run: () => renameNestOfItem(single.id) },
+                { label: _t('Nhân bản — dùng chung nội dung'), hint: _t('Sửa bên trong một bản là mọi bản đổi theo (như Alt + kéo)'), run: () => duplicateNestItem(single.id, false) },
+                { label: _t('Nhân bản — bản sao độc lập'), hint: _t('Bản sao có nội dung riêng'), run: () => duplicateNestItem(single.id, true) },
+                { label: _t('Tách khỏi nội dung dùng chung'), disabled: !shared, hint: _t('Block này có nội dung riêng từ giờ'), run: () => makeNestItemUnique(single.id) },
+                { sep: true },
+                { label: _t('Bung Subsequence (Un-nest)'), hint: _t('Trả nội dung về timeline này'), run: () => unnestItem(single.id) },
+            );
+        }
+        openPanelContextMenu(event.clientX, event.clientY, entries);
+    }
+
     function ensureInspectorExtra() {
         const host = document.getElementById('inspectorPanelBody') || document.getElementById('clipInspectorPanel');
         if (!host) return null;
@@ -9187,7 +10023,8 @@
         selectedItemsArray().forEach((item) => {
             // Chỉ block có NGƯỜI THẬT mới retouch được. Lớp Điều chỉnh không có hình,
             // text/shape do frontend tự vẽ.
-            if (item.type === 'media' && !isTrackLocked(itemTrack(item))) out.push(item);
+            // Subsequence: không có tệp nguồn để dò mặt người -> không retouch.
+            if (item.type === 'media' && !itemIsNest(item) && !isTrackLocked(itemTrack(item))) out.push(item);
         });
         return out;
     }
@@ -12301,6 +13138,17 @@
         exportCubeIdByText.clear();
         exportCubeTextById.clear();
         return out;
+    }
+    /* Lượt dựng Subsequence chạy exportPayload LỒNG giữa một lượt xuất (lane chính đã gom .cube từ
+     * trước) — cất bảng .cube đang gom rồi trả lại sau, nếu không lượt lồng rút mất của lượt ngoài. */
+    function stashExportCubeTexts() {
+        const saved = { byText: new Map(exportCubeIdByText), byId: new Map(exportCubeTextById) };
+        return () => {
+            exportCubeIdByText.clear();
+            exportCubeTextById.clear();
+            saved.byText.forEach((v, k) => exportCubeIdByText.set(k, v));
+            saved.byId.forEach((v, k) => exportCubeTextById.set(k, v));
+        };
     }
 
     // options: {frameHeight, frameWidth, label, fps, duration}
@@ -15788,7 +16636,7 @@
             ? TextAnimations.volumeAt(item.keyframes, Number(localTime))
             : null;
         const rawVolume = Number(kfVolume != null ? kfVolume : item.volume);
-        const gainValue = clamp((Number.isFinite(rawVolume) ? rawVolume : 100) / 100, 0, 10);
+        const gainValue = clamp((Number.isFinite(rawVolume) ? rawVolume : 100) / 100 * nestPreviewGainMul, 0, 10);
         const denoise = window.AudioDenoise
             ? window.AudioDenoise.normalize(item.audio_denoise)
             : { enabled: false, profile: 'voice', amount: 0 };
@@ -15882,7 +16730,7 @@
      * xuất vẫn đúng tốc độ đã đặt (xem applyMainClipPlaybackRate ở index.html). */
     function applyMediaPlaybackRate(el, speed) {
         if (!el) return;
-        const playable = clamp(speed.rate, 0.0625, 16);
+        const playable = clamp(speed.rate * nestPreviewRateMul, 0.0625, 16);
         try {
             if ('preservesPitch' in el) el.preservesPitch = speed.pitch_correct;
             if (Math.abs(el.playbackRate - playable) > 1e-4) el.playbackRate = playable;
@@ -18014,37 +18862,88 @@
         }, 0);
     }
 
-    function renderPreviewOverlays() {
-        if (renderGated('all')) return;
-        const root = ensurePreviewOverlayRoot();
-        if (!root) return;
-        const active = currentMode === 'FINAL' && currentStepId === 'step4';
-        root.style.display = active ? 'block' : 'none';
-        if (!active) {
-            stopOverlayPreviewLoop();
-            root.querySelectorAll('video,audio').forEach((el) => el.pause());
-            document.getElementById('editingSelectionBox')?.remove();
-            cancelPenTool();
-            if (video) video.muted = false;
-            return;
+    /* NỘI DUNG MỘT BLOCK SUBSEQUENCE trong preview: dựng lại chính các block bên trong bằng
+     * renderOverlayItemsInto, vào khung bọc `wrapper` (cỡ = khung Sequence, đã mang transform /
+     * opacity / hoạt ảnh / mặt nạ của block Subsequence -> hiệu ứng áp lên CẢ khối, đúng
+     * ngữ nghĩa Premiere).
+     *
+     * Trong lượt dựng (đồng bộ) runtime TẠM đọc kho của Subsequence: editingTracks/editingItems
+     * = bản sao nông của nội dung (id có tiền tố instance để hai instance dùng chung một nội
+     * dung không đụng phần tử DOM của nhau), giờ = giờ bên trong, tốc độ/âm lượng nhân thêm hệ
+     * số của block ngoài. try/finally trả lại ngay — không có gì chen vào được giữa chừng.
+     * Màu của block Subsequence = một LỚP ĐIỀU CHỈNH ẢO nằm trên cùng nội dung, nên mọi block
+     * con nhận màu đó qua đúng đường lớp Điều chỉnh sẵn có. */
+    function renderNestPreviewChildren(wrapper, item, asset, parentTime, previewScale) {
+        if (!window.NestSequence || !isNestAsset(asset)) return;
+        if (nestPreviewAncestors.length >= NestSequence.MAX_DEPTH || nestPreviewAncestors.includes(asset.id)) return;
+        const localParent = Math.max(0, Number(parentTime) - Number(item.timeline_start || 0));
+        const childTime = NestSequence.childTimeAt(item, parentTime);
+        const prefix = `${item.id}~`;
+        const parentMuted = isItemMuted(item);
+        const tracks = (asset.nest.tracks || []).map((t) => ({ ...t }));
+        const items = (asset.nest.items || []).map((child) => {
+            const copy = { ...child, id: prefix + child.id };
+            if (parentMuted) copy.muted = true;
+            return copy;
+        });
+        if (window.ColorAdjust && (item.adjustments || ColorAdjust.hasAdjustKeyframes(item.keyframes))) {
+            const adjTrackId = `${prefix}__adj`;
+            tracks.push({ id: adjTrackId, type: 'adjust', name: '', order: -1000, locked: false, muted: false, volume: 100, visible: true });
+            items.push({
+                id: `${prefix}__adj`,
+                type: 'adjust',
+                track_id: adjTrackId,
+                timeline_start: childTime - localParent,
+                duration: 1e7,
+                adjustments: item.adjustments || null,
+                keyframes: item.keyframes || null,
+                transform: { ...defaultTransform(), opacity: 100 },
+            });
         }
-        if (video) {
-            video.muted = isTrackMuted(findTrack('track_main'));
-            syncMainPreviewVolume();
+        const kfVolume = window.TextAnimations ? TextAnimations.volumeAt(item.keyframes, localParent) : null;
+        const volume = Number(kfVolume != null ? kfVolume : item.volume);
+        const saved = {
+            tracks: editingTracks,
+            items: editingItems,
+            time: nestPreviewTimeOverride,
+            rate: nestPreviewRateMul,
+            gain: nestPreviewGainMul,
+        };
+        editingTracks = tracks;
+        editingItems = items;
+        nestPreviewTimeOverride = childTime;
+        nestPreviewRateMul *= speedRate(item);
+        nestPreviewGainMul *= clamp((Number.isFinite(volume) ? volume : 100) / 100, 0, 10);
+        nestPreviewAncestors.push(asset.id);
+        try {
+            const w = Math.max(1, parseFloat(wrapper.style.width) || 1);
+            const h = Math.max(1, parseFloat(wrapper.style.height) || 1);
+            renderOverlayItemsInto(wrapper, w, h, previewScale, childTime);
+        } finally {
+            nestPreviewAncestors.pop();
+            editingTracks = saved.tracks;
+            editingItems = saved.items;
+            nestPreviewTimeOverride = saved.time;
+            nestPreviewRateMul = saved.rate;
+            nestPreviewGainMul = saved.gain;
         }
-        const frame = document.getElementById('sequencePreviewFrame');
-        const seq = payloadSequence();
-        const frameW = Math.max(1, frame?.clientWidth || 1);
-        const frameH = Math.max(1, frame?.clientHeight || 1);
-        const previewScale = Math.min(frameW / Math.max(1, seq.width), frameH / Math.max(1, seq.height));
-        const seqTime = currentSequenceTime();
-        const activeIds = new Set();
-        if (penSession) layoutPenOverlay();
-        // GĐ3: điểm cắt overlay đang trong vùng chuyển cảnh -> ẩn 2 item, vẽ composite thay thế.
-        const overlayTrans = activeOverlayTransition(seqTime);
-        suppressedTransitionItemIds = overlayTrans ? new Set([overlayTrans.A.id, overlayTrans.B.id]) : new Set();
-        const mainTrans = activeMainTransition(seqTime); // GĐ3 lane chính
+    }
 
+    // Khung bọc Subsequence bị gỡ khỏi preview: dừng mọi media con và trả context WebGL.
+    function releaseNestPreviewTree(wrapper) {
+        wrapper.querySelectorAll('video,audio').forEach((media) => { try { media.pause(); } catch (_) {} });
+        wrapper.querySelectorAll('[id^="preview_"]').forEach((child) => {
+            const id = child.id.slice('preview_'.length);
+            releaseColorFx(id);
+            if (typeof releaseDistortFx === 'function') releaseDistortFx(id);
+        });
+    }
+
+    /* Dựng phần tử preview cho mọi block của KHO ĐANG ĐỌC (editingItems / editingTracks) vào
+     * `root`, tại giờ `seqTime`. renderPreviewOverlays gọi cho timeline đang sửa; Subsequence
+     * gọi lại cho nội dung của nó với root = khung bọc (xem renderNestPreviewChildren). */
+    function renderOverlayItemsInto(root, frameW, frameH, previewScale, seqTime) {
+        const activeIds = new Set();
         /* ---- PRE-ROLL TIẾNG (sửa 2026-08-15) --------------------------------------
          * Trước đây phần tử <audio> chỉ được TẠO đúng lúc playhead chạm vào block. Trình
          * duyệt còn phải tải + giải mã + seek rồi mới phát ra tiếng — mất cỡ 100–300ms.
@@ -18145,11 +19044,14 @@
             const id = `preview_${item.id}`;
             activeIds.add(id);
             const asset = findAsset(item.asset_id);
-            const isVideoAsset = asset?.type === 'video' || asset?.type === 'media_video';
+            // SUBSEQUENCE: phần tử là một KHUNG BỌC <div>, nội dung dựng đệ quy bên trong.
+            const nestAsset = item.type === 'media' && isNestAsset(asset) ? asset : null;
+            const isVideoAsset = !nestAsset && (asset?.type === 'video' || asset?.type === 'media_video');
             // ĐIỀU CHỈNH MÀU: item media có chỉnh màu -> phần tử hiển thị là <canvas>
             // WebGL, media thật lui về nguồn ẩn. Bật/tắt giữa chừng thì phải dựng lại
             // phần tử vì loại thẻ đổi (canvas <-> video/img).
-            const useColorFx = itemHasColorAdjust(item);
+            // Màu của block Subsequence áp lên nội dung bên trong (renderNestPreviewChildren).
+            const useColorFx = !nestAsset && itemHasColorAdjust(item);
             const srcId = `previewsrc_${item.id}`;
             /* THAY MEDIA CỦA BLOCK (kéo-thả từ panel): item.id KHÔNG đổi nên phần tử preview
                cũ được dùng lại nguyên si, mà `src` chỉ được gán lúc TẠO -> preview vẫn hiện
@@ -18160,7 +19062,8 @@
                `src` chỉ gán lúc TẠO phần tử, nên bấm LQ/HQ mà khoá không đổi thì <video>
                vẫn phát bản cũ và cái nút thành ra vô nghĩa với lane overlay. */
             const mediaUrl = previewAssetUrl(asset);
-            const mediaKey = item.type === 'media' ? `${asset?.id || ''}|${mediaUrl}`
+            const mediaKey = nestAsset ? `nest:${nestAsset.id}`
+                : item.type === 'media' ? `${asset?.id || ''}|${mediaUrl}`
                 : (item.type === 'geocode' ? `gc:${item.geocode?.render_key || ''}` : '');
             /* Đổi qua/lại giữa text thường và MẪU VĂN BẢN là đổi cả LOẠI THẺ
                (<div> chữ CSS <-> <canvas> vẽ nhiều lớp). Không dựng lại thì thẻ cũ
@@ -18178,6 +19081,11 @@
                 el = null;
             }
             const makeMediaEl = () => {
+                if (nestAsset) {
+                    const wrap = document.createElement('div');
+                    wrap.dataset.nest = '1';
+                    return wrap;
+                }
                 if (isVideoAsset) {
                     const v = document.createElement('video');
                     v.playsInline = true;
@@ -18223,7 +19131,7 @@
                 el.id = id;
                 el.dataset.fx = useColorFx ? '1' : '0';
                 el.dataset.mediaKey = mediaKey;
-                el.setAttribute('class', 'editing-preview-item');
+                el.setAttribute('class', nestAsset ? 'editing-preview-item editing-preview-nest' : 'editing-preview-item');
                 root.appendChild(el);
             }
             if (useColorFx) activeIds.add(srcId);
@@ -18466,7 +19374,9 @@
                 const size = item.type === 'shape' ? shapeCanvasSize(item.style) : itemBaseSize(item, asset);
                 el.style.width = `${Math.max(1, size.width * previewScale)}px`;
                 el.style.height = `${Math.max(1, size.height * previewScale)}px`;
-                if (useColorFx) {
+                if (nestAsset) {
+                    renderNestPreviewChildren(el, item, nestAsset, seqTime, previewScale);
+                } else if (useColorFx) {
                     // Nguồn ẩn vẫn phải được tua/phát như bình thường (kể cả tiếng),
                     // rồi mới vẽ frame hiện tại qua shader lên canvas hiển thị.
                     const srcEl = document.getElementById(srcId);
@@ -18484,11 +19394,48 @@
             if (child.id === 'editingSelectionBox' || child.id === 'transitionPreviewCanvas' || child.id === 'mainTransitionCanvas') return;
             if (!activeIds.has(child.id)) {
                 if (child.tagName === 'VIDEO' || child.tagName === 'AUDIO') child.pause();
+                // Khung bọc Subsequence: phần tử con nằm bên trong cũng phải dừng + trả context.
+                if (child.dataset?.nest === '1') releaseNestPreviewTree(child);
                 // Canvas fx bị gỡ -> trả context WebGL về (mỗi tab chỉ có ~16 context)
                 if (child.id.startsWith('preview_')) releaseColorFx(child.id.slice('preview_'.length));
                 child.remove();
             }
         });
+    }
+
+    function renderPreviewOverlays() {
+        if (renderGated('all')) return;
+        const root = ensurePreviewOverlayRoot();
+        if (!root) return;
+        const active = currentMode === 'FINAL' && currentStepId === 'step4';
+        root.style.display = active ? 'block' : 'none';
+        if (!active) {
+            stopOverlayPreviewLoop();
+            root.querySelectorAll('video,audio').forEach((el) => el.pause());
+            document.getElementById('editingSelectionBox')?.remove();
+            cancelPenTool();
+            if (video) video.muted = false;
+            return;
+        }
+        if (video) {
+            video.muted = isTrackMuted(findTrack('track_main'));
+            syncMainPreviewVolume();
+        }
+        const frame = document.getElementById('sequencePreviewFrame');
+        const seq = payloadSequence();
+        const frameW = Math.max(1, frame?.clientWidth || 1);
+        const frameH = Math.max(1, frame?.clientHeight || 1);
+        const previewScale = Math.min(frameW / Math.max(1, seq.width), frameH / Math.max(1, seq.height));
+        const seqTime = currentSequenceTime();
+        if (penSession) layoutPenOverlay();
+        // GĐ3: điểm cắt overlay đang trong vùng chuyển cảnh -> ẩn 2 item, vẽ composite thay thế.
+        const overlayTrans = activeOverlayTransition(seqTime);
+        suppressedTransitionItemIds = overlayTrans ? new Set([overlayTrans.A.id, overlayTrans.B.id]) : new Set();
+        const mainTrans = activeMainTransition(seqTime); // GĐ3 lane chính
+
+        // Mọi block lane phụ -> phần tử preview (tách thành hàm để Subsequence dùng lại đệ quy).
+        renderOverlayItemsInto(root, frameW, frameH, previewScale, seqTime);
+
         // GĐ3: ẩn 2 item của vùng chuyển cảnh (vẫn giữ element làm nguồn vẽ) rồi vẽ composite phủ.
         // Dùng CLASS (opacity !important) thay vì ghi inline -> không phá cache style của setCached
         // (nếu ghi inline, item sẽ kẹt opacity 0 sau khi rời vùng vì cache tưởng chưa đổi).
@@ -19513,6 +20460,8 @@
     function importPaneAssets(kind) {
         const list = editingAssets
             .filter((a) => a.source !== 'library' && a.source !== 'main')
+            // Subsequence là tài sản nội bộ của timeline (không có tệp để xem trước / kéo vào).
+            .filter((a) => !isNestAsset(a))
             .filter((a) => (kind === 'audio'
                 ? a.type === 'audio'
                 : ['media', 'media_video', 'media_image'].includes(a.type)));
@@ -20734,6 +21683,9 @@
     let releaseExportTrap = null;
 
     function openExportModal() {
+        /* Xuất luôn là xuất TIMELINE CHÍNH: đang sửa trong Subsequence thì chốt nội dung và
+         * trở ra trước, nếu không payload sẽ là của sequence con. */
+        exitAllNests();
         document.body.classList.add('export-modal-open');
         const panel = document.getElementById('exportModalPanel');
         panel?.classList.add('active');
@@ -23382,6 +24334,157 @@
      *                 nhiều chuyển cảnh — xem khối "ĐÓNG GÓI CHUỖI KHUNG CHUYỂN CẢNH KHI
      *                 EXPORT"); KHÔNG có thì rơi về data URL nội tuyến như trước.
      */
+    /* ===== SUBSEQUENCE KHI XUẤT ===============================================
+     * Mỗi Subsequence được DỰNG bằng chính đường xuất (sidecar) thành một tệp trung gian ProRes
+     * 4444 có alpha, rồi đi vào payload như một block video bình thường — trim, tốc độ, keyframe,
+     * hoạt ảnh, màu, mặt nạ, âm lượng của block Subsequence đều đi đúng đường của video overlay.
+     * Lồng nhiều cấp: dựng cấp trong cùng trước (exportPayload của nội dung tự gọi lại chính nó).
+     * Backend cất tệp theo băm nội dung (nest_cache) nên xuất lại mà không sửa gì là dùng ngay. */
+    let nestExportFiles = null;     // assetId -> { path, url, has_audio, duration } trong MỘT lượt xuất
+    let nestExportDepth = 0;
+    const nestExportRestore = [];   // [{ asset, path, url }] — trả lại sau lượt xuất ngoài cùng
+
+    /* Cửa vào của MỌI lượt dựng payload (index.html, lượt dựng Subsequence): lo sổ tệp Subsequence
+     * của một lượt xuất rồi gọi exportPayload — thân dựng payload giữ đúng tên cũ. */
+    async function exportPayloadWithNests(options = {}) {
+        const outermost = nestExportDepth === 0;
+        if (outermost) nestExportFiles = new Map();
+        nestExportDepth += 1;
+        try {
+            return await exportPayload(options);
+        } finally {
+            nestExportDepth -= 1;
+            if (outermost) {
+                nestExportRestore.splice(0).forEach(({ asset, path, url }) => {
+                    asset.path = path;
+                    asset.url = url;
+                });
+                nestExportFiles = null;
+            }
+        }
+    }
+
+    // Tài sản trong payload: Subsequence đã dựng -> bản ghi video thường (bỏ nội dung `nest`).
+    function exportAssetRecord(asset) {
+        if (!isNestAsset(asset)) return asset;
+        const { nest: _content, ...rest } = asset;
+        const file = nestExportFiles?.get(asset.id);
+        return file ? { ...rest, path: file.path, url: file.url, has_audio: file.has_audio } : rest;
+    }
+
+    /* Dựng mọi Subsequence mà kho đang xuất dùng trực tiếp (cấp sâu hơn do lượt dựng của chính
+     * chúng lo). Trong lượt xuất, bản ghi tài sản SỐNG tạm mang path/url của tệp đã dựng để các
+     * khâu đọc nguồn theo đường dẫn (bake chuyển cảnh…) đọc được; trả lại ở cuối lượt. */
+    async function ensureNestRendersForExport(exportFps) {
+        if (!nestExportFiles) return;   // chỉ trong lượt đi qua exportPayloadWithNests
+        const used = [];
+        editingItems.forEach((item) => {
+            const asset = nestAssetOfItem(item);
+            if (asset && !used.includes(asset)) used.push(asset);
+        });
+        for (const asset of used) {
+            if (nestExportFiles.has(asset.id)) continue;
+            const file = await renderNestAssetFile(asset, { fps: exportFps, alpha: true });
+            nestExportFiles.set(asset.id, file);
+            nestExportRestore.push({ asset, path: asset.path, url: asset.url });
+            asset.path = file.path;
+            asset.url = file.url;
+        }
+    }
+
+    /* DỰNG NỘI DUNG MỘT SUBSEQUENCE thành tệp (xem /api/export-video › nest_render ở backend).
+     * `alpha: true` -> ProRes 4444 có alpha (lớp phủ); false -> H.264 đục (Subsequence trên lane
+     * chính). Tạm hoán đổi kho đang đọc sang nội dung của nó trong lúc dựng payload; vẽ lại bị
+     * treo suốt lượt đó để timeline/preview không hiện nhầm kho. */
+    // Nhịp khung của Sequence (số), dùng khi lượt dựng không được chỉ định fps.
+    function sequenceFpsValue() {
+        const seq = payloadSequence();
+        const raw = String(seq.fps || seq.source_fps || '30');
+        let value;
+        if (raw.includes('/')) {
+            const [a, b] = raw.split('/').map(Number);
+            value = b > 0 ? a / b : NaN;
+        } else {
+            value = Number(raw);
+        }
+        return Number.isFinite(value) && value > 0 ? value : 30;
+    }
+
+    async function renderNestAssetFile(asset, options = {}) {
+        if (!isNestAsset(asset)) throw new Error('not a Subsequence');
+        const fps = clamp(Number(options.fps) || sequenceFpsValue(), 10, 60);
+        const alpha = options.alpha !== false;
+        commitNestContent();
+        refreshNestAssetMeta(asset);
+        const transitionFrames = [];
+        const saved = { tracks: editingTracks, items: editingItems, latest: latestTimeline };
+        const restoreCubes = stashExportCubeTexts();
+        const releaseRender = suspendRender();
+        let editingJson;
+        if (typeof setStatusText === 'function') setStatusText(_t('Đang dựng Subsequence "{name}"…', { name: asset.name }), false);
+        try {
+            editingTracks = deepClone(asset.nest.tracks || []);
+            editingItems = deepClone(asset.nest.items || []);
+            latestTimeline = [];
+            ensureMainTrack();
+            editingJson = JSON.stringify(await exportPayloadWithNests({
+                fps,
+                audioOnly: false,
+                collectFile: (name, blob) => transitionFrames.push([name, blob]),
+            }));
+        } finally {
+            editingTracks = saved.tracks;
+            editingItems = saved.items;
+            latestTimeline = saved.latest;
+            restoreCubes();
+            releaseRender();
+        }
+        const sequence = payloadSequence();
+        // Lượt xuất: theo ô FPS của hộp Xuất; Subsequence lane chính: luôn theo nhịp của Sequence.
+        const fpsChoice = options.fpsChoice || document.getElementById('exportFps')?.value || 'source';
+        const form = new FormData();
+        form.append('timeline_json', JSON.stringify([{ start: 0, end: Math.max(0.2, Number(asset.duration) || 0.2) }]));
+        form.append('blank_base', '1');
+        form.append('editing_json', editingJson);
+        transitionFrames.forEach(([name, blob]) => form.append('transition_frames', blob, name));
+        form.append('export_settings', JSON.stringify({
+            resolution: 'sequence',
+            legacy_resolution: 'source',
+            sequence,
+            fps: fpsChoice,
+            codec: alpha ? 'prores' : 'h264',
+            export_video: true,
+            export_audio: false,
+        }));
+        form.append('sequence_settings', JSON.stringify(sequence));
+        form.append('export_preset', 'source');
+        form.append('export_fps', fpsChoice);
+        form.append('nest_render', '1');
+        form.append('nest_alpha', alpha ? '1' : '0');
+        const response = await fetch(`${API_BASE}/export-video`, { method: 'POST', body: form });
+        if (!response.ok) {
+            let detail = '';
+            try { detail = (await response.json()).detail || ''; } catch (_) {}
+            throw new Error(_t('Dựng Subsequence "{name}" thất bại: {error}', { name: asset.name, error: detail || response.status }));
+        }
+        const data = await response.json();
+        if (!data?.path) throw new Error(_t('Dựng Subsequence "{name}" thất bại: {error}', { name: asset.name, error: 'no path' }));
+        // Đăng ký cho /api/source-file: khâu bake đọc nguồn qua URL (chuyển cảnh, chụp khung hình).
+        try {
+            await fetch(`${API_BASE}/source-access/register`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ paths: [data.path] }),
+            });
+        } catch (_) { /* không đăng ký được thì chỉ các khâu đọc qua URL hụt, payload vẫn đúng */ }
+        return {
+            path: String(data.path),
+            url: sourceFileUrl(String(data.path)),
+            has_audio: data.has_audio !== false,
+            duration: Number(data.duration) || Number(asset.duration) || 0,
+        };
+    }
+
     async function exportPayload(options = {}) {
         const exportFps = clamp(Number(options.fps) || 30, 10, 60);
         const collectFile = typeof options.collectFile === 'function' ? options.collectFile : null;
@@ -23409,6 +24512,8 @@
             }
         };
         if (!audioOnly) await ensureGeocodeFramesForExport();
+        // SUBSEQUENCE: dựng tệp trung gian cho mọi block Subsequence trước khi dựng payload.
+        await ensureNestRendersForExport(exportFps);
         // Asset .svg của dự án cũ phải thành PNG trước khi xuất (migrateLegacyVectorAssets).
         if (legacyVectorMigration) await legacyVectorMigration;
         else await migrateLegacyVectorAssets();
@@ -23677,17 +24782,28 @@
             version: 5,
             tracks,
             items,
-            assets: editingAssets,
+            /* Bản ghi mới cho Subsequence (tệp đã dựng, bỏ nội dung lồng); asset khác giữ nguyên.
+             * Lượt dựng MỘT Subsequence (độ sâu > 1) chỉ mang asset mà nội dung của nó dùng: băm của
+             * nest_cache phủ cả payload, mang theo asset không liên quan là nhập thêm asset nào vào
+             * dự án cũng làm mọi Subsequence phải dựng lại. */
+            assets: (nestExportDepth > 1
+                ? editingAssets.filter((a) => items.some((it) => String(it.asset_id) === String(a.id)))
+                : editingAssets).map(exportAssetRecord),
             // Nội dung .cube mà spec màu (của lane chính lẫn của item) trỏ tới bằng `@cube:cN`.
             cube_texts: drainExportCubeTexts(),
         };
     }
 
     function getHistoryState() {
+        /* Đang ở trong Subsequence: chốt nội dung về tài sản rồi trả DẠNG GỐC (kho của
+         * timeline chính) + đường đang mở — xem khối SUBSEQUENCE. Selection là của cấp đang
+         * đứng, khôi phục sau khi mở lại đường đó. */
+        commitNestContent();
         return {
-            editingTracks: deepClone(editingTracks),
-            editingItems: deepClone(editingItems),
+            editingTracks: deepClone(rootEditingTracks()),
+            editingItems: deepClone(rootEditingItems()),
             editingAssets: deepClone(editingAssets),
+            nestPath: nestStack.map((f) => ({ assetId: f.assetId, instanceItemId: f.instanceItemId, parentTime: f.parentTime })),
             selectedEditingItemId,
             selectedEditingItemIds: Array.from(selectedEditingItemIds),
             selectedMainClipIndexes: Array.from(selectedMainClipIndexes),
@@ -23742,6 +24858,11 @@
             if (window.TextAnimations?.pairPositionKeyframes) TextAnimations.pairPositionKeyframes(it);
         });
         editingAssets = Array.isArray(state.editingAssets) ? deepClone(state.editingAssets) : [];
+        /* SUBSEQUENCE: snapshot luôn ở dạng gốc (latestTimeline do index.html vừa nạp cũng là
+         * của timeline gốc) -> mở lại đúng đường Subsequence đang đứng lúc chụp. */
+        reenterNestPath(state.nestPath);
+        // Hoàn tác / làm lại / mở dự án: nội dung Subsequence trên lane chính có thể đã khác tệp đang nối.
+        if (!nestStack.length) syncMainLaneNests();
         ensureGeocodeFramesInBackground();
         // Dự án cũ: scale media overlay tính trên cỡ gốc -> quy về mốc vừa khung (xem hàm).
         if (state.mediaScaleBasis !== 'fit') migrateMediaScaleToFit();
@@ -23819,6 +24940,8 @@
         editingTracks = [];
         editingItems = [];
         editingAssets = [];
+        nestStack = [];          // dự án mới không còn đứng trong Subsequence nào
+        renderNestBreadcrumb();
         /* SỔ PHỤ ĐỀ PHẢI DỌN CÙNG `editingItems`. Xoá block mà giữ sổ là một trạng thái KHÔNG
          * TỒN TẠI THẬT: `item_ids` trỏ vào những block vừa bị xoá, còn `cues` thì vẫn đầy.
          * Hậu quả đo được ở "Dự án mới":
@@ -24784,6 +25907,60 @@
                 background: linear-gradient(180deg, #3d70d4 0%, #315fba 58%, #2a51a0 100%);
                 color: #fff;
             }
+            /* SUBSEQUENCE: xanh lá như nested sequence của Premiere — nhìn là biết block này
+               chứa cả một sequence, bấm đúp để vào. Dải ảnh không có (chưa có tệp để trích). */
+            .editing-item-media.is-nest,
+            .editing-main-block.is-nest {
+                background: linear-gradient(180deg, #4f9a3a 0%, #3f8230 58%, #356e28 100%);
+            }
+            .editing-item-media.is-nest .editing-thumb-strip,
+            .editing-main-block.is-nest .editing-thumb-strip { display: none; }
+            .editing-main-block.is-nest .editing-block-label::before { content: '⧉ '; opacity: 0.85; }
+            .editing-item-media.is-nest .editing-block-label {
+                top: 50%;
+                transform: translateY(-50%);
+                background: rgba(0,0,0,0.22);
+            }
+            .editing-item-media.is-nest .editing-block-label::before {
+                content: '⧉ ';
+                opacity: 0.85;
+            }
+            .nest-breadcrumb {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                padding: 4px 12px;
+                min-height: 26px;
+                background: rgba(79,154,58,0.18);
+                border-top: 1px solid rgba(79,154,58,0.55);
+                border-bottom: 1px solid rgba(79,154,58,0.55);
+                font-size: var(--fs-sm, 12px);
+                color: var(--text-main, #e8e8e8);
+                overflow-x: auto;
+                white-space: nowrap;
+            }
+            .nest-breadcrumb .nest-crumb {
+                flex: 0 0 auto;
+                width: auto;
+                min-width: 0;
+                margin: 0;
+                background: none;
+                border: 0;
+                padding: 2px 4px;
+                color: inherit;
+                font: inherit;
+                border-radius: 4px;
+            }
+            .nest-breadcrumb button.nest-crumb { cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+            .nest-breadcrumb button.nest-crumb:hover { background: rgba(255,255,255,0.08); }
+            .nest-breadcrumb .nest-crumb.is-current { font-weight: 600; color: #a6e08f; }
+            .nest-breadcrumb .nest-crumb-sep { opacity: 0.6; }
+            .nest-breadcrumb .nest-crumb-hint { margin-left: auto; opacity: 0.65; padding-left: 16px; }
+            /* Nội dung Subsequence trong preview: khung bọc cắt đúng khung sequence. Chuột đi
+               xuyên qua các lớp con — chọn/kéo là chọn/kéo CẢ block Subsequence. */
+            .editing-preview-nest { position: absolute; overflow: hidden; }
+            .editing-preview-nest .editing-preview-nest,
+            .editing-preview-nest > * { pointer-events: none !important; }
             .editing-item-text .editing-block-label,
             .editing-item-shape .editing-block-label,
             .editing-item-vector .editing-block-label,
@@ -26016,6 +27193,23 @@
                 event.stopPropagation();
                 return;
             }
+            if (cmd === 'edit.nest' && currentMode === 'FINAL' && currentStepId === 'step4') {
+                event.preventDefault();
+                event.stopPropagation();
+                createNestFromSelection();
+                return;
+            }
+            /* Esc trong Subsequence = lên một cấp — chỉ khi không có hộp thoại / menu nào
+             * đang mở (Esc của chúng được ưu tiên đóng chúng trước). */
+            if (event.key === 'Escape' && isInsideNest() && currentStepId === 'step4'
+                && !panelCtxMenuEl
+                && !['export-modal-open', 'settings-modal-open', 'capture-modal-open', 'cut-prompt-open']
+                    .some((cls) => document.body.classList.contains(cls))) {
+                event.preventDefault();
+                event.stopPropagation();
+                exitNest(1);
+                return;
+            }
             if (cmd === 'edit.delete' && selectionCount() > 0) {
                 if (deleteSelectedBlocks()) {
                     event.preventDefault();
@@ -26028,6 +27222,7 @@
     }
 
     injectStyle();
+    installNestDblClick();
     patchTimelineAndPreview();
     patchInspector();
     bindEvents();
@@ -28068,7 +29263,7 @@
         getMagicFillHook: () => (magicFillHookNote ? { ...magicFillHookNote } : null),
         openExportModal,
         closeExportModal,
-        exportPayload,
+        exportPayload: exportPayloadWithNests,
         // Điều chỉnh màu: index.html dùng cho clip lane chính (latestTimeline) khi export
         colorAdjustExportSpec,
         videoMaskExportPng,
@@ -28129,6 +29324,19 @@
         getTimelineSnapTimes,
         getHistoryState,
         restoreHistoryState: restoreEditingHistoryState,
+        /* ---- SUBSEQUENCE (NEST) ---- index.html + cầu nối tự động hoá gọi vào. */
+        createNestFromSelection,
+        enterNest,
+        exitNest,
+        exitAllNests,
+        unnestItem,
+        duplicateNestItem,
+        makeNestItemUnique,
+        isInsideNest,
+        // latestTimeline của TIMELINE GỐC (đang trong Subsequence thì biến toàn cục là []).
+        rootLatestTimeline,
+        projectItemsDeep,
+        syncMainLaneNests,
         resetProjectState,
         refreshScriptPane,
         // Vẽ lại panel Tệp phương tiện. index.html gọi sau khi lane chính đổi: nhãn

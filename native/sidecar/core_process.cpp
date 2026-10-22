@@ -1113,6 +1113,11 @@ struct ExportOverlay {
 };
 
 struct ExportSettings {
+  /* SUBSEQUENCE (NEST): dựng nội dung một sequence con thành tệp TRUNG GIAN CÓ ALPHA (ProRes 4444)
+   * để timeline cha dùng như một lớp phủ video. Chỉ bật khi backend ghi `alpha_output: true` (luồng
+   * nest_render của /api/export-video) và codec là prores; mọi lượt xuất thường giữ nguyên. Nền
+   * (lane chính đen của blank_base) được làm TRONG SUỐT, lớp phủ ghép RGBA có bù alpha nền. */
+  bool alphaOutput = false;
   std::string resolution = "source";
   int width = 0;
   int height = 0;
@@ -1686,6 +1691,7 @@ EncoderPlan SelectEncoderPlan(const ExportSettings& settings) {
   if (!HardwareExportEnabled()) return cpu;
 
   if (settings.codec == "prores") {
+    if (settings.alphaOutput) return cpu;   // prores_ks là bộ mã hoá chắc chắn giữ alpha
 #ifdef __APPLE__
     if (HasFfmpegEncoder("prores_videotoolbox")) {
       return {"videotoolbox", "prores_videotoolbox", true};
@@ -2307,6 +2313,7 @@ bool ReadExportPayload(
     if (!(parsed > 0.0) || parsed > 240.0) settings.renderFps = "30";
   }
   if (!IsAllowed(settings.codec, {"h264", "hevc", "prores"})) settings.codec = "h264";
+  settings.alphaOutput = settings.codec == "prores" && ExtractBoolField(text, "alpha_output", false);
   if (!IsAllowed(settings.quality, {"small", "balanced", "high"})) settings.quality = "high";
   settings.rateMode = ExtractStringField(text, "rate_mode", "");
   settings.rateMbps = ExtractDoubleFieldOr(text, "rate_mbps", 0.0);
@@ -2505,6 +2512,8 @@ std::string Join(const std::vector<std::string>& values, const std::string& sepa
   return out.str();
 }
 
+std::string ClipPixelFormat(const ExportSettings& settings);
+
 std::string BuildVideoFilter(const ExportSettings& settings) {
   std::vector<std::string> filters;
   if (settings.fps != "source") filters.push_back("fps=" + settings.fps);
@@ -2515,8 +2524,15 @@ std::string BuildVideoFilter(const ExportSettings& settings) {
     filters.push_back("pad=" + w + ":" + h + ":(ow-iw)/2:(oh-ih)/2:color=black");
   }
   filters.push_back("setsar=1");
-  filters.push_back(settings.codec == "prores" ? "format=yuv422p10le" : "format=yuv420p");
+  filters.push_back(ClipPixelFormat(settings));
   return Join(filters, ",");
+}
+
+/* Nền TRONG SUỐT của lượt dựng Subsequence: lane chính (nền đen blank_base) giữ nguyên khổ/nhịp khung
+ * làm đồng hồ cho đồ thị, nhưng alpha = 0. `overlay format=auto` trên nền RGBA tự ghép có bù alpha nền
+ * (vf_overlay: main_has_alpha), nên lớp phủ ra đúng màu và đúng độ trong suốt. */
+std::string AlphaBaseFilter() {
+  return "format=rgba,colorchannelmixer=aa=0";
 }
 
 std::string FfmpegDouble(double value) {
@@ -2526,6 +2542,7 @@ std::string FfmpegDouble(double value) {
 }
 
 std::string ClipPixelFormat(const ExportSettings& settings) {
+  if (settings.alphaOutput) return "format=yuva444p10le";   // ProRes 4444 + alpha (Subsequence)
   return settings.codec == "prores" ? "format=yuv422p10le" : "format=yuv420p";
 }
 
@@ -5236,7 +5253,8 @@ const std::string& X264AsmCap() {
 
 void AppendCpuEncoderArgs(std::vector<std::string>& cmd, const ExportSettings& settings) {
   if (settings.codec == "prores") {
-    cmd.insert(cmd.end(), {"-c:v", "prores_ks", "-profile:v", "3", "-c:a", "pcm_s16le"});
+    // Subsequence: 4444 (profile 4) giữ kênh alpha 16 bit; còn lại 422 HQ như cũ.
+    cmd.insert(cmd.end(), {"-c:v", "prores_ks", "-profile:v", settings.alphaOutput ? "4" : "3", "-c:a", "pcm_s16le"});
     return;
   }
   const std::string preset = QualityPreset(settings);
@@ -5418,7 +5436,8 @@ bool WriteFilterScript(
   if (overlays.empty()) {
     if (wantVideo) {
       script << concatSpec << "[vcat]" << (wantAudio ? "[a]" : "") << ";\n";
-      script << "[vcat]" << (g_gpuGraph ? GpuOutputFilters(settings) : OutputColorFilters(settings)) << "[v]\n";
+      script << "[vcat]" << (settings.alphaOutput ? AlphaBaseFilter() + "," : std::string())
+             << (g_gpuGraph ? GpuOutputFilters(settings) : OutputColorFilters(settings)) << "[v]\n";
     } else if (dummyVideo) {
       script << concatSpec << "[dvcat][a];\n[dvcat]nullsink\n";
     } else {
@@ -5436,6 +5455,10 @@ bool WriteFilterScript(
   }
 
   std::string currentVideo = "[mainv]";
+  if (wantVideo && settings.alphaOutput) {
+    script << "[mainv]" << AlphaBaseFilter() << "[mainva];\n";
+    currentVideo = "[mainva]";
+  }
   size_t visualIndex = 0;
   for (const auto& overlay : overlays) {
     if (!wantVideo) break;

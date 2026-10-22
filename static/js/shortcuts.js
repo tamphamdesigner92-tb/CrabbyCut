@@ -57,6 +57,7 @@
         { id: 'edit.undo', group: 'edit', label: _t('Hoàn tác'), combo: 'Cmd+KeyZ' },
         { id: 'edit.redo', group: 'edit', label: _t('Làm lại'), combo: 'Cmd+Shift+KeyZ' },
         { id: 'edit.delete', group: 'edit', label: _t('Xoá block / clip đang chọn'), combo: 'Delete' },
+        { id: 'edit.nest', group: 'edit', label: _t('Tạo Subsequence (Nest) từ các block đang chọn'), combo: 'Alt+Shift+KeyN' },
 
         { id: 'tool.razor', group: 'tool', label: _t('Dao cắt (bật/tắt)'), combo: 'Cmd+KeyK' },
 

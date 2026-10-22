@@ -37,6 +37,8 @@
     <script src="/static/js/audio-waveform.js?v=waveform-strip-p5-grid"></script>
     <script src="/static/js/audio-denoise.js?v=denoise-p1"></script>
     <script src="/static/js/clip-speed.js?v=speed-p2"></script>
+    <!-- Subsequence (Nest): phần tính toán thuần; editing-runtime.js dùng qua window.NestSequence -->
+    <script src="/static/js/nest-sequence.js?v=nest-p1"></script>
     <script src="/static/js/color-adjust.js?v=coloradjust-p14"></script>
     <!-- auto-grade.js đọc window.ColorAdjust lúc khởi tạo (UMD) -> phải nạp SAU color-adjust.js -->
     <script src="/static/js/auto-grade.js?v=autograde-p1"></script>
@@ -12013,7 +12015,9 @@
         return {
             mappedChunks: JSON.parse(JSON.stringify(globalMappedChunks || [])),
             rawSegments: JSON.parse(JSON.stringify(globalRawSegments || [])),
-            latestTimeline: JSON.parse(JSON.stringify(latestTimeline || [])),
+            /* Đang sửa trong Subsequence thì `latestTimeline` tạm là [] — snapshot (undo + .crab)
+               luôn giữ lane chính của TIMELINE GỐC (xem khối SUBSEQUENCE ở editing-runtime.js). */
+            latestTimeline: JSON.parse(JSON.stringify(window.EditingRuntime?.rootLatestTimeline?.() || latestTimeline || [])),
             /* Sổ NGUỒN cũng phải hoàn tác được: từ 2026-09-08 menu chuột phải ở panel Tệp
              * phương tiện xoá được video nguồn khỏi dự án, mà thao tác đó ghi vào đây. Không
              * chụp thì Ctrl+Z trả clip về lane chính nhưng sổ nguồn vẫn thiếu video đó. */
@@ -12865,6 +12869,13 @@
                     (item) => !item.asset_id || !skippedAssetIds.has(item.asset_id),
                 );
             }
+            // Block nằm trong Subsequence trỏ vào asset bị bỏ qua -> bỏ theo, như ở timeline gốc.
+            editingState.editingAssets.forEach((asset) => {
+                if (!window.NestSequence?.isNestAsset(asset)) return;
+                asset.nest.items = (asset.nest.items || []).filter(
+                    (item) => !item.asset_id || !skippedAssetIds.has(item.asset_id),
+                );
+            });
         }
         for (const asset of editingState.editingAssets) {
             const patch = patches.get(asset.id);
@@ -13877,6 +13888,12 @@
      * (asset đã xoá nhưng sổ nguồn còn) — Ctrl+Z một lần ra một dự án không nhất quán.
      * Nhánh lỗi vẫn executeUndo() được: bước gần nhất trên stack chính là thao tác đang dở. */
     window.rebuildMainLane = async function rebuildMainLane({ appendPaths = [], history = true } = {}) {
+        // Sequence con (Subsequence) không có lane chính nam châm: lane chính đang hiện là của
+        // nó (rỗng), dựng lại temp_input.mp4 lúc này là làm lệch lane chính của timeline gốc.
+        if (window.EditingRuntime?.isInsideNest?.()) {
+            showToast(_t('Trong Subsequence không có lane chính — thả video lên một lane video.'), { type: 'warning' });
+            return false;
+        }
         if (mainLaneRebuildInFlight) {
             setStatusText(_t('Đang dựng lane chính — đợi lượt hiện tại xong đã.'), false);
             return false;
@@ -13999,6 +14016,65 @@
         }
     };
 
+    /* NỐI THÊM nguồn vào CUỐI temp_input.mp4, GIỮ NGUYÊN bố cục cũ (SUBSEQUENCE trên lane chính).
+     *
+     * KHÁC rebuildMainLane / replaceMainLaneSource: hai hàm đó dựng danh sách nối TỪ ROW đang có,
+     * nên nguồn không còn row nào (clip vừa được gói vào Subsequence, bản dựng cũ của Subsequence)
+     * bị rơi khỏi file nối -> mốc start/end trong các bản chụp HOÀN TÁC cũ trỏ sai chỗ (hoàn tác
+     * xong row Subsequence biến mất). Ở đây danh sách nối là đúng bố cục HIỆN TẠI (bảng đoạn) cộng
+     * nguồn mới ở cuối: mọi mốc cũ — của lane chính lẫn của mọi bản chụp — vẫn đúng nguyên.
+     * Không tạo row nào; người gọi tự đặt row. Trả bảng đoạn mới. */
+    window.appendSourcesToMainConcat = async function appendSourcesToMainConcat(paths) {
+        if (!isDesktopVideoEnv()) throw new Error(_t('Gói clip lane chính vào Subsequence cần bản desktop.'));
+        if (mainLaneRebuildInFlight) throw new Error(_t('Đang dựng lane chính — đợi lượt hiện tại xong đã.'));
+        const current = (mainConcatSegments || []).map((seg) => seg.source_path).filter(Boolean);
+        const oldSources = current.length ? current : (mainConcatCache.sources || []).slice();
+        const fresh = Array.from(new Set((paths || []).filter((p) => p && !oldSources.includes(p))));
+        if (!fresh.length) return mainConcatSegments;
+        const sources = oldSources.concat(fresh);
+        mainLaneRebuildInFlight = true;
+        startStatusPolling();
+        try {
+            const oldSegments = mainConcatSegments;
+            const response = await fetch(`${API_BASE}/project/reingest`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source_paths: sources, preserve_order: true, require_all: true }),
+            });
+            if (!response.ok) {
+                const detail = await response.json().catch(() => ({}));
+                throw new Error(detail.detail || _t('Nối video thất bại (HTTP {status}).', { status: response.status }));
+            }
+            const data = await response.json();
+            const reported = normalizeConcatSegments(data.segments);
+            const newSegments = reported.length
+                ? reported
+                : window.MainLane.segmentTableFromDurations(mainLaneSourceEntries(sources, await probeDurations(sources)));
+            if (!newSegments.length) throw new Error(_t('Không đọc được thời lượng của video nguồn.'));
+            // Biên của nguồn cũ thường không đổi (chỉ nối thêm ở cuối); rebaseRows bù nếu có trôi.
+            if (oldSegments.length && latestTimeline.length) {
+                latestTimeline = window.MainLane.rebaseRows(latestTimeline, oldSegments, newSegments);
+                latestTimeline = window.MainLane.clampRowsToSegments(latestTimeline, newSegments).rows;
+                latestTimeline = normalizeTimelineTransforms(latestTimeline);
+            }
+            mainConcatSegments = newSegments;
+            mainConcatFrame = normalizeConcatFrame(data.concat_frame);
+            mainConcatCache = { sources, order: 'given' };
+            await loadTranscribedVideoAndHydrateUI({
+                segments: [],
+                videoVersion: data.video_version,
+                transcriptMode: 'FINAL',
+                transcriptTitle: _t('Lane chính'),
+                fallbackDurationOverride: newSegments[newSegments.length - 1]?.end || 0,
+            });
+            markProjectDirty();
+            return newSegments;
+        } finally {
+            stopStatusPolling();
+            mainLaneRebuildInFlight = false;
+        }
+    };
+
     /* Đưa video ĐÃ CÓ trong panel Tệp phương tiện lên lane chính.
      *
      * KHÔNG còn nút "Video nguồn" riêng và KHÔNG còn hai hạng video: mọi tệp trong panel
@@ -14053,7 +14129,8 @@
      * lúc đó không suy được gì từ clip, mà cả thư viện chính là nguồn của lane chính, nên
      * rơi về sổ nguồn như cũ. */
     window.getMainLaneSourcePaths = function getMainLaneSourcePaths() {
-        const fromRows = window.MainLane?.concatSourcesFromRows(latestTimeline);
+        const rows = window.EditingRuntime?.rootLatestTimeline?.() || latestTimeline;
+        const fromRows = window.MainLane?.concatSourcesFromRows(rows);
         if (Array.isArray(fromRows)) return fromRows;
         return projectVideoLibrary.map((item) => item.source_path).filter(Boolean);
     };
@@ -14070,6 +14147,7 @@
      * Lane chính do LUỒNG LỌC sinh ra thì chỉ dọn sổ nguồn: row của nó không mang
      * source_path nên không biết clip nào thuộc video nào, dựng lại là mất kết quả lọc. */
     window.removeSourcePathsFromMainLane = async function removeSourcePathsFromMainLane(paths, options = {}) {
+        window.EditingRuntime?.exitAllNests?.();   // thao tác trên lane chính của timeline gốc
         // `history: false` khi người gọi đã chụp lịch sử — xem chú thích ở rebuildMainLane.
         const history = options.history !== false;
         const drop = new Set((paths || []).filter(Boolean));
@@ -16513,6 +16591,8 @@
             return;
         }
         videoExportInFlight = true;
+        // SUBSEQUENCE trên lane chính: chờ lượt dựng lại (nếu nội dung vừa đổi) xong rồi mới đọc lane chính.
+        try { await window.EditingRuntime?.syncMainLaneNests?.(); } catch (_) { /* lỗi đã báo ở lượt dựng */ }
         /* Dừng preview trước khi xuất: vòng phát (Pixi + overlay + cuộn timeline, ~60 Hz) giành
          * CPU/GPU với ffmpeg vốn đã bão hoà CPU. Đo 2026-09-28 (bản cắt 300 s 4K): cùng payload,
          * lượt xuất khi preview đang phát chậm hơn ~21–30%. Nút Play tự đồng bộ theo sự kiện

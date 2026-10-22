@@ -171,6 +171,12 @@ const PREBAKE_CACHE_DIR = process.env.CRAB_PREBAKE_CACHE_DIR
   ? path.resolve(process.env.CRAB_PREBAKE_CACHE_DIR)
   : path.join(USER_DATA_ROOT, 'prebake_cache');
 const PREBAKE_CACHE_ALLOWED = Boolean(process.env.CRAB_PREBAKE_CACHE_DIR) || !process.env.CRAB_TEMP_DIR;
+/* SUBSEQUENCE (NEST): tệp dựng sẵn của từng sequence con (ProRes 4444 có alpha cho lớp phủ, H.264 cho
+ * Subsequence nằm trên lane chính). Tên tệp = băm nội dung payload, nên sửa bên trong là ra tệp mới và
+ * xuất lại không đổi gì thì dùng ngay tệp cũ. Test (CRAB_TEMP_DIR) giữ trong thư mục tạm của test. */
+const NEST_CACHE_DIR = process.env.CRAB_TEMP_DIR
+  ? path.join(path.resolve(process.env.CRAB_TEMP_DIR), 'nest_cache')
+  : path.join(PROJECT_ROOT, 'nest_cache');
 const PREBAKE_CACHE_MAX_BYTES = 10 * 1024 * 1024 * 1024;
 const PREBAKE_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const LIBRARY_CATEGORIES = { video: 'Video', elements: 'Elements', sfxs: 'SFXs', music: 'Music' };
@@ -7935,6 +7941,45 @@ function createApp() {
       const editingRaw = parseOptionalJsonObject(req.body.editing_json || {});
       setExportCubeTexts(editingRaw.cube_texts);
       const exportSettings = normalizeExportSettings(req.body);
+      /* SUBSEQUENCE (nest_render=1): frontend nhờ dựng NỘI DUNG một sequence con thành tệp trung gian
+       * (editing-runtime.js › renderNestAssetFile). Cùng đường dựng với bản xuất thật — preview/xuất
+       * khớp nhau bằng cấu trúc — chỉ khác: codec cố định (ProRes 4444 + alpha cho lớp phủ, H.264 chất
+       * lượng cao cho lane chính), ghi vào nest_cache theo băm nội dung, trả JSON đường dẫn tệp. */
+      const nestRender = String(req.body.nest_render || '') === '1';
+      const nestAlpha = nestRender && String(req.body.nest_alpha || '') === '1';
+      let nestOutputPath = null;
+      if (nestRender) {
+        Object.assign(exportSettings, {
+          codec: nestAlpha ? 'prores' : 'h264',
+          quality: 'high',
+          rate_mode: 'higher',
+          export_video: true,
+          audio_file_format: null,
+          alpha_output: nestAlpha,
+        });
+        delete exportSettings.rate_mbps;
+        delete exportSettings.gif;
+        const hash = crypto.createHash('sha1');
+        hash.update(String(req.body.timeline_json || ''));
+        hash.update('\0');
+        hash.update(String(req.body.editing_json || ''));
+        hash.update('\0');
+        hash.update(String(req.body.sequence_settings || ''));
+        hash.update(`\0${req.body.export_fps || ''}\0${nestAlpha ? 'alpha' : 'opaque'}\0`);
+        for (const file of (Array.isArray(req.files) ? req.files : [])) {
+          hash.update(`${file.originalname}:${file.size}\0`);
+        }
+        await fsp.mkdir(NEST_CACHE_DIR, { recursive: true });
+        nestOutputPath = path.join(NEST_CACHE_DIR, `nest_${hash.digest('hex').slice(0, 24)}${nestAlpha ? '.mov' : '.mp4'}`);
+        if (fs.existsSync(nestOutputPath) && fs.statSync(nestOutputPath).size > 0) {
+          return res.json({
+            path: nestOutputPath,
+            cached: true,
+            duration: mediaDurationSeconds(nestOutputPath),
+            has_audio: mediaHasAudio(nestOutputPath),
+          });
+        }
+      }
       // Cài đặt › Xuất video › "Render bằng" (mục 1.21): sidecar dựng đồ thị GPU khi máy dùng được.
       exportSettings.render_device = readAppSettings().export.renderDevice;
       const exportRaw = typeof req.body.export_settings === 'string' && req.body.export_settings.trim()
@@ -7993,7 +8038,7 @@ function createApp() {
       }
       /* Đuôi đích theo LOẠI XUẤT: có Video -> đuôi video (tệp âm thanh riêng, nếu chọn, nằm cạnh
        * nó cùng tên); chỉ Audio -> đuôi của định dạng âm thanh. main.js ký đúng đuôi đó. */
-      userOutputPath = trustedExportOutputPath(req.body, exportSettings.export_video
+      userOutputPath = nestRender ? null : trustedExportOutputPath(req.body, exportSettings.export_video
         ? path.extname(exportOutputName(exportSettings))
         : exportAudioExt(exportSettings.audio_file_format));
       // Chốt màu asset overlay TRƯỚC khi dựng payload: xem sdrOverridesForEditingAssets.
@@ -8044,7 +8089,9 @@ function createApp() {
             : path.join(TEMP_DIR, `final_cut${exportAudioExt(audioFormat)}`));
       const audioPart = audioTarget ? (audioOnly ? outputPath : exportPartPath(audioTarget)) : null;
       // GIF: sidecar ghi MP4 tạm này, khâu chuyển GIF ghi ra outputPath. Còn lại: sidecar ghi thẳng outputPath.
-      const renderPath = gifSettings && !audioOnly ? path.join(TEMP_DIR, 'final_cut_gif_source.mp4') : outputPath;
+      const renderPath = nestOutputPath
+        ? `${nestOutputPath}.part${path.extname(nestOutputPath)}`
+        : (gifSettings && !audioOnly ? path.join(TEMP_DIR, 'final_cut_gif_source.mp4') : outputPath);
       if (renderPath !== outputPath) await fsp.rm(renderPath, { force: true });
       const clientStartedAt = parseClientStartedAtMs(req.body.client_started_at_ms);
       const renderStartedAt = clientStartedAt || Date.now();
@@ -8091,6 +8138,17 @@ function createApp() {
             _t('Video xuất ra bị thiếu: chỉ dài {actual}s trong khi timeline là {expected}s. Nhiều khả năng các video nguồn khác thông số nhau nên bản nối bị đứt giữa chừng — hãy thử "Dự án mới" rồi thêm lại video, hoặc báo lỗi kèm tệp .crab.',
             { actual: actualDuration.toFixed(2), expected: expectedDuration.toFixed(2) }),
           );
+        }
+        if (nestOutputPath) {
+          // Subsequence: xong là đổi tên vào cache rồi trả đường dẫn — không tệp âm thanh, không báo cáo.
+          await fsp.rename(renderPath, nestOutputPath);
+          setStatus(_t('Đã dựng xong Subsequence.'));
+          return res.json({
+            path: nestOutputPath,
+            cached: false,
+            duration: actualDuration,
+            has_audio: mediaHasAudio(nestOutputPath),
+          });
         }
         if (renderPath !== outputPath) {
           try {

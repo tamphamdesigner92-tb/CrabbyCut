@@ -23,6 +23,8 @@ logo_ai_cache/
 # Khung GeoCode (electron/geocode-renderer.js) — cache theo khoá nội dung, dựng lại được từ mã.
 geocode_cache/
 concat_cache/
+# Tệp dựng của Subsequence (Nest) — xem NEST_CACHE_DIR ở backend/server.js
+nest_cache/
 vendor/
 
 # ── KHO TÀI NGUYÊN MEDIA — KHÔNG ĐƯỢC CÔNG KHAI ────────────────────────────────
