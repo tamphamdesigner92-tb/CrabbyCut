@@ -111,6 +111,22 @@
     // Mỗi đỉnh lưới Mesh Warp = 10 số: x, y, rồi 4 tay cầm (TƯƠNG ĐỐI so với đỉnh) trái, phải, lên, xuống.
     const MESH_STRIDE = 10;
 
+    /* Liquify: trường dời đều FIELD_N × FIELD_N ô phủ hộp (toạ độ chuẩn hoá), mỗi đỉnh một véc-tơ
+     * dời (dx, dy) chuẩn hoá. Điểm p -> p + D(p)·Distortion Percentage + Offset. Cọ của AE trừ
+     * Reflection/Clone (hai cọ đó lấy mẫu chéo vùng ảnh, không biểu diễn được bằng trường dời). */
+    const FIELD_N = 64;
+    const FIELD_LEN = (FIELD_N + 1) * (FIELD_N + 1) * 2;
+    const LIQUIFY_TOOLS = [
+        { id: 'warp', label: 'Warp' },
+        { id: 'turbulence', label: 'Turbulence' },
+        { id: 'twirl_cw', label: 'Twirl Clockwise' },
+        { id: 'twirl_ccw', label: 'Twirl Counterclockwise' },
+        { id: 'pucker', label: 'Pucker' },
+        { id: 'bloat', label: 'Bloat' },
+        { id: 'shift', label: 'Shift Pixels' },
+        { id: 'reconstruct', label: 'Reconstruction' },
+    ];
+
     /* Bảng thông số theo loại hiệu ứng. `kind`: 'num' nội suy, 'enum' giữ (hold), 'vec2' / 'mesh'
      * nội suy từng số. Thông số nào có đồng hồ bấm giờ trong AE thì có ◆; `noKf` = không (Quality,
      * Rows, Columns). `slider` = dải thanh trượt (ô số vẫn nhận tới min/max). */
@@ -143,6 +159,18 @@
                 { key: 'cols', label: 'Columns', kind: 'num', def: 7, min: 1, max: 31, slider: [1, 31], step: 1, unit: '', noKf: true },
                 { key: 'quality', label: 'Quality', kind: 'num', def: 8, min: 1, max: 10, slider: [1, 10], step: 1, unit: '', noKf: true },
                 { key: 'mesh', label: 'Distortion Mesh', kind: 'mesh', def: null },
+            ],
+        },
+        liquify: {
+            label: 'Liquify',
+            handles: true,
+            params: [
+                { key: 'tool', label: 'Tool', kind: 'enum', options: LIQUIFY_TOOLS, def: 'warp', noKf: true },
+                { key: 'brush_size', label: 'Brush Size', kind: 'num', def: 80, min: 2, max: 4000, slider: [2, 600], step: 1, unit: 'px', noKf: true },
+                { key: 'brush_pressure', label: 'Brush Pressure', kind: 'num', def: 50, min: 1, max: 100, slider: [1, 100], step: 1, unit: '%', noKf: true },
+                { key: 'field', label: 'Distortion Mesh', kind: 'field', def: null },
+                { key: 'offset', label: 'Distortion Mesh Offset', kind: 'vec2', def: [0, 0] },
+                { key: 'percent', label: 'Distortion Percentage', kind: 'num', def: 100, min: -1000, max: 1000, slider: [0, 200], step: 1, unit: '%' },
             ],
         },
         /* Puppet Tool: ghim (pins) với Position keyframe RIÊNG từng ghim (khoá 'pin_<id>'), lưới tam
@@ -183,6 +211,11 @@
         if (def.kind === 'mesh') {
             // Độ dài được đối chiếu với Rows/Columns ở normalizeEffect / meshArray.
             if (!Array.isArray(value) || !value.length || value.length > 32 * 32 * MESH_STRIDE) return null;
+            const out = value.map(Number);
+            return out.every(Number.isFinite) ? out.map((v) => Math.max(-50, Math.min(50, v))) : null;
+        }
+        if (def.kind === 'field') {
+            if (!Array.isArray(value) || value.length !== FIELD_LEN) return null;
             const out = value.map(Number);
             return out.every(Number.isFinite) ? out.map((v) => Math.max(-50, Math.min(50, v))) : null;
         }
@@ -282,7 +315,7 @@
         const arr = list.slice().sort((a, b) => (Number(a.t) || 0) - (Number(b.t) || 0));
         const time = Number(t) || 0;
         const val = (k) => normalizeParam(def, k.v);
-        const vector = def.kind === 'vec2' || def.kind === 'mesh';
+        const vector = def.kind === 'vec2' || def.kind === 'mesh' || def.kind === 'field';
         const mix = (a, b, k) => {
             if (!vector) return a + (b - a) * k;
             if (!a || !b || a.length !== b.length) return a;   // lưới khác cỡ: giữ (Hold)
@@ -541,6 +574,103 @@
         let k = cache[key];
         if (!k) { k = meshCellPatch(m, cols, ci, cj); cache[key] = k; }
         return coons(k, U * cols - ci, V * rows - cj);
+    }
+
+    /* ===================================================================== LIQUIFY */
+
+    let zeroField = null;
+    function fieldArray(p) {
+        const f = p && Array.isArray(p.field) && p.field.length === FIELD_LEN ? p.field : null;
+        if (f) return f;
+        if (!zeroField) zeroField = new Array(FIELD_LEN).fill(0);
+        return zeroField;
+    }
+
+    /* Độ dời (chuẩn hoá) tại (U, V): song tuyến tính trên trường, ngoài hộp giữ giá trị ở mép. Viết
+     * 1-1 ở sidecar (DistortLiquifyDisp). */
+    function liquifyDisp(f, U, V) {
+        const N = FIELD_N;
+        const x = Math.max(0, Math.min(1, U)) * N;
+        const y = Math.max(0, Math.min(1, V)) * N;
+        const i = Math.min(N - 1, Math.floor(x));
+        const j = Math.min(N - 1, Math.floor(y));
+        const s = x - i;
+        const t = y - j;
+        const a = (j * (N + 1) + i) * 2;
+        const b = a + 2;
+        const c = a + (N + 1) * 2;
+        const d = c + 2;
+        return [
+            (1 - s) * (1 - t) * f[a] + s * (1 - t) * f[b] + (1 - s) * t * f[c] + s * t * f[d],
+            (1 - s) * (1 - t) * f[a + 1] + s * (1 - t) * f[b + 1] + (1 - s) * t * f[c + 1] + s * t * f[d + 1],
+        ];
+    }
+
+    /* MỘT nhát cọ Liquify lên trường (hàm thuần, trả trường MỚI). Toạ độ chuẩn hoá theo hộp, bán kính
+     * và khoảng cách tính bằng px của hộp. Cọ tác động lên vị trí ĐANG HIỆN của từng đỉnh (đã nhân
+     * Distortion Percentage + Offset) — như vẽ trực tiếp trên hình đang uốn.
+     *   o: { tool, cursor:[x,y], prev:[x,y], size (px), pressure (1..100), percent, offset:[x,y],
+     *        boxW, boxH, tick (số nguyên — hạt giống cho Turbulence) } */
+    function liquifyStroke(field, o) {
+        const N = FIELD_N;
+        const f = fieldArray({ field }).slice();
+        const W = o.boxW;
+        const H = o.boxH;
+        const r = Math.max(1, o.size / 2);
+        const s = Math.max(0.01, Math.min(1, (Number(o.pressure) || 50) / 100));
+        let pct = (Number(o.percent) || 0) / 100;
+        if (Math.abs(pct) < 0.05) pct = pct < 0 ? -0.05 : 0.05;
+        const off = o.offset || [0, 0];
+        const [cx, cy] = o.cursor;
+        const [px0, py0] = o.prev || o.cursor;
+        const dx = (cx - px0) * W;    // bước kéo, px
+        const dy = (cy - py0) * H;
+        for (let j = 0, q = 0; j <= N; j += 1) {
+            for (let i = 0; i <= N; i += 1, q += 2) {
+                const rx = i / N;
+                const ry = j / N;
+                // Vị trí đang hiện của đỉnh, px theo hộp.
+                let X = (rx + f[q] * pct + off[0]) * W;
+                let Y = (ry + f[q + 1] * pct + off[1]) * H;
+                const ex = X - cx * W;
+                const ey = Y - cy * H;
+                const d2 = ex * ex + ey * ey;
+                if (d2 >= r * r) continue;
+                const fall = (1 - d2 / (r * r)) ** 2;
+                const w = fall * s;
+                switch (o.tool) {
+                    case 'warp': X += w * dx; Y += w * dy; break;
+                    case 'shift': X += w * -dy * 0.5; Y += w * dx * 0.5; break;   // sang trái hướng kéo
+                    case 'twirl_cw':
+                    case 'twirl_ccw': {
+                        const a = (o.tool === 'twirl_cw' ? 1 : -1) * w * 0.12;
+                        const c = Math.cos(a);
+                        const sn = Math.sin(a);
+                        X = cx * W + ex * c - ey * sn;
+                        Y = cy * H + ex * sn + ey * c;
+                        break;
+                    }
+                    case 'pucker': X -= w * 0.08 * ex; Y -= w * 0.08 * ey; break;
+                    case 'bloat': X += w * 0.08 * ex * (1 - Math.sqrt(d2) / r); Y += w * 0.08 * ey * (1 - Math.sqrt(d2) / r); break;
+                    case 'turbulence': {
+                        const k = (o.tick | 0) * 131071 + q;
+                        X += w * r * 0.03 * hash32(k);
+                        Y += w * r * 0.03 * hash32(k + 7);
+                        break;
+                    }
+                    case 'reconstruct': {
+                        const keep = 1 - w * 0.15;
+                        f[q] *= keep;
+                        f[q + 1] *= keep;
+                        continue;
+                    }
+                    default: continue;
+                }
+                f[q] = Math.round(((X / W - rx - off[0]) / pct) * 1e5) / 1e5;
+                f[q + 1] = Math.round(((Y / H - ry - off[1]) / pct) * 1e5) / 1e5;
+            }
+        }
+        return f;
     }
 
     /* ===================================================================== PUPPET (ARAP) */
@@ -951,6 +1081,9 @@
                 cy = Math.max(cy, fx.params.rows * Math.max(2, fx.params.quality));
             } else if (fx.type === 'puppet') {
                 puppetCells.push(puppetGrid(fx.params, boxW, boxH));
+            } else if (fx.type === 'liquify') {
+                cx = Math.max(cx, FIELD_N);
+                cy = Math.max(cy, FIELD_N);
             }
         });
         /* Puppet: lưới vẽ phải là BỘI của lưới Puppet (cùng cách chia tam giác) thì ánh xạ affine từng
@@ -994,6 +1127,15 @@
                     const d = wf.h * waveShape(fx.params.wave_type, u) * pinWeight(fx.params.pinning, px / boxW, py / boxH);
                     pts[q] += wf.nx * d;
                     pts[q + 1] += wf.ny * d;
+                }
+            } else if (fx.type === 'liquify') {
+                const f = fieldArray(fx.params);
+                const pct = (Number(fx.params.percent) || 0) / 100;
+                const off = fx.params.offset || [0, 0];
+                for (let q = 0; q < n; q += 2) {
+                    const D = liquifyDisp(f, pts[q] / boxW + 0.5, pts[q + 1] / boxH + 0.5);
+                    pts[q] += (D[0] * pct + off[0]) * boxW;
+                    pts[q + 1] += (D[1] * pct + off[1]) * boxH;
                 }
             } else if (fx.type === 'puppet') {
                 // `solved` có sẵn khi dựng lại từ spec xuất (lưới đã giải gửi kèm); không thì giải tại chỗ.
@@ -1060,6 +1202,24 @@
                 const ey = (my + over * (hi[1] - lo[1])) * boxH;
                 padX = Math.max(0, ex - boxW / 2) + padX;
                 padY = Math.max(0, ey - boxH / 2) + padY;
+            } else if (fx.type === 'liquify') {
+                // Độ dời lớn nhất của mọi trường (tĩnh + keyframe) × % lớn nhất + Offset lớn nhất; +15 %.
+                const kfs = (item && item.keyframes) || {};
+                const fields = [fieldArray(fx.params)];
+                (kfs[kfField(fx.id, 'field')] || []).forEach((k) => {
+                    const v = normalizeParam(paramDef('liquify', 'field'), k.v);
+                    if (v) fields.push(v);
+                });
+                let mdx = 0;
+                let mdy = 0;
+                fields.forEach((f) => { for (let q = 0; q < f.length; q += 2) { mdx = Math.max(mdx, Math.abs(f[q])); mdy = Math.max(mdy, Math.abs(f[q + 1])); } });
+                const pcts = paramValues(item, fx, 'percent').map((v) => Math.abs(v) / 100);
+                const offs = [fx.params.offset, ...((kfs[kfField(fx.id, 'offset')] || []).map((k) => normalizeParam(paramDef('liquify', 'offset'), k.v)))];
+                const pmax = Math.max(...pcts);
+                const ox = Math.max(...offs.map((o) => Math.abs(o[0])));
+                const oy = Math.max(...offs.map((o) => Math.abs(o[1])));
+                padX += (mdx * pmax + ox) * 1.15 * boxW;
+                padY += (mdy * pmax + oy) * 1.15 * boxH;
             } else if (fx.type === 'puppet') {
                 /* Giải Puppet ở dáng tĩnh, ở mọi keyframe ghim và 4 điểm giữa mỗi đoạn, lấy bao của
                  * lưới đã giải; cộng 15 % (easing vượt đích). Phép phân tích được nhớ nên rẻ. */
@@ -1432,13 +1592,23 @@
      * mỗi khung chỉ còn ba số; gửi nguyên lưới từng khung thì Mesh 31×31 có keyframe dài 60 s là
      * ~240 MB JSON (vượt trần body của /api/export-video). */
     function meshMixAt(item, fx, t, cache = new Map()) {
-        const len = meshLength(fx.params.rows, fx.params.cols);
+        return arrayMixAt(item, fx, 'mesh', meshLength(fx.params.rows, fx.params.cols), () => meshArray(fx.params), t, cache);
+    }
+
+    // Trường dời Liquify tại t, cùng dạng { a, b, k } (xem meshMixAt).
+    function fieldMixAt(item, fx, t, cache = new Map()) {
+        return arrayMixAt(item, fx, 'field', FIELD_LEN, () => fieldArray(fx.params), t, cache);
+    }
+
+    /* Thông số kiểu MẢNG (lưới Mesh / trường Liquify) tại t dưới dạng trộn hai mảng gốc — đúng phép
+     * của evalParamKeyframes. `baseOf()` = giá trị tĩnh khi không có keyframe hợp lệ. */
+    function arrayMixAt(item, fx, key, len, baseOf, t, cache) {
         // `cache` (giữ suốt một lượt exportSpec): cùng keyframe -> CÙNG mảng, để gộp theo tham chiếu.
-        if (!cache.has('base')) cache.set('base', meshArray(fx.params));
+        if (!cache.has('base')) cache.set('base', baseOf());
         const base = cache.get('base');
-        const list = item && item.keyframes ? item.keyframes[kfField(fx.id, 'mesh')] : null;
+        const list = item && item.keyframes ? item.keyframes[kfField(fx.id, key)] : null;
         if (!Array.isArray(list) || !list.length) return { a: base, b: base, k: 0 };
-        const def = paramDef('mesh', 'mesh');
+        const def = paramDef(fx.type, key);
         const arr = list.slice().sort((x, y) => (Number(x.t) || 0) - (Number(y.t) || 0));
         const raw = (kf) => {
             if (!cache.has(kf)) cache.set(kf, normalizeParam(def, kf.v));
@@ -1506,6 +1676,15 @@
                 if (fx.type === 'puppet') {
                     return { type: 'puppet', t: 0, params: { triangles: fx.params.triangles }, puppet_ref: puppetRef(enabled[i], fx.params) };
                 }
+                if (fx.type === 'liquify') {
+                    // Trường dời dùng CHUNG bảng `meshes` với Mesh Warp (mảng số, trộn a + (b − a)·k).
+                    const mix = fieldMixAt(item, enabled[i], t, mixCaches[i]);
+                    return {
+                        type: 'liquify', t: 0,
+                        params: { percent: fx.params.percent, offset: fx.params.offset },
+                        field_ref: [meshRef(mix.a), meshRef(mix.b), mix.k],
+                    };
+                }
                 if (fx.type === 'mesh') {
                     const mix = meshMixAt(item, enabled[i], t, mixCaches[i]);
                     const { mesh: _m, ...rest } = fx.params;
@@ -1545,6 +1724,12 @@
             if (fx.type === 'puppet' && fx.puppet_ref != null) {
                 const sol = puppets[fx.puppet_ref];
                 return { ...fx, solved: { cols: sol.cols, rows: sol.rows, pts: sol.pts } };
+            }
+            if (fx.type === 'liquify' && fx.field_ref) {
+                const [fa, fb, fk] = fx.field_ref;
+                const a = meshes[fa];
+                const b = meshes[fb];
+                return { ...fx, params: { ...fx.params, field: a.map((x, i) => x + (b[i] - x) * fk) } };
             }
             if (fx.type !== 'mesh' || !fx.mesh_ref) return fx;
             const [ia, ib, k] = fx.mesh_ref;
@@ -1733,11 +1918,14 @@
                     }).join('');
                     return list || `<div class="dst-empty">${esc(_t('Bấm ✎ rồi bấm lên hình để đặt ghim; kéo ghim để uốn. Alt+bấm hoặc Delete để xoá ghim.'))}</div>`;
                 }
-                if (p.kind === 'mesh') {
+                if (p.kind === 'mesh' || p.kind === 'field') {
+                    const reset = p.kind === 'mesh'
+                        ? `<button type="button" class="btn btn-secondary" data-distort-action="reset-mesh" data-distort-id="${fx.id}">${esc(_t('Đặt lại lưới'))}</button>`
+                        : `<button type="button" class="btn btn-secondary" data-distort-action="reset-field" data-distort-id="${fx.id}">${esc(_t('Khôi phục tất cả'))}</button>`;
                     return `
                     <div class="dst-row">
                         <span>${esc(_t(p.label))}</span>
-                        <span class="dst-slider"><button type="button" class="btn btn-secondary" data-distort-action="reset-mesh" data-distort-id="${fx.id}">${esc(_t('Đặt lại lưới'))}</button></span>
+                        <span class="dst-slider">${reset}</span>
                         ${kf}
                     </div>`;
                 }
@@ -1812,7 +2000,7 @@
             cur[field.axis === 1 ? 1 : 0] = n / Math.max(1e-6, field.axis === 1 ? box.h : box.w);
             return normalizeParam(def, cur);
         }
-        if (def.kind === 'mesh') return null;
+        if (def.kind === 'mesh' || def.kind === 'field') return null;
         return normalizeParam(def, field.raw);
     }
 
@@ -1844,7 +2032,7 @@
             const def = fx && paramDef(fx.type, key);
             if (!def) return;
             const v = getParam(effectParamsAt(item, fx, t), key);
-            if (def.kind === 'mesh' || v == null) return;
+            if (def.kind === 'mesh' || def.kind === 'field' || v == null) return;
             let next;
             if (def.kind === 'vec2') {
                 const ax = Number(el.dataset.distortAxis) === 1 ? 1 : 0;
@@ -1893,6 +2081,13 @@
         exportSpec,
         evalSpecStack,
         meshMixAt,
+        FIELD_N,
+        FIELD_LEN,
+        LIQUIFY_TOOLS,
+        fieldArray,
+        liquifyDisp,
+        liquifyStroke,
+        fieldMixAt,
         puppetGrid,
         puppetSolve,
         puppetMap,

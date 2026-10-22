@@ -96,7 +96,17 @@ async function main() {
           params: { br_vertex: [1.12, 1.08], tl_tangent: [0.33, 0.15], tr_tangent: [0.66, 0.15] } },
       ],
     };
-    item.keyframes = { 'dst.u1.pin_b': [{ t: 0, v: [0.75, 0.5], e: 'ease-in-out' }, { t: 1, v: [0.8, 0.35] }] };
+    // Liquify cuối ngăn: trường vẽ bằng cọ Warp + Twirl, có keyframe Distortion Percentage.
+    let liq = null;
+    for (let k = 0; k < 6; k += 1) {
+      liq = D.liquifyStroke(liq, { tool: k < 3 ? 'warp' : 'twirl_cw', cursor: [0.35 + 0.05 * (k + 1), 0.45], prev: [0.35 + 0.05 * k, 0.45],
+        size: 50, pressure: 90, percent: 100, offset: [0, 0], boxW: OV_W, boxH: OV_H, tick: k });
+    }
+    item.distort.push({ id: 'l1', type: 'liquify', enabled: true, params: { field: liq, percent: 100, offset: [0, 0] } });
+    item.keyframes = {
+      'dst.u1.pin_b': [{ t: 0, v: [0.75, 0.5], e: 'ease-in-out' }, { t: 1, v: [0.8, 0.35] }],
+      'dst.l1.percent': [{ t: 0, v: 0, e: 'linear' }, { t: 1, v: 150 }],
+    };
     item.distort_spec = D.exportSpec(item, OV_W, OV_H, FPS, DUR);
     const editing = {
       tracks: [

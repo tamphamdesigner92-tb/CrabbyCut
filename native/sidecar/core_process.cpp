@@ -7197,7 +7197,12 @@ struct DistortWave {
 /* Một bước của ngăn hiệu ứng: Wave, Bezier (mặt Coons 24 số chuẩn hoá — thứ tự của bezierPatch ở
  * distort.js) hoặc Mesh (rows × cols ô, mỗi đỉnh 10 số: x, y + 4 tay cầm tương đối trái/phải/lên/xuống). */
 struct DistortOp {
-  int kind = 0;   // 0 wave, 1 bezier, 2 mesh, 3 puppet, -1 bỏ qua
+  int kind = 0;   // 0 wave, 1 bezier, 2 mesh, 3 puppet, 4 liquify, -1 bỏ qua
+  // Liquify: trường N×N ô = trộn bảng (meshA, meshB, meshK) như Mesh; điểm += (D·percent/100 + offset).
+  int fieldN = 0;
+  double percent = 100.0;
+  double offX = 0.0;
+  double offY = 0.0;
   int puppetRef = -1;
   DistortWave wave;
   std::vector<double> patch;
@@ -7254,6 +7259,10 @@ bool ReadDistortSpec(const std::string& path, DistortSpec& spec, std::string& er
           op.kind = 1;
           op.patch.resize(24);
           for (double& v : op.patch) in >> v;
+        } else if (kind == "liquify") {
+          op.kind = 4;
+          in >> op.fieldN >> op.meshA >> op.meshB >> op.meshK >> op.percent >> op.offX >> op.offY;
+          if (op.fieldN < 1 || op.fieldN > 256) { error = "trường Liquify sai cỡ"; return false; }
         } else if (kind == "puppet") {
           op.kind = 3;
           in >> op.puppetRef;
@@ -7314,6 +7323,17 @@ bool ReadDistortSpec(const std::string& path, DistortSpec& spec, std::string& er
   // Trộn sẵn lưới cho từng bước Mesh (cùng công thức x + (b − x)·k với JS).
   for (auto& stack : spec.stacks) {
     for (auto& op : stack) {
+      if (op.kind == 4) {
+        const size_t len = static_cast<size_t>(op.fieldN + 1) * (op.fieldN + 1) * 2;
+        const bool okA = op.meshA >= 0 && op.meshA < static_cast<int>(meshes.size()) && meshes[op.meshA].size() == len;
+        const bool okB = op.meshB >= 0 && op.meshB < static_cast<int>(meshes.size()) && meshes[op.meshB].size() == len;
+        if (!okA || !okB) { error = "trường Liquify tham chiếu sai"; return false; }
+        const auto& a = meshes[op.meshA];
+        const auto& b = meshes[op.meshB];
+        op.mesh.resize(len);
+        for (size_t i = 0; i < len; i++) op.mesh[i] = a[i] + (b[i] - a[i]) * op.meshK;
+        continue;
+      }
       if (op.kind == 3) {
         if (op.puppetRef < 0 || op.puppetRef >= static_cast<int>(puppets.size()) || puppets[op.puppetRef].pts.empty()) {
           error = "lưới Puppet tham chiếu sai";
@@ -7446,6 +7466,29 @@ void DistortEvalGrid(const std::vector<DistortOp>& stack, double boxW, double bo
   const double kPi = 3.14159265358979323846;
   for (const DistortOp& op : stack) {
     if (op.kind < 0) continue;
+    if (op.kind == 4) {
+      // = liquifyDisp của distort.js (song tuyến tính, kẹp vào hộp).
+      const int N = op.fieldN;
+      const std::vector<double>& f = op.mesh;
+      const double pct = op.percent / 100.0;
+      for (size_t p = 0; p < n; p += 2) {
+        const double x = std::max(0.0, std::min(1.0, pts[p] / boxW + 0.5)) * N;
+        const double y = std::max(0.0, std::min(1.0, pts[p + 1] / boxH + 0.5)) * N;
+        const int i = std::min(N - 1, static_cast<int>(std::floor(x)));
+        const int j = std::min(N - 1, static_cast<int>(std::floor(y)));
+        const double s = x - i;
+        const double t = y - j;
+        const size_t a = static_cast<size_t>(j * (N + 1) + i) * 2;
+        const size_t b = a + 2;
+        const size_t c = a + static_cast<size_t>(N + 1) * 2;
+        const size_t d = c + 2;
+        const double dx = (1 - s) * (1 - t) * f[a] + s * (1 - t) * f[b] + (1 - s) * t * f[c] + s * t * f[d];
+        const double dy = (1 - s) * (1 - t) * f[a + 1] + s * (1 - t) * f[b + 1] + (1 - s) * t * f[c + 1] + s * t * f[d + 1];
+        pts[p] += (dx * pct + op.offX) * boxW;
+        pts[p + 1] += (dy * pct + op.offY) * boxH;
+      }
+      continue;
+    }
     if (op.kind == 3) {
       // = puppetMap của distort.js: affine từng tam giác (a,b,d)/(a,d,c), ngoại suy ở mép.
       const int pc = op.cols, pr = op.rows;

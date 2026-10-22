@@ -14394,6 +14394,7 @@
             let cur = Distort.getParam(eff, parsed.key);
             // Mesh chưa uốn lưu `null` (= lưới đều) -> keyframe phải mang lưới đều THẬT để nội suy được.
             if (cur == null && fx.type === 'mesh' && parsed.key === 'mesh') cur = Distort.meshArray(eff);
+            if (cur == null && fx.type === 'liquify' && parsed.key === 'field') cur = Distort.fieldArray(eff).slice();
             if (cur == null) return;
             kfs[field] = upsertKeyframe(list, t, cur);
         }
@@ -14422,6 +14423,15 @@
         }
         const stack = Distort.normalizeStack(item.distort);
         recordHistory();
+        if (action === 'reset-field') {
+            // Khôi phục tất cả (Liquify): trường dời về 0; đang có keyframe thì ghi keyframe tại playhead.
+            if (stack.some((f) => f.id === id && f.type === 'liquify')) {
+                item.distort = stack;
+                applyDistortValue(item, id, 'field', new Array(Distort.FIELD_LEN).fill(0));
+            }
+            renderAll();
+            return true;
+        }
         if (action === 'reset-mesh') {
             const fx = stack.find((f) => f.id === id);
             if (fx && fx.type === 'mesh') {
@@ -14494,6 +14504,94 @@
         if (item) syncOverlayInspector(item);
     }
 
+    /* ===== CỌ LIQUIFY =====
+     * Một nét = một bước Hoàn tác. Warp / Shift Pixels đi theo bước kéo; Twirl / Pucker / Bloat /
+     * Turbulence / Reconstruction còn tác dụng LIÊN TỤC khi giữ chuột đứng yên (như AE) — hẹn giờ 40 ms.
+     * Ghi qua applyDistortValue nên trường đang có keyframe thì ghi keyframe tại playhead. */
+    let distortBrushAt = null;   // vị trí cọ (chuẩn hoá) để vẽ vòng cọ
+    let liquifyTick = 0;
+
+    function applyLiquifyDab(target, cursor, prev) {
+        const p = Distort.effectParamsAt(target.item, target.fx, overlayLocalTime(target.item));
+        const box = distortBoxSize(target.item);
+        const field = Distort.liquifyStroke(p.field || null, {
+            tool: p.tool, cursor, prev, size: p.brush_size, pressure: p.brush_pressure,
+            percent: p.percent, offset: p.offset,
+            boxW: Number(box.width) || 1, boxH: Number(box.height) || 1, tick: liquifyTick++,
+        });
+        applyDistortValue(target.item, target.fx.id, 'field', field);
+    }
+
+    function startLiquifyStroke(svg, event, target) {
+        const n = distortPointerToNorm(svg, event);
+        if (!n) return;
+        recordHistory();
+        distortDrag = { pointerId: event.pointerId, handleId: 'liquify', recorded: true };
+        let cur = n;
+        let prev = n;
+        distortBrushAt = n;
+        const directional = (tool) => tool === 'warp' || tool === 'shift';
+        const tool = Distort.effectParamsAt(target.item, target.fx, overlayLocalTime(target.item)).tool;
+        if (!directional(tool)) applyLiquifyDab(target, cur, cur);
+        renderPreviewOverlays();
+        const timer = directional(tool) ? 0 : window.setInterval(() => {
+            // Nét bị huỷ từ chỗ khác (rời bước dựng / Esc) -> tự dừng, không chờ cú rê chuột kế tiếp.
+            if (!distortDrag) { detach(); return; }
+            const t = distortEditTarget();
+            if (!t) return;
+            applyLiquifyDab(t, cur, cur);
+            renderPreviewOverlays();
+        }, 40);
+        const detach = () => {
+            if (timer) window.clearInterval(timer);
+            window.removeEventListener('pointermove', move, true);
+            window.removeEventListener('pointerup', up, true);
+            window.removeEventListener('pointercancel', up, true);
+        };
+        const move = (ev) => {
+            if (!distortDrag) { detach(); return; }
+            if (ev.pointerId !== distortDrag.pointerId) return;
+            if (ev.pointerType === 'mouse' && ev.buttons === 0) { up(ev); return; }
+            const t = distortEditTarget();
+            const m = t && distortPointerToNorm(svg, ev);
+            if (!m) return;
+            prev = cur;
+            cur = m;
+            distortBrushAt = m;
+            applyLiquifyDab(t, cur, prev);
+            renderPreviewOverlays();
+        };
+        const up = (ev) => {
+            if (!distortDrag) { detach(); return; }
+            if (ev.pointerId !== distortDrag.pointerId) return;
+            distortDrag = null;
+            detach();
+            renderAll();
+        };
+        window.addEventListener('pointermove', move, true);
+        window.addEventListener('pointerup', up, true);
+        window.addEventListener('pointercancel', up, true);
+    }
+
+    // Vòng cọ bám con trỏ khi đang ở chế độ ✎ Liquify (không giữ chuột).
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+        window.addEventListener('pointermove', (event) => {
+            if (!distortEdit || distortDrag) return;
+            const svg = document.getElementById('editingDistortHandles');
+            const ring = svg && svg.querySelector('#editingDistortBrush');
+            if (!ring) return;
+            const n = distortPointerToNorm(svg, event);
+            if (!n) return;
+            distortBrushAt = n;
+            const vb = svg.viewBox.baseVal;
+            [ring, svg.querySelector('[data-distort-brush2]')].forEach((c) => {
+                if (!c) return;
+                c.setAttribute('cx', (n[0] * vb.width).toFixed(2));
+                c.setAttribute('cy', (n[1] * vb.height).toFixed(2));
+            });
+        }, { passive: true });
+    }
+
     function distortEditTarget() {
         if (!distortEdit || !window.Distort) return null;
         const item = findItem(distortEdit.itemId);
@@ -14559,9 +14657,15 @@
         const X = (x) => (x * bw).toFixed(3);
         const Y = (y) => (y * bh).toFixed(3);
         // Puppet: nền trong suốt bắt cú bấm ĐẶT GHIM (phủ rộng hơn hộp vì hình đã uốn có thể tràn ra).
-        let html = fx.type === 'puppet'
-            ? `<rect data-distort-bg="1" x="${-bw}" y="${-bh}" width="${3 * bw}" height="${3 * bh}" fill="transparent" style="pointer-events:all;cursor:crosshair"/>`
+        let html = fx.type === 'puppet' || fx.type === 'liquify'
+            ? `<rect data-distort-bg="1" x="${-bw}" y="${-bh}" width="${3 * bw}" height="${3 * bh}" fill="transparent" style="pointer-events:all;cursor:${fx.type === 'liquify' ? 'none' : 'crosshair'}"/>`
             : '';
+        if (fx.type === 'liquify') {
+            // Vòng cọ (bán kính = Brush Size / 2, px của hộp = đơn vị viewBox) bám con trỏ.
+            const c = distortBrushAt || [0.5, 0.5];
+            html += `<circle id="editingDistortBrush" cx="${(c[0] * bw).toFixed(2)}" cy="${(c[1] * bh).toFixed(2)}" r="${(Math.max(1, p.brush_size) / 2).toFixed(2)}" fill="none" stroke="#ffffff" stroke-width="1.5" vector-effect="non-scaling-stroke" style="pointer-events:none"/>`
+                + `<circle cx="${(c[0] * bw).toFixed(2)}" cy="${(c[1] * bh).toFixed(2)}" r="${(Math.max(1, p.brush_size) / 2).toFixed(2)}" fill="none" stroke="#1b1b1b" stroke-width="1" stroke-dasharray="3 3" vector-effect="non-scaling-stroke" style="pointer-events:none" data-distort-brush2="1"/>`;
+        }
         html += `<g fill="none" stroke="#f4b942" stroke-width="1" vector-effect="non-scaling-stroke">`;
         html += `<path d="${model.segs.map((s) => `M${X(s[0])} ${Y(s[1])}C${X(s[2])} ${Y(s[3])} ${X(s[4])} ${Y(s[5])} ${X(s[6])} ${Y(s[7])}`).join('')}"/>`;
         model.handles.filter((h) => h.kind === 'tangent' && showTangent(h)).forEach((h) => {
@@ -14604,6 +14708,10 @@
         event.stopPropagation();
         event.stopImmediatePropagation?.();
         const svg0 = event.currentTarget;
+        if (bg && target.fx.type === 'liquify') {
+            startLiquifyStroke(svg0, event, target);
+            return;
+        }
         let preRecorded = false;
         if (target.fx.type === 'puppet' && node && event.altKey) {
             // Alt+bấm ghim = xoá ghim (như AE).

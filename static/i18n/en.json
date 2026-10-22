@@ -2421,6 +2421,7 @@
   "Sửa trên preview (Esc để thoát)": "Edit on preview (Esc to exit)",
   "Ghim {n}": "Pin {n}",
   "Xoá ghim": "Delete pin",
+  "Khôi phục tất cả": "Restore All",
   "Bấm ✎ rồi bấm lên hình để đặt ghim; kéo ghim để uốn. Alt+bấm hoặc Delete để xoá ghim.": "Click ✎, then click on the image to place pins; drag a pin to bend. Alt+click or Delete removes a pin.",
   "Lane chính đang khoá.": "The main lane is locked.",
   "Chọn ít nhất một block để tạo Subsequence.": "Select at least one block to create a Subsequence.",

@@ -232,6 +232,69 @@ const wave = (params = {}, extra = {}) => ({ id: 'd1', type: 'wave', enabled: tr
     ok('Puppet: đứng yên/tịnh tiến, ghim tới đích, ngược, mặt nạ tách đảo, keyframe ghim, lưới bội, cận khung');
 }
 
+// ---- Liquify
+{
+    const W = 400;
+    const H = 300;
+    const base = { tool: 'warp', size: 80, pressure: 100, percent: 100, offset: [0, 0], boxW: W, boxH: H };
+    // Trường rỗng = đứng yên.
+    const empty = D.liquifyDisp(D.fieldArray({}), 0.3, 0.7);
+    assert.deepStrictEqual(empty, [0, 0], 'trường rỗng không dời');
+    // Warp: kéo 5 bước × 8 px -> tâm cọ dời theo, ngoài cọ đứng yên.
+    let f = null;
+    for (let k = 0; k < 5; k += 1) f = D.liquifyStroke(f, { ...base, cursor: [0.5 + 0.02 * (k + 1), 0.5], prev: [0.5 + 0.02 * k, 0.5], tick: k });
+    const c = D.liquifyDisp(f, 0.5, 0.5);
+    assert.ok(c[0] * W > 25 && c[0] * W < 41, `Warp đẩy tâm theo hướng kéo (${(c[0] * W).toFixed(1)} px)`);
+    near(c[1], 0, 1e-9, 'Warp ngang không dời dọc');
+    assert.deepStrictEqual(D.liquifyDisp(f, 0.05, 0.05), [0, 0], 'ngoài cọ đứng yên');
+    // Reconstruction kéo về 0; Pucker co vào tâm; Twirl CW và CCW ngược chiều nhau.
+    let r = f;
+    for (let k = 0; k < 60; k += 1) r = D.liquifyStroke(r, { ...base, tool: 'reconstruct', cursor: [0.58, 0.5], size: 200 });
+    assert.ok(Math.abs(D.liquifyDisp(r, 0.5, 0.5)[0]) < Math.abs(c[0]) * 0.1, 'Reconstruction khôi phục');
+    const pk = D.liquifyStroke(null, { ...base, tool: 'pucker', cursor: [0.5, 0.5], size: 120 });
+    assert.ok(D.liquifyDisp(pk, 0.55, 0.5)[0] < 0, 'Pucker kéo điểm bên phải vào tâm');
+    const bl = D.liquifyStroke(null, { ...base, tool: 'bloat', cursor: [0.5, 0.5], size: 120 });
+    assert.ok(D.liquifyDisp(bl, 0.55, 0.5)[0] > 0, 'Bloat đẩy ra');
+    const cw = D.liquifyStroke(null, { ...base, tool: 'twirl_cw', cursor: [0.5, 0.5], size: 120 });
+    const ccw = D.liquifyStroke(null, { ...base, tool: 'twirl_ccw', cursor: [0.5, 0.5], size: 120 });
+    assert.ok(D.liquifyDisp(cw, 0.55, 0.5)[1] * D.liquifyDisp(ccw, 0.55, 0.5)[1] < 0, 'Twirl CW/CCW ngược chiều');
+    // Distortion Percentage 0 = không dời; Offset dời cả hình; keyframe trường nội suy.
+    const item = {
+        type: 'media',
+        distort: [{ id: 'l1', type: 'liquify', params: { field: f, percent: 100, offset: [0.01, 0] } }],
+        keyframes: {
+            'dst.l1.field': [{ t: 0, v: D.fieldArray({}).slice(), e: 'linear' }, { t: 1, v: f, e: 'linear' }],
+            'dst.l1.percent': [{ t: 0, v: 100, e: 'linear' }, { t: 2, v: 0, e: 'linear' }],
+        },
+    };
+    const midField = D.stackAt(item, 0.5)[0].params.field;
+    const ci = (32 * 65 + 32) * 2;
+    near(midField[ci], f[ci] / 2, 1e-12, 'trường nội suy giữa hai keyframe');
+    assert.ok(D.isTimeVarying(item), 'keyframe trường/percent -> đổi theo thời gian');
+    const spec = D.gridSpec(item, W, H);
+    const at2 = D.evalGrid(D.stackAt(item, 2), W, H, spec, 2);
+    const base0 = D.evalGrid([], W, H, spec, 0);
+    near(at2[0] - base0[0], 0.01 * W, 1e-9, 'percent 0: chỉ còn Offset');
+    // Cận khung + spec trùng preview.
+    const ext = D.maxExtents(item, W, H);
+    for (let t = 0; t <= 2; t += 0.25) {
+        const pts = D.evalGrid(D.stackAt(item, t), W, H, spec, t);
+        for (let q = 0; q < pts.length; q += 2) assert.ok(Math.abs(pts[q]) <= ext.hx && Math.abs(pts[q + 1]) <= ext.hy, 'cận khung chứa trọn Liquify');
+    }
+    const s3 = D.exportSpec(item, W, H, 30, 2);
+    assert.ok(s3.meshes.length <= 3, 'trường keyframe gửi một lần');
+    [0.2, 0.7, 1.6].forEach((t) => {
+        const k = Math.floor(t * 30);
+        const tt = (k + 0.5) / 30;
+        const a = D.evalSpecStack(s3.stacks[s3.frames[k]], W, H, s3.grid, s3.meshes, s3.puppets);
+        const b = D.evalGrid(D.stackAt(item, tt), W, H, s3.grid, tt);
+        let e = 0;
+        for (let q = 0; q < a.length; q += 1) e = Math.max(e, Math.abs(a[q] - b[q]));
+        assert.strictEqual(e, 0, `Liquify từ spec trùng preview tại t=${tt.toFixed(2)}`);
+    });
+    ok('Liquify: đứng yên, Warp/Reconstruction/Pucker/Bloat/Twirl, percent/offset, keyframe trường, cận khung, spec');
+}
+
 // ---- Dạng sóng
 {
     near(D.waveShape('sine', 0.25), 1, 1e-12, 'Sine đỉnh ở ¼ chu kỳ');
@@ -358,6 +421,17 @@ const wave = (params = {}, extra = {}) => ({ id: 'd1', type: 'wave', enabled: tr
         ] } },
         more: [{ id: 'b1', type: 'bezier', params: { tl_tangent: [0.3, 0.1] } }],
         keyframes: { 'dst.u1.pin_b': [{ t: 0, v: [0.75, 0.4], e: 'ease-out' }, { t: 0.5, v: [0.85, 0.2] }] },
+    });
+    // Liquify (trường đã vẽ bằng cọ, có keyframe) + Wave.
+    let liq = null;
+    for (let k = 0; k < 6; k += 1) {
+        liq = D.liquifyStroke(liq, { tool: k < 3 ? 'warp' : 'twirl_cw', cursor: [0.4 + 0.03 * (k + 1), 0.5], prev: [0.4 + 0.03 * k, 0.5],
+            size: 40, pressure: 80, percent: 100, offset: [0, 0], boxW: 48.5, boxH: 30.5, tick: k });
+    }
+    cases.push({
+        name: 'liquify + wave',
+        fx: { id: 'l1', type: 'liquify', params: { field: liq, percent: 120, offset: [0.02, -0.01] } },
+        keyframes: { 'dst.l1.field': [{ t: 0, v: D.fieldArray({}).slice(), e: 'ease-in' }, { t: 0.5, v: liq }] },
     });
     cases.forEach(({ name, fx, more, keyframes }) => {
         const item = {

@@ -5477,10 +5477,27 @@ function distortSpecText(spec) {
   ];
   for (const stack of stacks) {
     const effects = (Array.isArray(stack) ? stack : [])
-      .filter((fx) => fx && ['wave', 'bezier', 'mesh', 'puppet'].includes(fx.type)).slice(0, 8);
+      .filter((fx) => fx && ['wave', 'bezier', 'mesh', 'puppet', 'liquify'].includes(fx.type)).slice(0, 8);
     lines.push(`stack ${effects.length}`);
     for (const fx of effects) {
       const p = fx.params && typeof fx.params === 'object' ? fx.params : {};
+      if (fx.type === 'liquify') {
+        // Trường dời = trộn hai mảng của bảng meshdata (xem fieldMixAt); sai tham chiếu -> bỏ bước.
+        const ref = Array.isArray(fx.field_ref) ? fx.field_ref : [];
+        const idx = (v) => {
+          const i = Math.round(num(v, -1, meshes.length - 1, -1));
+          return i >= 0 && meshes[i] && meshes[i].length === Distort.FIELD_LEN ? i : -1;
+        };
+        const fa = idx(ref[0]);
+        const fb = idx(ref[1]);
+        const off = Array.isArray(p.offset) ? p.offset : [0, 0];
+        if (fa < 0 || fb < 0) lines.push('noop');
+        else {
+          lines.push(['liquify', Distort.FIELD_N, fa, fb, num(ref[2], -2, 3, 0), num(p.percent, -1000, 1000, 100),
+            num(off[0], -50, 50, 0), num(off[1], -50, 50, 0)].join(' '));
+        }
+        continue;
+      }
       if (fx.type === 'puppet') {
         // Lưới Puppet ĐÃ GIẢI ở frontend (bảng puppetdata); tham chiếu sai -> bỏ bước này (không uốn).
         const i = Math.round(num(fx.puppet_ref, -1, puppets.length - 1, -1));
