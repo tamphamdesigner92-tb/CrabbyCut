@@ -173,6 +173,65 @@ const wave = (params = {}, extra = {}) => ({ id: 'd1', type: 'wave', enabled: tr
     ok('Bezier/Mesh Warp: đồng nhất, kéo đỉnh/tay cầm, keyframe véc-tơ, cận khung, tay nắm');
 }
 
+// ---- Puppet (ARAP)
+{
+    const boxW = 300;
+    const boxH = 150;
+    const P = (pins, extra = {}) => D.normalizeStack([{ id: 'u1', type: 'puppet', params: { triangles: 200, pins, ...extra } }])[0];
+    // Không ghim = lưới gốc.
+    const none = D.puppetSolve(P([]).params, boxW, boxH);
+    near(D.puppetMap(none.pts, none.cols, none.rows, 0.37, 0.61)[0], 0.37, 1e-12, 'không ghim: đứng yên');
+    // Ghim tới đúng đích; một ghim = tịnh tiến cả hình.
+    const two = P([{ id: 'a', rest: [0.2, 0.5], pos: [0.2, 0.5] }, { id: 'b', rest: [0.8, 0.5], pos: [0.85, 0.25] }]);
+    const s2 = D.puppetSolve(two.params, boxW, boxH);
+    const hitB = D.puppetMap(s2.pts, s2.cols, s2.rows, 0.8, 0.5);
+    near(hitB[0], 0.85, 1e-4, 'ghim b tới đích (x)');
+    near(hitB[1], 0.25, 1e-4, 'ghim b tới đích (y)');
+    const one = D.puppetSolve(P([{ id: 'a', rest: [0.5, 0.5], pos: [0.6, 0.45] }]).params, boxW, boxH);
+    const far = D.puppetMap(one.pts, one.cols, one.rows, 0.05, 0.9);
+    near(far[0], 0.15, 1e-3, 'một ghim: tịnh tiến (x)');
+    near(far[1], 0.85, 1e-3, 'một ghim: tịnh tiến (y)');
+    // Ánh xạ ngược: điểm đã uốn -> điểm gốc -> uốn lại = chính nó.
+    const back = D.puppetInverse(s2, null, hitB[0], hitB[1]);
+    near(back[0], 0.8, 1e-6, 'puppetInverse (x)');
+    near(back[1], 0.5, 1e-6, 'puppetInverse (y)');
+    // Mặt nạ: hai đảo hình rời nhau (trái / phải). Kéo đảo phải không kéo theo đảo trái.
+    const two2 = P([{ id: 'r', rest: [0.85, 0.5], pos: [0.85, 0.2] }, { id: 'r2', rest: [0.7, 0.5], pos: [0.7, 0.5] }]);
+    const mask = D.puppetMask(two2.params, boxW, boxH, (x0, y0, x1) => (x1 <= 0.35 || x0 >= 0.6 ? 255 : 0));
+    const sm = D.puppetSolve(two2.params, boxW, boxH, mask);
+    const left = D.puppetMap(sm.pts, sm.cols, sm.rows, 0.15, 0.5);
+    near(left[0], 0.15, 1e-3, 'đảo trái đứng yên (x)');
+    near(left[1], 0.5, 1e-3, 'đảo trái đứng yên (y)');
+    const free = D.puppetSolve(two2.params, boxW, boxH);
+    assert.ok(Math.abs(D.puppetMap(free.pts, free.cols, free.rows, 0.15, 0.5)[1] - 0.5) > 1e-3, 'không mặt nạ thì đảo trái bị kéo theo (đối chứng)');
+    // Keyframe Position của ghim -> đổi theo thời gian, nội suy véc-tơ.
+    const item = {
+        type: 'shape',
+        distort: [{ id: 'u1', type: 'puppet', params: two.params }],
+        keyframes: { 'dst.u1.pin_b': [{ t: 0, v: [0.8, 0.5], e: 'linear' }, { t: 2, v: [0.9, 0.1], e: 'linear' }] },
+    };
+    assert.ok(D.isTimeVarying(item), 'keyframe ghim -> đổi theo thời gian');
+    const mid = D.stackAt(item, 1)[0].params.pins.find((p) => p.id === 'b').pos;
+    near(mid[0], 0.85, 1e-12, 'ghim nội suy (x)');
+    near(mid[1], 0.3, 1e-12, 'ghim nội suy (y)');
+    // Lưới vẽ là bội của lưới Puppet -> ánh xạ khớp tuyệt đối tại đỉnh lưới Puppet.
+    const spec = D.gridSpec(item, boxW, boxH);
+    const pg = D.puppetGrid(two.params, boxW, boxH);
+    assert.strictEqual(spec.cols % pg.cols, 0, 'lưới vẽ là bội lưới Puppet (cột)');
+    assert.strictEqual(spec.rows % pg.rows, 0, 'lưới vẽ là bội lưới Puppet (hàng)');
+    // Cận khung chứa trọn.
+    const ext = D.maxExtents(item, boxW, boxH);
+    for (let t = 0; t <= 2; t += 0.25) {
+        const pts = D.evalGrid(D.stackAt(item, t), boxW, boxH, spec, t);
+        for (let q = 0; q < pts.length; q += 2) {
+            assert.ok(Math.abs(pts[q]) <= ext.hx && Math.abs(pts[q + 1]) <= ext.hy, `cận maxExtents chứa trọn Puppet tại t=${t}`);
+        }
+    }
+    // Kéo ghim qua dragHandle -> khoá 'pin_<id>'.
+    assert.deepStrictEqual(D.dragHandle(two, two.params, 'pin:b', 0.5, 0.5), { pin_b: [0.5, 0.5] });
+    ok('Puppet: đứng yên/tịnh tiến, ghim tới đích, ngược, mặt nạ tách đảo, keyframe ghim, lưới bội, cận khung');
+}
+
 // ---- Dạng sóng
 {
     near(D.waveShape('sine', 0.25), 1, 1e-12, 'Sine đỉnh ở ¼ chu kỳ');
@@ -245,7 +304,7 @@ const wave = (params = {}, extra = {}) => ({ id: 'd1', type: 'wave', enabled: tr
     [0.4, 13.3, 39.9, 55].forEach((t) => {
         const k = Math.min(s3.frames.length - 1, Math.floor(t * 30));
         const tt = (k + 0.5) / 30;
-        const fromSpec = D.evalSpecStack(s3.stacks[s3.frames[k]], 320, 180, s3.grid, s3.meshes);
+        const fromSpec = D.evalSpecStack(s3.stacks[s3.frames[k]], 320, 180, s3.grid, s3.meshes, s3.puppets);
         const fromPreview = D.evalGrid(D.stackAt(meshed, tt), 320, 180, s3.grid, tt);
         let e = 0;
         for (let q = 0; q < fromSpec.length; q += 1) e = Math.max(e, Math.abs(fromSpec[q] - fromPreview[q]));
@@ -290,6 +349,16 @@ const wave = (params = {}, extra = {}) => ({ id: 'd1', type: 'wave', enabled: tr
         ],
         keyframes: { 'dst.m1.mesh': [{ t: 0, v: D.meshIdentity(2, 3), e: 'ease-in-out' }, { t: 0.5, v: meshUsed }] },
     });
+    // Puppet (lưới đã giải gửi kèm, ghim có keyframe) đứng ĐẦU ngăn, sau đó Bezier.
+    cases.push({
+        name: 'puppet + bezier + wave',
+        fx: { id: 'u1', type: 'puppet', params: { triangles: 120, pins: [
+            { id: 'a', rest: [0.25, 0.5], pos: [0.25, 0.5] },
+            { id: 'b', rest: [0.75, 0.4], pos: [0.85, 0.2] },
+        ] } },
+        more: [{ id: 'b1', type: 'bezier', params: { tl_tangent: [0.3, 0.1] } }],
+        keyframes: { 'dst.u1.pin_b': [{ t: 0, v: [0.75, 0.4], e: 'ease-out' }, { t: 0.5, v: [0.85, 0.2] }] },
+    });
     cases.forEach(({ name, fx, more, keyframes }) => {
         const item = {
             type: 'media',
@@ -305,7 +374,7 @@ const wave = (params = {}, extra = {}) => ({ id: 'd1', type: 'wave', enabled: tr
         assert.strictEqual(res.status, 0, `sidecar distort-selftest lỗi: ${res.stdout}${res.stderr}`);
         const dims = JSON.parse(res.stdout.trim().split('\n').pop());
 
-        const jsGrid = D.evalSpecStack(spec.stacks[stackIdx], boxW, boxH, spec.grid, spec.meshes);
+        const jsGrid = D.evalSpecStack(spec.stacks[stackIdx], boxW, boxH, spec.grid, spec.meshes, spec.puppets);
         const cGrid = fs.readFileSync(`${prefix}.grid`, 'utf8').trim().split('\n').map(Number);
         assert.strictEqual(cGrid.length, jsGrid.length, `${name}: cùng số đỉnh`);
         let maxGrid = 0;

@@ -84,6 +84,11 @@ async function main() {
       timeline_start: START, duration: DUR, source_start: 0,
       transform: { position_x: 0, position_y: 0, scale: 100, rotation: 0, opacity: 100 },
       distort: [
+        // Puppet đứng đầu: ghim trái đứng yên, ghim phải có keyframe (lưới đã giải gửi theo khung).
+        { id: 'u1', type: 'puppet', enabled: true, params: { triangles: 150, pins: [
+          { id: 'a', rest: [0.25, 0.5], pos: [0.25, 0.5] },
+          { id: 'b', rest: [0.75, 0.5], pos: [0.8, 0.35] },
+        ] } },
         { id: 'd1', type: 'wave', enabled: true,
           params: { wave_type: 'sine', height: 9, width: 36, direction: 90, speed: 1.2, pinning: 'none', phase: 0 } },
         // Bezier Warp xếp sau Wave: góc dưới-phải kéo ra, cạnh trên võng xuống.
@@ -91,6 +96,7 @@ async function main() {
           params: { br_vertex: [1.12, 1.08], tl_tangent: [0.33, 0.15], tr_tangent: [0.66, 0.15] } },
       ],
     };
+    item.keyframes = { 'dst.u1.pin_b': [{ t: 0, v: [0.75, 0.5], e: 'ease-in-out' }, { t: 1, v: [0.8, 0.35] }] };
     item.distort_spec = D.exportSpec(item, OV_W, OV_H, FPS, DUR);
     const editing = {
       tracks: [
@@ -118,7 +124,7 @@ async function main() {
     const outFrame = frameAt(out, n, 'rgb24', SEQ.width, SEQ.height);
     const srcFrame = frameAt(src, k, 'rgba', OV_W, OV_H);
     const spec = item.distort_spec;
-    const grid = D.evalSpecStack(spec.stacks[spec.frames[k]], OV_W, OV_H, spec.grid, spec.meshes);
+    const grid = D.evalSpecStack(spec.stacks[spec.frames[k]], OV_W, OV_H, spec.grid, spec.meshes, spec.puppets);
     const size = D.outputSize(spec.ext, 1);
     const warped = new Uint8ClampedArray(size.width * size.height * 4);
     D.rasterMesh(new Uint8ClampedArray(srcFrame), OV_W, OV_H, spec.grid.cols, spec.grid.rows,
@@ -142,8 +148,9 @@ async function main() {
     let errWarp = 0;
     let errPlain = 0;
     let count = 0;
-    for (let y = oy; y < oy + size.height; y += 1) {
-      for (let x = ox; x < ox + size.width; x += 1) {
+    // Khung đã nở có thể lớn hơn khung xuất -> chỉ so phần nằm trong khung.
+    for (let y = Math.max(0, oy); y < Math.min(SEQ.height, oy + size.height); y += 1) {
+      for (let x = Math.max(0, ox); x < Math.min(SEQ.width, ox + size.width); x += 1) {
         for (let c = 0; c < 3; c += 1) {
           const got = outFrame[(y * SEQ.width + x) * 3 + c];
           errWarp += Math.abs(got - ref(x, y, c));

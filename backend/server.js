@@ -5456,6 +5456,14 @@ function distortSpecText(spec) {
   const stacks = Array.isArray(spec.stacks) ? spec.stacks.slice(0, 200000) : [];
   const frames = Array.isArray(spec.frames) ? spec.frames.slice(0, 1000000) : [];
   if (!(boxW > 0 && boxH > 0) || !stacks.length || !frames.length) return null;
+  // Bảng lưới Puppet đã giải: { cols, rows, pts } — chỉ nhận lưới đúng cỡ.
+  const puppets = (Array.isArray(spec.puppets) ? spec.puppets.slice(0, 200000) : []).map((q) => {
+    const cols = Math.round(num(q?.cols, 1, 80, 0));
+    const rows = Math.round(num(q?.rows, 1, 80, 0));
+    const pts = Array.isArray(q?.pts) ? q.pts : [];
+    return cols && rows && pts.length === (cols + 1) * (rows + 1) * 2
+      ? { cols, rows, pts: pts.map((v) => num(v, -50, 50, 0)) } : null;
+  });
   // Bảng lưới Mesh (mỗi lưới keyframe một lần, xem meshMixAt ở distort.js).
   const meshes = (Array.isArray(spec.meshes) ? spec.meshes.slice(0, 4096) : [])
     .map((m) => (Array.isArray(m) && m.length <= 64 * 64 * 10 ? m.map((v) => num(v, -50, 50, 0)) : []));
@@ -5469,10 +5477,17 @@ function distortSpecText(spec) {
   ];
   for (const stack of stacks) {
     const effects = (Array.isArray(stack) ? stack : [])
-      .filter((fx) => fx && ['wave', 'bezier', 'mesh'].includes(fx.type)).slice(0, 8);
+      .filter((fx) => fx && ['wave', 'bezier', 'mesh', 'puppet'].includes(fx.type)).slice(0, 8);
     lines.push(`stack ${effects.length}`);
     for (const fx of effects) {
       const p = fx.params && typeof fx.params === 'object' ? fx.params : {};
+      if (fx.type === 'puppet') {
+        // Lưới Puppet ĐÃ GIẢI ở frontend (bảng puppetdata); tham chiếu sai -> bỏ bước này (không uốn).
+        const i = Math.round(num(fx.puppet_ref, -1, puppets.length - 1, -1));
+        if (i >= 0 && puppets[i]) lines.push(`puppet ${i}`);
+        else lines.push('noop');
+        continue;
+      }
       if (fx.type === 'bezier' || fx.type === 'mesh') {
         // Chuẩn hoá lại qua distort.js (kẹp, điểm thiếu về mặc định) rồi mới lấy số.
         const norm = Distort.normalizeEffect({ id: 'x', type: fx.type, params: p }).params;
@@ -5511,6 +5526,10 @@ function distortSpecText(spec) {
   if (meshes.length) {
     lines.push(`meshdata ${meshes.length}`);
     meshes.forEach((m) => lines.push(`m ${m.length} ${m.join(' ')}`));
+  }
+  if (puppets.length) {
+    lines.push(`puppetdata ${puppets.length}`);
+    puppets.forEach((q) => lines.push(q ? `q ${q.cols} ${q.rows} ${q.pts.join(' ')}` : 'q 0 0'));
   }
   return `${lines.join('\n')}\n`;
 }

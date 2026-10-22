@@ -7197,7 +7197,8 @@ struct DistortWave {
 /* Một bước của ngăn hiệu ứng: Wave, Bezier (mặt Coons 24 số chuẩn hoá — thứ tự của bezierPatch ở
  * distort.js) hoặc Mesh (rows × cols ô, mỗi đỉnh 10 số: x, y + 4 tay cầm tương đối trái/phải/lên/xuống). */
 struct DistortOp {
-  int kind = 0;   // 0 wave, 1 bezier, 2 mesh
+  int kind = 0;   // 0 wave, 1 bezier, 2 mesh, 3 puppet, -1 bỏ qua
+  int puppetRef = -1;
   DistortWave wave;
   std::vector<double> patch;
   int rows = 0;
@@ -7230,6 +7231,8 @@ bool ReadDistortSpec(const std::string& path, DistortSpec& spec, std::string& er
   if (tag != "CRDS" || version != 1) { error = "spec Distort sai định dạng"; return false; }
   int stackCount = 0;
   std::vector<std::vector<double>> meshes;
+  struct PuppetGrid { int cols; int rows; std::vector<double> pts; };
+  std::vector<PuppetGrid> puppets;
   while (in >> tag) {
     if (tag == "box") in >> spec.boxW >> spec.boxH;
     else if (tag == "ext") in >> spec.extHx >> spec.extHy;
@@ -7251,6 +7254,11 @@ bool ReadDistortSpec(const std::string& path, DistortSpec& spec, std::string& er
           op.kind = 1;
           op.patch.resize(24);
           for (double& v : op.patch) in >> v;
+        } else if (kind == "puppet") {
+          op.kind = 3;
+          in >> op.puppetRef;
+        } else if (kind == "noop") {
+          op.kind = -1;
         } else if (kind == "mesh") {
           op.kind = 2;
           in >> op.rows >> op.cols >> op.meshA >> op.meshB >> op.meshK;
@@ -7267,6 +7275,18 @@ bool ReadDistortSpec(const std::string& path, DistortSpec& spec, std::string& er
       in >> m;
       spec.frames.resize(std::max(0, m));
       for (int i = 0; i < m && in; i++) in >> spec.frames[i];
+    } else if (tag == "puppetdata") {
+      int m = 0;
+      in >> m;
+      for (int i = 0; i < m && in; i++) {
+        std::string qk;
+        int pc = 0, pr = 0;
+        in >> qk >> pc >> pr;
+        if (qk != "q" || pc < 0 || pr < 0 || pc > 80 || pr > 80) { error = "bảng Puppet sai"; return false; }
+        std::vector<double> pts(pc > 0 && pr > 0 ? static_cast<size_t>(pc + 1) * (pr + 1) * 2 : 0);
+        for (double& v : pts) in >> v;
+        puppets.push_back({pc, pr, std::move(pts)});
+      }
     } else if (tag == "meshdata") {
       int m = 0;
       in >> m;
@@ -7294,6 +7314,16 @@ bool ReadDistortSpec(const std::string& path, DistortSpec& spec, std::string& er
   // Trộn sẵn lưới cho từng bước Mesh (cùng công thức x + (b − x)·k với JS).
   for (auto& stack : spec.stacks) {
     for (auto& op : stack) {
+      if (op.kind == 3) {
+        if (op.puppetRef < 0 || op.puppetRef >= static_cast<int>(puppets.size()) || puppets[op.puppetRef].pts.empty()) {
+          error = "lưới Puppet tham chiếu sai";
+          return false;
+        }
+        op.cols = puppets[op.puppetRef].cols;
+        op.rows = puppets[op.puppetRef].rows;
+        op.mesh = puppets[op.puppetRef].pts;   // lưới đã giải, chuẩn hoá
+        continue;
+      }
       if (op.kind != 2) continue;
       const size_t len = static_cast<size_t>(op.rows + 1) * (op.cols + 1) * 10;
       const bool okA = op.meshA >= 0 && op.meshA < static_cast<int>(meshes.size()) && meshes[op.meshA].size() == len;
@@ -7415,6 +7445,33 @@ void DistortEvalGrid(const std::vector<DistortOp>& stack, double boxW, double bo
   }
   const double kPi = 3.14159265358979323846;
   for (const DistortOp& op : stack) {
+    if (op.kind < 0) continue;
+    if (op.kind == 3) {
+      // = puppetMap của distort.js: affine từng tam giác (a,b,d)/(a,d,c), ngoại suy ở mép.
+      const int pc = op.cols, pr = op.rows;
+      const std::vector<double>& d = op.mesh;
+      for (size_t p = 0; p < n; p += 2) {
+        const double U = pts[p] / boxW + 0.5;
+        const double V = pts[p + 1] / boxH + 0.5;
+        const int ci = std::max(0, std::min(pc - 1, static_cast<int>(std::floor(U * pc))));
+        const int cj = std::max(0, std::min(pr - 1, static_cast<int>(std::floor(V * pr))));
+        const double s = U * pc - ci;
+        const double t = V * pr - cj;
+        const int a = cj * (pc + 1) + ci;
+        const int b = a + 1;
+        const int c = a + pc + 1;
+        const int dd = c + 1;
+        int v0, v1, v2;
+        double w0, w1, w2;
+        if (s >= t) { v0 = a; w0 = 1.0 - s; v1 = b; w1 = s - t; v2 = dd; w2 = t; }
+        else { v0 = a; w0 = 1.0 - t; v1 = dd; w1 = s; v2 = c; w2 = t - s; }
+        const double ox = w0 * d[v0 * 2] + w1 * d[v1 * 2] + w2 * d[v2 * 2];
+        const double oy = w0 * d[v0 * 2 + 1] + w1 * d[v1 * 2 + 1] + w2 * d[v2 * 2 + 1];
+        pts[p] = (ox - 0.5) * boxW;
+        pts[p + 1] = (oy - 0.5) * boxH;
+      }
+      continue;
+    }
     if (op.kind == 1 || op.kind == 2) {
       std::map<int, std::vector<double>> cells;
       for (size_t p = 0; p < n; p += 2) {

@@ -14351,7 +14351,8 @@
         if (!def.noKf && fieldHasKeyframes(item, field)) {
             item.keyframes[field] = upsertKeyframe(item.keyframes[field], overlayLocalTime(item), value);
         }
-        fx.params[key] = value;
+        // setParam: kể cả Position của ghim Puppet ('pin_<id>' nằm trong params.pins).
+        Distort.setParam(fx.params, key, value);
         /* Đổi số hàng/cột của Mesh Warp: lưới cũ (và keyframe của nó) không còn khớp -> đặt lại,
          * như AE. */
         if (fx.type === 'mesh' && (key === 'rows' || key === 'cols')) {
@@ -14378,6 +14379,8 @@
         if (!item || !parsed || isTrackLocked(itemTrack(item))) return;
         const fx = Distort.normalizeStack(item.distort).find((f) => f.id === parsed.effectId);
         if (!fx || !Distort.paramDef(fx.type, parsed.key)) return;
+        // Ghim đã xoá (nút ◆ cũ còn trên panel) -> không làm gì, không sinh bước Hoàn tác rỗng.
+        if (/^pin_/.test(parsed.key) && Distort.getParam(fx.params, parsed.key) === null) return;
         recordHistory();
         const t = overlayLocalTime(item);
         const kfs = objectKeyframes(item);
@@ -14386,7 +14389,13 @@
             kfs[field] = removeKeyframeAt(list, t);
             if (!kfs[field].length) delete kfs[field];
         } else {
-            kfs[field] = upsertKeyframe(list, t, Distort.effectParamsAt(item, fx, t)[parsed.key]);
+            // getParam: Position của ghim Puppet ('pin_<id>') nằm trong params.pins, không phải params[key].
+            const eff = Distort.effectParamsAt(item, fx, t);
+            let cur = Distort.getParam(eff, parsed.key);
+            // Mesh chưa uốn lưu `null` (= lưới đều) -> keyframe phải mang lưới đều THẬT để nội suy được.
+            if (cur == null && fx.type === 'mesh' && parsed.key === 'mesh') cur = Distort.meshArray(eff);
+            if (cur == null) return;
+            kfs[field] = upsertKeyframe(list, t, cur);
         }
         renderAll();
     }
@@ -14405,6 +14414,10 @@
             const same = distortEdit && distortEdit.itemId === item.id && distortEdit.effectId === id;
             distortEdit = same ? null : { itemId: item.id, effectId: id, vertex: null };
             renderAll();
+            return true;
+        }
+        if (action === 'remove-pin') {
+            removePuppetPin(item, id, btn.dataset.distortPin);
             return true;
         }
         const stack = Distort.normalizeStack(item.distort);
@@ -14461,6 +14474,25 @@
      * Esc / chọn block khác / bấm ✎ lần nữa để thoát. */
     let distortEdit = null;      // { itemId, effectId, vertex }
     let distortDrag = null;      // { pointerId, handleId }
+
+    // Xoá MỘT ghim Puppet cùng keyframe Position của nó (một bước Hoàn tác).
+    function removePuppetPin(item, effectId, pinId) {
+        const stack = Distort.normalizeStack(item.distort);
+        const fx = stack.find((f) => f.id === effectId);
+        if (!fx || fx.type !== 'puppet' || !(fx.params.pins || []).some((p) => p.id === pinId)) return;
+        recordHistory();
+        fx.params.pins = fx.params.pins.filter((p) => p.id !== pinId);
+        item.distort = stack;
+        if (item.keyframes) delete item.keyframes[Distort.kfField(effectId, `pin_${pinId}`)];
+        if (distortEdit && distortEdit.vertex === `pin:${pinId}`) distortEdit.vertex = null;
+        renderAll();
+    }
+
+    // Dựng lại Inspector (danh sách ghim đổi) mà không chạy cả renderAll giữa cú kéo.
+    function renderEditingInspectorAfterDistort() {
+        const item = selectedEditingItem();
+        if (item) syncOverlayInspector(item);
+    }
 
     function distortEditTarget() {
         if (!distortEdit || !window.Distort) return null;
@@ -14526,7 +14558,11 @@
         const showTangent = (h) => fx.type === 'bezier' || (distortEdit.vertex && h.vertex === distortEdit.vertex);
         const X = (x) => (x * bw).toFixed(3);
         const Y = (y) => (y * bh).toFixed(3);
-        let html = `<g fill="none" stroke="#f4b942" stroke-width="1" vector-effect="non-scaling-stroke">`;
+        // Puppet: nền trong suốt bắt cú bấm ĐẶT GHIM (phủ rộng hơn hộp vì hình đã uốn có thể tràn ra).
+        let html = fx.type === 'puppet'
+            ? `<rect data-distort-bg="1" x="${-bw}" y="${-bh}" width="${3 * bw}" height="${3 * bh}" fill="transparent" style="pointer-events:all;cursor:crosshair"/>`
+            : '';
+        html += `<g fill="none" stroke="#f4b942" stroke-width="1" vector-effect="non-scaling-stroke">`;
         html += `<path d="${model.segs.map((s) => `M${X(s[0])} ${Y(s[1])}C${X(s[2])} ${Y(s[3])} ${X(s[4])} ${Y(s[5])} ${X(s[6])} ${Y(s[7])}`).join('')}"/>`;
         model.handles.filter((h) => h.kind === 'tangent' && showTangent(h)).forEach((h) => {
             html += `<line x1="${X(h.ax)}" y1="${Y(h.ay)}" x2="${X(h.x)}" y2="${Y(h.y)}" stroke-opacity=".7"/>`;
@@ -14536,6 +14572,11 @@
             if (h.kind === 'tangent' && !showTangent(h)) return;
             const sel = distortEdit.vertex && h.vertex === distortEdit.vertex && h.kind === 'vertex';
             const common = `data-distort-handle="${h.id}" style="pointer-events:all;cursor:move" stroke="#1b1b1b" stroke-width="1" vector-effect="non-scaling-stroke"`;
+            if (h.kind === 'pin') {
+                const on = distortEdit.vertex === h.vertex;
+                html += `<circle cx="${X(h.x)}" cy="${Y(h.y)}" r="${(R * 1.1).toFixed(3)}" fill="${on ? '#ff5a3c' : '#f4b942'}" ${common}/>`;
+                return;
+            }
             html += h.kind === 'vertex'
                 ? `<rect x="${(h.x * bw - R).toFixed(3)}" y="${(h.y * bh - R).toFixed(3)}" width="${(2 * R).toFixed(3)}" height="${(2 * R).toFixed(3)}" fill="${sel ? '#f4b942' : '#ffffff'}" ${common}/>`
                 : `<circle cx="${X(h.x)}" cy="${Y(h.y)}" r="${(R * 0.8).toFixed(3)}" fill="#f4b942" ${common}/>`;
@@ -14553,21 +14594,53 @@
     }
 
     function onDistortHandleDown(event) {
-        const node = event.target.closest?.('[data-distort-handle]');
+        let node = event.target.closest?.('[data-distort-handle]');
+        const bg = !node && event.target.closest?.('[data-distort-bg]');
         const target = distortEditTarget();
-        if (!node || !target || (event.button !== undefined && event.button !== 0)) return;
+        if ((!node && !bg) || !target || (event.button !== undefined && event.button !== 0)) return;
         // Đang kéo bằng một con trỏ khác (cảm ứng/bút thứ hai): bỏ qua, không ghi đè cú kéo dở.
         if (distortDrag) { event.preventDefault(); event.stopPropagation(); return; }
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation?.();
+        const svg0 = event.currentTarget;
+        let preRecorded = false;
+        if (target.fx.type === 'puppet' && node && event.altKey) {
+            // Alt+bấm ghim = xoá ghim (như AE).
+            removePuppetPin(target.item, target.fx.id, node.dataset.distortHandle.replace(/^pin:/, ''));
+            return;
+        }
+        if (bg) {
+            // Bấm lên hình: đặt ghim ở điểm GỐC nằm dưới con trỏ (đảo qua lưới đang uốn).
+            const n = distortPointerToNorm(svg0, event);
+            const box = distortBoxSize(target.item);
+            const env = distortEnvCache.get(target.item.id) || null;
+            const mask = env && env.masks ? env.masks[target.fx.id] : null;
+            const p = Distort.effectParamsAt(target.item, target.fx, overlayLocalTime(target.item));
+            const solved = Distort.puppetSolve(p, Number(box.width) || 1, Number(box.height) || 1, mask);
+            const rest = n && Distort.puppetInverse(solved, mask, n[0], n[1]);
+            if (!rest) return;   // ngoài vùng có hình
+            recordHistory();
+            preRecorded = true;
+            const stack = Distort.normalizeStack(target.item.distort);
+            const fx = stack.find((f) => f.id === target.fx.id);
+            const used = new Set((fx.params.pins || []).map((pin) => pin.id));
+            let k = 1;
+            while (used.has(`p${k}`)) k += 1;
+            fx.params.pins = [...(fx.params.pins || []), { id: `p${k}`, rest, pos: [n[0], n[1]] }];
+            target.item.distort = stack;
+            distortEdit.vertex = `pin:p${k}`;
+            renderPreviewOverlays();
+            renderEditingInspectorAfterDistort();
+            node = { dataset: { distortHandle: `pin:p${k}` } };
+        }
         const handleId = node.dataset.distortHandle;
         const model = Distort.handleModel(target.fx, Distort.effectParamsAt(target.item, target.fx, overlayLocalTime(target.item)));
         const handle = model.handles.find((h) => h.id === handleId);
         if (handle && handle.kind === 'vertex') distortEdit.vertex = handle.vertex;
-        const svg = event.currentTarget;
+        const svg = svg0;
         // Nghe trên window: con trỏ rời khỏi lớp SVG (pointer-events: none) vẫn kéo tiếp được.
-        distortDrag = { pointerId: event.pointerId, handleId, recorded: false };
+        distortDrag = { pointerId: event.pointerId, handleId, recorded: preRecorded };
         const move = (ev) => {
             // Cú kéo đã bị huỷ từ chỗ khác (rời bước dựng) -> tự gỡ listener, không rò.
             if (!distortDrag) { detach(); return; }
@@ -14602,15 +14675,36 @@
         renderPreviewOverlays();
     }
 
-    // Esc thoát chế độ sửa tay nắm (bắt ở pha capture để không lọt xuống phím tắt bỏ chọn).
+    /* Hộp thoại / lớp phủ đang mở (Cài đặt, Xuất, Chụp khung, hộp xác nhận .ui-scrim…): phím thuộc về nó. */
+    function distortKeysYield() {
+        if (window.Shortcuts && Shortcuts.isTypingTarget(document.activeElement)) return true;
+        if (['export-modal-open', 'settings-modal-open', 'capture-modal-open', 'cut-prompt-open']
+            .some((cls) => document.body.classList.contains(cls))) return true;
+        return !!document.querySelector('.ui-scrim');
+    }
+
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+        /* Delete/Backspace xoá GHIM Puppet đang chọn. Gắn ở WINDOW pha capture, đăng ký lúc nạp module —
+         * TRƯỚC bộ phím tắt toàn cục (cũng window capture, đăng ký sau) — nên Delete xoá ghim chứ không
+         * rơi vào 'edit.delete' (xoá cả block). Nhường khi Pen đang vẽ (Backspace xoá đỉnh Pen), đang
+         * sửa đỉnh path, đang gõ hoặc có hộp thoại mở. Ngoài đúng trường hợp đó hàm trả về ngay. */
+        window.addEventListener('keydown', (event) => {
+            if (event.key !== 'Delete' && event.key !== 'Backspace') return;
+            if (!distortEdit || !String(distortEdit.vertex || '').startsWith('pin:')) return;
+            if (penSession || pathEditItemId || distortKeysYield()) return;
+            const target = distortEditTarget();
+            if (!target || target.fx.type !== 'puppet') return;
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+            removePuppetPin(target.item, target.fx.id, distortEdit.vertex.slice(4));
+        }, true);
+    }
     if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+        // Esc thoát chế độ sửa tay nắm (document, pha capture — như GĐ 1; các handler Esc ở window chạy trước).
         document.addEventListener('keydown', (event) => {
             if (event.key !== 'Escape' || !distortEdit) return;
-            /* Esc đang thuộc về chỗ khác thì để yên: ô đang gõ (huỷ sửa tên, ô số…) hoặc hộp thoại
-             * đang mở (Cài đặt, Xuất, Chụp khung…) — cùng danh sách mà phím thoát Nest tôn trọng. */
-            if (window.Shortcuts && Shortcuts.isTypingTarget(document.activeElement)) return;
-            if (['export-modal-open', 'settings-modal-open', 'capture-modal-open', 'cut-prompt-open']
-                .some((cls) => document.body.classList.contains(cls))) return;
+            if (distortKeysYield()) return;
             distortEdit = null;
             event.preventDefault();
             event.stopPropagation();
@@ -17316,6 +17410,72 @@
         return entry.canvas;
     }
 
+    /* MẶT NẠ PUPPET: ô nào của lưới Puppet có hình (alpha > 8) — chỉ những ô đó vào hệ ARAP, nên phần
+     * rời nhau của ảnh PNG / Shape không kéo dính nhau qua khoảng trống. `source` là nguồn CHUẨN của
+     * block (Shape: raster 1× theo hộp; ảnh: chính ảnh) để preview và khâu xuất ra cùng mặt nạ.
+     * Video (đục) không cần mặt nạ. Trả env cho Distort.stackAt / maxExtents / warpToCanvas. */
+    const distortMaskCache = new Map();   // `${itemId}|${fxId}` -> { key, mask }
+    const distortEnvCache = new Map();    // itemId -> env của lượt vẽ preview gần nhất (tay nắm Puppet dùng)
+    function distortEnv(item, source, sw, sh) {
+        if (!window.Distort || !source || !(sw > 0 && sh > 0) || itemIsVideoMedia(item)) return null;
+        const puppets = Distort.normalizeStack(item.distort).filter((fx) => fx.enabled && fx.type === 'puppet');
+        if (!puppets.length) return null;
+        const box = distortBoxSize(item);
+        const bw = Math.max(1, Number(box.width) || 1);
+        const bh = Math.max(1, Number(box.height) || 1);
+        const masks = {};
+        puppets.forEach((fx) => {
+            const grid = Distort.puppetGrid(fx.params, bw, bh);
+            const srcKey = source.currentSrc || source.src || `${source.width}x${source.height}`;
+            const key = `${grid.cols}x${grid.rows}|${fx.params.expansion}|${srcKey}|${item.type === 'shape' ? shapeSvgMarkup(normalizeShapeStyle(item.style)) : ''}`;
+            const ck = `${item.id}|${fx.id}`;
+            const hit = distortMaskCache.get(ck);
+            if (hit && hit.key === key) { masks[fx.id] = hit.mask; return; }
+            // Alpha ở độ phân giải 4×4 điểm mỗi ô, lấy LỚN NHẤT trong ô.
+            const cw = grid.cols * 4;
+            const ch = grid.rows * 4;
+            const c = document.createElement('canvas');
+            c.width = cw;
+            c.height = ch;
+            const ctx = c.getContext('2d', { willReadFrequently: true });
+            let data = null;
+            try {
+                ctx.drawImage(source, 0, 0, cw, ch);
+                data = ctx.getImageData(0, 0, cw, ch).data;
+            } catch (_) {
+                data = null;   // nguồn khác gốc / chưa tải -> coi như đục cả hộp
+            }
+            const mask = data ? Distort.puppetMask(fx.params, bw, bh, (x0, y0, x1, y1) => {
+                let m = 0;
+                const px0 = Math.floor(x0 * cw); const py0 = Math.floor(y0 * ch);
+                const px1 = Math.ceil(x1 * cw); const py1 = Math.ceil(y1 * ch);
+                for (let y = py0; y < py1; y += 1) for (let x = px0; x < px1; x += 1) m = Math.max(m, data[(y * cw + x) * 4 + 3]);
+                return m;
+            }) : null;
+            distortMaskCache.set(ck, { key, mask });
+            if (distortMaskCache.size > 64) distortMaskCache.delete(distortMaskCache.keys().next().value);
+            masks[fx.id] = mask;
+        });
+        return { masks };
+    }
+
+    // Raster 1× của Shape theo hộp (nguồn CHUẨN cho mặt nạ Puppet ở preview — khớp khâu xuất).
+    function distortShapeMaskSource(item) {
+        const entry = distortShapeRasters.get(item.id);
+        if (!entry || !entry.ready) return null;
+        const size = shapeCanvasSize(normalizeShapeStyle(item.style));
+        if (!entry.maskCanvas || entry.maskKey !== entry.key) {
+            entry.maskCanvas = entry.maskCanvas || document.createElement('canvas');
+            entry.maskCanvas.width = Math.max(2, Math.ceil(size.width));
+            entry.maskCanvas.height = Math.max(2, Math.ceil(size.height));
+            const ctx = entry.maskCanvas.getContext('2d');
+            ctx.clearRect(0, 0, entry.maskCanvas.width, entry.maskCanvas.height);
+            ctx.drawImage(entry.img, 0, 0, entry.maskCanvas.width, entry.maskCanvas.height);
+            entry.maskKey = entry.key;
+        }
+        return entry.maskCanvas;
+    }
+
     /* Hộp của block trong ĐƠN VỊ HỘP (px sequence ở scale 100 %) mà lưới Distort phủ lên: Shape =
      * cả canvas SVG (gồm phần viền tràn), media = cỡ gốc của asset. */
     function distortBoxSize(item) {
@@ -17328,7 +17488,16 @@
         const box = distortBoxSize(item);
         const boxW = Math.max(1, Number(box.width) || 1);
         const boxH = Math.max(1, Number(box.height) || 1);
-        const ext = Distort.maxExtents(item, boxW, boxH);
+        // Mặt nạ Puppet từ nguồn CHUẨN (Shape: raster 1×; ảnh: chính ảnh) — xem distortEnv.
+        let env = null;
+        if (item.type === 'shape') {
+            const ms = distortShapeMaskSource(item);
+            if (ms) env = distortEnv(item, ms, ms.width, ms.height);
+        } else if (srcEl && srcEl.tagName === 'IMG' && previewMediaReady(srcEl)) {
+            env = distortEnv(item, srcEl, srcEl.naturalWidth, srcEl.naturalHeight);
+        }
+        distortEnvCache.set(item.id, env);
+        const ext = Distort.maxExtents(item, boxW, boxH, env);
         const dpr = window.devicePixelRatio || 1;
         const want = Math.max(0.05, previewScale * Math.max(0.01, absScale) * dpr);
         let source = null;
@@ -17368,7 +17537,7 @@
         }
         if (!entry.renderer || !entry.renderer.ok) return shown;
         const spec = Distort.gridSpec(item, boxW, boxH);
-        entry.grid = Distort.evalGrid(Distort.stackAt(item, localT), boxW, boxH, spec, localT, entry.grid);
+        entry.grid = Distort.evalGrid(Distort.stackAt(item, localT, env), boxW, boxH, spec, localT, entry.grid);
         entry.pix = Distort.gridToPixels(entry.grid, k, size.width, size.height, entry.pix);
         shown.ok = entry.renderer.draw(source, sw, sh, spec.cols, spec.rows, entry.pix);
         canvas.dataset.fxPainted = shown.ok ? '1' : '0';
@@ -24839,7 +25008,8 @@
             frameCount = Math.min(DISTORT_SEQ_MAX_FRAMES, Math.max(2, Math.round(dur * rate)));
         }
         const { boxW, boxH, srcW, srcH } = info;
-        const ext = Distort.maxExtents(item, boxW, boxH);
+        const env = info.env || null;
+        const ext = Distort.maxExtents(item, boxW, boxH, env);
         const spec = Distort.gridSpec(item, boxW, boxH);
         const k = srcW / boxW;
         const warpSize = Distort.outputSize(ext, k);
@@ -24885,7 +25055,7 @@
             const t = sampleTime(i);
             const st = stateAt(t);
             const warped = Distort.warpToCanvas(item, info.sourceAt(t), srcW, srcH, boxW, boxH, t,
-                { extents: ext, spec, canvas: warpCanvas, srcCache: info.srcCache || null });
+                { extents: ext, spec, canvas: warpCanvas, srcCache: info.srcCache || null, env });
             ctx.clearRect(0, 0, canvasW, canvasH);
             ctx.save();
             ctx.globalAlpha = Math.min(1, Math.max(0, st.opacityMul != null ? st.opacityMul : 1));
@@ -24924,13 +25094,14 @@
         source.width = boxW;
         source.height = boxH;
         source.getContext('2d').drawImage(image, 0, 0, boxW, boxH);
-        const still = Distort.warpToCanvas(copy, source, boxW, boxH, boxW, boxH, 0);
+        const env = distortEnv(copy, source, boxW, boxH);   // mặt nạ Puppet — cùng nguồn 1× với preview
+        const still = Distort.warpToCanvas(copy, source, boxW, boxH, boxW, boxH, 0, { env });
         copy.rendered_shape_png = still.canvas.toDataURL('image/png');
         copy.rendered_shape_width = still.width;
         copy.rendered_shape_height = still.height;
         if (Distort.isTimeVarying(copy)) {
             const anim = await renderDistortSequence(copy, fps,
-                { boxW, boxH, srcW: boxW, srcH: boxH, sourceAt: () => source, srcCache: {} }, collect);
+                { boxW, boxH, srcW: boxW, srcH: boxH, sourceAt: () => source, srcCache: {}, env }, collect);
             if (anim) copy.animation_render = anim;
         } else {
             await attachAnim(copy, renderShapeAnimationSequence, cache,
@@ -24974,8 +25145,9 @@
             staticSource.getContext('2d').drawImage(sourceAt(0), 0, 0, texW, texH);
         }
         const hasAnim = !!(window.TextAnimations && TextAnimations.hasAnimation(copy));
+        const env = distortEnv(copy, image, texW, texH);   // mặt nạ Puppet theo alpha của ảnh
         if (!Distort.isTimeVarying(copy) && !hasAnim && !animatedColor) {
-            const still = Distort.warpToCanvas(copy, staticSource, texW, texH, boxW, boxH, 0);
+            const still = Distort.warpToCanvas(copy, staticSource, texW, texH, boxW, boxH, 0, { env });
             // Chuỗi 2 khung = ảnh tĩnh (eof giữ khung cuối) — như bakeRetouchedStillSeq.
             const sink = bakedFrameSink(collect, `dststill_${String(copy.id).replace(/[^\w-]+/g, '_')}`, 'image/png');
             await sink.push(still.canvas, 0);
@@ -24988,6 +25160,7 @@
             boxW, boxH, srcW: texW, srcH: texH,
             sourceAt: animatedColor ? sourceAt : () => staticSource,
             srcCache: animatedColor ? null : {},
+            env,
         }, collect);
         if (anim) copy.animation_render = anim;
         return true;

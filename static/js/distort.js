@@ -145,12 +145,31 @@
                 { key: 'mesh', label: 'Distortion Mesh', kind: 'mesh', def: null },
             ],
         },
+        /* Puppet Tool: ghim (pins) với Position keyframe RIÊNG từng ghim (khoá 'pin_<id>'), lưới tam
+         * giác theo Triangles, nở thêm Expansion px quanh phần có hình (ảnh/Shape có alpha). */
+        puppet: {
+            label: 'Puppet',
+            handles: true,
+            params: [
+                { key: 'triangles', label: 'Triangles', kind: 'num', def: 500, min: 50, max: 3000, slider: [50, 2000], step: 1, unit: '', noKf: true },
+                { key: 'expansion', label: 'Expansion', kind: 'num', def: 3, min: 0, max: 200, slider: [0, 50], step: 1, unit: 'px', noKf: true },
+                { key: 'pins', label: 'Pins', kind: 'pins', def: null },
+            ],
+        },
     };
     const TYPE_IDS = Object.keys(EFFECT_DEFS);
 
+    const PIN_KEY = /^pin_([A-Za-z0-9-]{1,24})$/;
+    const PIN_DEF = { kind: 'vec2', def: [0.5, 0.5] };
+
     function paramDef(type, key) {
         const def = EFFECT_DEFS[type];
-        return def ? def.params.find((p) => p.key === key) || null : null;
+        if (!def) return null;
+        // Position của từng ghim Puppet là thông số ĐỘNG 'pin_<id>' (vec2, keyframe được).
+        if (type === 'puppet' && PIN_KEY.test(String(key))) {
+            return { ...PIN_DEF, key, label: `Pin ${String(key).slice(4)}` };
+        }
+        return def.params.find((p) => p.key === key) || null;
     }
 
     function normalizeParam(def, value) {
@@ -166,6 +185,19 @@
             if (!Array.isArray(value) || !value.length || value.length > 32 * 32 * MESH_STRIDE) return null;
             const out = value.map(Number);
             return out.every(Number.isFinite) ? out.map((v) => Math.max(-50, Math.min(50, v))) : null;
+        }
+        if (def.kind === 'pins') {
+            if (!Array.isArray(value)) return [];
+            const seen = new Set();
+            const out = [];
+            value.slice(0, 64).forEach((pin) => {
+                const id = String(pin && pin.id || '');
+                if (!/^[A-Za-z0-9-]{1,24}$/.test(id) || seen.has(id)) return;
+                const rest = normalizeParam(PIN_DEF, pin.rest);
+                out.push({ id, rest, pos: normalizeParam({ kind: 'vec2', def: rest }, pin.pos) });
+                seen.add(id);
+            });
+            return out;
         }
         if (def.step === 1 && def.noKf) return Math.round(clampNum(value, def.min, def.max, def.def));
         if (def.kind === 'enum') {
@@ -231,7 +263,7 @@
     const kfField = (effectId, key) => `${KF_PREFIX}${effectId}.${key}`;
     const isKfField = (field) => String(field || '').startsWith(KF_PREFIX);
     function parseKfField(field) {
-        const m = /^dst\.([A-Za-z0-9_-]+)\.([a-z_]+)$/.exec(String(field || ''));
+        const m = /^dst\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/.exec(String(field || ''));
         return m ? { effectId: m[1], key: m[2] } : null;
     }
 
@@ -280,19 +312,48 @@
         const kfs = item && item.keyframes;
         if (!kfs || typeof kfs !== 'object') return out;
         EFFECT_DEFS[fx.type].params.forEach((def) => {
-            if (def.noKf) return;
+            if (def.noKf || def.kind === 'pins') return;
             const v = evalParamKeyframes(kfs[kfField(fx.id, def.key)], t, def);
             if (v != null) out[def.key] = v;
         });
         if (fx.type === 'mesh' && out.mesh && out.mesh.length !== meshLength(out.rows, out.cols)) out.mesh = fx.params.mesh;
+        if (fx.type === 'puppet') {
+            out.pins = (fx.params.pins || []).map((pin) => {
+                const v = evalParamKeyframes(kfs[kfField(fx.id, `pin_${pin.id}`)], t, { kind: 'vec2', def: pin.pos });
+                return v ? { ...pin, pos: v } : pin;
+            });
+        }
         return out;
     }
 
-    // Danh sách hiệu ứng BẬT với thông số tại t: [{ type, params }].
-    function stackAt(item, t) {
+    // Đọc / ghi MỘT thông số (kể cả Position của ghim 'pin_<id>') trên bộ params.
+    function getParam(p, key) {
+        const m = PIN_KEY.exec(String(key));
+        if (m) {
+            const pin = (p.pins || []).find((x) => x.id === m[1]);
+            return pin ? pin.pos : null;
+        }
+        return p[key];
+    }
+    function setParam(p, key, value) {
+        const m = PIN_KEY.exec(String(key));
+        if (m) {
+            p.pins = (p.pins || []).map((x) => (x.id === m[1] ? { ...x, pos: value } : x));
+            return;
+        }
+        p[key] = value;
+    }
+
+    /* Danh sách hiệu ứng BẬT với thông số tại t: [{ type, params }]. `env.masks[fxId]` = mặt nạ ô có
+     * hình của Puppet (puppetMask) — caller dựng từ alpha của nguồn; không có = cả hộp. */
+    function stackAt(item, t, env = null) {
         return normalizeStack(item && item.distort)
             .filter((fx) => fx.enabled)
-            .map((fx) => ({ type: fx.type, params: effectParamsAt(item, fx, t) }));
+            .map((fx) => {
+                const params = effectParamsAt(item, fx, t);
+                if (fx.type === 'puppet') params.mask = (env && env.masks && env.masks[fx.id]) || null;
+                return { type: fx.type, params };
+            });
     }
 
     function hasDistortKeyframes(item) {
@@ -305,11 +366,10 @@
     function isTimeVarying(item) {
         const stack = normalizeStack(item && item.distort).filter((fx) => fx.enabled);
         if (!stack.length) return false;
-        if (stack.some((fx) => {
-            const kfs = item.keyframes || {};
-            return EFFECT_DEFS[fx.type].params.some((def) => Array.isArray(kfs[kfField(fx.id, def.key)])
-                && kfs[kfField(fx.id, def.key)].length > 1);
-        })) return true;
+        const kfs = item.keyframes || {};
+        // Bất kỳ thông số nào (kể cả Position của ghim) có từ hai keyframe trở lên.
+        if (stack.some((fx) => Object.keys(kfs).some((k) => k.startsWith(`${KF_PREFIX}${fx.id}.`)
+            && Array.isArray(kfs[k]) && kfs[k].length > 1))) return true;
         return stack.some((fx) => fx.type === 'wave' && (Math.abs(Number(fx.params.speed) || 0) > 1e-9
             || ((item.keyframes || {})[kfField(fx.id, 'speed')] || []).some((k) => Math.abs(Number(k.v) || 0) > 1e-9)));
     }
@@ -483,6 +543,384 @@
         return coons(k, U * cols - ci, V * rows - cj);
     }
 
+    /* ===================================================================== PUPPET (ARAP) */
+
+    /* Lưới Puppet: lưới đều cols × rows ô (mỗi ô 2 tam giác, cùng cách chia (a,b,d)/(a,d,c) với bộ vẽ
+     * nên lưới đã giải là ánh xạ affine từng mảnh CHÍNH XÁC). Số ô theo Triangles của AE, giữ tỉ lệ
+     * hộp. Ảnh/Shape có alpha: chỉ những ô có hình (nở thêm Expansion) mới vào hệ — hai phần rời
+     * nhau không kéo dính nhau qua khoảng trống. */
+    function puppetGrid(p, boxW, boxH) {
+        const cells = Math.max(4, Math.round((Number(p.triangles) || 500) / 2));
+        const aspect = Math.max(0.05, Math.min(20, boxW / Math.max(1e-6, boxH)));
+        const cols = Math.max(2, Math.min(80, Math.round(Math.sqrt(cells * aspect))));
+        const rows = Math.max(2, Math.min(80, Math.round(cells / cols)));
+        return { cols, rows };
+    }
+
+    // Ma trận đối xứng xác định dương dạng DẢI (bán kính bw) + phân tích Cholesky L·Lᵀ.
+    class BandSPD {
+        constructor(n, bw) {
+            this.n = n;
+            this.bw = bw;
+            this.a = new Float64Array(n * (bw + 1));   // a[i*(bw+1)+k] = A[i][i-k]
+        }
+
+        add(i, j, v) {
+            if (i < j) { const x = i; i = j; j = x; }
+            const k = i - j;
+            if (k > this.bw) throw new Error('band');
+            this.a[i * (this.bw + 1) + k] += v;
+        }
+
+        factor() {
+            const { n, bw, a } = this;
+            const W = bw + 1;
+            for (let i = 0; i < n; i += 1) {
+                const j0 = Math.max(0, i - bw);
+                for (let j = j0; j <= i; j += 1) {
+                    let sum = a[i * W + (i - j)];
+                    const k0 = Math.max(j0, j - bw);
+                    for (let k = k0; k < j; k += 1) sum -= a[i * W + (i - k)] * a[j * W + (j - k)];
+                    if (i === j) a[i * W] = Math.sqrt(Math.max(sum, 1e-18));
+                    else a[i * W + (i - j)] = sum / a[j * W];
+                }
+            }
+            return this;
+        }
+
+        solve(b) {
+            const { n, bw, a } = this;
+            const W = bw + 1;
+            const y = Float64Array.from(b);
+            for (let i = 0; i < n; i += 1) {
+                let sum = y[i];
+                for (let k = Math.max(0, i - bw); k < i; k += 1) sum -= a[i * W + (i - k)] * y[k];
+                y[i] = sum / a[i * W];
+            }
+            for (let i = n - 1; i >= 0; i -= 1) {
+                let sum = y[i];
+                for (let k = i + 1; k <= Math.min(n - 1, i + bw); k += 1) sum -= a[k * W + (k - i)] * y[k];
+                y[i] = sum / a[i * W];
+            }
+            return y;
+        }
+    }
+
+    // Tam giác nằm trong ô (i,j): vị trí (s,t) cục bộ -> 3 đỉnh + trọng số (khớp rasterMesh).
+    function cellTri(cols, i, j, s, t) {
+        const a = j * (cols + 1) + i;
+        const b = a + 1;
+        const c = a + cols + 1;
+        const d = c + 1;
+        return s >= t ? [[a, 1 - s], [b, s - t], [d, t]] : [[a, 1 - t], [d, s], [c, t - s]];
+    }
+
+    const PUPPET_W = 1000;     // trọng số ghim (gần như ràng buộc cứng)
+    const PUPPET_EPS = 1e-6;   // kéo nhẹ về dáng gốc: phần không ghim đứng yên, hệ không suy biến
+    const puppetCache = new Map();
+
+    /* Dựng (và nhớ) hệ ARAP của một lưới + một BỘ ghim (vị trí GỐC). Đổi vị trí ghim chỉ đổi vế phải.
+     * mask: { cols, rows, cells: Uint8Array, key } hoặc null = mọi ô. */
+    function puppetSystem(cols, rows, boxW, boxH, mask, pins) {
+        const key = `${cols}x${rows}|${boxW}x${boxH}|${mask ? mask.key : '*'}|${pins.map((p) => `${p.id}:${p.rest[0]},${p.rest[1]}`).join(';')}`;
+        const hit = puppetCache.get(key);
+        if (hit) { puppetCache.delete(key); puppetCache.set(key, hit); return hit; }
+        const nv = (cols + 1) * (rows + 1);
+        const useCell = (i, j) => !mask || mask.cells[j * cols + i] === 1;
+        const tris = [];
+        const inc = new Uint8Array(nv);
+        for (let j = 0; j < rows; j += 1) {
+            for (let i = 0; i < cols; i += 1) {
+                if (!useCell(i, j)) continue;
+                const a = j * (cols + 1) + i;
+                const b = a + 1;
+                const c = a + cols + 1;
+                const d = c + 1;
+                tris.push([a, b, d], [a, d, c]);
+                inc[a] = 1; inc[b] = 1; inc[c] = 1; inc[d] = 1;
+            }
+        }
+        const idx = new Int32Array(nv).fill(-1);
+        let n = 0;
+        for (let v = 0; v < nv; v += 1) if (inc[v]) idx[v] = n++;
+        const rest = new Float64Array(nv * 2);
+        for (let j = 0; j <= rows; j += 1) {
+            for (let i = 0; i <= cols; i += 1) {
+                const v = j * (cols + 1) + i;
+                rest[v * 2] = (i / cols) * boxW;
+                rest[v * 2 + 1] = (j / rows) * boxH;
+            }
+        }
+        // Ghim -> tổ hợp barycentric của tam giác GỐC chứa nó (ghim rơi ra ngoài lưới: bám đỉnh gần nhất).
+        const pinBary = pins.map((pin) => {
+            const U = Math.max(0, Math.min(1, pin.rest[0]));
+            const V = Math.max(0, Math.min(1, pin.rest[1]));
+            const ci = Math.max(0, Math.min(cols - 1, Math.floor(U * cols)));
+            const cj = Math.max(0, Math.min(rows - 1, Math.floor(V * rows)));
+            const tri = cellTri(cols, ci, cj, U * cols - ci, V * rows - cj);
+            if (tri.every(([v]) => idx[v] >= 0)) return tri;
+            let best = -1;
+            let bd = Infinity;
+            for (let v = 0; v < nv; v += 1) {
+                if (idx[v] < 0) continue;
+                const dx = rest[v * 2] - U * boxW;
+                const dy = rest[v * 2 + 1] - V * boxH;
+                if (dx * dx + dy * dy < bd) { bd = dx * dx + dy * dy; best = v; }
+            }
+            return best >= 0 ? [[best, 1]] : [];
+        });
+        let span = 1;
+        tris.forEach((t) => { span = Math.max(span, Math.max(idx[t[0]], idx[t[1]], idx[t[2]]) - Math.min(idx[t[0]], idx[t[1]], idx[t[2]])); });
+        pinBary.forEach((pb) => { if (pb.length > 1) span = Math.max(span, Math.max(...pb.map(([v]) => idx[v])) - Math.min(...pb.map(([v]) => idx[v]))); });
+        // Bước 1 (Igarashi 2005): mỗi đỉnh của tam giác biểu diễn theo cạnh đối diện bằng (x, y) cục bộ.
+        const G = new BandSPD(2 * n, 2 * span + 1);
+        const local = [];
+        tris.forEach((t) => {
+            [[0, 1, 2], [1, 2, 0], [2, 0, 1]].forEach(([o0, o1, o2]) => {
+                const v0 = t[o0]; const v1 = t[o1]; const v2 = t[o2];
+                const ex = rest[v1 * 2] - rest[v0 * 2]; const ey = rest[v1 * 2 + 1] - rest[v0 * 2 + 1];
+                const dx = rest[v2 * 2] - rest[v0 * 2]; const dy = rest[v2 * 2 + 1] - rest[v0 * 2 + 1];
+                const L2 = ex * ex + ey * ey;
+                const x = (dx * ex + dy * ey) / L2;
+                const y = (dx * -ey + dy * ex) / L2;
+                if (o0 === 0) local.push([t[0], t[1], t[2], x, y]);
+                const u0 = 2 * idx[v0]; const u1 = 2 * idx[v1]; const u2 = 2 * idx[v2];
+                // r_x = v2x - v0x - x(v1x-v0x) + y(v1y-v0y);  r_y = v2y - v0y - x(v1y-v0y) - y(v1x-v0x)
+                const rows2 = [
+                    [[u0, x - 1], [u0 + 1, -y], [u1, -x], [u1 + 1, y], [u2, 1]],
+                    [[u0 + 1, x - 1], [u0, y], [u1 + 1, -x], [u1, -y], [u2 + 1, 1]],
+                ];
+                rows2.forEach((r) => r.forEach(([i, a]) => r.forEach(([j, b]) => { if (i >= j) G.add(i, j, a * b); })));
+            });
+        });
+        // Bước 2: Laplacian cạnh (x và y dùng chung).
+        const H = new BandSPD(n, span + 1);
+        tris.forEach((t) => {
+            [[0, 1], [1, 2], [2, 0]].forEach(([p0, p1]) => {
+                const i = idx[t[p0]]; const j = idx[t[p1]];
+                H.add(i, i, 1); H.add(j, j, 1); H.add(i, j, -1);
+            });
+        });
+        const w2 = PUPPET_W * PUPPET_W;
+        pinBary.forEach((pb) => {
+            pb.forEach(([vi, bi]) => pb.forEach(([vj, bj]) => {
+                const i = idx[vi]; const j = idx[vj];
+                if (i < j) return;
+                G.add(2 * i, 2 * j, w2 * bi * bj);
+                G.add(2 * i + 1, 2 * j + 1, w2 * bi * bj);
+                H.add(i, j, w2 * bi * bj);
+            }));
+        });
+        for (let i = 0; i < n; i += 1) {
+            G.add(2 * i, 2 * i, PUPPET_EPS); G.add(2 * i + 1, 2 * i + 1, PUPPET_EPS); H.add(i, i, PUPPET_EPS);
+        }
+        G.factor();
+        H.factor();
+        const sys = { cols, rows, nv, n, idx, rest, tris, local, pinBary, G, H, boxW, boxH };
+        puppetCache.set(key, sys);
+        if (puppetCache.size > 24) puppetCache.delete(puppetCache.keys().next().value);
+        return sys;
+    }
+
+    /* Giải Puppet: trả lưới đã biến dạng (CHUẨN HOÁ theo hộp) (cols+1)×(rows+1)×2. Không ghim = lưới
+     * gốc. Đỉnh ngoài vùng có hình đi theo đỉnh trong vùng gần nhất (chỉ ảnh hưởng chỗ trong suốt). */
+    function puppetSolve(p, boxW, boxH, mask = null) {
+        const { cols, rows } = puppetGrid(p, boxW, boxH);
+        const pins = Array.isArray(p.pins) ? p.pins : [];
+        const out = new Float64Array((cols + 1) * (rows + 1) * 2);
+        for (let j = 0, q = 0; j <= rows; j += 1) {
+            for (let i = 0; i <= cols; i += 1, q += 2) { out[q] = i / cols; out[q + 1] = j / rows; }
+        }
+        const m = mask && mask.cols === cols && mask.rows === rows ? mask : null;
+        if (!pins.length) return { cols, rows, pts: out };
+        const S = puppetSystem(cols, rows, boxW, boxH, m, pins);
+        if (!S.n) return { cols, rows, pts: out };
+        const w2 = PUPPET_W * PUPPET_W;
+        // Bước 1.
+        const b1 = new Float64Array(2 * S.n);
+        for (let v = 0; v < S.nv; v += 1) {
+            const i = S.idx[v];
+            if (i < 0) continue;
+            b1[2 * i] += PUPPET_EPS * S.rest[v * 2];
+            b1[2 * i + 1] += PUPPET_EPS * S.rest[v * 2 + 1];
+        }
+        S.pinBary.forEach((pb, k) => {
+            const px = pins[k].pos[0] * boxW;
+            const py = pins[k].pos[1] * boxH;
+            pb.forEach(([v, b]) => { b1[2 * S.idx[v]] += w2 * b * px; b1[2 * S.idx[v] + 1] += w2 * b * py; });
+        });
+        const v1 = S.G.solve(b1);
+        // Bước 2: khớp lại từng tam giác GỐC (chỉ xoay + dời) vào kết quả bước 1, rồi giải theo cạnh.
+        const bx = new Float64Array(S.n);
+        const by = new Float64Array(S.n);
+        S.local.forEach(([a, b, c, x, y]) => {
+            const ia = S.idx[a]; const ib = S.idx[b]; const ic = S.idx[c];
+            const P = [v1[2 * ia], v1[2 * ia + 1], v1[2 * ib], v1[2 * ib + 1], v1[2 * ic], v1[2 * ic + 1]];
+            // M·u ≈ P, u = (v0fx, v0fy, v1fx, v1fy).
+            const M = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1], [1 - x, y, x, -y], [-y, 1 - x, y, x]];
+            const A = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
+            const r = [0, 0, 0, 0];
+            for (let k = 0; k < 6; k += 1) {
+                for (let i = 0; i < 4; i += 1) {
+                    r[i] += M[k][i] * P[k];
+                    for (let j = 0; j < 4; j += 1) A[i][j] += M[k][i] * M[k][j];
+                }
+            }
+            const u = solve4(A, r);
+            const fx0 = u[0]; const fy0 = u[1]; const fx1 = u[2]; const fy1 = u[3];
+            const ex = fx1 - fx0; const ey = fy1 - fy0;
+            const f = [fx0, fy0, fx1, fy1, fx0 + x * ex - y * ey, fy0 + x * ey + y * ex];
+            // Đưa về đúng cỡ gốc quanh trọng tâm (Igarashi: chỉ xoay, không co giãn).
+            const restLen = Math.hypot(S.rest[b * 2] - S.rest[a * 2], S.rest[b * 2 + 1] - S.rest[a * 2 + 1]);
+            const sc = restLen / Math.max(1e-9, Math.hypot(ex, ey));
+            const cx = (f[0] + f[2] + f[4]) / 3;
+            const cy = (f[1] + f[3] + f[5]) / 3;
+            for (let k = 0; k < 3; k += 1) { f[2 * k] = cx + (f[2 * k] - cx) * sc; f[2 * k + 1] = cy + (f[2 * k + 1] - cy) * sc; }
+            const id = [ia, ib, ic];
+            [[0, 1], [1, 2], [2, 0]].forEach(([p0, p1]) => {
+                const dx = f[2 * p1] - f[2 * p0];
+                const dy = f[2 * p1 + 1] - f[2 * p0 + 1];
+                bx[id[p1]] += dx; bx[id[p0]] -= dx;
+                by[id[p1]] += dy; by[id[p0]] -= dy;
+            });
+        });
+        for (let v = 0; v < S.nv; v += 1) {
+            const i = S.idx[v];
+            if (i < 0) continue;
+            bx[i] += PUPPET_EPS * S.rest[v * 2];
+            by[i] += PUPPET_EPS * S.rest[v * 2 + 1];
+        }
+        S.pinBary.forEach((pb, k) => {
+            pb.forEach(([v, b]) => { bx[S.idx[v]] += w2 * b * pins[k].pos[0] * boxW; by[S.idx[v]] += w2 * b * pins[k].pos[1] * boxH; });
+        });
+        const X = S.H.solve(bx);
+        const Y = S.H.solve(by);
+        // Kết quả + lấp đỉnh ngoài vùng bằng độ dời của đỉnh trong vùng gần nhất (loang theo lưới).
+        const disp = new Float64Array(S.nv * 2);
+        const done = new Uint8Array(S.nv);
+        const queue = [];
+        for (let v = 0; v < S.nv; v += 1) {
+            const i = S.idx[v];
+            if (i < 0) continue;
+            disp[v * 2] = X[i] - S.rest[v * 2];
+            disp[v * 2 + 1] = Y[i] - S.rest[v * 2 + 1];
+            done[v] = 1;
+            queue.push(v);
+        }
+        for (let h = 0; h < queue.length; h += 1) {
+            const v = queue[h];
+            const i = v % (cols + 1);
+            const j = Math.floor(v / (cols + 1));
+            [[i - 1, j], [i + 1, j], [i, j - 1], [i, j + 1]].forEach(([ii, jj]) => {
+                if (ii < 0 || jj < 0 || ii > cols || jj > rows) return;
+                const w = jj * (cols + 1) + ii;
+                if (done[w]) return;
+                done[w] = 1;
+                disp[w * 2] = disp[v * 2];
+                disp[w * 2 + 1] = disp[v * 2 + 1];
+                queue.push(w);
+            });
+        }
+        for (let v = 0; v < S.nv; v += 1) {
+            out[v * 2] += disp[v * 2] / boxW;
+            out[v * 2 + 1] += disp[v * 2 + 1] / boxH;
+        }
+        return { cols, rows, pts: out };
+    }
+
+    function solve4(A, b) {
+        const m = A.map((row, i) => [...row, b[i]]);
+        for (let c = 0; c < 4; c += 1) {
+            let piv = c;
+            for (let r = c + 1; r < 4; r += 1) if (Math.abs(m[r][c]) > Math.abs(m[piv][c])) piv = r;
+            [m[c], m[piv]] = [m[piv], m[c]];
+            const d = m[c][c] || 1e-12;
+            for (let r = 0; r < 4; r += 1) {
+                if (r === c) continue;
+                const f = m[r][c] / d;
+                for (let k = c; k < 5; k += 1) m[r][k] -= f * m[c][k];
+            }
+        }
+        return [0, 1, 2, 3].map((i) => m[i][4] / (m[i][i] || 1e-12));
+    }
+
+    /* Ánh xạ điểm chuẩn hoá (U, V) qua lưới Puppet đã giải (affine từng tam giác; ngoài [0,1] ngoại
+     * suy theo tam giác ở mép). Viết 1-1 ở sidecar (DistortPuppetMap). */
+    function puppetMap(def, cols, rows, U, V) {
+        const ci = Math.max(0, Math.min(cols - 1, Math.floor(U * cols)));
+        const cj = Math.max(0, Math.min(rows - 1, Math.floor(V * rows)));
+        const s = U * cols - ci;
+        const t = V * rows - cj;
+        const a = cj * (cols + 1) + ci;
+        const b = a + 1;
+        const c = a + cols + 1;
+        const d = c + 1;
+        let w;
+        if (s >= t) w = [[a, 1 - s], [b, s - t], [d, t]];
+        else w = [[a, 1 - t], [d, s], [c, t - s]];
+        return [
+            w[0][1] * def[w[0][0] * 2] + w[1][1] * def[w[1][0] * 2] + w[2][1] * def[w[2][0] * 2],
+            w[0][1] * def[w[0][0] * 2 + 1] + w[1][1] * def[w[1][0] * 2 + 1] + w[2][1] * def[w[2][0] * 2 + 1],
+        ];
+    }
+
+    /* Điểm (đã biến dạng, chuẩn hoá) -> điểm GỐC: tìm tam giác đã biến dạng chứa nó. null = ngoài lưới
+     * (hoặc ô không có hình). Dùng khi bấm thêm ghim trên hình đang uốn. */
+    function puppetInverse(solved, mask, X, Y) {
+        const { cols, rows, pts } = solved;
+        for (let j = 0; j < rows; j += 1) {
+            for (let i = 0; i < cols; i += 1) {
+                if (mask && mask.cols === cols && mask.rows === rows && mask.cells[j * cols + i] !== 1) continue;
+                const a = j * (cols + 1) + i;
+                const b = a + 1;
+                const c = a + cols + 1;
+                const d = c + 1;
+                for (const tri of [[a, b, d], [a, d, c]]) {
+                    const [p0, p1, p2] = tri.map((v) => [pts[v * 2], pts[v * 2 + 1]]);
+                    const area = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p2[0] - p0[0]) * (p1[1] - p0[1]);
+                    if (Math.abs(area) < 1e-14) continue;
+                    const w1 = ((X - p0[0]) * (p2[1] - p0[1]) - (p2[0] - p0[0]) * (Y - p0[1])) / area;
+                    const w2 = ((p1[0] - p0[0]) * (Y - p0[1]) - (X - p0[0]) * (p1[1] - p0[1])) / area;
+                    const w0 = 1 - w1 - w2;
+                    if (w0 < -1e-9 || w1 < -1e-9 || w2 < -1e-9) continue;
+                    const r = tri.map((v) => [(v % (cols + 1)) / cols, Math.floor(v / (cols + 1)) / rows]);
+                    return [w0 * r[0][0] + w1 * r[1][0] + w2 * r[2][0], w0 * r[0][1] + w1 * r[1][1] + w2 * r[2][1]];
+                }
+            }
+        }
+        return null;
+    }
+
+    /* Mặt nạ ô có hình cho Puppet từ kênh alpha của nguồn. `alphaAt(x0, y0, x1, y1)` (chuẩn hoá)
+     * trả alpha lớn nhất trong vùng đó. Expansion (px theo hộp) nở thêm số ô tương ứng. */
+    function puppetMask(p, boxW, boxH, alphaGrid) {
+        const { cols, rows } = puppetGrid(p, boxW, boxH);
+        if (!alphaGrid) return null;
+        const cells = new Uint8Array(cols * rows);
+        for (let j = 0; j < rows; j += 1) {
+            for (let i = 0; i < cols; i += 1) cells[j * cols + i] = alphaGrid(i / cols, j / rows, (i + 1) / cols, (j + 1) / rows) > 8 ? 1 : 0;
+        }
+        const rx = Math.ceil((Number(p.expansion) || 0) / Math.max(1e-6, boxW / cols));
+        const ry = Math.ceil((Number(p.expansion) || 0) / Math.max(1e-6, boxH / rows));
+        const grown = new Uint8Array(cells);
+        if (rx || ry) {
+            for (let j = 0; j < rows; j += 1) {
+                for (let i = 0; i < cols; i += 1) {
+                    if (!cells[j * cols + i]) continue;
+                    for (let dj = -ry; dj <= ry; dj += 1) {
+                        for (let di = -rx; di <= rx; di += 1) {
+                            const ii = i + di; const jj = j + dj;
+                            if (ii >= 0 && jj >= 0 && ii < cols && jj < rows) grown[jj * cols + ii] = 1;
+                        }
+                    }
+                }
+            }
+        }
+        let key = 0;
+        for (let k = 0; k < grown.length; k += 1) key = (Math.imul(key, 31) + grown[k] * (k + 1)) | 0;
+        return { cols, rows, cells: grown, key: `${cols}x${rows}:${key}` };
+    }
+
     /* ===================================================================== LƯỚI */
 
     /* Số ô lưới mỗi trục cho cả clip (KHÔNG đổi theo thời gian, để preview và bản xuất cùng một
@@ -491,6 +929,7 @@
     function gridSpec(item, boxW, boxH) {
         let cx = MIN_CELLS;
         let cy = MIN_CELLS;
+        const puppetCells = [];
         normalizeStack(item && item.distort).filter((fx) => fx.enabled).forEach((fx) => {
             if (fx.type === 'wave') {
                 const wMin = Math.max(1, Math.min(...paramValues(item, fx, 'width').map(Math.abs)));
@@ -510,8 +949,19 @@
             } else if (fx.type === 'mesh') {
                 cx = Math.max(cx, fx.params.cols * Math.max(2, fx.params.quality));
                 cy = Math.max(cy, fx.params.rows * Math.max(2, fx.params.quality));
+            } else if (fx.type === 'puppet') {
+                puppetCells.push(puppetGrid(fx.params, boxW, boxH));
             }
         });
+        /* Puppet: lưới vẽ phải là BỘI của lưới Puppet (cùng cách chia tam giác) thì ánh xạ affine từng
+         * mảnh mới khớp tuyệt đối — làm tròn lên bội của lưới Puppet ĐẦU TIÊN. */
+        if (puppetCells.length) {
+            const pc = puppetCells[0];
+            cx = pc.cols * Math.max(1, Math.ceil(Math.min(cx, MAX_CELLS) / pc.cols));
+            cy = pc.rows * Math.max(1, Math.ceil(Math.min(cy, MAX_CELLS) / pc.rows));
+            while (cx > MAX_CELLS) cx -= pc.cols;
+            while (cy > MAX_CELLS) cy -= pc.rows;
+        }
         return {
             cols: Math.max(MIN_CELLS, Math.min(MAX_CELLS, cx)),
             rows: Math.max(MIN_CELLS, Math.min(MAX_CELLS, cy)),
@@ -545,6 +995,14 @@
                     pts[q] += wf.nx * d;
                     pts[q + 1] += wf.ny * d;
                 }
+            } else if (fx.type === 'puppet') {
+                // `solved` có sẵn khi dựng lại từ spec xuất (lưới đã giải gửi kèm); không thì giải tại chỗ.
+                const sol = fx.solved || puppetSolve(fx.params, boxW, boxH, fx.params.mask || null);
+                for (let q = 0; q < n; q += 2) {
+                    const r = puppetMap(sol.pts, sol.cols, sol.rows, pts[q] / boxW + 0.5, pts[q + 1] / boxH + 0.5);
+                    pts[q] = (r[0] - 0.5) * boxW;
+                    pts[q + 1] = (r[1] - 0.5) * boxH;
+                }
             } else if (fx.type === 'bezier' || fx.type === 'mesh') {
                 const p = fx.params;
                 const patch = fx.type === 'bezier' ? bezierPatch(p) : null;
@@ -565,7 +1023,7 @@
     /* Nửa bề rộng/cao của hộp ĐỐI XỨNG quanh tâm chứa trọn nội dung đã biến dạng, cho CẢ clip (cỡ
      * khung xuất phải cố định). Tính theo cận giải tích nên không phải dựng lưới từng khung; nhân
      * 1.15 cho easing vượt đích (Bật lại / Đàn hồi). */
-    function maxExtents(item, boxW, boxH) {
+    function maxExtents(item, boxW, boxH, env = null) {
         let padX = 0;
         let padY = 0;
         normalizeStack(item && item.distort).filter((fx) => fx.enabled).forEach((fx) => {
@@ -602,6 +1060,32 @@
                 const ey = (my + over * (hi[1] - lo[1])) * boxH;
                 padX = Math.max(0, ex - boxW / 2) + padX;
                 padY = Math.max(0, ey - boxH / 2) + padY;
+            } else if (fx.type === 'puppet') {
+                /* Giải Puppet ở dáng tĩnh, ở mọi keyframe ghim và 4 điểm giữa mỗi đoạn, lấy bao của
+                 * lưới đã giải; cộng 15 % (easing vượt đích). Phép phân tích được nhớ nên rẻ. */
+                const kfs = (item && item.keyframes) || {};
+                const times = new Set([0]);
+                Object.keys(kfs).forEach((k) => {
+                    if (!k.startsWith(`${KF_PREFIX}${fx.id}.pin_`)) return;
+                    const list = (kfs[k] || []).map((x) => Number(x.t) || 0).sort((a, b) => a - b);
+                    list.forEach((t, i) => {
+                        times.add(t);
+                        if (i < list.length - 1) for (let q = 1; q < 5; q += 1) times.add(t + ((list[i + 1] - t) * q) / 5);
+                    });
+                });
+                const mask = (env && env.masks && env.masks[fx.id]) || null;
+                let mx = 0.5;
+                let my = 0.5;
+                times.forEach((t) => {
+                    const sol = puppetSolve(effectParamsAt(item, fx, t), boxW, boxH, mask);
+                    for (let q = 0; q < sol.pts.length; q += 2) {
+                        mx = Math.max(mx, Math.abs(sol.pts[q] - 0.5));
+                        my = Math.max(my, Math.abs(sol.pts[q + 1] - 0.5));
+                    }
+                });
+                const over = times.size > 1 ? 1.15 : 1;
+                padX += Math.max(0, mx * over * boxW - boxW / 2);
+                padY += Math.max(0, my * over * boxH - boxH / 2);
             }
         });
         return { hx: boxW / 2 + padX + 1, hy: boxH / 2 + padY + 1 };
@@ -742,7 +1226,8 @@
      * kỳ thứ gì drawImage nhận, kéo về đúng cỡ srcW×srcH (pixel nguồn); hộp là boxW×boxH đơn vị. */
     function warpToCanvas(item, source, srcW, srcH, boxW, boxH, t, opts = {}) {
         const k = srcW / Math.max(1e-6, boxW);
-        const ext = opts.extents || maxExtents(item, boxW, boxH);
+        const env = opts.env || null;
+        const ext = opts.extents || maxExtents(item, boxW, boxH, env);
         const size = outputSize(ext, k);
         const canvas = opts.canvas || document.createElement('canvas');
         if (canvas.width !== size.width) canvas.width = size.width;
@@ -764,7 +1249,7 @@
             if (cache) Object.assign(cache, { source, w: sw, h: sh, data: src });
         }
         const spec = opts.spec || gridSpec(item, boxW, boxH);
-        const pts = gridToPixels(evalGrid(stackAt(item, t), boxW, boxH, spec, t), k, size.width, size.height);
+        const pts = gridToPixels(evalGrid(stackAt(item, t, env), boxW, boxH, spec, t), k, size.width, size.height);
         const img = ctx.createImageData(size.width, size.height);
         rasterMesh(src, sw, sh, spec.cols, spec.rows, pts, img.data, size.width, size.height);
         ctx.putImageData(img, 0, 0);
@@ -981,9 +1466,9 @@
         return { a: v, b: v, k: 0 };
     }
 
-    function exportSpec(item, boxW, boxH, fps, duration) {
+    function exportSpec(item, boxW, boxH, fps, duration, env = null) {
         const spec = gridSpec(item, boxW, boxH);
-        const ext = maxExtents(item, boxW, boxH);
+        const ext = maxExtents(item, boxW, boxH, env);
         const rate = Math.max(1, Number(fps) || 30);
         const count = Math.max(1, Math.round(Math.max(0.01, Number(duration) || 0) * rate));
         const stacks = [];
@@ -998,11 +1483,29 @@
         };
         const enabled = normalizeStack(item && item.distort).filter((fx) => fx.enabled);
         const mixCaches = enabled.map(() => new Map());
+        /* Puppet: lưới ĐÃ GIẢI (chuẩn hoá, làm tròn 1e-6 ~ 0,002 px ở 1920) gửi kèm; mỗi bộ vị trí ghim
+         * giải đúng một lần. Sidecar chỉ nội suy, không giải ARAP. */
+        const puppets = [];
+        const puppetKeys = new Map();
+        const puppetRef = (fx, params) => {
+            const key = `${fx.id}|${JSON.stringify(params.pins.map((pin) => pin.pos))}`;
+            let at = puppetKeys.get(key);
+            if (at === undefined) {
+                const sol = puppetSolve(params, boxW, boxH, (env && env.masks && env.masks[fx.id]) || null);
+                at = puppets.length;
+                puppets.push({ cols: sol.cols, rows: sol.rows, pts: Array.from(sol.pts, (v) => Math.round(v * 1e6) / 1e6) });
+                puppetKeys.set(key, at);
+            }
+            return at;
+        };
         for (let k = 0; k < count; k += 1) {
             const t = (k + 0.5) / rate;
             // Thời gian chỉ đi vào hình khi sóng đang chạy; sóng đứng yên ghi t = 0 để các khung
             // giống nhau gộp được thành một mục.
-            const stack = stackAt(item, t).map((fx, i) => {
+            const stack = stackAt(item, t, env).map((fx, i) => {
+                if (fx.type === 'puppet') {
+                    return { type: 'puppet', t: 0, params: { triangles: fx.params.triangles }, puppet_ref: puppetRef(enabled[i], fx.params) };
+                }
                 if (fx.type === 'mesh') {
                     const mix = meshMixAt(item, enabled[i], t, mixCaches[i]);
                     const { mesh: _m, ...rest } = fx.params;
@@ -1032,12 +1535,17 @@
             frames,
             stacks,
             meshes,
+            puppets,
         };
     }
 
     // Lưới của một mục trong exportSpec (test so khớp với sidecar dùng). Mesh dựng lại từ mesh_ref.
-    function evalSpecStack(specStack, boxW, boxH, grid, meshes = []) {
+    function evalSpecStack(specStack, boxW, boxH, grid, meshes = [], puppets = []) {
         const stack = specStack.map((fx) => {
+            if (fx.type === 'puppet' && fx.puppet_ref != null) {
+                const sol = puppets[fx.puppet_ref];
+                return { ...fx, solved: { cols: sol.cols, rows: sol.rows, pts: sol.pts } };
+            }
             if (fx.type !== 'mesh' || !fx.mesh_ref) return fx;
             const [ia, ib, k] = fx.mesh_ref;
             const a = meshes[ia];
@@ -1106,6 +1614,9 @@
                 }
             }
         }
+        if (fx.type === 'puppet') {
+            (p.pins || []).forEach((pin) => handles.push({ id: `pin:${pin.id}`, kind: 'pin', x: pin.pos[0], y: pin.pos[1], vertex: `pin:${pin.id}` }));
+        }
         return { handles, segs };
     }
 
@@ -1122,6 +1633,10 @@
                 tangents.forEach((k) => { patch[k] = [p[k][0] + dx, p[k][1] + dy]; });
             }
             return patch;
+        }
+        if (fx.type === 'puppet') {
+            const pid = String(id).replace(/^pin:/, '');
+            return (p.pins || []).some((pin) => pin.id === pid) ? { [`pin_${pid}`]: [nx, ny] } : {};
         }
         if (fx.type === 'mesh') {
             const mm = /^v(\d+):([plrud])$/.exec(String(id));
@@ -1200,6 +1715,24 @@
                         ${kf}
                     </div>`;
                 }
+                if (p.kind === 'pins') {
+                    const pins = eff.pins || [];
+                    const list = pins.map((pin, k) => {
+                        const pf = kfField(fx.id, `pin_${pin.id}`);
+                        const pn = `${fx.id}|pin_${pin.id}`;
+                        return `
+                    <div class="dst-row">
+                        <span>${esc(_t('Ghim {n}', { n: k + 1 }))}</span>
+                        <span class="dst-slider">
+                            <input type="text" inputmode="decimal" value="${Math.round(pin.pos[0] * box.w * 10) / 10}" data-distort-param="${pn}" data-distort-axis="0" ${scrubAttrs({ step: 1, min: -100000, max: 100000 })} aria-label="X">
+                            <input type="text" inputmode="decimal" value="${Math.round(pin.pos[1] * box.h * 10) / 10}" data-distort-param="${pn}" data-distort-axis="1" ${scrubAttrs({ step: 1, min: -100000, max: 100000 })} aria-label="Y">
+                        </span>
+                        ${kfGroup(pf, _t('Ghim {n}', { n: k + 1 }))}
+                        <button type="button" class="btn btn-secondary" data-distort-action="remove-pin" data-distort-id="${fx.id}" data-distort-pin="${pin.id}" title="${esc(_t('Xoá ghim'))}">×</button>
+                    </div>`;
+                    }).join('');
+                    return list || `<div class="dst-empty">${esc(_t('Bấm ✎ rồi bấm lên hình để đặt ghim; kéo ghim để uốn. Alt+bấm hoặc Delete để xoá ghim.'))}</div>`;
+                }
                 if (p.kind === 'mesh') {
                     return `
                     <div class="dst-row">
@@ -1273,7 +1806,9 @@
         if (def.kind === 'vec2') {
             const n = Number(String(field.raw).replace(',', '.'));
             if (!Number.isFinite(n)) return null;
-            const cur = effectParamsAt(item, fx, t)[field.key].slice();
+            const curRaw = getParam(effectParamsAt(item, fx, t), field.key);
+            if (!curRaw) return null;
+            const cur = curRaw.slice();
             cur[field.axis === 1 ? 1 : 0] = n / Math.max(1e-6, field.axis === 1 ? box.h : box.w);
             return normalizeParam(def, cur);
         }
@@ -1308,8 +1843,8 @@
             const fx = stack.find((f) => f.id === effectId);
             const def = fx && paramDef(fx.type, key);
             if (!def) return;
-            const v = effectParamsAt(item, fx, t)[key];
-            if (def.kind === 'mesh') return;
+            const v = getParam(effectParamsAt(item, fx, t), key);
+            if (def.kind === 'mesh' || v == null) return;
             let next;
             if (def.kind === 'vec2') {
                 const ax = Number(el.dataset.distortAxis) === 1 ? 1 : 0;
@@ -1358,6 +1893,14 @@
         exportSpec,
         evalSpecStack,
         meshMixAt,
+        puppetGrid,
+        puppetSolve,
+        puppetMap,
+        puppetInverse,
+        puppetMask,
+        getParam,
+        setParam,
+        BandSPD,
         inspectorHtml,
         readField,
         fieldValue,
