@@ -171,6 +171,12 @@ const PREBAKE_CACHE_DIR = process.env.CRAB_PREBAKE_CACHE_DIR
   ? path.resolve(process.env.CRAB_PREBAKE_CACHE_DIR)
   : path.join(USER_DATA_ROOT, 'prebake_cache');
 const PREBAKE_CACHE_ALLOWED = Boolean(process.env.CRAB_PREBAKE_CACHE_DIR) || !process.env.CRAB_TEMP_DIR;
+/* SUBSEQUENCE (NEST): tệp dựng sẵn của từng sequence con (ProRes 4444 có alpha cho lớp phủ, H.264 cho
+ * Subsequence nằm trên lane chính). Tên tệp = băm nội dung payload, nên sửa bên trong là ra tệp mới và
+ * xuất lại không đổi gì thì dùng ngay tệp cũ. Test (CRAB_TEMP_DIR) giữ trong thư mục tạm của test. */
+const NEST_CACHE_DIR = process.env.CRAB_TEMP_DIR
+  ? path.join(path.resolve(process.env.CRAB_TEMP_DIR), 'nest_cache')
+  : path.join(PROJECT_ROOT, 'nest_cache');
 const PREBAKE_CACHE_MAX_BYTES = 10 * 1024 * 1024 * 1024;
 const PREBAKE_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const LIBRARY_CATEGORIES = { video: 'Video', elements: 'Elements', sfxs: 'SFXs', music: 'Music' };
@@ -388,6 +394,9 @@ const ColorAdjust = require(path.join(STATIC_DIR, 'js', 'color-adjust.js'));
  * và ở đây còn gắt hơn: ba phía (file nối do backend dựng, sprite preview, filtergraph
  * export) phải dùng ĐÚNG MỘT phép tính, lệch một pixel là bản xuất ra sai im lặng. */
 const MainLane = require(path.join(STATIC_DIR, 'js', 'main-lane.js'));
+/* BIẾN DẠNG: thứ tự 24 số của mặt Bezier và lưới Mesh mặc định lấy từ CHÍNH distort.js — spec gửi
+ * sidecar phải trùng từng số với thứ preview dựng. */
+const Distort = require(path.join(STATIC_DIR, 'js', 'distort.js'));
 const subtitleJobs = require('./subtitle-jobs.js');
 /* LỒNG TIẾNG (tab Âm thanh) + SỔ TẢI MODEL AI cho thanh trạng thái — xem đầu hai tệp. */
 const ttsService = require('./tts-service.js');
@@ -674,6 +683,15 @@ function cleanInlineText(value, maxLength = 500) {
   return String(value ?? '')
     .replace(/\s+/g, ' ')
     .trim()
+    .slice(0, maxLength);
+}
+
+/* ĐƯỜNG DẪN TỆP: chỉ bỏ ký tự điều khiển, KHÔNG gộp khoảng trắng như cleanInlineText — tên tệp
+ * thật có thể chứa hai dấu cách liền nhau ("Nào-  #shorts.mp4"), gộp lại là sidecar mở một tệp không
+ * tồn tại ("No such file or directory") và lượt xuất hỏng. */
+function cleanPathText(value, maxLength = 2000) {
+  return String(value ?? '')
+    .replace(/[\u0000-\u001f]/g, '')
     .slice(0, maxLength);
 }
 
@@ -997,6 +1015,47 @@ function mediaHasAudio(filePath) {
     filePath,
   ], 3000);
   return !!String(text || '').trim();
+}
+
+/* BITRATE LUỒNG HÌNH của một tệp, kbps, kèm số điểm ảnh của khung (ô "Bitrate" của hộp Xuất — port
+ * CrabbyStudio eba80b0: Khuyến nghị = trung bình bitrate video gốc trên lane chính, quy đổi theo tỉ lệ
+ * điểm ảnh khi xuất khác cỡ nguồn). Lấy `bit_rate` của luồng hình; MKV/WebM thường không khai số đó ->
+ * lấy bitrate container trừ các luồng tiếng, cuối cùng là cỡ tệp / thời lượng.
+ * Đệm theo đường dẫn + mtime + cỡ: mỗi lần mở hộp Xuất / bấm Xuất đều hỏi lại. */
+const mediaVideoBitrateCache = new Map();
+function mediaVideoBitrateInfo(filePath) {
+  let stat;
+  try { stat = fs.statSync(filePath); } catch (_) { return null; }
+  const cacheKey = `${filePath}|${stat.mtimeMs}|${stat.size}`;
+  if (mediaVideoBitrateCache.has(cacheKey)) return mediaVideoBitrateCache.get(cacheKey);
+  const text = commandText('ffprobe', [
+    '-v', 'error',
+    '-show_entries', 'stream=codec_type,bit_rate,width,height:format=bit_rate,duration',
+    '-of', 'json',
+    filePath,
+  ], 5000);
+  let info = null;
+  try {
+    const payload = JSON.parse(text || '{}');
+    const streams = Array.isArray(payload.streams) ? payload.streams : [];
+    const video = streams.find((stream) => stream.codec_type === 'video');
+    if (video) {
+      const streamRate = Number(video.bit_rate);
+      const formatRate = Number(payload.format?.bit_rate);
+      const duration = Number(payload.format?.duration);
+      const audioRate = streams
+        .filter((stream) => stream.codec_type === 'audio')
+        .reduce((sum, stream) => sum + (Number(stream.bit_rate) || 0), 0);
+      let bps = null;
+      if (Number.isFinite(streamRate) && streamRate > 0) bps = streamRate;
+      else if (Number.isFinite(formatRate) && formatRate > audioRate) bps = formatRate - audioRate;
+      else if (Number.isFinite(duration) && duration > 0) bps = (stat.size * 8) / duration - audioRate;
+      const pixels = Number(video.width) * Number(video.height);
+      if (bps > 0) info = { kbps: Math.round(bps / 1000), pixels: pixels > 0 ? pixels : null };
+    }
+  } catch (_) { /* không đo được -> null */ }
+  mediaVideoBitrateCache.set(cacheKey, info);
+  return info;
 }
 
 function publicTempUrl(filePath) {
@@ -1531,7 +1590,7 @@ async function writeProjectReport(reason) {
   lines.push(reportLine(2, 'codec', render?.codec));
   lines.push(reportLine(2, 'quality', render?.quality));
   lines.push(reportLine(2, 'bitrate', render?.rate_mode
-    ? (render.rate_mode === 'custom' ? `custom ${render.rate_mbps} Mbps` : render.rate_mode) : null));
+    ? (render.rate_mbps ? `${render.rate_mode} ${render.rate_mbps} Mbps` : render.rate_mode) : null));
   lines.push(reportLine(2, 'encoder', render?.encoder));
   lines.push(reportLine(2, 'audio_bitrate', render?.audio_bitrate));
   lines.push(reportLine(2, 'interval_count', render?.interval_count));
@@ -1953,6 +2012,61 @@ function runProcess(command, args, options = {}) {
       error.stderr = stderr.join('').trim();
       error.command = [command, ...args].join(' ');
       reject(error);
+    });
+  });
+}
+
+/* MP4 (bản render của sidecar) -> GIF chất lượng cao, cùng thuật toán với Convert2GIF:
+ * fps + scale lanczos -> (tua ngược / boomerang) -> palettegen (stats_mode=diff) + paletteuse.
+ * Tiến độ đọc từ `-progress pipe:1` và báo qua setStatus như các khâu khác của lượt xuất. */
+function exportGifFromVideo(inputPath, outputPath, gif) {
+  const chain = [`fps=${gif.fps}`];
+  if (gif.width > 0) chain.push(`scale=${gif.width}:-1:flags=lanczos`);
+  let effectChain = chain.join(',');
+  if (gif.effect === 'reverse') effectChain += ',reverse';
+  if (gif.effect === 'boomerang') {
+    effectChain += ',split[main][rev];[rev]reverse[rev_out];[main][rev_out]concat=n=2:v=1:a=0';
+  }
+  const paletteUse = gif.dither === 'none' ? 'paletteuse=dither=none'
+    : gif.dither === 'bayer' ? 'paletteuse=dither=bayer:bayer_scale=3'
+      : `paletteuse=dither=${gif.dither}`;
+  const filter = `[0:v]${effectChain},split[s0][s1];`
+    + `[s0]palettegen=max_colors=${gif.max_colors}:stats_mode=diff[p];[s1][p]${paletteUse}`;
+  const sourceSeconds = Number(mediaDurationSeconds(inputPath)) || 0;
+  const expectedSeconds = sourceSeconds * (gif.effect === 'boomerang' ? 2 : 1);
+  const args = ['-y', '-hide_banner', '-i', inputPath, '-filter_complex', filter, '-an',
+    '-loop', String(gif.loop), '-progress', 'pipe:1', '-nostats', '-f', 'gif', outputPath];
+  setStatus(_t('Đang chuyển sang GIF...'));
+  return new Promise((resolve, reject) => {
+    const child = spawn('ffmpeg', args, { cwd: PROJECT_ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    activeChildProcesses.add(child);
+    const stderr = [];
+    let lastPct = -1;
+    let pending = '';
+    child.stdout.on('data', (chunk) => {
+      pending += chunk.toString('utf8');
+      const lines = pending.split('\n');
+      pending = lines.pop();
+      for (const line of lines) {
+        const m = /^out_time_(?:us|ms)=(\d+)/.exec(line.trim());
+        if (!m || expectedSeconds <= 0) continue;
+        const pct = Math.min(99, Math.max(0, Math.floor((Number(m[1]) / 1e6 / expectedSeconds) * 100)));
+        if (pct !== lastPct) {
+          lastPct = pct;
+          setStatus(_t('Đang chuyển sang GIF... {pct}%', { pct }));
+        }
+      }
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr.push(chunk.toString('utf8'));
+      if (stderr.length > 200) stderr.splice(0, stderr.length - 200);
+    });
+    child.on('error', (error) => { activeChildProcesses.delete(child); reject(error); });
+    child.on('exit', (code) => {
+      activeChildProcesses.delete(child);
+      if (code === 0 && fs.existsSync(outputPath)) return resolve();
+      const tail = stderr.join('').trim().split(/\r?\n/).filter(Boolean).slice(-6).join('\n');
+      reject(new Error(_t('Chuyển sang GIF thất bại: {detail}', { detail: tail || `ffmpeg exited with code ${code}` })));
     });
   });
 }
@@ -3392,6 +3506,120 @@ function queueAudioPeaks(rawPath) {
   peaksJobs.set(key, job);
   peaksQueue.push(job);
   pumpPeaksQueue();
+  return job;
+}
+
+/* =============================================================================
+ * DẢI THUMBNAIL NHIỀU KHUNG (filmstrip) cho lane chính ở Editing — kiểu CapCut
+ *
+ * Trước đây block lane chính chỉ có MỘT ảnh tĩnh (thumbnail của video đầu thư viện) cho
+ * mọi block, nên không nhìn ra block nào là cảnh nào. Nay trích một tấm SPRITE: các khung
+ * cách đều `interval` giây xếp lưới `cols` cột, mỗi ô cao FILMSTRIP_TILE_HEIGHT px.
+ * Frontend chỉ việc dịch background-position tới ô của thời điểm cần vẽ.
+ *
+ * NHANH NHỜ `-skip_frame nokey`: chỉ giải mã khung khoá rồi `fps` lấy khung gần nhất cho
+ * từng mốc — đo 2026-10-22: phim 4K AV1 10 phút ra 202 khung trong 0,67 s. Độ chính xác
+ * theo khoảng cách khung khoá là đủ cho ảnh xem nhanh 70px. Nguồn nào giải mã kiểu đó hụt
+ * thì thử lại giải mã đủ.
+ *
+ * CACHE: temp_uploads/filmstrips/<sha1(path|size|mtime|version)>.jpg + .json — key gồm
+ * size+mtime nên dựng lại temp_input.mp4 là tự ra tấm mới. Chạy TUẦN TỰ từng job một để
+ * không giành CPU với ASR/export.
+ * ========================================================================== */
+const FILMSTRIP_DIR = path.join(TEMP_DIR, 'filmstrips');
+const FILMSTRIP_FORMAT_VERSION = 1;
+const FILMSTRIP_TILE_HEIGHT = 72;     // ô hiển thị ~40px -> đủ nét ở màn Retina
+const FILMSTRIP_COLUMNS = 20;
+const FILMSTRIP_MAX_FRAMES = 600;     // trần ô: tấm 2560×2160 với nguồn 16:9
+const FILMSTRIP_MIN_INTERVAL = 1;     // giây — dày hơn không thấy khác ở mức zoom thường
+const FILMSTRIP_MAX_ATTEMPTS = 2;
+const filmstripJobs = new Map();
+let filmstripChain = Promise.resolve();
+
+function filmstripPublicState(job) {
+  if (!job) return { status: 'error' };
+  if (job.status !== 'ready') return { status: job.status === 'error' ? 'error' : 'pending', error: job.error || null };
+  return {
+    status: 'ready',
+    url: `/temp_uploads/filmstrips/${job.key}.jpg`,
+    ...job.meta,
+  };
+}
+
+async function buildFilmstrip(job) {
+  const duration = mediaDurationSeconds(job.source);
+  if (!(duration > 0)) throw new Error('không đo được thời lượng nguồn');
+  const interval = Math.max(FILMSTRIP_MIN_INTERVAL, duration / FILMSTRIP_MAX_FRAMES);
+  const count = Math.max(1, Math.ceil(duration / interval));
+  const cols = Math.min(FILMSTRIP_COLUMNS, count);
+  const rows = Math.max(1, Math.ceil(count / cols));
+  let tonemap = '';
+  // Nguồn HDR -> nén dải về SDR trước khi trích (đường zscale CPU, xem HDR_TONEMAP_ZSCALE).
+  try { tonemap = sourceIsHdr(job.source) ? HDR_TONEMAP_ZSCALE : ''; } catch (_) { tonemap = ''; }
+  const vf = [tonemap, `fps=1/${interval.toFixed(6)}`, `scale=-2:${FILMSTRIP_TILE_HEIGHT}`, `tile=${cols}x${rows}`]
+    .filter(Boolean).join(',');
+  const partPath = path.join(FILMSTRIP_DIR, `${job.key}.part.jpg`);
+  const encode = (keyframesOnly) => runProcess('ffmpeg', [
+    '-v', 'error', '-y',
+    ...(keyframesOnly ? ['-skip_frame', 'nokey'] : []),
+    '-i', job.source, '-an', '-sn', '-dn',
+    '-vf', vf, '-frames:v', '1', '-q:v', '5', partPath,
+  ]);
+  const written = () => fs.existsSync(partPath) && fs.statSync(partPath).size > 0;
+  try {
+    await encode(true);
+  } catch (_) { /* thử giải mã đủ bên dưới */ }
+  if (!written()) await encode(false);
+  // ffmpeg trả 0 mà không ghi gì là ca có thật (xem scaleImageTo) — kiểm file, đừng tin mã thoát.
+  if (!written()) throw new Error('ảnh dải thumbnail rỗng');
+  fs.renameSync(partPath, job.path);
+  job.meta = { interval, count, cols, rows, duration };
+  fs.writeFileSync(job.metaPath, JSON.stringify(job.meta));
+}
+
+// Bảo đảm có dải thumbnail cho 1 nguồn video. Trả state ĐỒNG BỘ, không chặn request.
+function queueFilmstrip(rawPath) {
+  const source = resolveAllowedSourcePath(rawPath, ALLOWED_VIDEO_EXTENSIONS);
+  if (!source) return null;
+  let stat;
+  try {
+    stat = fs.statSync(source);
+  } catch (_) {
+    return null;
+  }
+  const key = sha1Text(`${source}|${stat.size}|${Math.trunc(stat.mtimeMs)}|f${FILMSTRIP_FORMAT_VERSION}`).slice(0, 24);
+  const imagePath = path.join(FILMSTRIP_DIR, `${key}.jpg`);
+  const metaPath = path.join(FILMSTRIP_DIR, `${key}.json`);
+  const existing = filmstripJobs.get(key);
+  if (existing) {
+    if (existing.status === 'queued' || existing.status === 'running') return existing;
+    if (existing.status === 'ready' && fs.existsSync(imagePath)) return existing;
+    if (existing.status === 'error' && existing.attempts >= FILMSTRIP_MAX_ATTEMPTS) return existing;
+  } else if (fs.existsSync(imagePath) && fs.existsSync(metaPath)) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+      const ready = { key, source, path: imagePath, metaPath, status: 'ready', meta, attempts: 0 };
+      filmstripJobs.set(key, ready);
+      return ready;
+    } catch (_) { /* meta hỏng -> dựng lại */ }
+  }
+  fs.mkdirSync(FILMSTRIP_DIR, { recursive: true });
+  const job = existing || { key, source, path: imagePath, metaPath, attempts: 0 };
+  job.status = 'queued';
+  job.error = null;
+  job.attempts = (job.attempts || 0) + 1;
+  filmstripJobs.set(key, job);
+  filmstripChain = filmstripChain.then(async () => {
+    job.status = 'running';
+    try {
+      await buildFilmstrip(job);
+      job.status = 'ready';
+    } catch (error) {
+      job.status = 'error';
+      job.error = cleanInlineText(error?.message || error, 300);
+      recordProjectError('filmstrip', error, { source: job.source });
+    }
+  });
   return job;
 }
 
@@ -4846,7 +5074,27 @@ function exportOutputFrame(sequenceWidth, sequenceHeight, preset, mode = EXPORT_
       && frame.output_content_width === sw && frame.output_content_height === sh) return null;
   return frame;
 }
-const EXPORT_CODEC_VALUES = new Set(['h264', 'hevc', 'prores']);
+const EXPORT_CODEC_VALUES = new Set(['h264', 'hevc', 'prores', 'gif']);
+/* XUẤT GIF (theo app Convert2GIF): sidecar KHÔNG biết GIF — nó render MP4 tạm (H.264, mức "Cao hơn")
+ * như mọi lượt xuất, rồi exportGifFromVideo chuyển sang GIF bằng 2-pass palette. Dải giá trị như
+ * Convert2GIF; giá trị lạ -> mặc định. */
+const GIF_WIDTH_VALUES = new Set([0, 320, 480, 640, 720, 1080]);
+const GIF_FPS_VALUES = new Set([10, 12, 15, 20, 24, 30]);
+const GIF_COLOR_VALUES = new Set([64, 128, 256]);
+const GIF_DITHER_VALUES = new Set(['sierra2_4a', 'floyd_steinberg', 'bayer', 'none']);
+const GIF_EFFECT_VALUES = new Set(['normal', 'reverse', 'boomerang']);
+
+function normalizeGifSettings(raw = {}) {
+  const pick = (set, value, fallback) => (set.has(value) ? value : fallback);
+  return {
+    width: pick(GIF_WIDTH_VALUES, Number(raw.width), 480),
+    fps: pick(GIF_FPS_VALUES, Number(raw.fps), 15),
+    max_colors: pick(GIF_COLOR_VALUES, Number(raw.max_colors), 256),
+    dither: pick(GIF_DITHER_VALUES, String(raw.dither || ''), 'sierra2_4a'),
+    effect: pick(GIF_EFFECT_VALUES, String(raw.effect || ''), 'normal'),
+    loop: Number(raw.loop) === -1 ? -1 : 0,
+  };
+}
 const EXPORT_QUALITY_VALUES = new Set(['small', 'balanced', 'high']);
 /* Ô "Bitrate" kiểu CapCut (mục 1.20 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md, người dùng chốt
  * 2026-10-01) thay ô "Chất lượng": ba mức là CHẤT LƯỢNG CỐ ĐỊNH có trần, "custom" là bitrate trung
@@ -4856,6 +5104,10 @@ const EXPORT_RATE_MBPS_MIN = 0.5;
 const EXPORT_RATE_MBPS_MAX = 400;
 // Payload/khách cũ chỉ gửi `quality`: Cao -> Khuyến nghị, Cân bằng / Tệp nhỏ -> Thấp hơn.
 const RATE_MODE_FROM_QUALITY = { high: 'recommended', balanced: 'lower', small: 'lower' };
+/* Ba mức theo bitrate video GỐC (port CrabbyStudio eba80b0): hộp Xuất gửi `source_mbps` = trung bình
+ * bitrate các video trên lane chính; Khuyến nghị = đúng số đó, Thấp hơn ×0,75, Cao hơn ×2. Không có
+ * `source_mbps` (lane chính không có video, khách cũ) thì sidecar tính như trước theo cỡ khung. */
+const RATE_FACTOR_FROM_SOURCE = { lower: 0.75, recommended: 1, higher: 2 };
 // Chiều ngược lại cho `quality` (preset CPU, báo cáo): Thấp hơn là Cân bằng cũ.
 const QUALITY_FROM_RATE_MODE = { lower: 'balanced', recommended: 'high', higher: 'high', custom: 'high' };
 const EXPORT_AUDIO_VALUES = new Set(['128k', '192k', '320k']);
@@ -4912,6 +5164,12 @@ function normalizeExportSettings(body = {}) {
   // "Tùy chỉnh" mà số không hợp lệ -> Khuyến nghị (sidecar cũng tự lùi như vậy).
   if (rateMode === 'custom' && rateMbps === null) rateMode = 'recommended';
   if (EXPORT_RATE_MODES.has(String(raw.rate_mode || ''))) quality = QUALITY_FROM_RATE_MODE[rateMode];
+  const sourceMbps = Number(raw.source_mbps);
+  // GIF/ProRes không dùng bitrate -> không mang số (báo cáo khỏi ghi một con số không dùng tới).
+  const rateFromSource = (codec === 'h264' || codec === 'hevc')
+    && RATE_FACTOR_FROM_SOURCE[rateMode] && Number.isFinite(sourceMbps) && sourceMbps > 0
+    ? Math.round(Math.min(EXPORT_RATE_MBPS_MAX, Math.max(EXPORT_RATE_MBPS_MIN, sourceMbps * RATE_FACTOR_FROM_SOURCE[rateMode])) * 100) / 100
+    : null;
   const audioBitrate = EXPORT_AUDIO_VALUES.has(String(raw.audio_bitrate || '192k')) ? String(raw.audio_bitrate || '192k') : '192k';
   /* Hai ô Video / Audio (kiểu CapCut). Video mặc định bật — khách cũ không gửi gì thì xuất như
    * trước. Audio bật = thêm một tệp âm thanh riêng (cạnh video, hoặc là tệp duy nhất khi tắt Video).
@@ -4944,7 +5202,9 @@ function normalizeExportSettings(body = {}) {
     quality,
     rate_mode: rateMode,
     ...(rateMode === 'custom' ? { rate_mbps: rateMbps } : {}),
+    ...(rateFromSource ? { rate_mbps: rateFromSource, source_mbps: Math.round(sourceMbps * 100) / 100 } : {}),
     audio_bitrate: audioBitrate,
+    ...(codec === 'gif' ? { gif: normalizeGifSettings(raw.gif && typeof raw.gif === 'object' ? raw.gif : {}) } : {}),
   };
 }
 
@@ -5352,6 +5612,130 @@ function normalizeVideoMaskFields(raw) {
   }
 }
 
+/* BIẾN DẠNG (Distort) của VIDEO lớp phủ -> tệp spec dạng dòng chữ cho sidecar (DistortVideoPrepass).
+ * Frontend gửi `distort_spec` (Distort.exportSpec ở static/js/distort.js): tham số của TỪNG khung đã
+ * nội suy keyframe. Ở đây chỉ DỰNG LẠI từ số đã kẹp — không chuỗi nào của client đi thẳng vào tệp.
+ * Hai bảng dưới phải trùng thứ tự WAVE_SHAPES / WAVE_PINNING của distort.js và các `case` của
+ * DistortWaveShape / DistortPinWeight trong sidecar. */
+const DISTORT_WAVE_SHAPES = ['sine', 'square', 'triangle', 'sawtooth', 'circle', 'semicircle', 'uncircle', 'noise', 'smooth_noise'];
+const DISTORT_WAVE_PINNING = ['none', 'all_edges', 'center', 'left', 'top', 'right', 'bottom', 'horizontal_edges', 'vertical_edges'];
+const DISTORT_MAX_CELLS = 512;
+function distortSpecText(spec) {
+  if (!spec || typeof spec !== 'object') return null;
+  const num = (v, lo, hi, d) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d;
+  };
+  const boxW = num(spec.box?.w, 1, 100000, 0);
+  const boxH = num(spec.box?.h, 1, 100000, 0);
+  const stacks = Array.isArray(spec.stacks) ? spec.stacks.slice(0, 200000) : [];
+  const frames = Array.isArray(spec.frames) ? spec.frames.slice(0, 1000000) : [];
+  if (!(boxW > 0 && boxH > 0) || !stacks.length || !frames.length) return null;
+  // Bảng lưới Puppet đã giải: { cols, rows, pts } — chỉ nhận lưới đúng cỡ.
+  const puppets = (Array.isArray(spec.puppets) ? spec.puppets.slice(0, 200000) : []).map((q) => {
+    const cols = Math.round(num(q?.cols, 1, 80, 0));
+    const rows = Math.round(num(q?.rows, 1, 80, 0));
+    const pts = Array.isArray(q?.pts) ? q.pts : [];
+    return cols && rows && pts.length === (cols + 1) * (rows + 1) * 2
+      ? { cols, rows, pts: pts.map((v) => num(v, -50, 50, 0)) } : null;
+  });
+  // Bảng lưới Mesh (mỗi lưới keyframe một lần, xem meshMixAt ở distort.js).
+  const meshes = (Array.isArray(spec.meshes) ? spec.meshes.slice(0, 4096) : [])
+    .map((m) => (Array.isArray(m) && m.length <= 64 * 64 * 10 ? m.map((v) => num(v, -50, 50, 0)) : []));
+  const lines = [
+    'CRDS 1',
+    `box ${boxW} ${boxH}`,
+    `ext ${num(spec.ext?.hx, 1, 1e6, boxW / 2)} ${num(spec.ext?.hy, 1, 1e6, boxH / 2)}`,
+    `grid ${Math.round(num(spec.grid?.cols, 1, DISTORT_MAX_CELLS, 8))} ${Math.round(num(spec.grid?.rows, 1, DISTORT_MAX_CELLS, 8))}`,
+    `fps ${num(spec.fps, 1, 240, 30)}`,
+    `stacks ${stacks.length}`,
+  ];
+  for (const stack of stacks) {
+    const effects = (Array.isArray(stack) ? stack : [])
+      .filter((fx) => fx && ['wave', 'bezier', 'mesh', 'puppet', 'liquify'].includes(fx.type)).slice(0, 8);
+    lines.push(`stack ${effects.length}`);
+    for (const fx of effects) {
+      const p = fx.params && typeof fx.params === 'object' ? fx.params : {};
+      if (fx.type === 'liquify') {
+        // Trường dời = trộn hai mảng của bảng meshdata (xem fieldMixAt); sai tham chiếu -> bỏ bước.
+        const ref = Array.isArray(fx.field_ref) ? fx.field_ref : [];
+        const idx = (v) => {
+          const i = Math.round(num(v, -1, meshes.length - 1, -1));
+          return i >= 0 && meshes[i] && meshes[i].length === Distort.FIELD_LEN ? i : -1;
+        };
+        const fa = idx(ref[0]);
+        const fb = idx(ref[1]);
+        const off = Array.isArray(p.offset) ? p.offset : [0, 0];
+        if (fa < 0 || fb < 0) lines.push('noop');
+        else {
+          lines.push(['liquify', Distort.FIELD_N, fa, fb, num(ref[2], -2, 3, 0), num(p.percent, -1000, 1000, 100),
+            num(off[0], -50, 50, 0), num(off[1], -50, 50, 0)].join(' '));
+        }
+        continue;
+      }
+      if (fx.type === 'puppet') {
+        // Lưới Puppet ĐÃ GIẢI ở frontend (bảng puppetdata); tham chiếu sai -> bỏ bước này (không uốn).
+        const i = Math.round(num(fx.puppet_ref, -1, puppets.length - 1, -1));
+        if (i >= 0 && puppets[i]) lines.push(`puppet ${i}`);
+        else lines.push('noop');
+        continue;
+      }
+      if (fx.type === 'bezier' || fx.type === 'mesh') {
+        // Chuẩn hoá lại qua distort.js (kẹp, điểm thiếu về mặc định) rồi mới lấy số.
+        const norm = Distort.normalizeEffect({ id: 'x', type: fx.type, params: p }).params;
+        if (fx.type === 'bezier') {
+          lines.push(`bezier ${Distort.bezierPatch(norm).map((v) => num(v, -50, 50, 0)).join(' ')}`);
+        } else {
+          // Lưới = trộn hai lưới của bảng `meshdata` (xem meshMixAt): chỉ số a, b và hệ số k.
+          const ref = Array.isArray(fx.mesh_ref) ? fx.mesh_ref : [0, 0, 0];
+          const len = Distort.meshLength(norm.rows, norm.cols);
+          const idx = (v) => {
+            const i = Math.round(num(v, 0, meshes.length - 1, 0));
+            return meshes[i] && meshes[i].length === len ? i : -1;
+          };
+          const ia = idx(ref[0]);
+          const ib = idx(ref[1]);
+          if (ia < 0 || ib < 0) {
+            // Không có lưới hợp lệ -> lưới đều (không biến dạng), đưa vào bảng như một lưới mới.
+            meshes.push(Distort.meshIdentity(norm.rows, norm.cols));
+            lines.push(`mesh ${norm.rows} ${norm.cols} ${meshes.length - 1} ${meshes.length - 1} 0`);
+          } else {
+            lines.push(`mesh ${norm.rows} ${norm.cols} ${ia} ${ib} ${num(ref[2], -2, 3, 0)}`);
+          }
+        }
+        continue;
+      }
+      const shape = Math.max(0, DISTORT_WAVE_SHAPES.indexOf(String(p.wave_type)));
+      const pin = Math.max(0, DISTORT_WAVE_PINNING.indexOf(String(p.pinning)));
+      lines.push(['wave', num(fx.t, 0, 1e6, 0), shape, num(p.height, -2000, 2000, 0), num(p.width, 1, 4000, 40),
+        num(p.direction, -3600, 3600, 90), num(p.speed, -100, 100, 0), pin, num(p.phase, -36000, 36000, 0)].join(' '));
+    }
+  }
+  const last = stacks.length - 1;
+  lines.push(`frames ${frames.length}`);
+  lines.push(frames.map((f) => Math.round(num(f, 0, last, 0))).join(' '));
+  // Bảng lưới đặt CUỐI (có thể vừa thêm lưới đều ở trên); sidecar tra chỉ số lúc dựng lưới.
+  if (meshes.length) {
+    lines.push(`meshdata ${meshes.length}`);
+    meshes.forEach((m) => lines.push(`m ${m.length} ${m.join(' ')}`));
+  }
+  if (puppets.length) {
+    lines.push(`puppetdata ${puppets.length}`);
+    puppets.forEach((q) => lines.push(q ? `q ${q.cols} ${q.rows} ${q.pts.join(' ')}` : 'q 0 0'));
+  }
+  return `${lines.join('\n')}\n`;
+}
+function normalizeDistortFields(spec, itemId, index) {
+  const text = distortSpecText(spec);
+  if (!text) return {};
+  const safeId = String(itemId || `item_${index}`).replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 80) || `item_${index}`;
+  const dir = path.join(TEMP_DIR, 'distort_specs');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${safeId}_${index}.txt`);
+  fs.writeFileSync(file, text, 'utf8');
+  return { distort_spec_path: file };
+}
+
 /* XOÁ VẬT THỂ của block -> field phẳng cho sidecar:
  *   - `logo_mode` + `logo_rects` ("x:y:w:h:p|..." — pixel NGUYÊN của stream mà chuỗi filter
  *     chạy trên đó, p = bán kính mờ hoặc cạnh ô khảm) cho vùng CỐ ĐỊNH xoá bằng công thức.
@@ -5415,6 +5799,8 @@ function normalizeAnimVideoExprFields(av) {
   const sx = sanitizeFfmpegExpr(av?.scale_x_expr, 4000); if (sx) out.anim_sx_expr = sx;
   const sy = sanitizeFfmpegExpr(av?.scale_y_expr, 4000); if (sy) out.anim_sy_expr = sy;
   const r = sanitizeFfmpegExpr(av?.rot_expr, 4000); if (r) out.anim_rot_expr = r;
+  // Block có Wiggle vị trí: sidecar dời phần lẻ dưới pixel (SubpixelShiftFilter) — chỉ cờ.
+  if (av?.subpixel === true) out.anim_subpixel = true;
   return out;
 }
 
@@ -5830,7 +6216,7 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
     id: cleanInlineText(asset?.id || '', 80),
     type: cleanInlineText(asset?.type || '', 40),
     name: cleanInlineText(asset?.name || '', 255),
-    path: cleanInlineText(usePath(asset?.path), 2000),
+    path: cleanPathText(usePath(asset?.path), 2000),
     url: cleanInlineText(asset?.url || '', 2000),
     thumbnail_url: cleanInlineText(asset?.thumbnail_url || '', 2000),
     width: finiteNumberOrNull(asset?.width),
@@ -5872,7 +6258,7 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
       : (shapeImagePath ? 'shape_image'
         : (geocodeSrc ? (geocodeSrc.still ? 'media_image' : 'image_seq') : cleanInlineText(asset?.type || '', 40)));
     const overlayAssetPath = textImagePath || shapeImagePath
-      || (geocodeSrc ? (geocodeSrc.still || geocodeSrc.pattern) : cleanInlineText(usePath(asset?.path), 2000));
+      || (geocodeSrc ? (geocodeSrc.still || geocodeSrc.pattern) : cleanPathText(usePath(asset?.path), 2000));
     const baseOverlay = {
       id: cleanInlineText(item.id || `overlay_${index}`, 120),
       type: overlayType,
@@ -6013,6 +6399,8 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
       overlays.push({
         ...baseOverlay, ...(animVideoFields || {}), ...kfFields, ...adjFields, ...maskFields,
         ...normalizeLogoRemovalFields(item.logo_removal_px),
+        // Biến dạng chỉ cho VIDEO lớp phủ (ảnh/Shape đã được frontend uốn sẵn vào PNG).
+        ...(type === 'media' && item.distort_spec ? normalizeDistortFields(item.distort_spec, item.id, index) : {}),
         index: overlayIndex++,
       });
     }
@@ -6036,6 +6424,7 @@ function normalizeEditingPayload(rawEditing, totalDuration, renderFpsValue = 0, 
 }
 
 function exportOutputName(settings) {
+  if (settings.codec === 'gif') return 'final_cut.gif';
   return settings.codec === 'prores' ? 'final_cut.mov' : 'final_cut.mp4';
 }
 
@@ -6207,6 +6596,14 @@ async function handleTranscribeFromSavedFiles({ savedFiles, referenceScript, scr
 
 function httpError(res, statusCode, detail) {
   res.status(statusCode).json({ detail: String(detail?.message || detail) });
+}
+
+/* res.sendFile cho ĐƯỜNG TUYỆT ĐỐI. Express 5 / `send` không có `root` thì soi MỌI đoạn của
+ * đường; gặp thư mục bắt đầu bằng "." (`D:\.footage\`, `~/.config/…`, worktree `.claude\…`) là
+ * coi như dotfile và trả 404 dù tệp có thật. Đặt root = thư mục chứa tệp thì `send` chỉ soi tên
+ * tệp — tệp ẩn vẫn bị chặn như cũ; Range/ETag/headers giữ nguyên. */
+function sendFileAbs(res, file, options = {}) {
+  return res.sendFile(path.basename(file), { ...options, root: path.dirname(file) });
 }
 
 /* Xoá SẠCH temp_uploads cho dự án mới.
@@ -6386,12 +6783,29 @@ function createApp() {
         res.set('Content-Type', 'application/octet-stream');
         res.set('Cache-Control', 'public, max-age=31536000, immutable');
         res.set('X-Peaks-Key', job.key);
-        return res.sendFile(job.path);
+        return sendFileAbs(res, job.path);
       }
       if (job.status === 'error') {
         return res.status(500).json({ status: 'error', ...peaksJobPublicState(job) });
       }
       return res.status(202).json({ status: 'pending', ...peaksJobPublicState(job) });
+    } catch (error) {
+      httpError(res, 500, error);
+    }
+  });
+
+  /* Dải thumbnail nhiều khung (xem khối "DẢI THUMBNAIL NHIỀU KHUNG").
+   * Tham số như /api/audio-peaks: source=main HOẶC path= HOẶC url=.
+   * Luôn trả 200 JSON {status: ready|pending|error, url, interval, count, cols, rows}:
+   * thiếu dải ảnh không phải lỗi của người dùng (block vẫn có ảnh tĩnh thay thế). */
+  app.get('/api/filmstrip', (req, res) => {
+    try {
+      const requested = String(req.query.source || '') === 'main'
+        ? path.join(TEMP_DIR, 'temp_input.mp4')
+        : (req.query.path || req.query.url || '');
+      const job = queueFilmstrip(requested);
+      res.set('Cache-Control', 'no-store');
+      return res.json(job ? filmstripPublicState(job) : { status: 'error', error: 'not_found' });
     } catch (error) {
       httpError(res, 500, error);
     }
@@ -6554,6 +6968,35 @@ function createApp() {
     }
   });
 
+  /* Bitrate video TRUNG BÌNH của các nguồn trên lane chính (ô "Bitrate" của hộp Xuất): trung bình
+   * cộng theo từng video, bỏ qua ảnh/âm thanh và tệp không đo được. Không có video nào -> null
+   * (hộp Xuất lùi về cách tính cũ theo cỡ khung). Có `width`/`height` (khung XUẤT) thì bitrate từng
+   * video nhân theo tỉ lệ điểm ảnh khung xuất / khung nguồn trước khi lấy trung bình. */
+  app.post('/api/media-bitrate', (req, res) => {
+    try {
+      const paths = Array.isArray(req.body?.paths) ? req.body.paths : [];
+      const targetPixels = Math.round(Number(req.body?.width)) * Math.round(Number(req.body?.height));
+      const unique = [...new Set(paths.map((item) => path.resolve(String(item || ''))))];
+      const rates = [];
+      for (const filePath of unique) {
+        if (!isSourceAccessAllowed(filePath) || !isSupportedEditingAssetFile(filePath)) continue;
+        if (editingAssetKindForPath(filePath) !== 'media_video') continue;
+        const info = mediaVideoBitrateInfo(filePath);
+        if (!(info?.kbps > 0)) continue;
+        const scale = targetPixels > 0 && info.pixels > 0 ? targetPixels / info.pixels : 1;
+        rates.push(info.kbps * scale);
+      }
+      const averageKbps = rates.length ? rates.reduce((sum, value) => sum + value, 0) / rates.length : null;
+      res.json({
+        status: 'success',
+        count: rates.length,
+        average_mbps: averageKbps ? Math.round(averageKbps / 10) / 100 : null,
+      });
+    } catch (error) {
+      httpError(res, 500, error);
+    }
+  });
+
   /* Số đo của MỘT file (ffprobe) — tách khỏi listing để listing luôn rẻ.
    * Dùng cho: mặc định Sequence theo video đầu tiên, và asset link lúc kéo xuống timeline. */
   app.post('/api/media-probe', (req, res) => {
@@ -6635,13 +7078,13 @@ function createApp() {
     }
   });
 
-  // Phát file nguồn tại chỗ (không chép). res.sendFile hỗ trợ sẵn Range nên <video> tua được.
+  // Phát file nguồn tại chỗ (không chép). sendFile hỗ trợ sẵn Range nên <video> tua được.
   app.get('/api/source-file', (req, res) => {
     try {
       const filePath = path.resolve(String(req.query.path || ''));
       if (!isSourceAccessAllowed(filePath)) return httpError(res, 403, _t('Đường dẫn chưa được đăng ký.'));
       if (!isSupportedEditingAssetFile(filePath)) return httpError(res, 404, _t('Không tìm thấy tệp phương tiện.'));
-      res.sendFile(filePath);
+      sendFileAbs(res, filePath);
     } catch (error) {
       httpError(res, 500, error);
     }
@@ -7428,7 +7871,7 @@ function createApp() {
     if (!file) return res.status(404).end();
     // Một miếng vá không bao giờ đổi nội dung (lượt mới = thư mục run mới) -> cache lâu.
     res.set('Cache-Control', 'private, max-age=86400, immutable');
-    res.sendFile(file);
+    sendFileAbs(res, file);
   });
 
   app.post('/api/pose/track', async (req, res) => {
@@ -7597,7 +8040,7 @@ function createApp() {
 
   app.get('/api/voice-profiles/:id/audio', (req, res) => {
     try {
-      res.sendFile(voiceProfiles.audioPath(req.params.id), { headers: { 'Cache-Control': 'no-store' } });
+      sendFileAbs(res, voiceProfiles.audioPath(req.params.id), { headers: { 'Cache-Control': 'no-store' } });
     } catch (error) {
       httpError(res, error?.status || 500, error);
     }
@@ -7858,6 +8301,45 @@ function createApp() {
       const editingRaw = parseOptionalJsonObject(req.body.editing_json || {});
       setExportCubeTexts(editingRaw.cube_texts);
       const exportSettings = normalizeExportSettings(req.body);
+      /* SUBSEQUENCE (nest_render=1): frontend nhờ dựng NỘI DUNG một sequence con thành tệp trung gian
+       * (editing-runtime.js › renderNestAssetFile). Cùng đường dựng với bản xuất thật — preview/xuất
+       * khớp nhau bằng cấu trúc — chỉ khác: codec cố định (ProRes 4444 + alpha cho lớp phủ, H.264 chất
+       * lượng cao cho lane chính), ghi vào nest_cache theo băm nội dung, trả JSON đường dẫn tệp. */
+      const nestRender = String(req.body.nest_render || '') === '1';
+      const nestAlpha = nestRender && String(req.body.nest_alpha || '') === '1';
+      let nestOutputPath = null;
+      if (nestRender) {
+        Object.assign(exportSettings, {
+          codec: nestAlpha ? 'prores' : 'h264',
+          quality: 'high',
+          rate_mode: 'higher',
+          export_video: true,
+          audio_file_format: null,
+          alpha_output: nestAlpha,
+        });
+        delete exportSettings.rate_mbps;
+        delete exportSettings.gif;
+        const hash = crypto.createHash('sha1');
+        hash.update(String(req.body.timeline_json || ''));
+        hash.update('\0');
+        hash.update(String(req.body.editing_json || ''));
+        hash.update('\0');
+        hash.update(String(req.body.sequence_settings || ''));
+        hash.update(`\0${req.body.export_fps || ''}\0${nestAlpha ? 'alpha' : 'opaque'}\0`);
+        for (const file of (Array.isArray(req.files) ? req.files : [])) {
+          hash.update(`${file.originalname}:${file.size}\0`);
+        }
+        await fsp.mkdir(NEST_CACHE_DIR, { recursive: true });
+        nestOutputPath = path.join(NEST_CACHE_DIR, `nest_${hash.digest('hex').slice(0, 24)}${nestAlpha ? '.mov' : '.mp4'}`);
+        if (fs.existsSync(nestOutputPath) && fs.statSync(nestOutputPath).size > 0) {
+          return res.json({
+            path: nestOutputPath,
+            cached: true,
+            duration: mediaDurationSeconds(nestOutputPath),
+            has_audio: mediaHasAudio(nestOutputPath),
+          });
+        }
+      }
       // Cài đặt › Xuất video › "Render bằng" (mục 1.21): sidecar dựng đồ thị GPU khi máy dùng được.
       exportSettings.render_device = readAppSettings().export.renderDevice;
       const exportRaw = typeof req.body.export_settings === 'string' && req.body.export_settings.trim()
@@ -7916,7 +8398,7 @@ function createApp() {
       }
       /* Đuôi đích theo LOẠI XUẤT: có Video -> đuôi video (tệp âm thanh riêng, nếu chọn, nằm cạnh
        * nó cùng tên); chỉ Audio -> đuôi của định dạng âm thanh. main.js ký đúng đuôi đó. */
-      userOutputPath = trustedExportOutputPath(req.body, exportSettings.export_video
+      userOutputPath = nestRender ? null : trustedExportOutputPath(req.body, exportSettings.export_video
         ? path.extname(exportOutputName(exportSettings))
         : exportAudioExt(exportSettings.audio_file_format));
       // Chốt màu asset overlay TRƯỚC khi dựng payload: xem sdrOverridesForEditingAssets.
@@ -7932,6 +8414,14 @@ function createApp() {
         sdrAssetOverrides,
       ));
       const timelineFile = path.join(TEMP_DIR, 'export_timeline.json');
+      /* GIF: sidecar render MP4 tạm bằng H.264 mức "Cao hơn" (bản trung gian nên ưu tiên chất lượng).
+       * Bỏ khoá `gif` khỏi settings gửi sidecar: nó dò khoá theo tên trong cả tệp (width/fps...). */
+      const gifSettings = exportSettings.codec === 'gif' ? exportSettings.gif : null;
+      const { gif: _gifSettings, ...sidecarSettings } = exportSettings;
+      if (gifSettings) {
+        Object.assign(sidecarSettings, { codec: 'h264', rate_mode: 'higher', quality: 'high' });
+        delete sidecarSettings.rate_mbps;
+      }
       /* KHÔNG ghi `editingItems`: sidecar không đọc nó (lớp phủ đã chuẩn hoá nằm ở `overlays`), mà item thô
        * còn nguyên ảnh chữ base64 + khung hoạt ảnh — "Bin Tom" 92 MB: backend stringify + ghi 92 MB, sidecar
        * quét cả tệp mất ~1 s mỗi lượt xuất (đo 2026-10-03, khâu dò nguồn 1,4 s so với 0,6 s của dự án khác). */
@@ -7943,7 +8433,7 @@ function createApp() {
         assets: editingPayload.assets,
         main_audio_volume: editingPayload.mainAudioVolume,
         overlays: editingPayload.overlays,
-        settings: exportSettings,
+        settings: sidecarSettings,
       })), 'utf8');
       const audioFormat = exportSettings.audio_file_format;
       const audioOnly = !exportSettings.export_video;
@@ -7958,6 +8448,11 @@ function createApp() {
             ? path.join(path.dirname(userOutputPath), `${path.basename(userOutputPath, path.extname(userOutputPath))}${exportAudioExt(audioFormat)}`)
             : path.join(TEMP_DIR, `final_cut${exportAudioExt(audioFormat)}`));
       const audioPart = audioTarget ? (audioOnly ? outputPath : exportPartPath(audioTarget)) : null;
+      // GIF: sidecar ghi MP4 tạm này, khâu chuyển GIF ghi ra outputPath. Còn lại: sidecar ghi thẳng outputPath.
+      const renderPath = nestOutputPath
+        ? `${nestOutputPath}.part${path.extname(nestOutputPath)}`
+        : (gifSettings && !audioOnly ? path.join(TEMP_DIR, 'final_cut_gif_source.mp4') : outputPath);
+      if (renderPath !== outputPath) await fsp.rm(renderPath, { force: true });
       const clientStartedAt = parseClientStartedAtMs(req.body.client_started_at_ms);
       const renderStartedAt = clientStartedAt || Date.now();
       const serverRenderStartedAt = Date.now();
@@ -7975,7 +8470,7 @@ function createApp() {
       const sidecarEvents = audioOnly ? [] : await timeStage('sidecar_ms', () => runSidecar([
         'export-video',
         sourceVideoPath,
-        outputPath,
+        renderPath,
         timelineFile,
         TEMP_DIR,
         exportSettings.resolution,
@@ -7996,13 +8491,31 @@ function createApp() {
       const allowedShortfall = Math.max(0.5, expectedDuration * 0.02);
       let actualDuration = null;
       if (!audioOnly) {
-        actualDuration = await timeStage('verify_ms', () => mediaDurationSeconds(outputPath));
+        actualDuration = await timeStage('verify_ms', () => mediaDurationSeconds(renderPath));
         if (Number.isFinite(actualDuration) && expectedDuration > 0
           && actualDuration < expectedDuration - allowedShortfall) {
           throw new Error(
             _t('Video xuất ra bị thiếu: chỉ dài {actual}s trong khi timeline là {expected}s. Nhiều khả năng các video nguồn khác thông số nhau nên bản nối bị đứt giữa chừng — hãy thử "Dự án mới" rồi thêm lại video, hoặc báo lỗi kèm tệp .crab.',
             { actual: actualDuration.toFixed(2), expected: expectedDuration.toFixed(2) }),
           );
+        }
+        if (nestOutputPath) {
+          // Subsequence: xong là đổi tên vào cache rồi trả đường dẫn — không tệp âm thanh, không báo cáo.
+          await fsp.rename(renderPath, nestOutputPath);
+          setStatus(_t('Đã dựng xong Subsequence.'));
+          return res.json({
+            path: nestOutputPath,
+            cached: false,
+            duration: actualDuration,
+            has_audio: mediaHasAudio(nestOutputPath),
+          });
+        }
+        if (renderPath !== outputPath) {
+          try {
+            await timeStage('gif_ms', () => exportGifFromVideo(renderPath, outputPath, gifSettings));
+          } finally {
+            await fsp.rm(renderPath, { force: true }).catch(() => {});
+          }
         }
       }
       /* TỆP ÂM THANH (ô "Audio"): một lượt sidecar `export-audio` — cùng bộ trộn với lượt tiếng của
@@ -8081,7 +8594,10 @@ function createApp() {
           ...(audioTarget ? { audio_path: audioTarget, audio_name: path.basename(audioTarget) } : {}),
         });
       } else {
-        res.download(outputPath, outputName);
+        /* `root` BẮT BUỘC: không có nó thì `send` soi MỌI đoạn của đường tuyệt đối, gặp thư mục
+         * bắt đầu bằng "." (worktree `.claude\worktrees\…`, `~/.config`…) là trả 404 dù tệp có
+         * thật. Có `root` thì chỉ soi phần sau root — ở đây chỉ còn tên tệp. */
+        res.download(outputName, outputName, { root: path.dirname(outputPath) });
       }
     } catch (error) {
       recordProjectError('export', error, { endpoint: '/api/export-video', exportSettings: exportSettingsForError });
@@ -8218,4 +8734,6 @@ module.exports = {
   exportOutputFrame,
   // Test khoá ô "Bitrate" (mục 1.20): mức, số Mbps, lùi về Khuyến nghị, suy từ `quality` cũ.
   normalizeExportSettings,
+  // Test so khớp Distort JS <-> sidecar: spec dạng dòng chữ mà sidecar đọc.
+  distortSpecText,
 };

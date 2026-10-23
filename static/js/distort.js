@@ -1,0 +1,2136 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Tam Pham <tampham.designer92@gmail.com>
+
+/* BIẾN DẠNG (Distort) KIỂU AFTER EFFECTS cho block ảnh / video / Shape.
+ *
+ * DỮ LIỆU — một danh sách hiệu ứng có thứ tự (như ngăn Effect của AE), lưu thẳng trong block nên
+ * .crab và Hoàn tác tự có:
+ *   item.distort = [{ id: 'd1', type: 'wave', enabled: true, params: { ... } }]
+ *   Keyframe:  item.keyframes['dst.<id>.<param>'] = [{ t, v, e }]   (cùng mô hình {t,v,e} của
+ *   text-animations.js; thuộc tính kiểu liệt kê giữ (hold) như AE).
+ *
+ * HÌNH HỌC — mọi hiệu ứng chỉ là cách tính VỊ TRÍ ĐÍCH cho các đỉnh của một lưới đều phủ ảnh
+ * nguồn. Toạ độ đích tính theo "đơn vị hộp" (px của block ở scale 100 %), gốc ở TÂM hộp — nên
+ * position_x/y vẫn là tâm block và bật/tắt hiệu ứng không làm block nhảy chỗ (như Warp chữ).
+ *
+ * VẼ — kéo ảnh nguồn lên lưới tam giác đã biến dạng: affine từng tam giác + lấy mẫu song tuyến
+ * tính trên alpha NHÂN SẴN, ngoài ảnh = trong suốt (đúng phép của TextDeform.rasterWarp). Ba bản
+ * cùng một phép toán:
+ *   - WebGL2 (preview, MeshRenderer)          — kéo tay nắm / phát mượt;
+ *   - JS CPU (rasterMesh)                     — bake PNG ảnh/Shape khi xuất, và test;
+ *   - C++ (native/sidecar/core_process.cpp)   — video khi xuất (DistortVideoPrepass).
+ * Tam giác chồng nhau (lưới tự gấp) thì tam giác vẽ SAU thắng, ở cả ba bản.
+ *
+ * XUẤT VIDEO — lưới của Wave trên video 1080p có thể tới hàng trăm nghìn đỉnh, gửi từng khung là
+ * quá nặng, nên frontend chỉ gửi THAM SỐ đã nội suy của từng khung (exportSpec) và sidecar tự
+ * dựng lưới bằng CÙNG công thức (gridSpec / evalGrid được viết lại 1-1 bằng C++; test
+ * tests/scripts/distort.js so số của hai bản).
+ */
+(function (root, factory) {
+    if (typeof module === 'object' && module.exports) {
+        module.exports = factory();
+    } else {
+        root.Distort = factory();
+    }
+}(typeof self !== 'undefined' ? self : this, function () {
+    'use strict';
+
+    const _t = (typeof globalThis !== 'undefined' && globalThis._t)
+        || ((k, p) => (p ? String(k).replace(/\{(\w+)\}/g, (m, n) => (n in p ? p[n] : m)) : k));
+    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+
+    const KF_PREFIX = 'dst.';
+    const MAX_EFFECTS = 8;
+    // Trần số ô lưới mỗi trục — PHẢI trùng kDistortMaxCells của sidecar.
+    const MAX_CELLS = 512;
+    const MIN_CELLS = 8;
+
+    const clampNum = (v, lo, hi, d) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d;
+    };
+
+    /* ===================================================================== THAM SỐ */
+
+    // Cùng danh sách và cùng tên với Wave Warp của After Effects.
+    const WAVE_SHAPES = [
+        { id: 'sine', label: 'Sine' },
+        { id: 'square', label: 'Square' },
+        { id: 'triangle', label: 'Triangle' },
+        { id: 'sawtooth', label: 'Sawtooth' },
+        { id: 'circle', label: 'Circle' },
+        { id: 'semicircle', label: 'Semicircle' },
+        { id: 'uncircle', label: 'Uncircle' },
+        { id: 'noise', label: 'Noise' },
+        { id: 'smooth_noise', label: 'Smooth Noise' },
+    ];
+    const WAVE_PINNING = [
+        { id: 'none', label: 'None' },
+        { id: 'all_edges', label: 'All Edges' },
+        { id: 'center', label: 'Center' },
+        { id: 'left', label: 'Left Edge' },
+        { id: 'top', label: 'Top Edge' },
+        { id: 'right', label: 'Right Edge' },
+        { id: 'bottom', label: 'Bottom Edge' },
+        { id: 'horizontal_edges', label: 'Horizontal Edges' },
+        { id: 'vertical_edges', label: 'Vertical Edges' },
+    ];
+
+    /* Bezier Warp: 12 điểm, mỗi điểm một thông số keyframe RIÊNG như AE. Toạ độ CHUẨN HOÁ theo hộp
+     * (0..1, gốc trên-trái) — đổi cỡ Shape / đổi nguồn không làm lệch biến dạng; Inspector hiện px.
+     * Bốn cạnh là bốn đường cong bậc ba:
+     *   trên  : tl_vertex, tl_tangent, tr_tangent, rt_vertex
+     *   phải  : rt_vertex, rt_tangent, rb_tangent, br_vertex
+     *   dưới  : lb_vertex, bl_tangent, br_tangent, br_vertex   (trái -> phải)
+     *   trái  : tl_vertex, lt_tangent, lb_tangent, lb_vertex   (trên -> dưới) */
+    const T1 = 1 / 3;
+    const T2 = 2 / 3;
+    const BEZIER_POINTS = [
+        { key: 'tl_vertex', label: 'Top Left Vertex', def: [0, 0], vertex: true },
+        { key: 'tl_tangent', label: 'Top Left Tangent', def: [T1, 0] },
+        { key: 'tr_tangent', label: 'Top Right Tangent', def: [T2, 0] },
+        { key: 'rt_vertex', label: 'Right Top Vertex', def: [1, 0], vertex: true },
+        { key: 'rt_tangent', label: 'Right Top Tangent', def: [1, T1] },
+        { key: 'rb_tangent', label: 'Right Bottom Tangent', def: [1, T2] },
+        { key: 'br_vertex', label: 'Bottom Right Vertex', def: [1, 1], vertex: true },
+        { key: 'br_tangent', label: 'Bottom Right Tangent', def: [T2, 1] },
+        { key: 'bl_tangent', label: 'Bottom Left Tangent', def: [T1, 1] },
+        { key: 'lb_vertex', label: 'Left Bottom Vertex', def: [0, 1], vertex: true },
+        { key: 'lb_tangent', label: 'Left Bottom Tangent', def: [0, T2] },
+        { key: 'lt_tangent', label: 'Left Top Tangent', def: [0, T1] },
+    ];
+    // Kéo đỉnh thì hai tiếp tuyến kề nó đi theo (như AE).
+    const BEZIER_VERTEX_TANGENTS = {
+        tl_vertex: ['tl_tangent', 'lt_tangent'],
+        rt_vertex: ['tr_tangent', 'rt_tangent'],
+        br_vertex: ['rb_tangent', 'br_tangent'],
+        lb_vertex: ['bl_tangent', 'lb_tangent'],
+    };
+    // Mỗi đỉnh lưới Mesh Warp = 10 số: x, y, rồi 4 tay cầm (TƯƠNG ĐỐI so với đỉnh) trái, phải, lên, xuống.
+    const MESH_STRIDE = 10;
+
+    /* Liquify: trường dời đều FIELD_N × FIELD_N ô phủ hộp (toạ độ chuẩn hoá), mỗi đỉnh một véc-tơ
+     * dời (dx, dy) chuẩn hoá. Điểm p -> p + D(p)·Distortion Percentage + Offset. Cọ của AE trừ
+     * Reflection/Clone (hai cọ đó lấy mẫu chéo vùng ảnh, không biểu diễn được bằng trường dời). */
+    const FIELD_N = 64;
+    const FIELD_LEN = (FIELD_N + 1) * (FIELD_N + 1) * 2;
+    const LIQUIFY_TOOLS = [
+        { id: 'warp', label: 'Warp' },
+        { id: 'turbulence', label: 'Turbulence' },
+        { id: 'twirl_cw', label: 'Twirl Clockwise' },
+        { id: 'twirl_ccw', label: 'Twirl Counterclockwise' },
+        { id: 'pucker', label: 'Pucker' },
+        { id: 'bloat', label: 'Bloat' },
+        { id: 'shift', label: 'Shift Pixels' },
+        { id: 'reconstruct', label: 'Reconstruction' },
+    ];
+
+    /* Bảng thông số theo loại hiệu ứng. `kind`: 'num' nội suy, 'enum' giữ (hold), 'vec2' / 'mesh'
+     * nội suy từng số. Thông số nào có đồng hồ bấm giờ trong AE thì có ◆; `noKf` = không (Quality,
+     * Rows, Columns). `slider` = dải thanh trượt (ô số vẫn nhận tới min/max). */
+    const EFFECT_DEFS = {
+        wave: {
+            label: 'Wave Warp',
+            params: [
+                { key: 'wave_type', label: 'Wave Type', kind: 'enum', options: WAVE_SHAPES, def: 'sine' },
+                { key: 'height', label: 'Wave Height', kind: 'num', def: 10, min: -2000, max: 2000, slider: [-100, 100], step: 1, unit: 'px' },
+                { key: 'width', label: 'Wave Width', kind: 'num', def: 40, min: 1, max: 4000, slider: [1, 400], step: 1, unit: 'px' },
+                { key: 'direction', label: 'Direction', kind: 'num', def: 90, min: -3600, max: 3600, slider: [0, 360], step: 1, unit: '°' },
+                { key: 'speed', label: 'Wave Speed', kind: 'num', def: 1, min: -100, max: 100, slider: [-10, 10], step: 0.1, unit: '' },
+                { key: 'pinning', label: 'Pinning', kind: 'enum', options: WAVE_PINNING, def: 'none' },
+                { key: 'phase', label: 'Phase', kind: 'num', def: 0, min: -36000, max: 36000, slider: [0, 360], step: 1, unit: '°' },
+            ],
+        },
+        bezier: {
+            label: 'Bezier Warp',
+            handles: true,
+            params: [
+                ...BEZIER_POINTS.map((p) => ({ key: p.key, label: p.label, kind: 'vec2', def: p.def })),
+                { key: 'quality', label: 'Quality', kind: 'num', def: 8, min: 1, max: 10, slider: [1, 10], step: 1, unit: '', noKf: true },
+            ],
+        },
+        mesh: {
+            label: 'Mesh Warp',
+            handles: true,
+            params: [
+                { key: 'rows', label: 'Rows', kind: 'num', def: 7, min: 1, max: 31, slider: [1, 31], step: 1, unit: '', noKf: true },
+                { key: 'cols', label: 'Columns', kind: 'num', def: 7, min: 1, max: 31, slider: [1, 31], step: 1, unit: '', noKf: true },
+                { key: 'quality', label: 'Quality', kind: 'num', def: 8, min: 1, max: 10, slider: [1, 10], step: 1, unit: '', noKf: true },
+                { key: 'mesh', label: 'Distortion Mesh', kind: 'mesh', def: null },
+            ],
+        },
+        liquify: {
+            label: 'Liquify',
+            handles: true,
+            params: [
+                { key: 'tool', label: 'Tool', kind: 'enum', options: LIQUIFY_TOOLS, def: 'warp', noKf: true },
+                { key: 'brush_size', label: 'Brush Size', kind: 'num', def: 80, min: 2, max: 4000, slider: [2, 600], step: 1, unit: 'px', noKf: true },
+                { key: 'brush_pressure', label: 'Brush Pressure', kind: 'num', def: 50, min: 1, max: 100, slider: [1, 100], step: 1, unit: '%', noKf: true },
+                { key: 'field', label: 'Distortion Mesh', kind: 'field', def: null },
+                { key: 'offset', label: 'Distortion Mesh Offset', kind: 'vec2', def: [0, 0] },
+                { key: 'percent', label: 'Distortion Percentage', kind: 'num', def: 100, min: -1000, max: 1000, slider: [0, 200], step: 1, unit: '%' },
+            ],
+        },
+        /* Puppet Tool: ghim (pins) với Position keyframe RIÊNG từng ghim (khoá 'pin_<id>'), lưới tam
+         * giác theo Triangles, nở thêm Expansion px quanh phần có hình (ảnh/Shape có alpha). */
+        puppet: {
+            label: 'Puppet',
+            handles: true,
+            params: [
+                { key: 'triangles', label: 'Triangles', kind: 'num', def: 500, min: 50, max: 3000, slider: [50, 2000], step: 1, unit: '', noKf: true },
+                { key: 'expansion', label: 'Expansion', kind: 'num', def: 3, min: 0, max: 200, slider: [0, 50], step: 1, unit: 'px', noKf: true },
+                { key: 'pins', label: 'Pins', kind: 'pins', def: null },
+            ],
+        },
+    };
+    const TYPE_IDS = Object.keys(EFFECT_DEFS);
+
+    const PIN_KEY = /^pin_([A-Za-z0-9-]{1,24})$/;
+    const PIN_DEF = { kind: 'vec2', def: [0.5, 0.5] };
+
+    function paramDef(type, key) {
+        const def = EFFECT_DEFS[type];
+        if (!def) return null;
+        // Position của từng ghim Puppet là thông số ĐỘNG 'pin_<id>' (vec2, keyframe được).
+        if (type === 'puppet' && PIN_KEY.test(String(key))) {
+            return { ...PIN_DEF, key, label: `Pin ${String(key).slice(4)}` };
+        }
+        return def.params.find((p) => p.key === key) || null;
+    }
+
+    function normalizeParam(def, value) {
+        if (def.kind === 'vec2') {
+            if (!Array.isArray(value) || value.length !== 2) return def.def.slice();
+            const x = Number(value[0]);
+            const y = Number(value[1]);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return def.def.slice();
+            return [Math.max(-50, Math.min(50, x)), Math.max(-50, Math.min(50, y))];
+        }
+        if (def.kind === 'mesh') {
+            // Độ dài được đối chiếu với Rows/Columns ở normalizeEffect / meshArray.
+            if (!Array.isArray(value) || !value.length || value.length > 32 * 32 * MESH_STRIDE) return null;
+            const out = value.map(Number);
+            return out.every(Number.isFinite) ? out.map((v) => Math.max(-50, Math.min(50, v))) : null;
+        }
+        if (def.kind === 'field') {
+            if (!Array.isArray(value) || value.length !== FIELD_LEN) return null;
+            const out = value.map(Number);
+            return out.every(Number.isFinite) ? out.map((v) => Math.max(-50, Math.min(50, v))) : null;
+        }
+        if (def.kind === 'pins') {
+            if (!Array.isArray(value)) return [];
+            const seen = new Set();
+            const out = [];
+            value.slice(0, 64).forEach((pin) => {
+                const id = String(pin && pin.id || '');
+                if (!/^[A-Za-z0-9-]{1,24}$/.test(id) || seen.has(id)) return;
+                const rest = normalizeParam(PIN_DEF, pin.rest);
+                out.push({ id, rest, pos: normalizeParam({ kind: 'vec2', def: rest }, pin.pos) });
+                seen.add(id);
+            });
+            return out;
+        }
+        if (def.step === 1 && def.noKf) return Math.round(clampNum(value, def.min, def.max, def.def));
+        if (def.kind === 'enum') {
+            const v = String(value == null ? '' : value);
+            return def.options.some((o) => o.id === v) ? v : def.def;
+        }
+        return clampNum(value, def.min, def.max, def.def);
+    }
+
+    /* ===================================================================== DỮ LIỆU */
+
+    function normalizeEffect(raw, index = 0) {
+        if (!raw || typeof raw !== 'object' || !EFFECT_DEFS[raw.type]) return null;
+        const id = /^[A-Za-z0-9_-]{1,24}$/.test(String(raw.id || '')) ? String(raw.id) : `d${index + 1}`;
+        const params = {};
+        EFFECT_DEFS[raw.type].params.forEach((def) => {
+            params[def.key] = normalizeParam(def, raw.params ? raw.params[def.key] : undefined);
+        });
+        if (raw.type === 'mesh' && params.mesh && params.mesh.length !== meshLength(params.rows, params.cols)) params.mesh = null;
+        return { id, type: raw.type, enabled: raw.enabled !== false, params };
+    }
+
+    function normalizeStack(list) {
+        if (!Array.isArray(list)) return [];
+        const seen = new Set();
+        const out = [];
+        list.slice(0, MAX_EFFECTS).forEach((raw, i) => {
+            const fx = normalizeEffect(raw, i);
+            if (!fx) return;
+            while (seen.has(fx.id)) fx.id = `${fx.id}x`;
+            seen.add(fx.id);
+            out.push(fx);
+        });
+        return out;
+    }
+
+    function supportsItem(item) {
+        return !!item && (item.type === 'media' || item.type === 'shape');
+    }
+
+    // Block có ít nhất một hiệu ứng đang BẬT. Quyết định loại thẻ preview (canvas) nên chỉ xét
+    // cấu hình, không xét thời điểm — như itemHasColorAdjust.
+    function isActive(item) {
+        if (!supportsItem(item) || !Array.isArray(item.distort)) return false;
+        return normalizeStack(item.distort).some((fx) => fx.enabled);
+    }
+
+    function newEffectId(item) {
+        const used = new Set((Array.isArray(item?.distort) ? item.distort : []).map((fx) => String(fx?.id || '')));
+        for (let n = 1; n < 1000; n += 1) {
+            if (!used.has(`d${n}`)) return `d${n}`;
+        }
+        return `d${Date.now()}`;
+    }
+
+    function createEffect(item, type) {
+        if (!EFFECT_DEFS[type]) return null;
+        return normalizeEffect({ id: newEffectId(item), type, enabled: true, params: {} });
+    }
+
+    /* ===================================================================== KEYFRAME */
+
+    const kfField = (effectId, key) => `${KF_PREFIX}${effectId}.${key}`;
+    const isKfField = (field) => String(field || '').startsWith(KF_PREFIX);
+    function parseKfField(field) {
+        const m = /^dst\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/.exec(String(field || ''));
+        return m ? { effectId: m[1], key: m[2] } : null;
+    }
+
+    function easeFn(name) {
+        const E = (typeof globalThis !== 'undefined' && globalThis.TextAnimations && globalThis.TextAnimations.EASINGS)
+            || null;
+        if (E && E[name]) return E[name];
+        if (E && E['ease-in-out']) return E['ease-in-out'];
+        return (p) => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2);
+    }
+
+    /* Nội suy một thông số tại t (giây cục bộ). Giữ mép như evalKeyframeField; số -> easing của
+     * keyframe TRÁI; liệt kê -> giữ giá trị keyframe trái (Hold của AE). null = không có keyframe. */
+    function evalParamKeyframes(list, t, def) {
+        if (!Array.isArray(list) || !list.length) return null;
+        const arr = list.slice().sort((a, b) => (Number(a.t) || 0) - (Number(b.t) || 0));
+        const time = Number(t) || 0;
+        const val = (k) => normalizeParam(def, k.v);
+        const vector = def.kind === 'vec2' || def.kind === 'mesh' || def.kind === 'field';
+        const mix = (a, b, k) => {
+            if (!vector) return a + (b - a) * k;
+            if (!a || !b || a.length !== b.length) return a;   // lưới khác cỡ: giữ (Hold)
+            return a.map((x, i) => x + (b[i] - x) * k);
+        };
+        if (arr.length === 1 || time <= Number(arr[0].t)) return val(arr[0]);
+        const last = arr[arr.length - 1];
+        if (time >= Number(last.t)) return val(last);
+        for (let i = 0; i < arr.length - 1; i += 1) {
+            const a = arr[i];
+            const b = arr[i + 1];
+            const ta = Number(a.t);
+            const tb = Number(b.t);
+            if (time >= ta && time <= tb) {
+                if (def.kind === 'enum') return val(time >= tb ? b : a);
+                const p = Math.min(1, Math.max(0, (time - ta) / Math.max(1e-6, tb - ta)));
+                const k = easeFn(a.e)(p);
+                return mix(val(a), val(b), k);
+            }
+        }
+        return val(last);
+    }
+
+    // Thông số HIỆU DỤNG của một hiệu ứng tại t (đã áp keyframe).
+    function effectParamsAt(item, fx, t) {
+        const out = { ...fx.params };
+        const kfs = item && item.keyframes;
+        if (!kfs || typeof kfs !== 'object') return out;
+        EFFECT_DEFS[fx.type].params.forEach((def) => {
+            if (def.noKf || def.kind === 'pins') return;
+            const v = evalParamKeyframes(kfs[kfField(fx.id, def.key)], t, def);
+            if (v != null) out[def.key] = v;
+        });
+        if (fx.type === 'mesh' && out.mesh && out.mesh.length !== meshLength(out.rows, out.cols)) out.mesh = fx.params.mesh;
+        if (fx.type === 'puppet') {
+            out.pins = (fx.params.pins || []).map((pin) => {
+                const v = evalParamKeyframes(kfs[kfField(fx.id, `pin_${pin.id}`)], t, { kind: 'vec2', def: pin.pos });
+                return v ? { ...pin, pos: v } : pin;
+            });
+        }
+        return out;
+    }
+
+    // Đọc / ghi MỘT thông số (kể cả Position của ghim 'pin_<id>') trên bộ params.
+    function getParam(p, key) {
+        const m = PIN_KEY.exec(String(key));
+        if (m) {
+            const pin = (p.pins || []).find((x) => x.id === m[1]);
+            return pin ? pin.pos : null;
+        }
+        return p[key];
+    }
+    function setParam(p, key, value) {
+        const m = PIN_KEY.exec(String(key));
+        if (m) {
+            p.pins = (p.pins || []).map((x) => (x.id === m[1] ? { ...x, pos: value } : x));
+            return;
+        }
+        p[key] = value;
+    }
+
+    /* Danh sách hiệu ứng BẬT với thông số tại t: [{ type, params }]. `env.masks[fxId]` = mặt nạ ô có
+     * hình của Puppet (puppetMask) — caller dựng từ alpha của nguồn; không có = cả hộp. */
+    function stackAt(item, t, env = null) {
+        return normalizeStack(item && item.distort)
+            .filter((fx) => fx.enabled)
+            .map((fx) => {
+                const params = effectParamsAt(item, fx, t);
+                if (fx.type === 'puppet') params.mask = (env && env.masks && env.masks[fx.id]) || null;
+                return { type: fx.type, params };
+            });
+    }
+
+    function hasDistortKeyframes(item) {
+        const kfs = item && item.keyframes;
+        if (!kfs || typeof kfs !== 'object') return false;
+        return Object.keys(kfs).some((k) => isKfField(k) && Array.isArray(kfs[k]) && kfs[k].length > 0);
+    }
+
+    // Kết quả có đổi theo thời gian không (keyframe, hoặc sóng đang chạy).
+    function isTimeVarying(item) {
+        const stack = normalizeStack(item && item.distort).filter((fx) => fx.enabled);
+        if (!stack.length) return false;
+        const kfs = item.keyframes || {};
+        // Bất kỳ thông số nào (kể cả Position của ghim) có từ hai keyframe trở lên.
+        if (stack.some((fx) => Object.keys(kfs).some((k) => k.startsWith(`${KF_PREFIX}${fx.id}.`)
+            && Array.isArray(kfs[k]) && kfs[k].length > 1))) return true;
+        return stack.some((fx) => fx.type === 'wave' && (Math.abs(Number(fx.params.speed) || 0) > 1e-9
+            || ((item.keyframes || {})[kfField(fx.id, 'speed')] || []).some((k) => Math.abs(Number(k.v) || 0) > 1e-9)));
+    }
+
+    // Mọi giá trị một thông số số có thể nhận (tĩnh + keyframe) — để tính lưới/biên ổn định cả clip.
+    function paramValues(item, fx, key) {
+        const def = paramDef(fx.type, key);
+        const list = (item && item.keyframes && item.keyframes[kfField(fx.id, key)]) || [];
+        const vals = list.length ? list.map((k) => normalizeParam(def, k.v)) : [fx.params[key]];
+        return vals.map(Number).filter(Number.isFinite);
+    }
+    const paramKeyframed = (item, fx, key) => {
+        const list = item && item.keyframes && item.keyframes[kfField(fx.id, key)];
+        return Array.isArray(list) && list.length > 0;
+    };
+
+    /* ===================================================================== WAVE WARP */
+
+    // Hàm băm số nguyên 32 bit — viết lại y hệt ở sidecar (DistortHash) để Noise khớp từng bit.
+    function hash32(n) {
+        let x = Math.imul(n | 0, 0x27d4eb2d);
+        x ^= x >>> 15;
+        x = Math.imul(x, 0x85ebca6b);
+        x ^= x >>> 13;
+        x = Math.imul(x, 0xc2b2ae35);
+        x ^= x >>> 16;
+        return ((x >>> 0) / 4294967295) * 2 - 1;
+    }
+
+    // Dạng sóng theo pha u (chu kỳ 1). Biên độ trong [-1, 1].
+    function waveShape(type, u) {
+        const f = u - Math.floor(u);
+        switch (type) {
+            case 'square': return f < 0.5 ? 1 : -1;
+            case 'triangle': return f < 0.25 ? 4 * f : (f < 0.75 ? 2 - 4 * f : 4 * f - 4);
+            case 'sawtooth': return f < 0.5 ? 2 * f : 2 * f - 2;
+            case 'circle': {
+                const a = f < 0.5 ? 4 * f - 1 : 4 * f - 3;
+                const s = Math.sqrt(Math.max(0, 1 - a * a));
+                return f < 0.5 ? s : -s;
+            }
+            case 'semicircle': {
+                const a = 2 * f - 1;
+                return Math.sqrt(Math.max(0, 1 - a * a));
+            }
+            case 'uncircle': {
+                const a = 2 * f - 1;
+                return 1 - Math.sqrt(Math.max(0, 1 - a * a));
+            }
+            case 'noise': return hash32(Math.floor(2 * u));
+            case 'smooth_noise': {
+                const v = 2 * u;
+                const n = Math.floor(v);
+                const k = (1 - Math.cos((v - n) * Math.PI)) / 2;
+                const a = hash32(n);
+                return a + (hash32(n + 1) - a) * k;
+            }
+            default: return Math.sin(2 * Math.PI * u);
+        }
+    }
+
+    // Trọng số ghim theo vị trí chuẩn hoá (nx, ny ∈ [0,1]); 0 = đứng yên.
+    function pinWeight(pinning, nx, ny) {
+        switch (pinning) {
+            case 'all_edges': return Math.sin(Math.PI * nx) * Math.sin(Math.PI * ny);
+            case 'center': return Math.min(1, 2 * Math.hypot(nx - 0.5, ny - 0.5));
+            case 'left': return nx;
+            case 'right': return 1 - nx;
+            case 'top': return ny;
+            case 'bottom': return 1 - ny;
+            case 'horizontal_edges': return Math.sin(Math.PI * ny);
+            case 'vertical_edges': return Math.sin(Math.PI * nx);
+            default: return 1;
+        }
+    }
+
+    /* Hướng theo la bàn của AE: 0° = lên, 90° = sang phải. Sóng CHẠY theo `dir`, điểm dời theo
+     * phương VUÔNG GÓC `nrm` (sóng ngang). Pha đo từ góc trên-trái của hộp. */
+    function waveFrame(p, t) {
+        const rad = (Number(p.direction) || 0) * Math.PI / 180;
+        return {
+            dx: Math.sin(rad),
+            dy: -Math.cos(rad),
+            nx: Math.cos(rad),
+            ny: Math.sin(rad),
+            invW: 1 / Math.max(1, Math.abs(Number(p.width) || 1)),
+            shift: (Number(p.speed) || 0) * (Number(t) || 0) - (Number(p.phase) || 0) / 360,
+            h: Number(p.height) || 0,
+        };
+    }
+
+    /* ===================================================================== BEZIER / MESH WARP */
+
+    const meshLength = (rows, cols) => (Math.round(rows) + 1) * (Math.round(cols) + 1) * MESH_STRIDE;
+
+    // Lưới Mesh Warp chưa uốn: đỉnh chia đều, tay cầm bằng 1/3 cạnh ô -> mọi ô là ánh xạ đồng nhất.
+    function meshIdentity(rows, cols) {
+        const r = Math.round(rows);
+        const c = Math.round(cols);
+        const out = new Array(meshLength(r, c));
+        for (let j = 0, q = 0; j <= r; j += 1) {
+            for (let i = 0; i <= c; i += 1, q += MESH_STRIDE) {
+                out[q] = i / c; out[q + 1] = j / r;
+                out[q + 2] = -1 / (3 * c); out[q + 3] = 0;
+                out[q + 4] = 1 / (3 * c); out[q + 5] = 0;
+                out[q + 6] = 0; out[q + 7] = -1 / (3 * r);
+                out[q + 8] = 0; out[q + 9] = 1 / (3 * r);
+            }
+        }
+        return out;
+    }
+
+    function meshArray(p) {
+        const m = p && Array.isArray(p.mesh) ? p.mesh : null;
+        return m && m.length === meshLength(p.rows, p.cols) ? m : meshIdentity(p.rows, p.cols);
+    }
+
+    const cubic = (a, b, c, d, t) => {
+        const s = 1 - t;
+        return s * s * s * a + 3 * s * s * t * b + 3 * s * t * t * c + t * t * t * d;
+    };
+
+    /* Mặt Coons từ bốn cạnh bậc ba (toạ độ chuẩn hoá). k = [p00x,p00y, p10.., p01.., p11..,
+     * trên a/b, dưới a/b, trái a/b, phải a/b] — 20 số. (u, v) có thể ra ngoài [0,1] (ngoại suy). */
+    function coons(k, u, v) {
+        const out = [0, 0];
+        for (let c = 0; c < 2; c += 1) {
+            const p00 = k[c]; const p10 = k[2 + c]; const p01 = k[4 + c]; const p11 = k[6 + c];
+            const top = cubic(p00, k[8 + c], k[10 + c], p10, u);
+            const bot = cubic(p01, k[12 + c], k[14 + c], p11, u);
+            const lft = cubic(p00, k[16 + c], k[18 + c], p01, v);
+            const rgt = cubic(p10, k[20 + c], k[22 + c], p11, v);
+            out[c] = (1 - v) * top + v * bot + (1 - u) * lft + u * rgt
+                - ((1 - u) * (1 - v) * p00 + u * (1 - v) * p10 + (1 - u) * v * p01 + u * v * p11);
+        }
+        return out;
+    }
+
+    // 24 số của mặt Coons Bezier Warp (cùng thứ tự với `coons`).
+    function bezierPatch(p) {
+        const P = (key) => p[key];
+        return [
+            ...P('tl_vertex'), ...P('rt_vertex'), ...P('lb_vertex'), ...P('br_vertex'),
+            ...P('tl_tangent'), ...P('tr_tangent'),
+            ...P('bl_tangent'), ...P('br_tangent'),
+            ...P('lt_tangent'), ...P('lb_tangent'),
+            ...P('rt_tangent'), ...P('rb_tangent'),
+        ];
+    }
+
+    // 24 số của ô (i, j) trong Mesh Warp.
+    function meshCellPatch(m, cols, i, j) {
+        const at = (ii, jj) => (jj * (cols + 1) + ii) * MESH_STRIDE;
+        const a = at(i, j); const b = at(i + 1, j); const c = at(i, j + 1); const d = at(i + 1, j + 1);
+        return [
+            m[a], m[a + 1], m[b], m[b + 1], m[c], m[c + 1], m[d], m[d + 1],
+            m[a] + m[a + 4], m[a + 1] + m[a + 5], m[b] + m[b + 2], m[b + 1] + m[b + 3],   // trên: phải của a, trái của b
+            m[c] + m[c + 4], m[c + 1] + m[c + 5], m[d] + m[d + 2], m[d + 1] + m[d + 3],   // dưới
+            m[a] + m[a + 8], m[a + 1] + m[a + 9], m[c] + m[c + 6], m[c + 1] + m[c + 7],   // trái: xuống của a, lên của c
+            m[b] + m[b + 8], m[b + 1] + m[b + 9], m[d] + m[d + 6], m[d + 1] + m[d + 7],   // phải
+        ];
+    }
+
+    // Ánh xạ một điểm chuẩn hoá (U, V) qua Mesh Warp: tìm ô, toạ độ cục bộ (ngoại suy ở mép).
+    function meshMap(m, rows, cols, U, V, cache) {
+        const ci = Math.max(0, Math.min(cols - 1, Math.floor(U * cols)));
+        const cj = Math.max(0, Math.min(rows - 1, Math.floor(V * rows)));
+        const key = cj * cols + ci;
+        let k = cache[key];
+        if (!k) { k = meshCellPatch(m, cols, ci, cj); cache[key] = k; }
+        return coons(k, U * cols - ci, V * rows - cj);
+    }
+
+    /* ===================================================================== LIQUIFY */
+
+    let zeroField = null;
+    function fieldArray(p) {
+        const f = p && Array.isArray(p.field) && p.field.length === FIELD_LEN ? p.field : null;
+        if (f) return f;
+        if (!zeroField) zeroField = new Array(FIELD_LEN).fill(0);
+        return zeroField;
+    }
+
+    /* Độ dời (chuẩn hoá) tại (U, V): song tuyến tính trên trường, ngoài hộp giữ giá trị ở mép. Viết
+     * 1-1 ở sidecar (DistortLiquifyDisp). */
+    function liquifyDisp(f, U, V) {
+        const N = FIELD_N;
+        const x = Math.max(0, Math.min(1, U)) * N;
+        const y = Math.max(0, Math.min(1, V)) * N;
+        const i = Math.min(N - 1, Math.floor(x));
+        const j = Math.min(N - 1, Math.floor(y));
+        const s = x - i;
+        const t = y - j;
+        const a = (j * (N + 1) + i) * 2;
+        const b = a + 2;
+        const c = a + (N + 1) * 2;
+        const d = c + 2;
+        return [
+            (1 - s) * (1 - t) * f[a] + s * (1 - t) * f[b] + (1 - s) * t * f[c] + s * t * f[d],
+            (1 - s) * (1 - t) * f[a + 1] + s * (1 - t) * f[b + 1] + (1 - s) * t * f[c + 1] + s * t * f[d + 1],
+        ];
+    }
+
+    /* MỘT nhát cọ Liquify lên trường (hàm thuần, trả trường MỚI). Toạ độ chuẩn hoá theo hộp, bán kính
+     * và khoảng cách tính bằng px của hộp. Cọ tác động lên vị trí ĐANG HIỆN của từng đỉnh (đã nhân
+     * Distortion Percentage + Offset) — như vẽ trực tiếp trên hình đang uốn.
+     *   o: { tool, cursor:[x,y], prev:[x,y], size (px), pressure (1..100), percent, offset:[x,y],
+     *        boxW, boxH, tick (số nguyên — hạt giống cho Turbulence) } */
+    function liquifyStroke(field, o) {
+        const N = FIELD_N;
+        const f = fieldArray({ field }).slice();
+        const W = o.boxW;
+        const H = o.boxH;
+        const r = Math.max(1, o.size / 2);
+        const s = Math.max(0.01, Math.min(1, (Number(o.pressure) || 50) / 100));
+        let pct = (Number(o.percent) || 0) / 100;
+        if (Math.abs(pct) < 0.05) pct = pct < 0 ? -0.05 : 0.05;
+        const off = o.offset || [0, 0];
+        const [cx, cy] = o.cursor;
+        const [px0, py0] = o.prev || o.cursor;
+        const dx = (cx - px0) * W;    // bước kéo, px
+        const dy = (cy - py0) * H;
+        for (let j = 0, q = 0; j <= N; j += 1) {
+            for (let i = 0; i <= N; i += 1, q += 2) {
+                const rx = i / N;
+                const ry = j / N;
+                // Vị trí đang hiện của đỉnh, px theo hộp.
+                let X = (rx + f[q] * pct + off[0]) * W;
+                let Y = (ry + f[q + 1] * pct + off[1]) * H;
+                const ex = X - cx * W;
+                const ey = Y - cy * H;
+                const d2 = ex * ex + ey * ey;
+                if (d2 >= r * r) continue;
+                const fall = (1 - d2 / (r * r)) ** 2;
+                const w = fall * s;
+                switch (o.tool) {
+                    case 'warp': X += w * dx; Y += w * dy; break;
+                    case 'shift': X += w * -dy * 0.5; Y += w * dx * 0.5; break;   // sang trái hướng kéo
+                    case 'twirl_cw':
+                    case 'twirl_ccw': {
+                        const a = (o.tool === 'twirl_cw' ? 1 : -1) * w * 0.12;
+                        const c = Math.cos(a);
+                        const sn = Math.sin(a);
+                        X = cx * W + ex * c - ey * sn;
+                        Y = cy * H + ex * sn + ey * c;
+                        break;
+                    }
+                    case 'pucker': X -= w * 0.08 * ex; Y -= w * 0.08 * ey; break;
+                    case 'bloat': X += w * 0.08 * ex * (1 - Math.sqrt(d2) / r); Y += w * 0.08 * ey * (1 - Math.sqrt(d2) / r); break;
+                    case 'turbulence': {
+                        const k = (o.tick | 0) * 131071 + q;
+                        X += w * r * 0.03 * hash32(k);
+                        Y += w * r * 0.03 * hash32(k + 7);
+                        break;
+                    }
+                    case 'reconstruct': {
+                        const keep = 1 - w * 0.15;
+                        f[q] *= keep;
+                        f[q + 1] *= keep;
+                        continue;
+                    }
+                    default: continue;
+                }
+                f[q] = Math.round(((X / W - rx - off[0]) / pct) * 1e5) / 1e5;
+                f[q + 1] = Math.round(((Y / H - ry - off[1]) / pct) * 1e5) / 1e5;
+            }
+        }
+        return f;
+    }
+
+    /* ===================================================================== PUPPET (ARAP) */
+
+    /* Lưới Puppet: lưới đều cols × rows ô (mỗi ô 2 tam giác, cùng cách chia (a,b,d)/(a,d,c) với bộ vẽ
+     * nên lưới đã giải là ánh xạ affine từng mảnh CHÍNH XÁC). Số ô theo Triangles của AE, giữ tỉ lệ
+     * hộp. Ảnh/Shape có alpha: chỉ những ô có hình (nở thêm Expansion) mới vào hệ — hai phần rời
+     * nhau không kéo dính nhau qua khoảng trống. */
+    function puppetGrid(p, boxW, boxH) {
+        const cells = Math.max(4, Math.round((Number(p.triangles) || 500) / 2));
+        const aspect = Math.max(0.05, Math.min(20, boxW / Math.max(1e-6, boxH)));
+        const cols = Math.max(2, Math.min(80, Math.round(Math.sqrt(cells * aspect))));
+        const rows = Math.max(2, Math.min(80, Math.round(cells / cols)));
+        return { cols, rows };
+    }
+
+    // Ma trận đối xứng xác định dương dạng DẢI (bán kính bw) + phân tích Cholesky L·Lᵀ.
+    class BandSPD {
+        constructor(n, bw) {
+            this.n = n;
+            this.bw = bw;
+            this.a = new Float64Array(n * (bw + 1));   // a[i*(bw+1)+k] = A[i][i-k]
+        }
+
+        add(i, j, v) {
+            if (i < j) { const x = i; i = j; j = x; }
+            const k = i - j;
+            if (k > this.bw) throw new Error('band');
+            this.a[i * (this.bw + 1) + k] += v;
+        }
+
+        factor() {
+            const { n, bw, a } = this;
+            const W = bw + 1;
+            for (let i = 0; i < n; i += 1) {
+                const j0 = Math.max(0, i - bw);
+                for (let j = j0; j <= i; j += 1) {
+                    let sum = a[i * W + (i - j)];
+                    const k0 = Math.max(j0, j - bw);
+                    for (let k = k0; k < j; k += 1) sum -= a[i * W + (i - k)] * a[j * W + (j - k)];
+                    if (i === j) a[i * W] = Math.sqrt(Math.max(sum, 1e-18));
+                    else a[i * W + (i - j)] = sum / a[j * W];
+                }
+            }
+            return this;
+        }
+
+        solve(b) {
+            const { n, bw, a } = this;
+            const W = bw + 1;
+            const y = Float64Array.from(b);
+            for (let i = 0; i < n; i += 1) {
+                let sum = y[i];
+                for (let k = Math.max(0, i - bw); k < i; k += 1) sum -= a[i * W + (i - k)] * y[k];
+                y[i] = sum / a[i * W];
+            }
+            for (let i = n - 1; i >= 0; i -= 1) {
+                let sum = y[i];
+                for (let k = i + 1; k <= Math.min(n - 1, i + bw); k += 1) sum -= a[k * W + (k - i)] * y[k];
+                y[i] = sum / a[i * W];
+            }
+            return y;
+        }
+    }
+
+    // Tam giác nằm trong ô (i,j): vị trí (s,t) cục bộ -> 3 đỉnh + trọng số (khớp rasterMesh).
+    function cellTri(cols, i, j, s, t) {
+        const a = j * (cols + 1) + i;
+        const b = a + 1;
+        const c = a + cols + 1;
+        const d = c + 1;
+        return s >= t ? [[a, 1 - s], [b, s - t], [d, t]] : [[a, 1 - t], [d, s], [c, t - s]];
+    }
+
+    const PUPPET_W = 1000;     // trọng số ghim (gần như ràng buộc cứng)
+    const PUPPET_EPS = 1e-6;   // kéo nhẹ về dáng gốc: phần không ghim đứng yên, hệ không suy biến
+    const puppetCache = new Map();
+
+    /* Dựng (và nhớ) hệ ARAP của một lưới + một BỘ ghim (vị trí GỐC). Đổi vị trí ghim chỉ đổi vế phải.
+     * mask: { cols, rows, cells: Uint8Array, key } hoặc null = mọi ô. */
+    function puppetSystem(cols, rows, boxW, boxH, mask, pins) {
+        const key = `${cols}x${rows}|${boxW}x${boxH}|${mask ? mask.key : '*'}|${pins.map((p) => `${p.id}:${p.rest[0]},${p.rest[1]}`).join(';')}`;
+        const hit = puppetCache.get(key);
+        if (hit) { puppetCache.delete(key); puppetCache.set(key, hit); return hit; }
+        const nv = (cols + 1) * (rows + 1);
+        const useCell = (i, j) => !mask || mask.cells[j * cols + i] === 1;
+        const tris = [];
+        const inc = new Uint8Array(nv);
+        for (let j = 0; j < rows; j += 1) {
+            for (let i = 0; i < cols; i += 1) {
+                if (!useCell(i, j)) continue;
+                const a = j * (cols + 1) + i;
+                const b = a + 1;
+                const c = a + cols + 1;
+                const d = c + 1;
+                tris.push([a, b, d], [a, d, c]);
+                inc[a] = 1; inc[b] = 1; inc[c] = 1; inc[d] = 1;
+            }
+        }
+        const idx = new Int32Array(nv).fill(-1);
+        let n = 0;
+        for (let v = 0; v < nv; v += 1) if (inc[v]) idx[v] = n++;
+        const rest = new Float64Array(nv * 2);
+        for (let j = 0; j <= rows; j += 1) {
+            for (let i = 0; i <= cols; i += 1) {
+                const v = j * (cols + 1) + i;
+                rest[v * 2] = (i / cols) * boxW;
+                rest[v * 2 + 1] = (j / rows) * boxH;
+            }
+        }
+        // Ghim -> tổ hợp barycentric của tam giác GỐC chứa nó (ghim rơi ra ngoài lưới: bám đỉnh gần nhất).
+        const pinBary = pins.map((pin) => {
+            const U = Math.max(0, Math.min(1, pin.rest[0]));
+            const V = Math.max(0, Math.min(1, pin.rest[1]));
+            const ci = Math.max(0, Math.min(cols - 1, Math.floor(U * cols)));
+            const cj = Math.max(0, Math.min(rows - 1, Math.floor(V * rows)));
+            const tri = cellTri(cols, ci, cj, U * cols - ci, V * rows - cj);
+            if (tri.every(([v]) => idx[v] >= 0)) return tri;
+            let best = -1;
+            let bd = Infinity;
+            for (let v = 0; v < nv; v += 1) {
+                if (idx[v] < 0) continue;
+                const dx = rest[v * 2] - U * boxW;
+                const dy = rest[v * 2 + 1] - V * boxH;
+                if (dx * dx + dy * dy < bd) { bd = dx * dx + dy * dy; best = v; }
+            }
+            return best >= 0 ? [[best, 1]] : [];
+        });
+        let span = 1;
+        tris.forEach((t) => { span = Math.max(span, Math.max(idx[t[0]], idx[t[1]], idx[t[2]]) - Math.min(idx[t[0]], idx[t[1]], idx[t[2]])); });
+        pinBary.forEach((pb) => { if (pb.length > 1) span = Math.max(span, Math.max(...pb.map(([v]) => idx[v])) - Math.min(...pb.map(([v]) => idx[v]))); });
+        // Bước 1 (Igarashi 2005): mỗi đỉnh của tam giác biểu diễn theo cạnh đối diện bằng (x, y) cục bộ.
+        const G = new BandSPD(2 * n, 2 * span + 1);
+        const local = [];
+        tris.forEach((t) => {
+            [[0, 1, 2], [1, 2, 0], [2, 0, 1]].forEach(([o0, o1, o2]) => {
+                const v0 = t[o0]; const v1 = t[o1]; const v2 = t[o2];
+                const ex = rest[v1 * 2] - rest[v0 * 2]; const ey = rest[v1 * 2 + 1] - rest[v0 * 2 + 1];
+                const dx = rest[v2 * 2] - rest[v0 * 2]; const dy = rest[v2 * 2 + 1] - rest[v0 * 2 + 1];
+                const L2 = ex * ex + ey * ey;
+                const x = (dx * ex + dy * ey) / L2;
+                const y = (dx * -ey + dy * ex) / L2;
+                if (o0 === 0) local.push([t[0], t[1], t[2], x, y]);
+                const u0 = 2 * idx[v0]; const u1 = 2 * idx[v1]; const u2 = 2 * idx[v2];
+                // r_x = v2x - v0x - x(v1x-v0x) + y(v1y-v0y);  r_y = v2y - v0y - x(v1y-v0y) - y(v1x-v0x)
+                const rows2 = [
+                    [[u0, x - 1], [u0 + 1, -y], [u1, -x], [u1 + 1, y], [u2, 1]],
+                    [[u0 + 1, x - 1], [u0, y], [u1 + 1, -x], [u1, -y], [u2 + 1, 1]],
+                ];
+                rows2.forEach((r) => r.forEach(([i, a]) => r.forEach(([j, b]) => { if (i >= j) G.add(i, j, a * b); })));
+            });
+        });
+        // Bước 2: Laplacian cạnh (x và y dùng chung).
+        const H = new BandSPD(n, span + 1);
+        tris.forEach((t) => {
+            [[0, 1], [1, 2], [2, 0]].forEach(([p0, p1]) => {
+                const i = idx[t[p0]]; const j = idx[t[p1]];
+                H.add(i, i, 1); H.add(j, j, 1); H.add(i, j, -1);
+            });
+        });
+        const w2 = PUPPET_W * PUPPET_W;
+        pinBary.forEach((pb) => {
+            pb.forEach(([vi, bi]) => pb.forEach(([vj, bj]) => {
+                const i = idx[vi]; const j = idx[vj];
+                if (i < j) return;
+                G.add(2 * i, 2 * j, w2 * bi * bj);
+                G.add(2 * i + 1, 2 * j + 1, w2 * bi * bj);
+                H.add(i, j, w2 * bi * bj);
+            }));
+        });
+        for (let i = 0; i < n; i += 1) {
+            G.add(2 * i, 2 * i, PUPPET_EPS); G.add(2 * i + 1, 2 * i + 1, PUPPET_EPS); H.add(i, i, PUPPET_EPS);
+        }
+        G.factor();
+        H.factor();
+        const sys = { cols, rows, nv, n, idx, rest, tris, local, pinBary, G, H, boxW, boxH };
+        puppetCache.set(key, sys);
+        if (puppetCache.size > 24) puppetCache.delete(puppetCache.keys().next().value);
+        return sys;
+    }
+
+    /* Giải Puppet: trả lưới đã biến dạng (CHUẨN HOÁ theo hộp) (cols+1)×(rows+1)×2. Không ghim = lưới
+     * gốc. Đỉnh ngoài vùng có hình đi theo đỉnh trong vùng gần nhất (chỉ ảnh hưởng chỗ trong suốt). */
+    function puppetSolve(p, boxW, boxH, mask = null) {
+        const { cols, rows } = puppetGrid(p, boxW, boxH);
+        const pins = Array.isArray(p.pins) ? p.pins : [];
+        const out = new Float64Array((cols + 1) * (rows + 1) * 2);
+        for (let j = 0, q = 0; j <= rows; j += 1) {
+            for (let i = 0; i <= cols; i += 1, q += 2) { out[q] = i / cols; out[q + 1] = j / rows; }
+        }
+        const m = mask && mask.cols === cols && mask.rows === rows ? mask : null;
+        if (!pins.length) return { cols, rows, pts: out };
+        const S = puppetSystem(cols, rows, boxW, boxH, m, pins);
+        if (!S.n) return { cols, rows, pts: out };
+        const w2 = PUPPET_W * PUPPET_W;
+        // Bước 1.
+        const b1 = new Float64Array(2 * S.n);
+        for (let v = 0; v < S.nv; v += 1) {
+            const i = S.idx[v];
+            if (i < 0) continue;
+            b1[2 * i] += PUPPET_EPS * S.rest[v * 2];
+            b1[2 * i + 1] += PUPPET_EPS * S.rest[v * 2 + 1];
+        }
+        S.pinBary.forEach((pb, k) => {
+            const px = pins[k].pos[0] * boxW;
+            const py = pins[k].pos[1] * boxH;
+            pb.forEach(([v, b]) => { b1[2 * S.idx[v]] += w2 * b * px; b1[2 * S.idx[v] + 1] += w2 * b * py; });
+        });
+        const v1 = S.G.solve(b1);
+        // Bước 2: khớp lại từng tam giác GỐC (chỉ xoay + dời) vào kết quả bước 1, rồi giải theo cạnh.
+        const bx = new Float64Array(S.n);
+        const by = new Float64Array(S.n);
+        S.local.forEach(([a, b, c, x, y]) => {
+            const ia = S.idx[a]; const ib = S.idx[b]; const ic = S.idx[c];
+            const P = [v1[2 * ia], v1[2 * ia + 1], v1[2 * ib], v1[2 * ib + 1], v1[2 * ic], v1[2 * ic + 1]];
+            // M·u ≈ P, u = (v0fx, v0fy, v1fx, v1fy).
+            const M = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1], [1 - x, y, x, -y], [-y, 1 - x, y, x]];
+            const A = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
+            const r = [0, 0, 0, 0];
+            for (let k = 0; k < 6; k += 1) {
+                for (let i = 0; i < 4; i += 1) {
+                    r[i] += M[k][i] * P[k];
+                    for (let j = 0; j < 4; j += 1) A[i][j] += M[k][i] * M[k][j];
+                }
+            }
+            const u = solve4(A, r);
+            const fx0 = u[0]; const fy0 = u[1]; const fx1 = u[2]; const fy1 = u[3];
+            const ex = fx1 - fx0; const ey = fy1 - fy0;
+            const f = [fx0, fy0, fx1, fy1, fx0 + x * ex - y * ey, fy0 + x * ey + y * ex];
+            // Đưa về đúng cỡ gốc quanh trọng tâm (Igarashi: chỉ xoay, không co giãn).
+            const restLen = Math.hypot(S.rest[b * 2] - S.rest[a * 2], S.rest[b * 2 + 1] - S.rest[a * 2 + 1]);
+            const sc = restLen / Math.max(1e-9, Math.hypot(ex, ey));
+            const cx = (f[0] + f[2] + f[4]) / 3;
+            const cy = (f[1] + f[3] + f[5]) / 3;
+            for (let k = 0; k < 3; k += 1) { f[2 * k] = cx + (f[2 * k] - cx) * sc; f[2 * k + 1] = cy + (f[2 * k + 1] - cy) * sc; }
+            const id = [ia, ib, ic];
+            [[0, 1], [1, 2], [2, 0]].forEach(([p0, p1]) => {
+                const dx = f[2 * p1] - f[2 * p0];
+                const dy = f[2 * p1 + 1] - f[2 * p0 + 1];
+                bx[id[p1]] += dx; bx[id[p0]] -= dx;
+                by[id[p1]] += dy; by[id[p0]] -= dy;
+            });
+        });
+        for (let v = 0; v < S.nv; v += 1) {
+            const i = S.idx[v];
+            if (i < 0) continue;
+            bx[i] += PUPPET_EPS * S.rest[v * 2];
+            by[i] += PUPPET_EPS * S.rest[v * 2 + 1];
+        }
+        S.pinBary.forEach((pb, k) => {
+            pb.forEach(([v, b]) => { bx[S.idx[v]] += w2 * b * pins[k].pos[0] * boxW; by[S.idx[v]] += w2 * b * pins[k].pos[1] * boxH; });
+        });
+        const X = S.H.solve(bx);
+        const Y = S.H.solve(by);
+        // Kết quả + lấp đỉnh ngoài vùng bằng độ dời của đỉnh trong vùng gần nhất (loang theo lưới).
+        const disp = new Float64Array(S.nv * 2);
+        const done = new Uint8Array(S.nv);
+        const queue = [];
+        for (let v = 0; v < S.nv; v += 1) {
+            const i = S.idx[v];
+            if (i < 0) continue;
+            disp[v * 2] = X[i] - S.rest[v * 2];
+            disp[v * 2 + 1] = Y[i] - S.rest[v * 2 + 1];
+            done[v] = 1;
+            queue.push(v);
+        }
+        for (let h = 0; h < queue.length; h += 1) {
+            const v = queue[h];
+            const i = v % (cols + 1);
+            const j = Math.floor(v / (cols + 1));
+            [[i - 1, j], [i + 1, j], [i, j - 1], [i, j + 1]].forEach(([ii, jj]) => {
+                if (ii < 0 || jj < 0 || ii > cols || jj > rows) return;
+                const w = jj * (cols + 1) + ii;
+                if (done[w]) return;
+                done[w] = 1;
+                disp[w * 2] = disp[v * 2];
+                disp[w * 2 + 1] = disp[v * 2 + 1];
+                queue.push(w);
+            });
+        }
+        for (let v = 0; v < S.nv; v += 1) {
+            out[v * 2] += disp[v * 2] / boxW;
+            out[v * 2 + 1] += disp[v * 2 + 1] / boxH;
+        }
+        return { cols, rows, pts: out };
+    }
+
+    function solve4(A, b) {
+        const m = A.map((row, i) => [...row, b[i]]);
+        for (let c = 0; c < 4; c += 1) {
+            let piv = c;
+            for (let r = c + 1; r < 4; r += 1) if (Math.abs(m[r][c]) > Math.abs(m[piv][c])) piv = r;
+            [m[c], m[piv]] = [m[piv], m[c]];
+            const d = m[c][c] || 1e-12;
+            for (let r = 0; r < 4; r += 1) {
+                if (r === c) continue;
+                const f = m[r][c] / d;
+                for (let k = c; k < 5; k += 1) m[r][k] -= f * m[c][k];
+            }
+        }
+        return [0, 1, 2, 3].map((i) => m[i][4] / (m[i][i] || 1e-12));
+    }
+
+    /* Ánh xạ điểm chuẩn hoá (U, V) qua lưới Puppet đã giải (affine từng tam giác; ngoài [0,1] ngoại
+     * suy theo tam giác ở mép). Viết 1-1 ở sidecar (DistortPuppetMap). */
+    function puppetMap(def, cols, rows, U, V) {
+        const ci = Math.max(0, Math.min(cols - 1, Math.floor(U * cols)));
+        const cj = Math.max(0, Math.min(rows - 1, Math.floor(V * rows)));
+        const s = U * cols - ci;
+        const t = V * rows - cj;
+        const a = cj * (cols + 1) + ci;
+        const b = a + 1;
+        const c = a + cols + 1;
+        const d = c + 1;
+        let w;
+        if (s >= t) w = [[a, 1 - s], [b, s - t], [d, t]];
+        else w = [[a, 1 - t], [d, s], [c, t - s]];
+        return [
+            w[0][1] * def[w[0][0] * 2] + w[1][1] * def[w[1][0] * 2] + w[2][1] * def[w[2][0] * 2],
+            w[0][1] * def[w[0][0] * 2 + 1] + w[1][1] * def[w[1][0] * 2 + 1] + w[2][1] * def[w[2][0] * 2 + 1],
+        ];
+    }
+
+    /* Điểm (đã biến dạng, chuẩn hoá) -> điểm GỐC: tìm tam giác đã biến dạng chứa nó. null = ngoài lưới
+     * (hoặc ô không có hình). Dùng khi bấm thêm ghim trên hình đang uốn. */
+    function puppetInverse(solved, mask, X, Y) {
+        const { cols, rows, pts } = solved;
+        for (let j = 0; j < rows; j += 1) {
+            for (let i = 0; i < cols; i += 1) {
+                if (mask && mask.cols === cols && mask.rows === rows && mask.cells[j * cols + i] !== 1) continue;
+                const a = j * (cols + 1) + i;
+                const b = a + 1;
+                const c = a + cols + 1;
+                const d = c + 1;
+                for (const tri of [[a, b, d], [a, d, c]]) {
+                    const [p0, p1, p2] = tri.map((v) => [pts[v * 2], pts[v * 2 + 1]]);
+                    const area = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p2[0] - p0[0]) * (p1[1] - p0[1]);
+                    if (Math.abs(area) < 1e-14) continue;
+                    const w1 = ((X - p0[0]) * (p2[1] - p0[1]) - (p2[0] - p0[0]) * (Y - p0[1])) / area;
+                    const w2 = ((p1[0] - p0[0]) * (Y - p0[1]) - (X - p0[0]) * (p1[1] - p0[1])) / area;
+                    const w0 = 1 - w1 - w2;
+                    if (w0 < -1e-9 || w1 < -1e-9 || w2 < -1e-9) continue;
+                    const r = tri.map((v) => [(v % (cols + 1)) / cols, Math.floor(v / (cols + 1)) / rows]);
+                    return [w0 * r[0][0] + w1 * r[1][0] + w2 * r[2][0], w0 * r[0][1] + w1 * r[1][1] + w2 * r[2][1]];
+                }
+            }
+        }
+        return null;
+    }
+
+    /* Mặt nạ ô có hình cho Puppet từ kênh alpha của nguồn. `alphaAt(x0, y0, x1, y1)` (chuẩn hoá)
+     * trả alpha lớn nhất trong vùng đó. Expansion (px theo hộp) nở thêm số ô tương ứng. */
+    function puppetMask(p, boxW, boxH, alphaGrid) {
+        const { cols, rows } = puppetGrid(p, boxW, boxH);
+        if (!alphaGrid) return null;
+        const cells = new Uint8Array(cols * rows);
+        for (let j = 0; j < rows; j += 1) {
+            for (let i = 0; i < cols; i += 1) cells[j * cols + i] = alphaGrid(i / cols, j / rows, (i + 1) / cols, (j + 1) / rows) > 8 ? 1 : 0;
+        }
+        const rx = Math.ceil((Number(p.expansion) || 0) / Math.max(1e-6, boxW / cols));
+        const ry = Math.ceil((Number(p.expansion) || 0) / Math.max(1e-6, boxH / rows));
+        const grown = new Uint8Array(cells);
+        if (rx || ry) {
+            for (let j = 0; j < rows; j += 1) {
+                for (let i = 0; i < cols; i += 1) {
+                    if (!cells[j * cols + i]) continue;
+                    for (let dj = -ry; dj <= ry; dj += 1) {
+                        for (let di = -rx; di <= rx; di += 1) {
+                            const ii = i + di; const jj = j + dj;
+                            if (ii >= 0 && jj >= 0 && ii < cols && jj < rows) grown[jj * cols + ii] = 1;
+                        }
+                    }
+                }
+            }
+        }
+        let key = 0;
+        for (let k = 0; k < grown.length; k += 1) key = (Math.imul(key, 31) + grown[k] * (k + 1)) | 0;
+        return { cols, rows, cells: grown, key: `${cols}x${rows}:${key}` };
+    }
+
+    /* ===================================================================== LƯỚI */
+
+    /* Số ô lưới mỗi trục cho cả clip (KHÔNG đổi theo thời gian, để preview và bản xuất cùng một
+     * lưới). Sóng: ~8 ô mỗi bước sóng theo phương sóng chạy; trục vuông góc với phương chạy gần như
+     * không đổi nên ít ô. Hướng có keyframe thì coi cả hai trục đều cần dày. */
+    function gridSpec(item, boxW, boxH) {
+        let cx = MIN_CELLS;
+        let cy = MIN_CELLS;
+        const puppetCells = [];
+        normalizeStack(item && item.distort).filter((fx) => fx.enabled).forEach((fx) => {
+            if (fx.type === 'wave') {
+                const wMin = Math.max(1, Math.min(...paramValues(item, fx, 'width').map(Math.abs)));
+                let ax = 1;
+                let ay = 1;
+                if (!paramKeyframed(item, fx, 'direction')) {
+                    const rad = (Number(fx.params.direction) || 0) * Math.PI / 180;
+                    ax = Math.max(0.02, Math.abs(Math.sin(rad)));
+                    ay = Math.max(0.02, Math.abs(Math.cos(rad)));
+                }
+                cx = Math.max(cx, Math.ceil((boxW * ax * 8) / wMin));
+                cy = Math.max(cy, Math.ceil((boxH * ay * 8) / wMin));
+            } else if (fx.type === 'bezier') {
+                // Quality của AE (1..10) -> 4..40 ô mỗi trục.
+                cx = Math.max(cx, 4 * fx.params.quality);
+                cy = Math.max(cy, 4 * fx.params.quality);
+            } else if (fx.type === 'mesh') {
+                cx = Math.max(cx, fx.params.cols * Math.max(2, fx.params.quality));
+                cy = Math.max(cy, fx.params.rows * Math.max(2, fx.params.quality));
+            } else if (fx.type === 'puppet') {
+                puppetCells.push(puppetGrid(fx.params, boxW, boxH));
+            } else if (fx.type === 'liquify') {
+                cx = Math.max(cx, FIELD_N);
+                cy = Math.max(cy, FIELD_N);
+            }
+        });
+        /* Puppet: lưới vẽ phải là BỘI của lưới Puppet (cùng cách chia tam giác) thì ánh xạ affine từng
+         * mảnh mới khớp tuyệt đối — làm tròn lên bội của lưới Puppet ĐẦU TIÊN. */
+        if (puppetCells.length) {
+            const pc = puppetCells[0];
+            cx = pc.cols * Math.max(1, Math.ceil(Math.min(cx, MAX_CELLS) / pc.cols));
+            cy = pc.rows * Math.max(1, Math.ceil(Math.min(cy, MAX_CELLS) / pc.rows));
+            while (cx > MAX_CELLS) cx -= pc.cols;
+            while (cy > MAX_CELLS) cy -= pc.rows;
+        }
+        return {
+            cols: Math.max(MIN_CELLS, Math.min(MAX_CELLS, cx)),
+            rows: Math.max(MIN_CELLS, Math.min(MAX_CELLS, cy)),
+        };
+    }
+
+    /* Đỉnh đích của lưới (cols+1)×(rows+1), toạ độ theo TÂM hộp, đơn vị hộp. `stack` = stackAt().
+     * Hiệu ứng áp lần lượt lên toạ độ (thứ tự = thứ tự trong ngăn hiệu ứng). */
+    function evalGrid(stack, boxW, boxH, spec, t, out = null) {
+        const { cols, rows } = spec;
+        const n = (cols + 1) * (rows + 1) * 2;
+        const pts = out && out.length === n ? out : new Float64Array(n);
+        for (let j = 0, q = 0; j <= rows; j += 1) {
+            const y = (j / rows - 0.5) * boxH;
+            for (let i = 0; i <= cols; i += 1, q += 2) {
+                pts[q] = (i / cols - 0.5) * boxW;
+                pts[q + 1] = y;
+            }
+        }
+        /* Hiệu ứng nối tiếp: hiệu ứng sau nhận vị trí ĐÃ dời của hiệu ứng trước (p -> f2(f1(p))).
+         * `fx.t` (nếu có) là thời gian riêng của mục đó trong exportSpec; không thì dùng t. */
+        stack.forEach((fx) => {
+            if (fx.type === 'wave') {
+                const wf = waveFrame(fx.params, fx.t != null ? fx.t : t);
+                if (Math.abs(wf.h) < 1e-9) return;
+                for (let q = 0; q < n; q += 2) {
+                    const px = pts[q] + boxW / 2;
+                    const py = pts[q + 1] + boxH / 2;
+                    const u = (px * wf.dx + py * wf.dy) * wf.invW - wf.shift;
+                    const d = wf.h * waveShape(fx.params.wave_type, u) * pinWeight(fx.params.pinning, px / boxW, py / boxH);
+                    pts[q] += wf.nx * d;
+                    pts[q + 1] += wf.ny * d;
+                }
+            } else if (fx.type === 'liquify') {
+                const f = fieldArray(fx.params);
+                const pct = (Number(fx.params.percent) || 0) / 100;
+                const off = fx.params.offset || [0, 0];
+                for (let q = 0; q < n; q += 2) {
+                    const D = liquifyDisp(f, pts[q] / boxW + 0.5, pts[q + 1] / boxH + 0.5);
+                    pts[q] += (D[0] * pct + off[0]) * boxW;
+                    pts[q + 1] += (D[1] * pct + off[1]) * boxH;
+                }
+            } else if (fx.type === 'puppet') {
+                // `solved` có sẵn khi dựng lại từ spec xuất (lưới đã giải gửi kèm); không thì giải tại chỗ.
+                const sol = fx.solved || puppetSolve(fx.params, boxW, boxH, fx.params.mask || null);
+                for (let q = 0; q < n; q += 2) {
+                    const r = puppetMap(sol.pts, sol.cols, sol.rows, pts[q] / boxW + 0.5, pts[q + 1] / boxH + 0.5);
+                    pts[q] = (r[0] - 0.5) * boxW;
+                    pts[q + 1] = (r[1] - 0.5) * boxH;
+                }
+            } else if (fx.type === 'bezier' || fx.type === 'mesh') {
+                const p = fx.params;
+                const patch = fx.type === 'bezier' ? bezierPatch(p) : null;
+                const m = fx.type === 'mesh' ? meshArray(p) : null;
+                const cache = {};
+                for (let q = 0; q < n; q += 2) {
+                    const U = pts[q] / boxW + 0.5;
+                    const V = pts[q + 1] / boxH + 0.5;
+                    const r = patch ? coons(patch, U, V) : meshMap(m, p.rows, p.cols, U, V, cache);
+                    pts[q] = (r[0] - 0.5) * boxW;
+                    pts[q + 1] = (r[1] - 0.5) * boxH;
+                }
+            }
+        });
+        return pts;
+    }
+
+    /* Nửa bề rộng/cao của hộp ĐỐI XỨNG quanh tâm chứa trọn nội dung đã biến dạng, cho CẢ clip (cỡ
+     * khung xuất phải cố định). Tính theo cận giải tích nên không phải dựng lưới từng khung; nhân
+     * 1.15 cho easing vượt đích (Bật lại / Đàn hồi). */
+    function maxExtents(item, boxW, boxH, env = null) {
+        let padX = 0;
+        let padY = 0;
+        normalizeStack(item && item.distort).filter((fx) => fx.enabled).forEach((fx) => {
+            if (fx.type === 'wave') {
+                const hMax = Math.max(...paramValues(item, fx, 'height').map(Math.abs)) * 1.15;
+                let ax = 1;
+                let ay = 1;
+                if (!paramKeyframed(item, fx, 'direction')) {
+                    const rad = (Number(fx.params.direction) || 0) * Math.PI / 180;
+                    ax = Math.abs(Math.cos(rad));
+                    ay = Math.abs(Math.sin(rad));
+                }
+                padX += hMax * ax;
+                padY += hMax * ay;
+            } else if (fx.type === 'bezier' || fx.type === 'mesh') {
+                /* Mặt Coons nằm trong bao lồi của các điểm điều khiển. Lấy mọi điểm điều khiển ở mọi
+                 * keyframe; khi có keyframe cộng 15 % khoảng chênh (easing vượt đích). Hiệu ứng ĐỨNG
+                 * TRƯỚC đã nở hộp bao nhiêu thì cộng thêm bấy nhiêu (ngoại suy theo mép). */
+                const ctrl = controlSnapshots(item, fx);
+                let mx = 0.5;
+                let my = 0.5;
+                let lo = [Infinity, Infinity];
+                let hi = [-Infinity, -Infinity];
+                ctrl.forEach((pts) => {
+                    for (let q = 0; q < pts.length; q += 2) {
+                        mx = Math.max(mx, Math.abs(pts[q] - 0.5));
+                        my = Math.max(my, Math.abs(pts[q + 1] - 0.5));
+                        lo = [Math.min(lo[0], pts[q]), Math.min(lo[1], pts[q + 1])];
+                        hi = [Math.max(hi[0], pts[q]), Math.max(hi[1], pts[q + 1])];
+                    }
+                });
+                const over = ctrl.length > 1 ? 0.15 : 0;
+                const ex = (mx + over * (hi[0] - lo[0])) * boxW;
+                const ey = (my + over * (hi[1] - lo[1])) * boxH;
+                padX = Math.max(0, ex - boxW / 2) + padX;
+                padY = Math.max(0, ey - boxH / 2) + padY;
+            } else if (fx.type === 'liquify') {
+                // Độ dời lớn nhất của mọi trường (tĩnh + keyframe) × % lớn nhất + Offset lớn nhất; +15 %.
+                const kfs = (item && item.keyframes) || {};
+                const fields = [fieldArray(fx.params)];
+                (kfs[kfField(fx.id, 'field')] || []).forEach((k) => {
+                    const v = normalizeParam(paramDef('liquify', 'field'), k.v);
+                    if (v) fields.push(v);
+                });
+                let mdx = 0;
+                let mdy = 0;
+                fields.forEach((f) => { for (let q = 0; q < f.length; q += 2) { mdx = Math.max(mdx, Math.abs(f[q])); mdy = Math.max(mdy, Math.abs(f[q + 1])); } });
+                const pcts = paramValues(item, fx, 'percent').map((v) => Math.abs(v) / 100);
+                const offs = [fx.params.offset, ...((kfs[kfField(fx.id, 'offset')] || []).map((k) => normalizeParam(paramDef('liquify', 'offset'), k.v)))];
+                const pmax = Math.max(...pcts);
+                const ox = Math.max(...offs.map((o) => Math.abs(o[0])));
+                const oy = Math.max(...offs.map((o) => Math.abs(o[1])));
+                padX += (mdx * pmax + ox) * 1.15 * boxW;
+                padY += (mdy * pmax + oy) * 1.15 * boxH;
+            } else if (fx.type === 'puppet') {
+                /* Giải Puppet ở dáng tĩnh, ở mọi keyframe ghim và 4 điểm giữa mỗi đoạn, lấy bao của
+                 * lưới đã giải; cộng 15 % (easing vượt đích). Phép phân tích được nhớ nên rẻ. */
+                const kfs = (item && item.keyframes) || {};
+                const times = new Set([0]);
+                Object.keys(kfs).forEach((k) => {
+                    if (!k.startsWith(`${KF_PREFIX}${fx.id}.pin_`)) return;
+                    const list = (kfs[k] || []).map((x) => Number(x.t) || 0).sort((a, b) => a - b);
+                    list.forEach((t, i) => {
+                        times.add(t);
+                        if (i < list.length - 1) for (let q = 1; q < 5; q += 1) times.add(t + ((list[i + 1] - t) * q) / 5);
+                    });
+                });
+                const mask = (env && env.masks && env.masks[fx.id]) || null;
+                let mx = 0.5;
+                let my = 0.5;
+                times.forEach((t) => {
+                    const sol = puppetSolve(effectParamsAt(item, fx, t), boxW, boxH, mask);
+                    for (let q = 0; q < sol.pts.length; q += 2) {
+                        mx = Math.max(mx, Math.abs(sol.pts[q] - 0.5));
+                        my = Math.max(my, Math.abs(sol.pts[q + 1] - 0.5));
+                    }
+                });
+                const over = times.size > 1 ? 1.15 : 1;
+                padX += Math.max(0, mx * over * boxW - boxW / 2);
+                padY += Math.max(0, my * over * boxH - boxH / 2);
+            }
+        });
+        return { hx: boxW / 2 + padX + 1, hy: boxH / 2 + padY + 1 };
+    }
+
+    /* Toạ độ chuẩn hoá của MỌI điểm điều khiển (đỉnh + tay cầm tuyệt đối) của một Bezier/Mesh Warp,
+     * một mảng cho giá trị tĩnh và một mảng cho mỗi keyframe. */
+    function controlSnapshots(item, fx) {
+        const kfs = (item && item.keyframes) || {};
+        const snaps = [];
+        if (fx.type === 'bezier') {
+            const times = new Set([null]);
+            BEZIER_POINTS.forEach((b) => (kfs[kfField(fx.id, b.key)] || []).forEach((k) => times.add(Number(k.t) || 0)));
+            times.forEach((t) => {
+                const p = t == null ? fx.params : effectParamsAt(item, fx, t);
+                snaps.push(BEZIER_POINTS.flatMap((b) => p[b.key]));
+            });
+        } else {
+            const list = kfs[kfField(fx.id, 'mesh')] || [];
+            const meshes = [meshArray(fx.params)];
+            list.forEach((k) => {
+                const v = normalizeParam(paramDef('mesh', 'mesh'), k.v);
+                if (v && v.length === meshLength(fx.params.rows, fx.params.cols)) meshes.push(v);
+            });
+            const { rows, cols } = fx.params;
+            meshes.forEach((m) => {
+                const pts = [];
+                for (let j = 0, q = 0; j <= rows; j += 1) {
+                    for (let i = 0; i <= cols; i += 1, q += MESH_STRIDE) {
+                        pts.push(m[q], m[q + 1]);
+                        // Tay cầm hướng RA NGOÀI mép lưới không thuộc ô nào -> bỏ.
+                        if (i > 0) pts.push(m[q] + m[q + 2], m[q + 1] + m[q + 3]);
+                        if (i < cols) pts.push(m[q] + m[q + 4], m[q + 1] + m[q + 5]);
+                        if (j > 0) pts.push(m[q] + m[q + 6], m[q + 1] + m[q + 7]);
+                        if (j < rows) pts.push(m[q] + m[q + 8], m[q + 1] + m[q + 9]);
+                    }
+                }
+                snaps.push(pts);
+            });
+        }
+        return snaps;
+    }
+
+    /* ===================================================================== VẼ (CPU) */
+
+    /* src: RGBA THẲNG (ImageData.data) cỡ sw×sh. pts: đỉnh đích theo PIXEL CỦA ẢNH RA. Ghi vào
+     * out (RGBA thẳng, outW×outH, đã xoá). Đỉnh (i,j) lấy mẫu nguồn tại (i/cols·sw, j/rows·sh).
+     * Phép lấy mẫu giống hệt TextDeform.rasterWarp; khác ở chỗ tam giác SAU thắng (khớp WebGL). */
+    function rasterMesh(src, sw, sh, cols, rows, pts, out, outW, outH) {
+        const sample = (sx, sy, idx) => {
+            const fx = sx - 0.5;
+            const fy = sy - 0.5;
+            const ix = Math.floor(fx);
+            const iy = Math.floor(fy);
+            const tx = fx - ix;
+            const ty = fy - iy;
+            let r = 0; let g = 0; let b = 0; let a = 0;
+            for (let dy = 0; dy < 2; dy += 1) {
+                const yy = iy + dy;
+                if (yy < 0 || yy >= sh) continue;
+                const wy = dy ? ty : 1 - ty;
+                for (let dx = 0; dx < 2; dx += 1) {
+                    const xx = ix + dx;
+                    if (xx < 0 || xx >= sw) continue;
+                    const w = wy * (dx ? tx : 1 - tx);
+                    const q = (yy * sw + xx) * 4;
+                    const al = src[q + 3] * w;
+                    if (!al) continue;
+                    r += src[q] * al; g += src[q + 1] * al; b += src[q + 2] * al; a += al;
+                }
+            }
+            if (a > 0) {
+                out[idx] = r / a; out[idx + 1] = g / a; out[idx + 2] = b / a; out[idx + 3] = a;
+            } else {
+                out[idx] = 0; out[idx + 1] = 0; out[idx + 2] = 0; out[idx + 3] = 0;
+            }
+        };
+        const tri = (x0, y0, x1, y1, x2, y2, u0, v0, u1, v1, u2, v2) => {
+            const area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+            if (Math.abs(area) < 1e-9) return;
+            const bx0 = Math.max(0, Math.floor(Math.min(x0, x1, x2)));
+            const by0 = Math.max(0, Math.floor(Math.min(y0, y1, y2)));
+            const bx1 = Math.min(outW - 1, Math.ceil(Math.max(x0, x1, x2)));
+            const by1 = Math.min(outH - 1, Math.ceil(Math.max(y0, y1, y2)));
+            const eps = -1e-7;
+            for (let py = by0; py <= by1; py += 1) {
+                const cy = py + 0.5;
+                for (let px = bx0; px <= bx1; px += 1) {
+                    const cx = px + 0.5;
+                    const w0 = ((x1 - cx) * (y2 - cy) - (x2 - cx) * (y1 - cy)) / area;
+                    const w1 = ((x2 - cx) * (y0 - cy) - (x0 - cx) * (y2 - cy)) / area;
+                    const w2 = 1 - w0 - w1;
+                    if (w0 < eps || w1 < eps || w2 < eps) continue;
+                    sample(w0 * u0 + w1 * u1 + w2 * u2, w0 * v0 + w1 * v1 + w2 * v2, (py * outW + px) * 4);
+                }
+            }
+        };
+        const stride = cols + 1;
+        for (let j = 0; j < rows; j += 1) {
+            const v0 = (j / rows) * sh;
+            const v1 = ((j + 1) / rows) * sh;
+            for (let i = 0; i < cols; i += 1) {
+                const u0 = (i / cols) * sw;
+                const u1 = ((i + 1) / cols) * sw;
+                const a = (j * stride + i) * 2;
+                const b = a + 2;
+                const c = a + stride * 2;
+                const d = c + 2;
+                tri(pts[a], pts[a + 1], pts[b], pts[b + 1], pts[d], pts[d + 1], u0, v0, u1, v0, u1, v1);
+                tri(pts[a], pts[a + 1], pts[d], pts[d + 1], pts[c], pts[c + 1], u0, v0, u1, v1, u0, v1);
+            }
+        }
+        return out;
+    }
+
+    /* Đỉnh lưới (đơn vị hộp, theo tâm) -> pixel ảnh ra cỡ outW×outH có tâm trùng tâm hộp; k = số
+     * pixel ảnh ra trên một đơn vị hộp. */
+    function gridToPixels(pts, k, outW, outH, dst = null) {
+        const res = dst && dst.length === pts.length ? dst : new Float64Array(pts.length);
+        const ox = outW / 2;
+        const oy = outH / 2;
+        for (let q = 0; q < pts.length; q += 2) {
+            res[q] = pts[q] * k + ox;
+            res[q + 1] = pts[q + 1] * k + oy;
+        }
+        return res;
+    }
+
+    // Cỡ ảnh ra (pixel, chẵn) cho nửa-hộp (hx, hy) ở mật độ k.
+    function outputSize(ext, k) {
+        return {
+            width: Math.max(2, 2 * Math.ceil(ext.hx * k)),
+            height: Math.max(2, 2 * Math.ceil(ext.hy * k)),
+        };
+    }
+
+    /* Vẽ biến dạng bằng CPU lên một canvas mới (dùng khi bake ảnh/Shape để xuất). `source` là bất
+     * kỳ thứ gì drawImage nhận, kéo về đúng cỡ srcW×srcH (pixel nguồn); hộp là boxW×boxH đơn vị. */
+    function warpToCanvas(item, source, srcW, srcH, boxW, boxH, t, opts = {}) {
+        const k = srcW / Math.max(1e-6, boxW);
+        const env = opts.env || null;
+        const ext = opts.extents || maxExtents(item, boxW, boxH, env);
+        const size = outputSize(ext, k);
+        const canvas = opts.canvas || document.createElement('canvas');
+        if (canvas.width !== size.width) canvas.width = size.width;
+        if (canvas.height !== size.height) canvas.height = size.height;
+        const ctx = canvas.getContext('2d');
+        /* Điểm ảnh nguồn: đọc lại mỗi lần là getImageData cả ảnh (chậm với ảnh lớn). Caller dựng
+         * chuỗi khung từ CÙNG một nguồn tĩnh thì truyền `opts.srcCache` ({}) để đọc đúng một lần. */
+        const sw = Math.max(1, Math.round(srcW));
+        const sh = Math.max(1, Math.round(srcH));
+        const cache = opts.srcCache || null;
+        let src = cache && cache.source === source && cache.w === sw && cache.h === sh ? cache.data : null;
+        if (!src) {
+            const srcCanvas = document.createElement('canvas');
+            srcCanvas.width = sw;
+            srcCanvas.height = sh;
+            const sctx = srcCanvas.getContext('2d', { willReadFrequently: true });
+            sctx.drawImage(source, 0, 0, sw, sh);
+            src = sctx.getImageData(0, 0, sw, sh).data;
+            if (cache) Object.assign(cache, { source, w: sw, h: sh, data: src });
+        }
+        const spec = opts.spec || gridSpec(item, boxW, boxH);
+        const pts = gridToPixels(evalGrid(stackAt(item, t, env), boxW, boxH, spec, t), k, size.width, size.height);
+        const img = ctx.createImageData(size.width, size.height);
+        rasterMesh(src, sw, sh, spec.cols, spec.rows, pts, img.data, size.width, size.height);
+        ctx.putImageData(img, 0, 0);
+        return { canvas, width: size.width, height: size.height, boxWidth: size.width / k, boxHeight: size.height / k };
+    }
+
+    /* ===================================================================== VẼ (WebGL2, preview) */
+
+    const VS = `#version 300 es
+        in vec2 aDst; in vec2 aSrc; uniform vec2 uOut; out vec2 vSrc;
+        void main() {
+            vSrc = aSrc;
+            vec2 c = aDst / uOut * 2.0 - 1.0;
+            gl_Position = vec4(c.x, -c.y, 0.0, 1.0);
+        }`;
+    /* Song tuyến tính TỰ VIẾT bằng texelFetch: điểm ngoài ảnh = trong suốt (đúng như rasterMesh),
+     * thay vì CLAMP_TO_EDGE của phần cứng làm mép ảnh kéo dài ra. Texture đã nhân sẵn alpha nên
+     * tổng có trọng số chính là màu nhân sẵn mà canvas premultipliedAlpha cần. */
+    const FS = `#version 300 es
+        precision highp float; precision highp int;
+        uniform sampler2D uTex; uniform ivec2 uSize; in vec2 vSrc; out vec4 o;
+        vec4 tap(ivec2 p) {
+            if (p.x < 0 || p.y < 0 || p.x >= uSize.x || p.y >= uSize.y) return vec4(0.0);
+            return texelFetch(uTex, p, 0);
+        }
+        void main() {
+            vec2 f = vSrc - 0.5;
+            vec2 fl = floor(f);
+            vec2 t = f - fl;
+            ivec2 i = ivec2(fl);
+            o = mix(mix(tap(i), tap(i + ivec2(1, 0)), t.x), mix(tap(i + ivec2(0, 1)), tap(i + ivec2(1, 1)), t.x), t.y);
+        }`;
+
+    class MeshRenderer {
+        constructor(canvas) {
+            this.canvas = canvas;
+            this.gl = canvas.getContext('webgl2', {
+                alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: false,
+                // Giữ khung đã vẽ: bấm chọn đọc alpha của canvas (overlayAlphaAt) bằng drawImage.
+                preserveDrawingBuffer: true,
+            });
+            if (!this.gl) return;
+            const gl = this.gl;
+            const sh = (type, src) => {
+                const s = gl.createShader(type);
+                gl.shaderSource(s, src);
+                gl.compileShader(s);
+                if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s) || 'shader');
+                return s;
+            };
+            const prog = gl.createProgram();
+            gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS));
+            gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+            gl.linkProgram(prog);
+            if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || 'link');
+            this.prog = prog;
+            this.loc = {
+                dst: gl.getAttribLocation(prog, 'aDst'),
+                src: gl.getAttribLocation(prog, 'aSrc'),
+                out: gl.getUniformLocation(prog, 'uOut'),
+                size: gl.getUniformLocation(prog, 'uSize'),
+                tex: gl.getUniformLocation(prog, 'uTex'),
+            };
+            this.vao = gl.createVertexArray();
+            this.dstBuf = gl.createBuffer();
+            this.srcBuf = gl.createBuffer();
+            this.idxBuf = gl.createBuffer();
+            this.tex = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, this.tex);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            this.topo = '';
+            this.indexCount = 0;
+            this.dstScratch = null;
+        }
+
+        get ok() { return !!this.gl && !!this.prog; }
+
+        // Đỉnh nguồn + chỉ số tam giác chỉ dựng lại khi lưới hoặc cỡ nguồn đổi.
+        ensureTopology(cols, rows, sw, sh) {
+            const key = `${cols}x${rows}|${sw}x${sh}`;
+            if (key === this.topo) return;
+            const gl = this.gl;
+            const src = new Float32Array((cols + 1) * (rows + 1) * 2);
+            for (let j = 0, q = 0; j <= rows; j += 1) {
+                for (let i = 0; i <= cols; i += 1, q += 2) {
+                    src[q] = (i / cols) * sw;
+                    src[q + 1] = (j / rows) * sh;
+                }
+            }
+            const stride = cols + 1;
+            const count = cols * rows * 6;
+            const idx = (cols + 1) * (rows + 1) > 65535 ? new Uint32Array(count) : new Uint16Array(count);
+            for (let j = 0, q = 0; j < rows; j += 1) {
+                for (let i = 0; i < cols; i += 1) {
+                    const a = j * stride + i;
+                    const b = a + 1;
+                    const c = a + stride;
+                    const d = c + 1;
+                    // Cùng thứ tự với rasterMesh: (a,b,d) rồi (a,d,c) — tam giác sau thắng.
+                    idx[q++] = a; idx[q++] = b; idx[q++] = d;
+                    idx[q++] = a; idx[q++] = d; idx[q++] = c;
+                }
+            }
+            gl.bindVertexArray(this.vao);
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.srcBuf);
+            gl.bufferData(gl.ARRAY_BUFFER, src, gl.STATIC_DRAW);
+            gl.enableVertexAttribArray(this.loc.src);
+            gl.vertexAttribPointer(this.loc.src, 2, gl.FLOAT, false, 0, 0);
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.idxBuf);
+            gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+            gl.bindVertexArray(null);
+            this.indexType = idx instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT;
+            this.indexCount = count;
+            this.topo = key;
+        }
+
+        /* source: <video>/<img>/<canvas> cỡ sw×sh; pts: đỉnh đích theo PIXEL của canvas này. */
+        draw(source, sw, sh, cols, rows, pts) {
+            if (!this.ok) return false;
+            const gl = this.gl;
+            const W = this.canvas.width;
+            const H = this.canvas.height;
+            gl.viewport(0, 0, W, H);
+            gl.clearColor(0, 0, 0, 0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            this.ensureTopology(cols, rows, sw, sh);
+            gl.bindTexture(gl.TEXTURE_2D, this.tex);
+            gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+            try {
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+            } catch (_) {
+                return false;
+            }
+            if (!this.dstScratch || this.dstScratch.length !== pts.length) this.dstScratch = new Float32Array(pts.length);
+            this.dstScratch.set(pts);
+            gl.useProgram(this.prog);
+            gl.bindVertexArray(this.vao);
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.dstBuf);
+            gl.bufferData(gl.ARRAY_BUFFER, this.dstScratch, gl.DYNAMIC_DRAW);
+            gl.enableVertexAttribArray(this.loc.dst);
+            gl.vertexAttribPointer(this.loc.dst, 2, gl.FLOAT, false, 0, 0);
+            gl.uniform2f(this.loc.out, W, H);
+            // Cỡ texture THẬT (video/ảnh có thể khác sw×sh khi caller kéo về cỡ khác).
+            const tw = source.videoWidth || source.naturalWidth || source.width || sw;
+            const th = source.videoHeight || source.naturalHeight || source.height || sh;
+            gl.uniform2i(this.loc.size, tw, th);
+            gl.uniform1i(this.loc.tex, 0);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.disable(gl.BLEND);
+            gl.drawElements(gl.TRIANGLES, this.indexCount, this.indexType, 0);
+            gl.bindVertexArray(null);
+            return true;
+        }
+
+        destroy() {
+            const gl = this.gl;
+            if (!gl) return;
+            try {
+                gl.deleteBuffer(this.dstBuf); gl.deleteBuffer(this.srcBuf); gl.deleteBuffer(this.idxBuf);
+                gl.deleteTexture(this.tex); gl.deleteVertexArray(this.vao); gl.deleteProgram(this.prog);
+                const lose = gl.getExtension('WEBGL_lose_context');
+                if (lose) lose.loseContext();
+            } catch (_) { /* context đã mất */ }
+            this.gl = null;
+        }
+    }
+
+    /* ===================================================================== XUẤT VIDEO */
+
+    /* Spec cho sidecar: tham số của TỪNG khung (đã nội suy keyframe) ở nhịp xuất, khử trùng lặp
+     * (khung đứng yên chỉ là một chỉ số). Khung k lấy mẫu tại GIỮA khung ((k+0.5)/fps) — như
+     * renderAnimationSequence, khớp cách ffmpeg hiển thị khung đó.
+     *   box: đơn vị hộp; ext: nửa-hộp chứa nội dung (đơn vị hộp); grid: số ô; t: giây cục bộ. */
+    /* Lưới Mesh tại t dưới dạng TRỘN hai lưới gốc { a, b, k }: lưới = a + (b − a)·k — đúng phép của
+     * evalParamKeyframes (k đã qua easing). Nhờ vậy spec xuất chỉ mang MỖI lưới keyframe một lần,
+     * mỗi khung chỉ còn ba số; gửi nguyên lưới từng khung thì Mesh 31×31 có keyframe dài 60 s là
+     * ~240 MB JSON (vượt trần body của /api/export-video). */
+    function meshMixAt(item, fx, t, cache = new Map()) {
+        return arrayMixAt(item, fx, 'mesh', meshLength(fx.params.rows, fx.params.cols), () => meshArray(fx.params), t, cache);
+    }
+
+    // Trường dời Liquify tại t, cùng dạng { a, b, k } (xem meshMixAt).
+    function fieldMixAt(item, fx, t, cache = new Map()) {
+        return arrayMixAt(item, fx, 'field', FIELD_LEN, () => fieldArray(fx.params), t, cache);
+    }
+
+    /* Thông số kiểu MẢNG (lưới Mesh / trường Liquify) tại t dưới dạng trộn hai mảng gốc — đúng phép
+     * của evalParamKeyframes. `baseOf()` = giá trị tĩnh khi không có keyframe hợp lệ. */
+    function arrayMixAt(item, fx, key, len, baseOf, t, cache) {
+        // `cache` (giữ suốt một lượt exportSpec): cùng keyframe -> CÙNG mảng, để gộp theo tham chiếu.
+        if (!cache.has('base')) cache.set('base', baseOf());
+        const base = cache.get('base');
+        const list = item && item.keyframes ? item.keyframes[kfField(fx.id, key)] : null;
+        if (!Array.isArray(list) || !list.length) return { a: base, b: base, k: 0 };
+        const def = paramDef(fx.type, key);
+        const arr = list.slice().sort((x, y) => (Number(x.t) || 0) - (Number(y.t) || 0));
+        const raw = (kf) => {
+            if (!cache.has(kf)) cache.set(kf, normalizeParam(def, kf.v));
+            return cache.get(kf);
+        };
+        const ok = (v) => (v && v.length === len ? v : base);
+        const time = Number(t) || 0;
+        const last = arr[arr.length - 1];
+        if (arr.length === 1 || time <= Number(arr[0].t)) { const v = ok(raw(arr[0])); return { a: v, b: v, k: 0 }; }
+        if (time >= Number(last.t)) { const v = ok(raw(last)); return { a: v, b: v, k: 0 }; }
+        for (let i = 0; i < arr.length - 1; i += 1) {
+            const ta = Number(arr[i].t);
+            const tb = Number(arr[i + 1].t);
+            if (time >= ta && time <= tb) {
+                const ra = raw(arr[i]);
+                const rb = raw(arr[i + 1]);
+                // Khác cỡ: giữ (Hold) như evalParamKeyframes; kết quả sai cỡ thì về lưới tĩnh.
+                if (!ra || !rb || ra.length !== rb.length) { const v = ok(ra); return { a: v, b: v, k: 0 }; }
+                if (ra.length !== len) return { a: base, b: base, k: 0 };
+                const p = Math.min(1, Math.max(0, (time - ta) / Math.max(1e-6, tb - ta)));
+                return { a: ra, b: rb, k: easeFn(arr[i].e)(p) };
+            }
+        }
+        const v = ok(raw(last));
+        return { a: v, b: v, k: 0 };
+    }
+
+    function exportSpec(item, boxW, boxH, fps, duration, env = null) {
+        const spec = gridSpec(item, boxW, boxH);
+        const ext = maxExtents(item, boxW, boxH, env);
+        const rate = Math.max(1, Number(fps) || 30);
+        const count = Math.max(1, Math.round(Math.max(0.01, Number(duration) || 0) * rate));
+        const stacks = [];
+        const keys = new Map();
+        const frames = new Array(count);
+        const meshes = [];
+        const meshIndex = new Map();   // mảng lưới (theo tham chiếu) -> chỉ số trong `meshes`
+        const meshRef = (m) => {
+            let at = meshIndex.get(m);
+            if (at === undefined) { at = meshes.length; meshes.push(m); meshIndex.set(m, at); }
+            return at;
+        };
+        const enabled = normalizeStack(item && item.distort).filter((fx) => fx.enabled);
+        const mixCaches = enabled.map(() => new Map());
+        /* Puppet: lưới ĐÃ GIẢI (chuẩn hoá, làm tròn 1e-6 ~ 0,002 px ở 1920) gửi kèm; mỗi bộ vị trí ghim
+         * giải đúng một lần. Sidecar chỉ nội suy, không giải ARAP. */
+        const puppets = [];
+        const puppetKeys = new Map();
+        const puppetRef = (fx, params) => {
+            const key = `${fx.id}|${JSON.stringify(params.pins.map((pin) => pin.pos))}`;
+            let at = puppetKeys.get(key);
+            if (at === undefined) {
+                const sol = puppetSolve(params, boxW, boxH, (env && env.masks && env.masks[fx.id]) || null);
+                at = puppets.length;
+                puppets.push({ cols: sol.cols, rows: sol.rows, pts: Array.from(sol.pts, (v) => Math.round(v * 1e6) / 1e6) });
+                puppetKeys.set(key, at);
+            }
+            return at;
+        };
+        for (let k = 0; k < count; k += 1) {
+            const t = (k + 0.5) / rate;
+            // Thời gian chỉ đi vào hình khi sóng đang chạy; sóng đứng yên ghi t = 0 để các khung
+            // giống nhau gộp được thành một mục.
+            const stack = stackAt(item, t, env).map((fx, i) => {
+                if (fx.type === 'puppet') {
+                    return { type: 'puppet', t: 0, params: { triangles: fx.params.triangles }, puppet_ref: puppetRef(enabled[i], fx.params) };
+                }
+                if (fx.type === 'liquify') {
+                    // Trường dời dùng CHUNG bảng `meshes` với Mesh Warp (mảng số, trộn a + (b − a)·k).
+                    const mix = fieldMixAt(item, enabled[i], t, mixCaches[i]);
+                    return {
+                        type: 'liquify', t: 0,
+                        params: { percent: fx.params.percent, offset: fx.params.offset },
+                        field_ref: [meshRef(mix.a), meshRef(mix.b), mix.k],
+                    };
+                }
+                if (fx.type === 'mesh') {
+                    const mix = meshMixAt(item, enabled[i], t, mixCaches[i]);
+                    const { mesh: _m, ...rest } = fx.params;
+                    return { type: 'mesh', t: 0, params: rest, mesh_ref: [meshRef(mix.a), meshRef(mix.b), mix.k] };
+                }
+                return {
+                    type: fx.type,
+                    t: fx.type === 'wave' && Math.abs(Number(fx.params.speed) || 0) > 1e-9 ? t : 0,
+                    params: fx.params,
+                };
+            });
+            const key = JSON.stringify(stack);
+            let at = keys.get(key);
+            if (at === undefined) {
+                at = stacks.length;
+                stacks.push(stack);
+                keys.set(key, at);
+            }
+            frames[k] = at;
+        }
+        return {
+            version: 1,
+            box: { w: boxW, h: boxH },
+            ext: { hx: ext.hx, hy: ext.hy },
+            grid: spec,
+            fps: rate,
+            frames,
+            stacks,
+            meshes,
+            puppets,
+        };
+    }
+
+    // Lưới của một mục trong exportSpec (test so khớp với sidecar dùng). Mesh dựng lại từ mesh_ref.
+    function evalSpecStack(specStack, boxW, boxH, grid, meshes = [], puppets = []) {
+        const stack = specStack.map((fx) => {
+            if (fx.type === 'puppet' && fx.puppet_ref != null) {
+                const sol = puppets[fx.puppet_ref];
+                return { ...fx, solved: { cols: sol.cols, rows: sol.rows, pts: sol.pts } };
+            }
+            if (fx.type === 'liquify' && fx.field_ref) {
+                const [fa, fb, fk] = fx.field_ref;
+                const a = meshes[fa];
+                const b = meshes[fb];
+                return { ...fx, params: { ...fx.params, field: a.map((x, i) => x + (b[i] - x) * fk) } };
+            }
+            if (fx.type !== 'mesh' || !fx.mesh_ref) return fx;
+            const [ia, ib, k] = fx.mesh_ref;
+            const a = meshes[ia];
+            const b = meshes[ib];
+            return { ...fx, params: { ...fx.params, mesh: a.map((x, i) => x + (b[i] - x) * k) } };
+        });
+        return evalGrid(stack, boxW, boxH, grid, 0);
+    }
+
+    /* ===================================================================== TAY NẮM (preview) */
+
+    const BEZIER_TANGENT_ANCHOR = {
+        tl_tangent: 'tl_vertex', lt_tangent: 'tl_vertex',
+        tr_tangent: 'rt_vertex', rt_tangent: 'rt_vertex',
+        rb_tangent: 'br_vertex', br_tangent: 'br_vertex',
+        bl_tangent: 'lb_vertex', lb_tangent: 'lb_vertex',
+    };
+    const MESH_PARTS = { l: 2, r: 4, u: 6, d: 8 };
+
+    /* Tay nắm + đường của một Bezier/Mesh Warp, toạ độ CHUẨN HOÁ (0..1 theo hộp):
+     *   handles: [{ id, kind: 'vertex'|'tangent', x, y, ax, ay (đỉnh mà tiếp tuyến bám), vertex }]
+     *   segs:    [[x0,y0, x1,y1, x2,y2, x3,y3]] — đường cong bậc ba để vẽ khung/lưới.
+     * Mesh: id 'v<chỉ số đỉnh>:p' (đỉnh) và 'v<chỉ số>:l|r|u|d' (tay cầm). */
+    function handleModel(fx, p) {
+        const handles = [];
+        const segs = [];
+        if (fx.type === 'bezier') {
+            BEZIER_POINTS.forEach((b) => {
+                const [x, y] = p[b.key];
+                const anchor = BEZIER_TANGENT_ANCHOR[b.key];
+                handles.push(anchor
+                    ? { id: b.key, kind: 'tangent', x, y, ax: p[anchor][0], ay: p[anchor][1], vertex: anchor }
+                    : { id: b.key, kind: 'vertex', x, y, vertex: b.key });
+            });
+            const seg = (a, b, c, d) => segs.push([...p[a], ...p[b], ...p[c], ...p[d]]);
+            seg('tl_vertex', 'tl_tangent', 'tr_tangent', 'rt_vertex');
+            seg('rt_vertex', 'rt_tangent', 'rb_tangent', 'br_vertex');
+            seg('lb_vertex', 'bl_tangent', 'br_tangent', 'br_vertex');
+            seg('tl_vertex', 'lt_tangent', 'lb_tangent', 'lb_vertex');
+        } else if (fx.type === 'mesh') {
+            const m = meshArray(p);
+            const { rows, cols } = p;
+            const at = (i, j) => (j * (cols + 1) + i) * MESH_STRIDE;
+            for (let j = 0; j <= rows; j += 1) {
+                for (let i = 0; i <= cols; i += 1) {
+                    const q = at(i, j);
+                    const v = `v${j * (cols + 1) + i}`;
+                    handles.push({ id: `${v}:p`, kind: 'vertex', x: m[q], y: m[q + 1], vertex: v });
+                    const parts = [];
+                    if (i > 0) parts.push('l');
+                    if (i < cols) parts.push('r');
+                    if (j > 0) parts.push('u');
+                    if (j < rows) parts.push('d');
+                    parts.forEach((part) => {
+                        const o = MESH_PARTS[part];
+                        handles.push({ id: `${v}:${part}`, kind: 'tangent', x: m[q] + m[q + o], y: m[q + 1] + m[q + o + 1], ax: m[q], ay: m[q + 1], vertex: v });
+                    });
+                    if (i < cols) {
+                        const b = at(i + 1, j);
+                        segs.push([m[q], m[q + 1], m[q] + m[q + 4], m[q + 1] + m[q + 5], m[b] + m[b + 2], m[b + 1] + m[b + 3], m[b], m[b + 1]]);
+                    }
+                    if (j < rows) {
+                        const c = at(i, j + 1);
+                        segs.push([m[q], m[q + 1], m[q] + m[q + 8], m[q + 1] + m[q + 9], m[c] + m[c + 6], m[c + 1] + m[c + 7], m[c], m[c + 1]]);
+                    }
+                }
+            }
+        }
+        if (fx.type === 'puppet') {
+            (p.pins || []).forEach((pin) => handles.push({ id: `pin:${pin.id}`, kind: 'pin', x: pin.pos[0], y: pin.pos[1], vertex: `pin:${pin.id}` }));
+        }
+        return { handles, segs };
+    }
+
+    /* Kéo tay nắm `id` tới điểm chuẩn hoá (nx, ny). Trả patch { thông số: giá trị mới } — caller ghi
+     * qua đường auto-keyframe (thông số đang có keyframe thì ghi keyframe tại playhead). */
+    function dragHandle(fx, p, id, nx, ny) {
+        if (fx.type === 'bezier') {
+            if (!p[id]) return {};
+            const patch = { [id]: [nx, ny] };
+            const tangents = BEZIER_VERTEX_TANGENTS[id];
+            if (tangents) {
+                const dx = nx - p[id][0];
+                const dy = ny - p[id][1];
+                tangents.forEach((k) => { patch[k] = [p[k][0] + dx, p[k][1] + dy]; });
+            }
+            return patch;
+        }
+        if (fx.type === 'puppet') {
+            const pid = String(id).replace(/^pin:/, '');
+            return (p.pins || []).some((pin) => pin.id === pid) ? { [`pin_${pid}`]: [nx, ny] } : {};
+        }
+        if (fx.type === 'mesh') {
+            const mm = /^v(\d+):([plrud])$/.exec(String(id));
+            if (!mm) return {};
+            const m = meshArray(p).slice();
+            const q = Number(mm[1]) * MESH_STRIDE;
+            if (q < 0 || q + MESH_STRIDE > m.length) return {};
+            if (mm[2] === 'p') {
+                m[q] = nx; m[q + 1] = ny;   // tay cầm TƯƠNG ĐỐI nên tự đi theo đỉnh
+            } else {
+                const o = MESH_PARTS[mm[2]];
+                m[q + o] = nx - m[q];
+                m[q + o + 1] = ny - m[q + 1];
+            }
+            return { mesh: m };
+        }
+        return {};
+    }
+
+    /* ===================================================================== INSPECTOR */
+
+    function injectStyle() {
+        if (typeof document === 'undefined' || document.getElementById('distortStyle')) return;
+        const el = document.createElement('style');
+        el.id = 'distortStyle';
+        el.textContent = `
+            .dst-add { display: flex; gap: 6px; align-items: center; margin: 4px 0 10px; }
+            .dst-add select { flex: 1; min-width: 0; }
+            .dst-fx { border: 1px solid var(--border-color, rgba(255,255,255,.12)); border-radius: 8px; padding: 6px 8px; margin: 8px 0; }
+            .dst-fx.is-off { opacity: .55; }
+            .dst-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; }
+            .dst-head .dst-name { flex: 1; }
+            .dst-head button { min-width: 24px; padding: 0 6px; }
+            .dst-row { display: flex; align-items: center; gap: 6px; margin: 6px 0; font-size: 12px; }
+            .dst-row > span:first-child { flex: 0 0 88px; opacity: .8; }
+            .dst-row select { flex: 1; min-width: 0; }
+            .dst-slider { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
+            .dst-slider input[type=range] { flex: 1; min-width: 0; }
+            .dst-slider input[type=text] { width: 56px; }
+            .dst-empty { font-size: 12px; opacity: .7; margin: 6px 0; }
+            .dst-edit { margin: 6px 0 8px; }
+            .dst-edit button { width: 100%; }
+            .dst-edit button.is-active { background: var(--accent, #f4b942); color: #1b1b1b; border-color: transparent; }
+            .dst-hint { font-size: 11px; opacity: .7; margin-top: 4px; line-height: 1.35; }
+        `;
+        document.head.appendChild(el);
+    }
+
+    /* Bezier / Mesh / Puppet / Liquify chỉ UỐN khi thao tác trên preview (như AE): Rows/Columns,
+     * Triangles, Distortion Percentage… một mình không làm hình đổi. Thanh "Sửa trên preview" + một dòng
+     * hướng dẫn cho từng hiệu ứng để người dùng không tưởng hiệu ứng hỏng. */
+    const EFFECT_HINTS = {
+        bezier: 'Kéo 4 đỉnh vuông và 8 tiếp tuyến tròn trên preview để uốn.',
+        mesh: 'Kéo đỉnh lưới trên preview (bấm một đỉnh để hiện tay cầm của nó). Rows/Columns chỉ chia lưới, chưa uốn.',
+        puppet: 'Bấm lên hình để đặt ghim (ít nhất 2), rồi kéo ghim để uốn. Triangles/Expansion chỉ dựng lưới.',
+        liquify: 'Vẽ cọ lên hình trên preview. Distortion Percentage chỉ nhân độ uốn của các nét đã vẽ.',
+    };
+    function editBarHtml(fx, active) {
+        return `
+                    <div class="dst-edit">
+                        <button type="button" class="btn btn-secondary${active ? ' is-active' : ''}" data-distort-action="edit" data-distort-id="${fx.id}" title="${esc(_t('Sửa trên preview (Esc để thoát)'))}">${esc(active ? _t('✎ Đang sửa trên preview — Esc để thoát') : _t('✎ Sửa trên preview'))}</button>
+                        <div class="dst-hint">${esc(_t(EFFECT_HINTS[fx.type] || ''))}</div>
+                    </div>`;
+    }
+
+    const scrubAttrs = (def) => `data-scrub-axis="x" data-scrub-step="${def.step}" data-scrub-min="${def.min}" data-scrub-max="${def.max}"${Number.isInteger(def.step) ? ' data-scrub-integer="1"' : ''}`;
+
+    function fmt(def, v) {
+        const n = Number(v) || 0;
+        return Number.isInteger(def.step) ? String(Math.round(n)) : String(Math.round(n * 100) / 100);
+    }
+
+    /* Mục "Biến dạng" của Inspector. `t` = giây cục bộ tại playhead (ô hiện giá trị HIỆU DỤNG).
+     * `kfGroup(field, label)` do editing-runtime cung cấp để nút ◂ ◆ ▸ giống mọi chỗ khác. */
+    function inspectorHtml(item, t, helpers = {}) {
+        injectStyle();
+        const kfGroup = typeof helpers.kfGroup === 'function' ? helpers.kfGroup : () => '';
+        const stack = normalizeStack(item && item.distort);
+        const effects = stack.map((fx, index) => {
+            const def = EFFECT_DEFS[fx.type];
+            const eff = effectParamsAt(item, fx, t);
+            const box = helpers.box || { w: 1, h: 1 };
+            const rows = def.params.map((p) => {
+                const field = kfField(fx.id, p.key);
+                const name = `${fx.id}|${p.key}`;
+                const kf = p.noKf ? '' : kfGroup(field, _t(p.label));
+                if (p.kind === 'vec2') {
+                    // Hiện px theo hộp (như AE), lưu chuẩn hoá.
+                    const v = eff[p.key];
+                    return `
+                    <div class="dst-row">
+                        <span>${esc(_t(p.label))}</span>
+                        <span class="dst-slider">
+                            <input type="text" inputmode="decimal" value="${Math.round(v[0] * box.w * 10) / 10}" data-distort-param="${name}" data-distort-axis="0" ${scrubAttrs({ step: 1, min: -100000, max: 100000 })} aria-label="X">
+                            <input type="text" inputmode="decimal" value="${Math.round(v[1] * box.h * 10) / 10}" data-distort-param="${name}" data-distort-axis="1" ${scrubAttrs({ step: 1, min: -100000, max: 100000 })} aria-label="Y">
+                        </span>
+                        ${kf}
+                    </div>`;
+                }
+                if (p.kind === 'pins') {
+                    const pins = eff.pins || [];
+                    const list = pins.map((pin, k) => {
+                        const pf = kfField(fx.id, `pin_${pin.id}`);
+                        const pn = `${fx.id}|pin_${pin.id}`;
+                        return `
+                    <div class="dst-row">
+                        <span>${esc(_t('Ghim {n}', { n: k + 1 }))}</span>
+                        <span class="dst-slider">
+                            <input type="text" inputmode="decimal" value="${Math.round(pin.pos[0] * box.w * 10) / 10}" data-distort-param="${pn}" data-distort-axis="0" ${scrubAttrs({ step: 1, min: -100000, max: 100000 })} aria-label="X">
+                            <input type="text" inputmode="decimal" value="${Math.round(pin.pos[1] * box.h * 10) / 10}" data-distort-param="${pn}" data-distort-axis="1" ${scrubAttrs({ step: 1, min: -100000, max: 100000 })} aria-label="Y">
+                        </span>
+                        ${kfGroup(pf, _t('Ghim {n}', { n: k + 1 }))}
+                        <button type="button" class="btn btn-secondary" data-distort-action="remove-pin" data-distort-id="${fx.id}" data-distort-pin="${pin.id}" title="${esc(_t('Xoá ghim'))}">×</button>
+                    </div>`;
+                    }).join('');
+                    return list || `<div class="dst-empty">${esc(_t('Bấm ✎ rồi bấm lên hình để đặt ghim; kéo ghim để uốn. Alt+bấm hoặc Delete để xoá ghim.'))}</div>`;
+                }
+                if (p.kind === 'mesh' || p.kind === 'field') {
+                    const reset = p.kind === 'mesh'
+                        ? `<button type="button" class="btn btn-secondary" data-distort-action="reset-mesh" data-distort-id="${fx.id}">${esc(_t('Đặt lại lưới'))}</button>`
+                        : `<button type="button" class="btn btn-secondary" data-distort-action="reset-field" data-distort-id="${fx.id}">${esc(_t('Khôi phục tất cả'))}</button>`;
+                    return `
+                    <div class="dst-row">
+                        <span>${esc(_t(p.label))}</span>
+                        <span class="dst-slider">${reset}</span>
+                        ${kf}
+                    </div>`;
+                }
+                if (p.kind === 'enum') {
+                    return `
+                    <div class="dst-row">
+                        <span>${esc(_t(p.label))}</span>
+                        <select data-distort-param="${name}">
+                            ${p.options.map((o) => `<option value="${o.id}"${o.id === eff[p.key] ? ' selected' : ''}>${esc(_t(o.label))}</option>`).join('')}
+                        </select>
+                        ${kf}
+                    </div>`;
+                }
+                const lo = Math.max(p.min, p.slider[0]);
+                const hi = Math.min(p.max, p.slider[1]);
+                return `
+                    <div class="dst-row">
+                        <span>${esc(_t(p.label))}${p.unit ? ` (${esc(p.unit)})` : ''}</span>
+                        <span class="dst-slider">
+                            <input type="range" min="${lo}" max="${hi}" step="${p.step}" value="${fmt(p, eff[p.key])}" data-distort-param="${name}">
+                            <input type="text" inputmode="decimal" value="${fmt(p, eff[p.key])}" data-distort-param="${name}" ${scrubAttrs(p)}>
+                        </span>
+                        ${kf}
+                    </div>`;
+            }).join('');
+            return `
+                <div class="dst-fx${fx.enabled ? '' : ' is-off'}" data-distort-fx="${fx.id}">
+                    <div class="dst-head">
+                        <input type="checkbox" data-distort-enable="${fx.id}"${fx.enabled ? ' checked' : ''} title="${esc(_t('Bật/tắt hiệu ứng'))}">
+                        <span class="dst-name">${esc(_t(def.label))}</span>
+                        <button type="button" class="btn btn-secondary" data-distort-action="up" data-distort-id="${fx.id}" ${index === 0 ? 'disabled' : ''} title="${esc(_t('Lên trên'))}">↑</button>
+                        <button type="button" class="btn btn-secondary" data-distort-action="down" data-distort-id="${fx.id}" ${index === stack.length - 1 ? 'disabled' : ''} title="${esc(_t('Xuống dưới'))}">↓</button>
+                        <button type="button" class="btn btn-secondary" data-distort-action="remove" data-distort-id="${fx.id}" title="${esc(_t('Xoá hiệu ứng'))}">×</button>
+                    </div>
+                    ${def.handles ? editBarHtml(fx, helpers.editingId === fx.id) : ''}
+                    ${rows}
+                </div>`;
+        }).join('');
+        return `
+            <div class="ins-sec" data-ins-tab="distort" data-ins-sub="basic" data-distort-section="1">
+                <div class="ins-sec-head"><span class="ins-sec-title">${esc(_t('Biến dạng (Distort)'))}</span></div>
+                <div class="dst-add">
+                    <select data-distort-add-type>
+                        ${TYPE_IDS.map((id) => `<option value="${id}"${id === helpers.addType ? ' selected' : ''}>${esc(_t(EFFECT_DEFS[id].label))}</option>`).join('')}
+                    </select>
+                    <button type="button" class="btn btn-secondary" data-distort-action="add" ${stack.length >= MAX_EFFECTS ? 'disabled' : ''}>${esc(_t('Thêm'))}</button>
+                </div>
+                ${effects || `<div class="dst-empty">${esc(_t('Chưa có hiệu ứng. Chọn một hiệu ứng rồi bấm Thêm.'))}</div>`}
+            </div>`;
+    }
+
+    // Ô inspector -> { effectId, key, value } đã kẹp đúng khoảng; null nếu không phải ô Distort.
+    function readField(target) {
+        const name = target && target.dataset && target.dataset.distortParam;
+        if (!name) return null;
+        const [effectId, key] = String(name).split('|');
+        const axis = target.dataset.distortAxis;
+        return { effectId, key, raw: target.value, axis: axis === undefined ? null : Number(axis) };
+    }
+
+    /* Giá trị MỚI của một thông số từ ô Inspector. vec2: ô X/Y nhận px -> đổi về chuẩn hoá theo hộp,
+     * giữ nguyên trục còn lại (giá trị hiệu dụng tại t). */
+    function fieldValue(item, fx, field, box, t) {
+        const def = paramDef(fx.type, field.key);
+        if (!def) return null;
+        if (def.kind === 'vec2') {
+            const n = Number(String(field.raw).replace(',', '.'));
+            if (!Number.isFinite(n)) return null;
+            const curRaw = getParam(effectParamsAt(item, fx, t), field.key);
+            if (!curRaw) return null;
+            const cur = curRaw.slice();
+            cur[field.axis === 1 ? 1 : 0] = n / Math.max(1e-6, field.axis === 1 ? box.h : box.w);
+            return normalizeParam(def, cur);
+        }
+        if (def.kind === 'mesh' || def.kind === 'field') return null;
+        return normalizeParam(def, field.raw);
+    }
+
+    function coerceValue(type, key, raw) {
+        const def = paramDef(type, key);
+        return def ? normalizeParam(def, raw) : null;
+    }
+
+    // Đồng bộ thanh trượt <-> ô số cùng thông số (không dựng lại inspector).
+    function syncTwin(target) {
+        const name = target && target.dataset && target.dataset.distortParam;
+        const box = target && target.closest && target.closest('[data-distort-fx]');
+        if (!name || !box) return;
+        box.querySelectorAll(`[data-distort-param="${name}"]`).forEach((el) => {
+            // Ô X và Y của một điểm cùng tên thông số — chỉ đồng bộ ô CÙNG trục.
+            if (el !== target && el.dataset.distortAxis === target.dataset.distortAxis) el.value = target.value;
+        });
+    }
+
+    /* Ô đang hiện giá trị HIỆU DỤNG tại playhead (bám playhead như bảng transform). Bỏ qua ô
+     * đang được gõ/kéo (document.activeElement). */
+    function syncPanelValues(root, item, t, box = { w: 1, h: 1 }) {
+        if (!root || !item) return;
+        const stack = normalizeStack(item.distort);
+        root.querySelectorAll('[data-distort-param]').forEach((el) => {
+            if (typeof document !== 'undefined' && el === document.activeElement) return;
+            const [effectId, key] = String(el.dataset.distortParam).split('|');
+            const fx = stack.find((f) => f.id === effectId);
+            const def = fx && paramDef(fx.type, key);
+            if (!def) return;
+            const v = getParam(effectParamsAt(item, fx, t), key);
+            if (def.kind === 'mesh' || def.kind === 'field' || v == null) return;
+            let next;
+            if (def.kind === 'vec2') {
+                const ax = Number(el.dataset.distortAxis) === 1 ? 1 : 0;
+                next = String(Math.round(v[ax] * (ax ? box.h : box.w) * 10) / 10);
+            } else next = def.kind === 'enum' ? String(v) : fmt(def, v);
+            if (el.value !== next) el.value = next;
+        });
+    }
+
+    return {
+        KF_PREFIX,
+        MAX_EFFECTS,
+        MAX_CELLS,
+        MIN_CELLS,
+        EFFECT_DEFS,
+        TYPE_IDS,
+        WAVE_SHAPES,
+        WAVE_PINNING,
+        paramDef,
+        normalizeParam,
+        normalizeEffect,
+        normalizeStack,
+        supportsItem,
+        isActive,
+        createEffect,
+        kfField,
+        isKfField,
+        parseKfField,
+        evalParamKeyframes,
+        effectParamsAt,
+        stackAt,
+        hasDistortKeyframes,
+        isTimeVarying,
+        hash32,
+        waveShape,
+        pinWeight,
+        waveFrame,
+        gridSpec,
+        evalGrid,
+        maxExtents,
+        rasterMesh,
+        gridToPixels,
+        outputSize,
+        warpToCanvas,
+        MeshRenderer,
+        exportSpec,
+        evalSpecStack,
+        meshMixAt,
+        FIELD_N,
+        FIELD_LEN,
+        LIQUIFY_TOOLS,
+        fieldArray,
+        liquifyDisp,
+        liquifyStroke,
+        fieldMixAt,
+        puppetGrid,
+        puppetSolve,
+        puppetMap,
+        puppetInverse,
+        puppetMask,
+        getParam,
+        setParam,
+        BandSPD,
+        inspectorHtml,
+        readField,
+        fieldValue,
+        handleModel,
+        dragHandle,
+        meshIdentity,
+        meshArray,
+        meshLength,
+        coons,
+        bezierPatch,
+        BEZIER_POINTS,
+        MESH_STRIDE,
+        coerceValue,
+        syncTwin,
+        syncPanelValues,
+    };
+}));

@@ -27,7 +27,7 @@ const HTTP_TIMEOUT_MS = 35_000;
 // Lệnh chạy lâu (nhập cả loạt tệp, lệnh gộp): app chờ renderer chừng này, HTTP chờ thêm 5 s.
 // PHẢI khớp LONG_RPC_TIMEOUT_MS ở electron/automation-bridge.js.
 const LONG_TIMEOUT_MS = 300_000;
-const LONG_METHODS = new Set(['batch', 'add_media_batch', 'import_media', 'add_geocode']);
+const LONG_METHODS = new Set(['batch', 'add_media_batch', 'import_media', 'add_geocode', 'add_shape', 'subsequence']);
 
 /* ---- Tìm app ---- */
 
@@ -79,6 +79,26 @@ function pickBridge() {
 
 function describe(b) {
   return `pid ${b.pid} (${b.packaged ? 'bản cài' : 'dev'} v${b.version}, ${b.platform})`;
+}
+
+/* Chạy job rồi CHỜ NGAY TRONG SERVER (hỏi job_status mỗi giây) — model nhận một kết quả cuối thay
+ * vì phải gọi crabbycut_job_status nhiều lượt. Hết hạn chờ mà job còn chạy thì trả job_id để hỏi tiếp;
+ * job lỗi thì ném lỗi (tool báo isError). */
+async function runJob(kind, options, waitSeconds) {
+  const wait = Math.max(0, Math.min(600, Number.isFinite(Number(waitSeconds)) ? Number(waitSeconds) : 50));
+  let job = await rpc('start_job', { kind, options });
+  const deadline = Date.now() + wait * 1000;
+  while (job.state === 'running' && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1000));
+    job = await rpc('job_status', { job_id: job.id });
+  }
+  if (job.state === 'complete') return { job_id: job.id, state: 'complete', ...(job.result || {}) };
+  if (job.state === 'failed') throw new Error(job.error || `${kind} thất bại`);
+  if (job.state === 'cancelled') return { job_id: job.id, state: 'cancelled' };
+  return {
+    job_id: job.id, state: job.state, progress: job.progress, message: job.message,
+    next: `still running — call crabbycut_job_status with job_id "${job.id}" and wait_seconds 25`,
+  };
 }
 
 function rpc(method, params) {
@@ -143,11 +163,85 @@ const KEYFRAME_MODE = { type: 'string', enum: ['merge', 'replace'], default: 'me
 const KEYFRAME_TIME = { type: 'string', enum: ['local', 'timeline'], default: 'local', description: 't measured from the block start (local) or on the sequence (timeline).' };
 const TRANSFORM_SCHEMA = { type: 'object', additionalProperties: { type: ['number', 'boolean'] }, description: 'position_x, position_y (px from centre), scale (%), rotation (deg), opacity (%), flip_x, flip_y.' };
 const ANIM_SIDE = { type: 'object', properties: { type: { type: 'string' }, duration: { type: 'number' }, easing: { type: 'string' } } };
+const WIGGLE_FX = {
+  anyOf: [
+    { type: 'null' },
+    { type: 'boolean' },
+    {
+      type: 'object',
+      properties: {
+        enabled: { type: 'boolean' },
+        freq: { type: 'number' },
+        amp: { type: 'number' },
+        octaves: { type: 'integer' },
+        amp_mult: { type: 'number' },
+        seed: { type: 'integer' },
+        style: { type: 'string', enum: ['smooth', 'target', 'step'] },
+        easing: { type: 'string' },
+        hold: { type: 'number' },
+        axis: { type: 'string', enum: ['xy', 'x', 'y'] },
+        uniform: { type: 'boolean' },
+      },
+      additionalProperties: false,
+    },
+  ],
+};
+const WIGGLE_SCHEMA = {
+  description: 'After Effects style wiggle (continuous shake for the whole block, on top of in/out + keyframes). Partial update per type; types not given are kept. <type>: {freq, amp, octaves, amp_mult, seed, style (smooth | target | step), easing + hold (style target), axis (position), uniform (scale), enabled (default true)} | true (turn on) | null/false (remove). "none" removes all. Ranges: crabbycut_catalog wiggle.',
+  anyOf: [
+    { type: 'string', enum: ['none'] },
+    { type: 'null' },
+    { type: 'object', properties: { position: WIGGLE_FX, scale: WIGGLE_FX, rotation: WIGGLE_FX, opacity: WIGGLE_FX }, additionalProperties: false },
+  ],
+};
+const ANIMATION_SCHEMA = { type: 'object', properties: { combo: { type: 'string' }, combo_duration: { type: 'number' }, in: ANIM_SIDE, out: ANIM_SIDE, wiggle: WIGGLE_SCHEMA } };
+const WAIT_SECONDS = { type: 'number', minimum: 0, maximum: 600, default: 50, description: 'How long the server waits for the job before returning (still running -> job_id for crabbycut_job_status).' };
+const PLACEMENT_PROPS = {
+  start: { type: 'number', minimum: 0 },
+  track_id: { type: 'string' },
+  transform: TRANSFORM_SCHEMA,
+  keyframes: KEYFRAMES_SCHEMA,
+  keyframe_mode: KEYFRAME_MODE,
+  keyframe_time: KEYFRAME_TIME,
+  animation: ANIMATION_SCHEMA,
+};
+const GEOCODE_BLOCK_PROPS = {
+  lang: { type: 'string', enum: ['html', 'canvas', 'python'] },
+  code: { type: 'string', minLength: 1 },
+  preset: { type: 'string' },
+  width: { type: 'integer', minimum: 16, maximum: 4096 },
+  height: { type: 'integer', minimum: 16, maximum: 4096 },
+  kind: { type: 'string', enum: ['image', 'video'], default: 'image' },
+  duration: { type: 'number', exclusiveMinimum: 0, description: 'Video length in seconds (kind video).' },
+  fps: { type: 'integer', minimum: 1, maximum: 60 },
+  bg: { type: 'string', description: '"transparent" (default) or #rrggbb.' },
+  loop: { type: 'boolean', default: true, description: 'Loop the video when the block is longer than it (otherwise hold the last frame).' },
+  block_duration: { type: 'number', exclusiveMinimum: 0, description: 'Block length on the timeline (default: video length, or 5 s for an image).' },
+  ...PLACEMENT_PROPS,
+};
+const SHAPE_PROPS = {
+  shape_type: { type: 'string', enum: ['rectangle', 'square', 'circle', 'triangle', 'trapezoid', 'polygon', 'star', 'line', 'path'] },
+  width: { type: 'number', minimum: 20, maximum: 4000 },
+  height: { type: 'number', minimum: 20, maximum: 4000 },
+  fill_color: { type: 'string' },
+  stroke_color: { type: 'string' },
+  stroke_width: { type: 'number', minimum: 0, maximum: 100 },
+  stroke_position: { type: 'string', enum: ['inside', 'center', 'outside'] },
+  corner_radius: { type: 'number', minimum: 0 },
+  outer_corner_radius: { type: 'number', minimum: 0 },
+  inner_corner_radius: { type: 'number', minimum: 0 },
+  sides: { type: 'integer', minimum: 3 },
+  points: { type: 'integer', minimum: 3 },
+  path_points: { type: 'array', items: { type: 'object' } },
+  path_closed: { type: 'boolean' },
+  duration: { type: 'number', exclusiveMinimum: 0 },
+  ...PLACEMENT_PROPS,
+};
 
 const TOOLS = [
   {
     name: 'crabbycut_status',
-    description: 'Check the connection to the running CrabbyCut app and return a short project state: step, mode, project path/name, unsaved flag, duration, playhead, playing, clip counts, undo/redo depth. Call this first.',
+    description: 'Check the connection to the running CrabbyCut app and return a short project state: step, mode, project path/name, unsaved flag, duration, playhead, playing, clip counts, undo/redo depth, and in_subsequence / subsequence_path when the user (or you) is editing inside a Subsequence. Call this first.',
     inputSchema: NO_ARGS,
     run: async () => {
       const ping = await rpc('ping');
@@ -157,7 +251,7 @@ const TOOLS = [
   },
   {
     name: 'crabbycut_get_timeline',
-    description: 'Return the timeline: main-lane clips (index, timeline_start/end in sequence seconds, source start/end, text) and, optionally, overlay tracks and items (text/media/audio blocks with id, track_id, timeline_start, duration). Times are in seconds.',
+    description: 'Return the timeline: main-lane clips (index, timeline_start/end in sequence seconds, source start/end, text) and, optionally, overlay tracks and items (text/media/audio blocks with id, track_id, timeline_start, duration). Times are in seconds. Subsequence (nest) blocks and main-lane rows carry subsequence {asset_id, name}. When in_subsequence is true this is the INSIDE of the open Subsequence (no main lane) — crabbycut_subsequence exit to return.',
     inputSchema: {
       type: 'object',
       properties: { include_overlays: { type: 'boolean', default: true } },
@@ -243,7 +337,7 @@ const TOOLS = [
   },
   {
     name: 'crabbycut_add_text',
-    description: 'Editing step only. Add a text block on an overlay track. start defaults to the playhead, duration to 5 s. Undoable.',
+    description: 'Editing step only. Add a text block on an overlay track — with its look in the SAME call (one undo step): style (font_family, font_size, color, font_weight, letter_spacing, font_kerning auto|none, align, stroke_*, bg_*, shadow_*), warp (After Effects style text warp: type arc | arc_lower | arc_upper | arch | bulge | shell_lower | shell_upper | flag | wave | fish | rise | fisheye | inflate | squeeze | twist, bend/horizontal/vertical -100..100), path (text running along a curve: preset arc | smile | wave | circle | s_curve | rise, or points in the Pen model; width/height of the path box, x/y its centre in px from the frame centre, offset, align, flip, shift), transform, keyframes, animation. start defaults to the playhead, duration to 5 s. Warp types: crabbycut_catalog text_warps. Change them later with crabbycut_update_block style {warp_*, path_*}.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -251,6 +345,38 @@ const TOOLS = [
         start: { type: 'number', minimum: 0 },
         duration: { type: 'number', exclusiveMinimum: 0 },
         track_id: { type: 'string' },
+        style: { type: 'object', description: 'Text style fields (see crabbycut_update_block).' },
+        warp: {
+          type: 'object',
+          properties: {
+            type: { type: 'string', enum: ['none', 'arc', 'arc_lower', 'arc_upper', 'arch', 'bulge', 'shell_lower', 'shell_upper', 'flag', 'wave', 'fish', 'rise', 'fisheye', 'inflate', 'squeeze', 'twist'] },
+            bend: { type: 'number', minimum: -100, maximum: 100 },
+            horizontal: { type: 'number', minimum: -100, maximum: 100 },
+            vertical: { type: 'number', minimum: -100, maximum: 100 },
+          },
+          required: ['type'],
+        },
+        path: {
+          type: 'object',
+          properties: {
+            preset: { type: 'string', enum: ['arc', 'smile', 'wave', 'circle', 's_curve', 'rise'] },
+            points: { type: 'array', items: { type: 'object' } },
+            closed: { type: 'boolean' },
+            width: { type: 'number', minimum: 10 },
+            height: { type: 'number', minimum: 0 },
+            x: { type: 'number' },
+            y: { type: 'number' },
+            offset: { type: 'number', minimum: -100, maximum: 100 },
+            align: { type: 'string', enum: ['left', 'center', 'right'] },
+            flip: { type: 'boolean' },
+            shift: { type: 'number' },
+          },
+        },
+        transform: TRANSFORM_SCHEMA,
+        keyframes: KEYFRAMES_SCHEMA,
+        keyframe_mode: KEYFRAME_MODE,
+        keyframe_time: KEYFRAME_TIME,
+        animation: ANIMATION_SCHEMA,
       },
       required: ['text'],
       additionalProperties: false,
@@ -345,10 +471,10 @@ const TOOLS = [
   },
   {
     name: 'crabbycut_catalog',
-    description: 'Look up valid ids/values before editing: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories, geocode (languages, size presets, limits).',
+    description: 'Look up valid ids/values before editing: transitions, animations, text_styles, text_effects, luts, color_params, export_options, subtitle, library_categories, geocode (languages, size presets, limits), shapes (shape types + style fields), voices (dubbing engines, voices, cloned voice profiles), text_warps (text warp types + text-on-path presets), wiggle (After Effects style wiggle types position | scale | rotation | opacity: params, ranges, defaults), distort (After Effects style distort effects wave | bezier | mesh | puppet | liquify: every param with its range/options/default and whether it can be keyframed).',
     inputSchema: {
       type: 'object',
-      properties: { kind: { type: 'string', enum: ['transitions', 'animations', 'text_styles', 'text_effects', 'luts', 'color_params', 'export_options', 'subtitle', 'library_categories', 'geocode'] } },
+      properties: { kind: { type: 'string', enum: ['transitions', 'animations', 'text_styles', 'text_effects', 'luts', 'color_params', 'export_options', 'subtitle', 'library_categories', 'geocode', 'shapes', 'voices', 'text_warps', 'wiggle', 'distort'] } },
       required: ['kind'],
       additionalProperties: false,
     },
@@ -358,7 +484,7 @@ const TOOLS = [
   /* ---- Sửa block ---- */
   {
     name: 'crabbycut_update_block',
-    description: 'Editing step only. Change properties of ONE block: a main-lane clip (main_index) or an overlay item (item_id). transform: position_x, position_y, scale, rotation, opacity, flip_x, flip_y (fields with keyframes get a keyframe at the playhead). keyframes animates fields over time, e.g. {"position": [{"t": 0, "x": -400, "y": 0}, {"t": 2, "x": 0, "y": 0, "e": "ease-out"}], "scale": [{"t": 0, "v": 80}, {"t": 2, "v": 100}]}. volume is percent (100 = original). speed is a rate (1 = normal). Overlay items also accept timeline_start, duration, muted, text (text blocks) and style (text: font_family, font_size, color, font_weight, letter_spacing, line_height, align, stroke_*, bg_*, shadow_*). One undo step.',
+    description: 'Editing step only. Change properties of ONE block: a main-lane clip (main_index) or an overlay item (item_id). transform: position_x, position_y, scale, rotation, opacity, flip_x, flip_y (fields with keyframes get a keyframe at the playhead). keyframes animates fields over time, e.g. {"position": [{"t": 0, "x": -400, "y": 0}, {"t": 2, "x": 0, "y": 0, "e": "ease-out"}], "scale": [{"t": 0, "v": 80}, {"t": 2, "v": 100}]}. volume is percent (100 = original). speed is a rate (1 = normal). Overlay items also accept timeline_start, duration, muted, text (text blocks) and style (text: font_family, font_size, color, font_weight, letter_spacing, font_kerning auto|none, line_height, align, stroke_*, bg_*, shadow_*, warp_*, path_*). Media (image/video) and shape items also accept distort: the After Effects style distort stack [{id?, type wave|bezier|mesh|puppet|liquify, enabled, params}] in order — entries with an existing id keep their other params and keyframes, entries without id are new effects, effects left out are removed ([] clears); animate a param with keyframes {"dst.<effect id>.<param>": [{t, v, e}]} (ids are returned in the result; params, ranges and keyframable flags: crabbycut_catalog distort). One undo step.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -376,6 +502,21 @@ const TOOLS = [
         muted: { type: 'boolean' },
         text: { type: 'string' },
         style: { type: 'object' },
+        distort: {
+          type: 'array',
+          maxItems: 8,
+          description: 'Distort effects (media/shape items only), the whole new stack in order. See crabbycut_catalog distort.',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'Existing effect id to keep/modify (e.g. "d1"); omit for a new effect.' },
+              type: { type: 'string', enum: ['wave', 'bezier', 'mesh', 'puppet', 'liquify'], description: 'Required for a new effect.' },
+              enabled: { type: 'boolean' },
+              params: { type: 'object', description: 'Only the params to set, e.g. wave {"wave_type": "sine", "height": 20, "width": 120, "direction": 90, "speed": 1, "pinning": "none", "phase": 0}; bezier {"tl_vertex": [0, 0], ...} as box fractions; puppet {"pins": [{"id": "a", "rest": [0.5, 0.2], "pos": [0.6, 0.1]}]}.' },
+            },
+            additionalProperties: false,
+          },
+        },
       },
       additionalProperties: false,
     },
@@ -394,7 +535,7 @@ const TOOLS = [
   },
   {
     name: 'crabbycut_set_animation',
-    description: 'Editing step only. Set in/out animation of a block (main_index or item_id). Either combo (e.g. "pop_fade", "none" to clear) with optional combo_duration (total seconds), or in/out objects {type, duration 0.2-2, easing}. Values from crabbycut_catalog animations.',
+    description: 'Editing step only. Set in/out animation of a block (main_index or item_id). Either combo (e.g. "pop_fade", "none" to clear) with optional combo_duration (total seconds), or in/out objects {type, duration 0.2-2, easing}. Values from crabbycut_catalog animations. wiggle = After Effects style continuous wiggle of position / scale / rotation / opacity, e.g. {"wiggle": {"position": {"freq": 2, "amp": 30}, "rotation": {"amp": 8}}}; kept when only combo/in/out change; ranges in crabbycut_catalog wiggle.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -404,6 +545,7 @@ const TOOLS = [
         combo_duration: { type: 'number' },
         in: ANIM_SIDE,
         out: ANIM_SIDE,
+        wiggle: WIGGLE_SCHEMA,
       },
       additionalProperties: false,
     },
@@ -440,6 +582,29 @@ const TOOLS = [
     },
     run: async (args) => json(await rpc('set_color', args)),
   },
+  {
+    name: 'crabbycut_subsequence',
+    description: 'Editing step only. Subsequences (Premiere-style nested sequences): action "list" (all Subsequences with instance counts); "create" packs item_ids (any overlay lanes) and/or main_indexes (adjacent main-lane clips; slow — renders a file) into ONE Subsequence block, optional name; "enter" opens one (item_id or main_index) so every timeline/editing tool then works INSIDE it; "exit" goes back (levels, or all: true); "rename" (item_id | main_index | asset_id, name); "duplicate" an item_id (independent: false = shares content, true = own copy); "make_unique" gives an item_id its own copy of the content; "unnest" puts the content back on this timeline (discard_effects: true needed when the block has its own transform/effects/colour/volume, which are lost). Each edit is one undo step; enter/exit are navigation only. Export and crabbycut_add_main_videos leave Subsequences automatically.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['list', 'create', 'enter', 'exit', 'rename', 'duplicate', 'make_unique', 'unnest'] },
+        item_ids: { type: 'array', items: { type: 'string' }, description: 'create: overlay blocks to pack.' },
+        main_indexes: { type: 'array', items: { type: 'integer', minimum: 0 }, description: 'create: adjacent main-lane clips to pack.' },
+        item_id: { type: 'string', description: 'The Subsequence block.' },
+        main_index: { type: 'integer', minimum: 0, description: 'A Subsequence row on the main lane (enter, rename).' },
+        asset_id: { type: 'string', description: 'rename: the Subsequence asset (from list / subsequence_path).' },
+        name: { type: 'string', maxLength: 60 },
+        levels: { type: 'integer', minimum: 1, default: 1 },
+        all: { type: 'boolean', description: 'exit: back to the root timeline.' },
+        independent: { type: 'boolean', default: false },
+        discard_effects: { type: 'boolean', default: false },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('subsequence', args)),
+  },
 
   /* ---- Lệnh gộp: cả lô = MỘT bước Hoàn tác + MỘT lượt vẽ ---- */
   {
@@ -467,7 +632,7 @@ const TOOLS = [
               keyframes: KEYFRAMES_SCHEMA,
               keyframe_mode: KEYFRAME_MODE,
               keyframe_time: KEYFRAME_TIME,
-              animation: { type: 'object', properties: { combo: { type: 'string' }, combo_duration: { type: 'number' }, in: ANIM_SIDE, out: ANIM_SIDE } },
+              animation: ANIMATION_SCHEMA,
               transition: { type: 'object', properties: { type: { type: 'string' }, duration: { type: 'number' } } },
               color: { type: 'object', properties: { lut_id: { type: 'string' }, lut_intensity: { type: 'number' }, params: { type: 'object', additionalProperties: { type: 'number' } } } },
               volume: { type: 'number', minimum: 0, maximum: 1000 },
@@ -489,7 +654,7 @@ const TOOLS = [
   },
   {
     name: 'crabbycut_batch',
-    description: 'Editing step only. Run many EDIT commands in one call and ONE undo step, in order. ops: [{tool, args}] where tool is one of add_text, update_block, apply_text_preset, set_animation, set_transition, set_color, split, select, delete_selected, seek, add_asset, import_media, add_media_batch, add_geocode (waits for the render; with or without the crabbycut_ prefix) and args are the arguments of that tool. Reference an earlier result with a string "$<index>.<path>", e.g. {"tool": "add_text", "args": {"text": "Hi"}} then {"tool": "update_block", "args": {"item_id": "$0.item_id", "keyframes": {...}}}. UI tools, screenshots and jobs are not allowed. on_error "abort" (default) rolls back everything on the first failure; "continue" rolls back only the failed op.',
+    description: 'Editing step only. Run many EDIT commands in one call and ONE undo step, in order. ops: [{tool, args}] where tool is one of add_text, update_block, apply_text_preset, set_animation, set_transition, set_color, split, select, delete_selected, seek, add_asset, import_media, add_media_batch, add_geocode (waits for the render), add_shape (with or without the crabbycut_ prefix) and args are the arguments of that tool. Reference an earlier result with a string "$<index>.<path>", e.g. {"tool": "add_text", "args": {"text": "Hi"}} then {"tool": "update_block", "args": {"item_id": "$0.item_id", "keyframes": {...}}}. UI tools, screenshots and jobs are not allowed. on_error "abort" (default) rolls back everything on the first failure; "continue" rolls back only the failed op.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -511,46 +676,121 @@ const TOOLS = [
     run: async (args) => json(await rpc('batch', args)),
   },
 
-  /* ---- GeoCode: dựng ảnh/video từ mã ---- */
+  /* ---- GeoCode: dựng ảnh/video từ mã ----
+   * Mọi tool dựng lâu (GeoCode, lồng tiếng) TỰ CHỜ job trong server (runJob) rồi trả kết quả gọn:
+   * model khỏi gọi crabbycut_job_status nhiều lượt — mỗi lượt là một vòng token. */
   {
     name: 'crabbycut_add_geocode',
-    description: 'Editing step only. Render an image or a video from CODE at an exact pixel size and place it as a GeoCode block on a shape track (scale 100% = exactly width x height px; transparent background by default). lang: "html" (HTML/CSS/JS page, CSS animations and timers run on a virtual clock), "canvas" (define function draw(ctx, t, width, height, frame)) or "python" (define def frame(t, width, height) returning a PIL.Image / numpy array / matplotlib Figure; runs with the machine\'s real Python and FULL user permissions — the user sees a notification). Size: width + height, or preset (crabbycut_catalog geocode). kind "video" needs duration (s) and fps (default: sequence fps, max 3600 frames). Rendering can take a while, so this returns a job: poll crabbycut_job_status; the finished job result has item_id. Also usable inside crabbycut_batch as tool "add_geocode" (waits for the render there).',
+    description: 'Editing step only. Render images/videos from CODE at an exact pixel size and place them as GeoCode blocks on a shape track (scale 100% = exactly width x height px; transparent background by default). lang: "html" (HTML/CSS/JS page, CSS animations and timers run on a virtual clock), "canvas" (define function draw(ctx, t, width, height, frame)) or "python" (define def frame(t, width, height) returning a PIL.Image / numpy array / matplotlib Figure; runs with the machine\'s real Python and FULL user permissions — the user sees a notification). Size: width + height, or preset (crabbycut_catalog geocode). kind "video" needs duration (s) and fps (default: sequence fps, max 3600 frames). ONE block: pass the fields at top level. MANY blocks (cheaper — one call, one undo step): items[] + defaults; put the shared code ONCE in template with {{name}} slots and give each item only vars (or its own code). Items without start follow the previous one (+ gap). The server waits for the render (wait_seconds, default 50) and returns item_id(s); if still running you get job_id — continue with crabbycut_job_status. Logs are returned only for warnings/errors (verbose_logs for all). Inside crabbycut_batch use tool "add_geocode" (one block).',
     inputSchema: {
       type: 'object',
       properties: {
-        lang: { type: 'string', enum: ['html', 'canvas', 'python'] },
-        code: { type: 'string', minLength: 1 },
-        preset: { type: 'string' },
-        width: { type: 'integer', minimum: 16, maximum: 4096 },
-        height: { type: 'integer', minimum: 16, maximum: 4096 },
-        kind: { type: 'string', enum: ['image', 'video'], default: 'image' },
-        duration: { type: 'number', exclusiveMinimum: 0, description: 'Video length in seconds (kind video).' },
-        fps: { type: 'integer', minimum: 1, maximum: 60 },
-        bg: { type: 'string', description: '"transparent" (default) or #rrggbb.' },
-        loop: { type: 'boolean', default: true, description: 'Loop the video when the block is longer than it (otherwise hold the last frame).' },
-        start: { type: 'number', minimum: 0 },
-        block_duration: { type: 'number', exclusiveMinimum: 0, description: 'Block length on the timeline (default: video length, or 5 s for an image).' },
-        track_id: { type: 'string' },
-        transform: TRANSFORM_SCHEMA,
-        keyframes: KEYFRAMES_SCHEMA,
-        keyframe_mode: KEYFRAME_MODE,
-        keyframe_time: KEYFRAME_TIME,
-        animation: { type: 'object', properties: { combo: { type: 'string' }, combo_duration: { type: 'number' }, in: ANIM_SIDE, out: ANIM_SIDE } },
+        ...GEOCODE_BLOCK_PROPS,
+        items: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'object', properties: { ...GEOCODE_BLOCK_PROPS, vars: { type: 'object', description: 'Values for the {{name}} slots of template.' } } } },
+        template: { type: 'string', description: 'Shared code with {{name}} slots, filled from each item\'s vars (items without code).' },
+        defaults: { type: 'object', description: 'Fields merged into every item (lang, width, height, kind, fps, bg, animation…).' },
+        gap: { type: 'number', minimum: 0, default: 0, description: 'Seconds between items placed one after another.' },
+        on_error: { type: 'string', enum: ['abort', 'continue'], default: 'abort' },
+        verbose_logs: { type: 'boolean', default: false },
+        wait_seconds: WAIT_SECONDS,
       },
-      required: ['lang', 'code'],
       additionalProperties: false,
     },
-    run: async (args) => json(await rpc('start_job', { kind: 'geocode', options: args })),
+    run: async ({ wait_seconds, ...args }) => {
+      if (!(Array.isArray(args.items) && args.items.length) && !(args.lang && args.code)) {
+        throw new Error('Pass lang + code for one block, or items[] (with template/vars or code) for many');
+      }
+      return json(await runJob('geocode', args, wait_seconds));
+    },
+  },
+  {
+    name: 'crabbycut_update_geocode',
+    description: 'Editing step only. Change an existing GeoCode block WITHOUT resending its code: replace [{find, with, all}] patches the code stored in the block (or pass a new code), and/or change width, height, kind, fps, duration, bg, loop; then it is re-rendered in place keeping position, transform, keyframes and animation. block_duration only changes the block length (no re-render). read: true returns the current code (alone: no change). Waits for the render like crabbycut_add_geocode.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        item_id: { type: 'string' },
+        code: { type: 'string', minLength: 1 },
+        replace: { type: 'array', items: { type: 'object', properties: { find: { type: 'string', minLength: 1 }, with: { type: 'string' }, all: { type: 'boolean', default: false } }, required: ['find'] } },
+        width: { type: 'integer', minimum: 16, maximum: 4096 },
+        height: { type: 'integer', minimum: 16, maximum: 4096 },
+        kind: { type: 'string', enum: ['image', 'video'] },
+        fps: { type: 'integer', minimum: 1, maximum: 60 },
+        duration: { type: 'number', exclusiveMinimum: 0 },
+        bg: { type: 'string' },
+        loop: { type: 'boolean' },
+        block_duration: { type: 'number', exclusiveMinimum: 0 },
+        read: { type: 'boolean', default: false },
+        verbose_logs: { type: 'boolean', default: false },
+        wait_seconds: WAIT_SECONDS,
+      },
+      required: ['item_id'],
+      additionalProperties: false,
+    },
+    run: async ({ wait_seconds, ...args }) => {
+      const rebuild = args.code !== undefined || (Array.isArray(args.replace) && args.replace.length)
+        || ['width', 'height', 'kind', 'fps', 'duration', 'bg', 'loop'].some((k) => args[k] !== undefined);
+      if (!rebuild) return json(await rpc('update_geocode', args));
+      return json(await runJob('geocode_update', args, wait_seconds));
+    },
+  },
+
+  /* ---- Shape (Hình học › Hình dạng) ---- */
+  {
+    name: 'crabbycut_add_shape',
+    description: 'Editing step only. Add vector shapes on a shape track in ONE call and ONE undo step: one shape (fields at top level) or items[] + defaults. shape_type rectangle | square | circle | triangle | trapezoid | polygon | star | line | path; width/height px, fill_color/stroke_color #rrggbb, stroke_width, stroke_position, corner_radius, outer/inner_corner_radius (star), sides (polygon), points (star), path_points for "path" (see crabbycut_catalog shapes). Plus start, duration (default 5 s), track_id, transform, keyframes, animation. Items without start follow the previous one (+ gap). Returns item_id(s). Also usable inside crabbycut_batch as "add_shape".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...SHAPE_PROPS,
+        items: { type: 'array', minItems: 1, maxItems: 500, items: { type: 'object', properties: SHAPE_PROPS } },
+        defaults: { type: 'object', description: 'Fields merged into every item.' },
+        gap: { type: 'number', minimum: 0, default: 0 },
+        on_error: { type: 'string', enum: ['abort', 'continue'], default: 'abort' },
+      },
+      additionalProperties: false,
+    },
+    run: async (args) => json(await rpc('add_shape', args)),
+  },
+
+  /* ---- Lồng tiếng (Âm thanh › Lồng tiếng) ---- */
+  {
+    name: 'crabbycut_dub',
+    description: 'Editing step only. AI voice-over placed on the "Lồng tiếng" audio track, in one call: text (split into sentences, read one after another with gap seconds between, starting at start) or sentences[] (exact sentences, no splitting) — both also create matching subtitles unless make_subtitles is false; or cues[] {start, end, text} timed on the timeline (timing_mode auto_fit | dynamic_shift | fixed_duration). engine/voice default to the user\'s choice in the Dubbing panel; list them with crabbycut_catalog voices (voice_profile = a cloned voice id). replace (default true) swaps the previous dub with the same name. The server waits for the job (wait_seconds, default 50; first run may download a model) and returns the timeline start/end of every sentence (clips[i]) — use them to time GeoCode/text/shapes to the speech without reading the timeline again.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string' },
+        sentences: { type: 'array', items: { type: 'string' }, maxItems: 500 },
+        cues: { type: 'array', maxItems: 2000, items: { type: 'object', properties: { start: { type: 'number', minimum: 0 }, end: { type: 'number' }, text: { type: 'string' } }, required: ['start', 'end', 'text'] } },
+        start: { type: 'number', minimum: 0, default: 0, description: 'Timeline offset (s) added to every sentence/cue.' },
+        gap: { type: 'number', minimum: 0, maximum: 5, default: 0.4 },
+        engine: { type: 'string' },
+        voice: { type: 'string' },
+        voice_profile: { type: 'string' },
+        engine_options: { type: 'object', description: 'qwen3: {mode custom|clone|design, language, instruct}; chatterbox: {language, exaggeration, cfg_weight}.' },
+        speed: { type: 'number', minimum: 0.5, maximum: 2 },
+        timing_mode: { type: 'string', enum: ['auto_fit', 'dynamic_shift', 'fixed_duration'] },
+        max_speed: { type: 'number', minimum: 1, maximum: 2 },
+        split: { type: 'boolean', default: false, description: 'One audio block per sentence instead of one block for the whole read.' },
+        make_subtitles: { type: 'boolean', default: true },
+        replace: { type: 'boolean', default: true },
+        name: { type: 'string', description: 'Name of this dub (default "MCP"); same name + replace swaps the old one.' },
+        wait_seconds: WAIT_SECONDS,
+      },
+      additionalProperties: false,
+    },
+    run: async ({ wait_seconds, ...args }) => json(await runJob('dub', args, wait_seconds)),
   },
 
   /* ---- Job chạy lâu ---- */
   {
     name: 'crabbycut_start_job',
-    description: 'Start a long-running task and return a job immediately; then poll crabbycut_job_status. kinds: "geocode" (same options as crabbycut_add_geocode), "auto_subtitle" (options: scope all|main|overlay, language vi|en|zh|ja|ko|auto), "magic_fill" (needs a script loaded), "export" (options: output_path REQUIRED absolute file path, video bool, audio bool, resolution, fps, codec, bitrate, bitrate_mbps, audio_bitrate, audio_format, audio_file_bitrate — values from crabbycut_catalog export_options). Editing step only.',
+    description: 'Start a long-running task and return a job immediately; then poll crabbycut_job_status. Prefer crabbycut_add_geocode / crabbycut_update_geocode / crabbycut_dub, which wait for the job themselves. kinds: "geocode" (same options as crabbycut_add_geocode), "geocode_update" (same as crabbycut_update_geocode), "dub" (same as crabbycut_dub), "auto_subtitle" (options: scope all|main|overlay, language vi|en|zh|ja|ko|auto), "magic_fill" (needs a script loaded), "export" (options: output_path REQUIRED absolute file path, video bool, audio bool, resolution, fps, codec, bitrate, bitrate_mbps, audio_bitrate, audio_format, audio_file_bitrate — values from crabbycut_catalog export_options). Editing step only.',
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', enum: ['auto_subtitle', 'magic_fill', 'export', 'geocode'] },
+        kind: { type: 'string', enum: ['auto_subtitle', 'magic_fill', 'export', 'geocode', 'geocode_update', 'dub'] },
         options: { type: 'object' },
       },
       required: ['kind'],
@@ -755,7 +995,12 @@ async function handle(message) {
           + 'for several edits at once use crabbycut_add_media_batch (many files + keyframes/animation) or '
           + 'crabbycut_batch (any edit commands) — one call, one undo step. '
           + 'To draw graphics (buttons, lower thirds, animated badges, charts) at an exact pixel size, write code '
-          + 'with crabbycut_add_geocode (HTML/CSS/JS, canvas or Python). '
+          + 'with crabbycut_add_geocode (HTML/CSS/JS, canvas or Python) — several blocks in ONE call via items + a shared '
+          + 'template with {{vars}}; fix one later with crabbycut_update_geocode (find/replace, no need to resend the code). '
+          + 'Subsequences (nested sequences): crabbycut_subsequence; crabbycut_status shows in_subsequence '
+          + 'when the user is editing inside one — timeline tools then act on its content. '
+          + 'Vector shapes: crabbycut_add_shape. Voice-over: crabbycut_dub (returns the timeline time of every sentence — '
+          + 'time visuals to it without re-reading the timeline). These wait for their render themselves. '
           + 'look up valid ids with crabbycut_catalog. For anything without a dedicated tool, drive the UI '
           + 'like a user: crabbycut_screenshot + crabbycut_ui_snapshot, then crabbycut_ui_click / ui_type / '
           + 'ui_key / ui_drag / ui_scroll, and screenshot again to verify. Native OS dialogs (file pickers) '

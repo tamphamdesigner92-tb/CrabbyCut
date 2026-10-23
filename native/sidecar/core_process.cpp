@@ -939,6 +939,8 @@ struct ExportInterval {
   double animInDur = 0.0;
   double animOutStart = 0.0;
   double animOutDur = 0.0;
+  // WIGGLE vị trí: dời phần lẻ dưới pixel (xem SubpixelShiftFilter) — chỉ block có Wiggle.
+  bool animSubpixel = false;
   // KEYFRAME: biểu thức FFmpeg theo thời gian (LOCALT), đơn vị native (px / % / độ).
   // Rỗng = field đó không keyframe (dùng transform tĩnh). Áp THAY cho giá trị tĩnh.
   std::string kfXExpr;
@@ -1057,6 +1059,8 @@ struct ExportOverlay {
   double animInDur = 0.0;
   double animOutStart = 0.0;
   double animOutDur = 0.0;
+  // WIGGLE vị trí: dời phần lẻ dưới pixel (xem SubpixelShiftFilter) — chỉ block có Wiggle.
+  bool animSubpixel = false;
   // KEYFRAME (xem ExportInterval): biểu thức theo LOCALT, đơn vị native, áp THAY tĩnh.
   std::string kfXExpr;
   std::string kfYExpr;
@@ -1071,6 +1075,8 @@ struct ExportOverlay {
   // MẶT NẠ CẮT HÌNH của block (tab Video) — KHÁC adjustMaskPath (mặt nạ đó chỉ giới hạn
   // phạm vi chỉnh màu). Xem AppendVideoMaskFilter.
   std::string videoMaskPath;
+  // BIẾN DẠNG (Distort): spec theo khung do backend ghi (xem DistortVideoPrepass). Rỗng = không có.
+  std::string distortSpecPath;
   // XOÁ LOGO (tab Retouch > Xoá logo): chế độ + các hình chữ nhật PIXEL trên stream nguồn,
   // "x:y:w:h:p|..." do backend dựng lại từ số đã kẹp. Rỗng = không xoá. Xem AppendLogoRemovalFilters.
   std::string logoMode;
@@ -1113,6 +1119,11 @@ struct ExportOverlay {
 };
 
 struct ExportSettings {
+  /* SUBSEQUENCE (NEST): dựng nội dung một sequence con thành tệp TRUNG GIAN CÓ ALPHA (ProRes 4444)
+   * để timeline cha dùng như một lớp phủ video. Chỉ bật khi backend ghi `alpha_output: true` (luồng
+   * nest_render của /api/export-video) và codec là prores; mọi lượt xuất thường giữ nguyên. Nền
+   * (lane chính đen của blank_base) được làm TRONG SUỐT, lớp phủ ghép RGBA có bù alpha nền. */
+  bool alphaOutput = false;
   std::string resolution = "source";
   int width = 0;
   int height = 0;
@@ -1492,6 +1503,8 @@ struct ExportRunTiming {
   bool gpu = false;           // lượt chạy bằng đồ thị GPU (mục 1.21)
   bool gpuFallback = false;   // đồ thị GPU lỗi -> chạy lại bằng đồ thị CPU
   bool cacheHit = false;      // dùng lại batch trong cache render (mục 1.13), không chạy ffmpeg
+  double vramEstMb = 0.0;     // VRAM ước lượng của bản GPU (EstimateBatchGpuVramMb)
+  double startMs = -1.0;      // mốc khởi chạy ffmpeg tính từ đầu lượt xuất (lần chạy cuối); -1 = không chạy
 };
 
 struct ExportTimingLog {
@@ -1509,6 +1522,7 @@ struct ExportTimingLog {
   // Cache render (mục 1.13): thời gian tính khoá, số batch cất vào cache sau lượt này.
   double cacheKeyMs = 0.0;
   size_t cacheStored = 0;
+  double vramBudgetMb = 0.0;   // ngân sách VRAM của lượt GPU song song (GpuVramBudgetMb); 0 = không giới hạn
   std::vector<ExportRunTiming> runs;
 };
 
@@ -1566,6 +1580,7 @@ std::string ExportTimingJson(const std::string& encoder) {
       << ",\"gpu_probe_cached\":" << (g_exportTiming.gpuProbeCached ? "true" : "false")
       << ",\"cache_key_ms\":" << g_exportTiming.cacheKeyMs
       << ",\"cache_stored\":" << g_exportTiming.cacheStored
+      << ",\"vram_budget_mb\":" << g_exportTiming.vramBudgetMb
       << ",\"runs\":[";
   for (size_t i = 0; i < g_exportTiming.runs.size(); i++) {
     const ExportRunTiming& run = g_exportTiming.runs[i];
@@ -1583,6 +1598,8 @@ std::string ExportTimingJson(const std::string& encoder) {
         << ",\"cpu_retry\":" << (run.cpuRetry ? "true" : "false")
         << ",\"gpu\":" << (run.gpu ? "true" : "false")
         << ",\"gpu_fallback\":" << (run.gpuFallback ? "true" : "false")
+        << ",\"vram_est_mb\":" << run.vramEstMb
+        << ",\"start_ms\":" << run.startMs
         << ",\"cache_hit\":" << (run.cacheHit ? "true" : "false") << "}";
   }
   out << "]}";
@@ -1686,6 +1703,7 @@ EncoderPlan SelectEncoderPlan(const ExportSettings& settings) {
   if (!HardwareExportEnabled()) return cpu;
 
   if (settings.codec == "prores") {
+    if (settings.alphaOutput) return cpu;   // prores_ks là bộ mã hoá chắc chắn giữ alpha
 #ifdef __APPLE__
     if (HasFfmpegEncoder("prores_videotoolbox")) {
       return {"videotoolbox", "prores_videotoolbox", true};
@@ -1731,8 +1749,11 @@ std::string RateModeFromQuality(const std::string& quality) {
   return "recommended";
 }
 
-bool RateIsCustom(const ExportSettings& settings) {
-  return settings.rateMode == "custom" && settings.rateMbps >= kRateMbpsMin && settings.rateMbps <= kRateMbpsMax;
+/* Có con số Mbps cụ thể: "Tùy chỉnh", hoặc ba mức khi backend đã tính từ bitrate video gốc trên
+ * lane chính (Khuyến nghị = trung bình nguồn, Thấp hơn ×0,75, Cao hơn ×2 — port CrabbyStudio eba80b0).
+ * Không có số (không đo được nguồn, GIF) thì ba mức giữ CQ/CRF + trần như cũ. */
+bool RateHasMbps(const ExportSettings& settings) {
+  return settings.rateMbps >= kRateMbpsMin && settings.rateMbps <= kRateMbpsMax;
 }
 
 /* Mức chất lượng cố định của từng mức. NVENC `-cq` (đo VMAF trên 4.320 khung 4K, mục 1.20:
@@ -1754,7 +1775,7 @@ std::string RateCpuCrf(const ExportSettings& settings) {
  * "Cao hơn" gấp đôi Cao), hoặc bitrate TRUNG BÌNH người dùng nhập ở "Tùy chỉnh" (không nhân theo cỡ
  * khung — người dùng đã chọn con số). Các mức theo khung THẬT SỰ được mã hoá (cỡ xuất ở mục 1.12). */
 int RateKbps(const ExportSettings& settings) {
-  if (RateIsCustom(settings)) {
+  if (RateHasMbps(settings)) {
     return static_cast<int>(std::round(settings.rateMbps * 1000.0));
   }
   const int width = OutputResized(settings) ? settings.outputWidth : (settings.width > 0 ? settings.width : 1920);
@@ -2307,6 +2328,7 @@ bool ReadExportPayload(
     if (!(parsed > 0.0) || parsed > 240.0) settings.renderFps = "30";
   }
   if (!IsAllowed(settings.codec, {"h264", "hevc", "prores"})) settings.codec = "h264";
+  settings.alphaOutput = settings.codec == "prores" && ExtractBoolField(text, "alpha_output", false);
   if (!IsAllowed(settings.quality, {"small", "balanced", "high"})) settings.quality = "high";
   settings.rateMode = ExtractStringField(text, "rate_mode", "");
   settings.rateMbps = ExtractDoubleFieldOr(text, "rate_mbps", 0.0);
@@ -2369,6 +2391,7 @@ bool ReadExportPayload(
     item.animInDur = std::max(0.0, ExtractDoubleFieldOr(objects[i], "anim_in_dur", 0.0));
     item.animOutStart = std::max(0.0, ExtractDoubleFieldOr(objects[i], "anim_out_start", 0.0));
     item.animOutDur = std::max(0.0, ExtractDoubleFieldOr(objects[i], "anim_out_dur", 0.0));
+    item.animSubpixel = ExtractBoolField(objects[i], "anim_subpixel", false);
     item.kfXExpr = ExtractJsonStringField(objects[i], "kf_x_expr", "");
     item.kfYExpr = ExtractJsonStringField(objects[i], "kf_y_expr", "");
     item.kfScaleExpr = ExtractJsonStringField(objects[i], "kf_scale_expr", "");
@@ -2452,6 +2475,7 @@ bool ReadExportPayload(
       overlay.animInDur = std::max(0.0, ExtractDoubleFieldOr(overlayObjects[i], "anim_in_dur", 0.0));
       overlay.animOutStart = std::max(0.0, ExtractDoubleFieldOr(overlayObjects[i], "anim_out_start", 0.0));
       overlay.animOutDur = std::max(0.0, ExtractDoubleFieldOr(overlayObjects[i], "anim_out_dur", 0.0));
+      overlay.animSubpixel = ExtractBoolField(overlayObjects[i], "anim_subpixel", false);
       overlay.kfXExpr = ExtractJsonStringField(overlayObjects[i], "kf_x_expr", "");
       overlay.kfYExpr = ExtractJsonStringField(overlayObjects[i], "kf_y_expr", "");
       overlay.kfScaleExpr = ExtractJsonStringField(overlayObjects[i], "kf_scale_expr", "");
@@ -2461,6 +2485,7 @@ bool ReadExportPayload(
       overlay.adjustFilters = ExtractJsonStringField(overlayObjects[i], "adj_filters", "");
       overlay.adjustMaskPath = ExtractJsonStringField(overlayObjects[i], "adj_mask_path", "");
       overlay.videoMaskPath = ExtractJsonStringField(overlayObjects[i], "video_mask_path", "");
+      overlay.distortSpecPath = ExtractJsonStringField(overlayObjects[i], "distort_spec_path", "");
       overlay.logoMode = ExtractJsonStringField(overlayObjects[i], "logo_mode", "");
       overlay.logoRects = ExtractJsonStringField(overlayObjects[i], "logo_rects", "");
       overlay.logoAiDir = ExtractJsonStringField(overlayObjects[i], "logo_ai_dir", "");
@@ -2505,6 +2530,8 @@ std::string Join(const std::vector<std::string>& values, const std::string& sepa
   return out.str();
 }
 
+std::string ClipPixelFormat(const ExportSettings& settings);
+
 std::string BuildVideoFilter(const ExportSettings& settings) {
   std::vector<std::string> filters;
   if (settings.fps != "source") filters.push_back("fps=" + settings.fps);
@@ -2515,8 +2542,15 @@ std::string BuildVideoFilter(const ExportSettings& settings) {
     filters.push_back("pad=" + w + ":" + h + ":(ow-iw)/2:(oh-ih)/2:color=black");
   }
   filters.push_back("setsar=1");
-  filters.push_back(settings.codec == "prores" ? "format=yuv422p10le" : "format=yuv420p");
+  filters.push_back(ClipPixelFormat(settings));
   return Join(filters, ",");
+}
+
+/* Nền TRONG SUỐT của lượt dựng Subsequence: lane chính (nền đen blank_base) giữ nguyên khổ/nhịp khung
+ * làm đồng hồ cho đồ thị, nhưng alpha = 0. `overlay format=auto` trên nền RGBA tự ghép có bù alpha nền
+ * (vf_overlay: main_has_alpha), nên lớp phủ ra đúng màu và đúng độ trong suốt. */
+std::string AlphaBaseFilter() {
+  return "format=rgba,colorchannelmixer=aa=0";
 }
 
 std::string FfmpegDouble(double value) {
@@ -2526,6 +2560,7 @@ std::string FfmpegDouble(double value) {
 }
 
 std::string ClipPixelFormat(const ExportSettings& settings) {
+  if (settings.alphaOutput) return "format=yuva444p10le";   // ProRes 4444 + alpha (Subsequence)
   return settings.codec == "prores" ? "format=yuv422p10le" : "format=yuv420p";
 }
 
@@ -2681,6 +2716,81 @@ std::string KfOpacityFilter(const std::string& kfOpacityExpr, double start) {
   return ",format=gbrap,sendcmd=f='" + FilterPath(cmdPath.string()) + "',colorchannelmixer@" + tag + "=aa=1";
 }
 
+/* DỜI DƯỚI PIXEL cho block có WIGGLE vị trí (2026-10-22).
+ *
+ * vf_overlay đặt lớp phủ ở toạ độ NGUYÊN (cắt phần lẻ; ghép yuv420 còn kéo về số chẵn), nên rung
+ * biên độ nhỏ (vài px) thành chuỗi "đứng vài khung – nhảy 1 px" — nhìn giật. Cách làm: overlay
+ * đặt ở X0 = 2·floor(P/2) (số chẵn: đường rgb lẫn yuv420 đều giữ nguyên), còn phần lẻ
+ * f = P − X0 ∈ [0, 2) do `geq` nội suy song tuyến dời trên lớp phủ đã đệm 2 px trong suốt.
+ *
+ * Hai chỗ đặt geq:
+ *   - cỡ lớp phủ KHÔNG đổi theo thời gian: ngay trước overlay (sau fade);
+ *   - có thu phóng theo thời gian (keyframe / hoạt ảnh / wiggle Thu phóng): `scale` eval=frame đổi
+ *     cỡ khung từng khung mà pad/geq giữ cỡ khung đầu -> geq đứng TRƯỚC scale (sau rotate, cỡ cố
+ *     định), độ dời quy về px của khung trước co: f·W/w_ra (scale ánh xạ tuyến tính mép–mép).
+ *
+ * Mọi biểu thức (overlay, geq, rotate, scale) phải tính ở CÙNG một khung: overlay dùng t = mốc
+ * khung NỀN, còn các filter trên luồng lớp phủ dùng mốc khung LỚP PHỦ (sớm hơn một chút — dời sớm
+ * kOverlayTieEpsilon để khỏi hoà mốc). Cả hai quy về chỉ số khung m của lưới xuất: phía nền
+ * round(t·fps), phía lớp phủ ceil(t·fps − 1e-6). Lệch nhau một khung là nhảy 2 px đúng khung đó.
+ *
+ * Chi phí: độ dời tính MỘT lần mỗi hàng — thanh ghi st/ld của biểu thức sống suốt lát cắt geq và
+ * mỗi hàng bắt đầu ở X = 0 — nên chỉ còn phần nội suy (~2 ms/khung cho block cỡ ảnh 230 px,
+ * ~80 ms cho khung Full HD). Nhân alpha trước khi nội suy để mép không viền đen. Thanh ghi 0..3
+ * của sidecar; 4..8 là của biểu thức wiggle kiểu Điểm đích (text-animations.js). */
+std::string SubpixelGridTime(const std::string& timeVar, double fps, bool baseSide) {
+  const std::string f = FfmpegDouble(fps);
+  return baseSide ? "(round(" + timeVar + "*" + f + ")/" + f + ")"
+                  : "(ceil(" + timeVar + "*" + f + "-0.000001)/" + f + ")";
+}
+
+// Toạ độ trục (vị trí tĩnh/keyframe + offset hoạt ảnh), LOCALT theo `gridTime`.
+std::string SubpixelAxisPos(const std::string& kfPosExpr, double staticPos, const std::string& animExpr,
+                            double start, const std::string& gridTime) {
+  const std::string base = kfPosExpr.empty()
+    ? "(" + FfmpegDouble(staticPos) + ")"
+    : "(" + SubstituteLocalTimeVar(kfPosExpr, start, gridTime) + ")";
+  return animExpr.empty() ? base : base + "+(" + SubstituteLocalTimeVar(animExpr, start, gridTime) + ")";
+}
+
+struct SubpixelSpec {
+  double fps = 0.0;
+  int seqW = 1920;
+  int seqH = 1080;
+  double start = 0.0;   // mốc trừ LOCALT (overlay: timeline_start; clip lane chính: 0)
+  std::string kfX, kfY, animX, animY;
+  double posX = 0.0;
+  double posY = 0.0;
+};
+
+// Toạ độ overlay (biến w/h/t của vf_overlay): 2·floor(P/2) — phần lẻ đã dời ở geq.
+std::string SubpixelOverlayXY(const SubpixelSpec& sp) {
+  const std::string gt = SubpixelGridTime("t", sp.fps, true);
+  const std::string xd = "(" + std::to_string(sp.seqW) + "-w)/2+" + SubpixelAxisPos(sp.kfX, sp.posX, sp.animX, sp.start, gt);
+  const std::string yd = "(" + std::to_string(sp.seqH) + "-h)/2+" + SubpixelAxisPos(sp.kfY, sp.posY, sp.animY, sp.start, gt);
+  return "x='2*floor((" + xd + ")/2)':y='2*floor((" + yd + ")/2)'";
+}
+
+/* Đệm 2 px + geq dời phần lẻ. `wOut`/`hOut`: cỡ khung mà overlay sẽ thấy, viết bằng biến của geq
+ * (W/H = khung đã đệm đang xử lý): "W"/"H" khi geq đứng ngay trước overlay, biểu thức của `scale`
+ * khi geq đứng trước scale.
+ * `afterRotate`: `rotate` với canvas cỡ LẺ (hypot(iw,ih) hiếm khi chẵn) đặt nội dung lệch +½ px so
+ * với tâm khung (đo: ô 100 px -> canvas 141, tâm nội dung ở 70,5). Đường cũ không thấy vì overlay cắt
+ * phần lẻ toạ độ, vô tình bù đúng ½ px; ở đây đặt chính xác nên phải trừ lại ½ px khi khung lẻ. */
+std::string SubpixelShiftFilter(const SubpixelSpec& sp, const std::string& wOut, const std::string& hOut,
+                                bool afterRotate = false) {
+  const std::string gT = SubpixelGridTime("T", sp.fps, false);
+  const std::string px = "((" + std::to_string(sp.seqW) + "-ld(0))/2+" + SubpixelAxisPos(sp.kfX, sp.posX, sp.animX, sp.start, gT) + ")";
+  const std::string py = "((" + std::to_string(sp.seqH) + "-ld(1))/2+" + SubpixelAxisPos(sp.kfY, sp.posY, sp.animY, sp.start, gT) + ")";
+  const std::string head = "if(not(X),st(0," + wOut + ");st(1," + hOut + ");st(2," + px + ");st(3," + py + ");"
+    "st(0,(ld(2)-2*floor(ld(2)/2))*W/ld(0)" + std::string(afterRotate ? "-0.5*mod(W,2)" : "") + ");"
+    "st(1,(ld(3)-2*floor(ld(3)/2))*H/ld(1)" + std::string(afterRotate ? "-0.5*mod(H,2)" : "") + "));";
+  const auto plane = [&](const char* fn) { return head + fn + "(X-ld(0),Y-ld(1))"; };
+  return ",pad=w=iw+4:h=ih+4:x=2:y=2:color=black@0,format=gbrap,premultiply=inplace=1"
+         ",geq=r='" + plane("r") + "':g='" + plane("g") + "':b='" + plane("b") + "':a='" + plane("alpha")
+         + "':i=bilinear,unpremultiply=inplace=1";
+}
+
 // Nối chuỗi filter biến đổi theo thời gian (rotate -> scale -> opacity) cho 1 stream đã ở
 // format=rgba (gọi ngay sau format=rgba/flip). start = mốc trừ LOCALT. Thứ tự rotate
 // TRƯỚC scale để canvas rotate = đường chéo nguồn (hằng) không bị xén khi scale biến thiên.
@@ -2700,17 +2810,24 @@ void AppendKfTransformFilters(
   const std::string& kfScaleExpr, const std::string& kfRotExpr, const std::string& kfOpacityExpr,
   double staticScale, double staticRotDeg, double staticOpacity,
   const std::string& animSxExpr = "", const std::string& animSyExpr = "",
-  const std::string& animRotExpr = "", double fitScale = 1.0
+  const std::string& animRotExpr = "", double fitScale = 1.0,
+  const SubpixelSpec* subpixel = nullptr
 ) {
+  /* Wiggle vị trí (dời dưới pixel, xem SubpixelShiftFilter): rotate/scale tính ở MỐC KHUNG của lưới
+   * xuất như geq và overlay; geq chen giữa rotate và scale. Không có thì y như trước (biến `t`). */
+  const std::string tv = subpixel ? SubpixelGridTime("t", subpixel->fps, false) : "t";
+  const auto local = [&](const std::string& expr, const std::string& timeVar) {
+    return SubstituteLocalTimeVar(expr, start, timeVar);
+  };
   const bool needRotate = !kfRotExpr.empty() || !animRotExpr.empty() || std::abs(staticRotDeg) > 1e-6;
   if (needRotate) {
     // Gộp ở ĐƠN VỊ ĐỘ rồi đổi sang radian MỘT lần — trộn hai đơn vị trong cùng biểu thức
     // là chỗ rất dễ sai mà chỉ lộ ra khi có đủ cả xoay tĩnh lẫn hoạt ảnh xoay.
     std::string deg = kfRotExpr.empty()
       ? "(" + FfmpegDouble(staticRotDeg) + ")"
-      : "(" + SubstituteLocalTime(kfRotExpr, start) + ")";
+      : "(" + local(kfRotExpr, tv) + ")";
     if (!animRotExpr.empty()) {
-      deg = "((" + deg + ")+(" + SubstituteLocalTime(animRotExpr, start) + "))";
+      deg = "((" + deg + ")+(" + local(animRotExpr, tv) + "))";
     }
     // Hằng độ->radian viết thẳng đủ chữ số: FfmpegDouble chỉ in 6 số thập phân, mà ở đây
     // nó là HỆ SỐ nhân với góc (tới 180) nên chữ số bị cắt sẽ thành sai số góc thấy được.
@@ -2718,14 +2835,25 @@ void AppendKfTransformFilters(
            << "':ow='hypot(iw,ih)':oh='hypot(iw,ih)':c=black@0";
   }
   const double fit = (fitScale > 0.0) ? fitScale : 1.0;
-  const std::string sf = kfScaleExpr.empty()
-    ? "(" + FfmpegDouble(std::max(0.01, (staticScale / 100.0) * fit)) + ")"
-    : "((" + SubstituteLocalTime(kfScaleExpr, start) + ")/100*" + FfmpegDouble(fit) + ")";
-  // Hai trục tách nhau vì hoạt ảnh có hiệu ứng KHÔNG ĐẲNG HƯỚNG (lật: chỉ co trục X)
-  const std::string sfx = animSxExpr.empty()
-    ? sf : "((" + sf + ")*(" + SubstituteLocalTime(animSxExpr, start) + "))";
-  const std::string sfy = animSyExpr.empty()
-    ? sf : "((" + sf + ")*(" + SubstituteLocalTime(animSyExpr, start) + "))";
+  // Hệ số co hai trục theo một biến thời gian (`t` của scale, hoặc `T` cho geq ở nhánh dời dưới pixel).
+  const auto scaleFactors = [&](const std::string& timeVar) {
+    const std::string sf = kfScaleExpr.empty()
+      ? "(" + FfmpegDouble(std::max(0.01, (staticScale / 100.0) * fit)) + ")"
+      : "((" + local(kfScaleExpr, timeVar) + ")/100*" + FfmpegDouble(fit) + ")";
+    // Hai trục tách nhau vì hoạt ảnh có hiệu ứng KHÔNG ĐẲNG HƯỚNG (lật: chỉ co trục X)
+    const std::string sfx = animSxExpr.empty()
+      ? sf : "((" + sf + ")*(" + local(animSxExpr, timeVar) + "))";
+    const std::string sfy = animSyExpr.empty()
+      ? sf : "((" + sf + ")*(" + local(animSyExpr, timeVar) + "))";
+    return std::make_pair(sfx, sfy);
+  };
+  const auto [sfx, sfy] = scaleFactors(tv);
+  if (subpixel) {
+    // Cỡ khung ra của scale ngay dưới, viết bằng biến của geq (W/H = khung đã đệm trước co).
+    const auto [gx, gy] = scaleFactors(SubpixelGridTime("T", subpixel->fps, false));
+    script << SubpixelShiftFilter(*subpixel, "max(2,ceil(W*(" + gx + ")/2)*2)", "max(2,ceil(H*(" + gy + ")/2)*2)",
+                                  needRotate);
+  }
   script << ",scale=w='max(2,ceil(iw*(" << sfx << ")/2)*2)':h='max(2,ceil(ih*(" << sfy << ")/2)*2)'";
   // đánh giá lại w/h mỗi frame -> scale động
   if (!kfScaleExpr.empty() || !animSxExpr.empty() || !animSyExpr.empty()) script << ":eval=frame";
@@ -3823,6 +3951,16 @@ void WriteClipVideoFilters(
   // việc bỏ bước scale tĩnh phía trước format=rgba (nếu không thì scale HAI lần).
   const bool clipDynTransform = clipKf
     || HasAnimGeomExpr(item.animSxExpr, item.animSyExpr, item.animRotExpr);
+  // WIGGLE vị trí: dời phần lẻ dưới pixel như lớp phủ (xem SubpixelShiftFilter), mốc 0-based.
+  const double subpixelFps = ParseFpsValue(settings.renderFps);
+  const bool subpixel = item.animSubpixel && !item.animXExpr.empty() && subpixelFps > 0.0;
+  SubpixelSpec sub;
+  if (subpixel) {
+    sub.fps = subpixelFps; sub.seqW = seqW; sub.seqH = seqH; sub.start = 0.0;
+    sub.kfX = clipKf ? item.kfXExpr : ""; sub.kfY = clipKf ? item.kfYExpr : "";
+    sub.animX = item.animXExpr; sub.animY = item.animYExpr;
+    sub.posX = item.positionX; sub.posY = item.positionY;
+  }
   // Đường nhanh YUV (mục 1.3): không nền `color`, không RGBA, không overlay.
   const MainLaneFast fast = MainLaneFastPlan(item, settings, clipKf || clipDynTransform || clipHasAnim,
                                              scaleValue, opacityValue);
@@ -3984,7 +4122,8 @@ void WriteClipVideoFilters(
   if (clipDynTransform) {
     AppendKfTransformFilters(script, 0.0, item.kfScaleExpr, item.kfRotExpr, item.kfOpacityExpr,
                              item.scale, item.rotation, opacityValue,
-                             item.animSxExpr, item.animSyExpr, item.animRotExpr, fitScale);
+                             item.animSxExpr, item.animSyExpr, item.animRotExpr, fitScale,
+                             subpixel ? &sub : nullptr);
   } else {
     if (std::abs(rotationRad) > 0.000001) {
       const std::string angle = FfmpegDouble(rotationRad);
@@ -4005,12 +4144,16 @@ void WriteClipVideoFilters(
              << ":d=" << FfmpegDouble(item.animOutDur) << ":alpha=1";
     }
   }
+  // Cỡ clip cố định: dời dưới pixel ngay trước overlay (nhánh động đã dời trước scale).
+  if (subpixel && !clipDynTransform) script << SubpixelShiftFilter(sub, "W", "H");
   script << "[clip" << idx << "];\n";
 
   // Vùng lộ ra khi clip dịch/thu nhỏ = nền đen (color=c=black) -> "nền xanh nhấp nháy"
   // của preview KHÔNG đi vào export. Vị trí = tâm + posX/Y + offset(t) khi có hoạt ảnh/kf.
   script << "[base" << idx << "][clip" << idx << "]overlay=";
-  if (clipKf || clipHasAnim) {
+  if (subpixel) {
+    script << SubpixelOverlayXY(sub);
+  } else if (clipKf || clipHasAnim) {
     const std::string xPos = clipKf ? KfOverlayPos(item.kfXExpr, 0.0, item.positionX)
                                     : ("(" + FfmpegDouble(item.positionX) + ")");
     const std::string yPos = clipKf ? KfOverlayPos(item.kfYExpr, 0.0, item.positionY)
@@ -4709,7 +4852,10 @@ int SequenceTailFrames(const ExportOverlay& overlay) {
  * "hoà" của ảnh tĩnh không hiện ra gì. */
 void WriteOverlaySetpts(std::ostream& out, const ExportOverlay& overlay, const ExportSettings& settings) {
   const double start = overlay.timelineStart;
-  const double setptsStart = (!OverlayIsImageLike(overlay) && !OverlayIsImageSequence(overlay))
+  // Ảnh có Wiggle (dời dưới pixel) cũng lùi epsilon: geq quy mốc khung lớp phủ về khung nền bằng
+  // ceil(T·fps), cần T đứng HẲN trước mốc khung nền chứ không hoà (xem SubpixelShiftFilter).
+  const double setptsStart = ((!OverlayIsImageLike(overlay) && !OverlayIsImageSequence(overlay))
+                              || (overlay.animSubpixel && OverlayIsImageLike(overlay)))
     ? start - kOverlayTieEpsilon : start;
   const double renderFpsForSeq = ParseFpsValue(settings.renderFps);
   if (OverlayIsImageSequence(overlay) && renderFpsForSeq > 0.0) {
@@ -4815,6 +4961,15 @@ void WriteVisualOverlayFilter(
   // (xem WriteClipVideoFilters — cùng lý do, cùng cách gộp cờ).
   const bool overlayDynTransform = overlayKf
     || HasAnimGeomExpr(overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr);
+  // WIGGLE vị trí: dời phần lẻ dưới pixel (xem SubpixelShiftFilter); overlay đặt ở 2·floor(P/2).
+  const double subpixelFps = ParseFpsValue(settings.renderFps);
+  const bool subpixel = overlay.animSubpixel && hasVideoAnim && subpixelFps > 0.0;
+  SubpixelSpec sub;
+  if (subpixel) {
+    sub.fps = subpixelFps; sub.seqW = seqW; sub.seqH = seqH; sub.start = start;
+    sub.kfX = overlay.kfXExpr; sub.kfY = overlay.kfYExpr; sub.animX = overlay.animXExpr; sub.animY = overlay.animYExpr;
+    sub.posX = overlay.positionX; sub.posY = overlay.positionY;
+  }
 
   // Ảnh tĩnh một lần: `null` (setpts ở cuối chuỗi); loại khác: trim + setpts của `timing`.
   script << (stillOnce ? std::string("null") : timing.str());
@@ -4850,7 +5005,8 @@ void WriteVisualOverlayFilter(
   if (overlayDynTransform) {
     AppendKfTransformFilters(script, start, overlay.kfScaleExpr, overlay.kfRotExpr, overlay.kfOpacityExpr,
                              overlay.scale, overlay.rotation, opacityValue,
-                             overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr, overlayFit);
+                             overlay.animSxExpr, overlay.animSyExpr, overlay.animRotExpr, overlayFit,
+                             subpixel ? &sub : nullptr);
   } else {
     if (std::abs(rotationRad) > 0.000001) {
       const std::string angle = FfmpegDouble(rotationRad);
@@ -4878,6 +5034,8 @@ void WriteVisualOverlayFilter(
     }
     if (fadeShift) script << ",setpts=PTS-round(1/TB)";
   }
+  // Cỡ lớp phủ cố định: dời dưới pixel ngay trước overlay (nhánh động đã dời trước scale).
+  if (subpixel && !overlayDynTransform) script << SubpixelShiftFilter(sub, "W", "H");
   // Ghép ở YUV (xem YuvCompositeEnabled). `yuvStatic` = lớp phủ đứng yên, không xoay.
   const bool yuvChain = YuvCompositeEnabled(settings);
   const bool yuvStatic = yuvChain && !overlayKf && !hasVideoAnim && !overlayDynTransform
@@ -4928,8 +5086,14 @@ void WriteVisualOverlayFilter(
       const long long n1 = static_cast<long long>(std::ceil(end * fps)) + 2;
       span = static_cast<double>(std::max(1LL, n1 - n0)) / fps;
     }
+    /* `settb=AVTB` SAU khi dời số khung nguyên: để nguyên timebase 1/r thì vf_overlay (framesync)
+     * quy mốc khung LỚP PHỦ về 1/r, làm tròn tới khung GẦN NHẤT — khung video lệch lưới 0,1 khung
+     * (đặt ở 0,37 s trên nhịp 30) bị coi là trùng khung nền trước và ghép SỚM một khung. Đường CPU
+     * không mắc vì luồng chính ở timebase µs. Lộ ra ở Wiggle dời dưới pixel: geq lấy phần lẻ theo
+     * mốc thật của khung video (khung sau), overlay lấy toạ độ chẵn theo khung nền -> nhảy 2 px
+     * (test:wiggle-styles, ca video, đồ thị GPU). */
     script << "color=c=black@0:s=" << seqW << "x" << seqH << ":r=" << settings.renderFps
-           << ":d=" << FixedSeconds(span) << ",format=rgba,setpts=PTS+" << n0 << "[cv" << id << "];\n";
+           << ":d=" << FixedSeconds(span) << ",format=rgba,setpts=PTS+" << n0 << ",settb=AVTB[cv" << id << "];\n";
     script << "[cv" << id << "][ov" << id << "]overlay=";
   } else {
     script << inputLabel << "[ov" << id << "]" << (gpu == OverlayGpu::CpuYuv ? "crabblend_cuda=" : "overlay=");
@@ -4939,6 +5103,9 @@ void WriteVisualOverlayFilter(
     const std::string bx = "trunc((" + std::to_string(seqW) + "-(w-4))/2+" + posX + ")";
     const std::string by = "trunc((" + std::to_string(seqH) + "-(h-4))/2+" + posY + ")";
     script << "x='" << bx << "-mod(" << bx << ",2)':y='" << by << "-mod(" << by << ",2)'";
+  } else if (subpixel) {
+    // Cùng toạ độ như nhánh dưới nhưng lấy ở lưới khung rồi kéo về số chẵn — phần lẻ đã dời ở geq.
+    script << SubpixelOverlayXY(sub);
   } else if (overlayKf || hasVideoAnim) {
     // Vị trí = tâm + kf/tĩnh + offset(t) hoạt ảnh. Bọc nháy đơn vì biểu thức có dấu phẩy.
     const std::string xPos = overlayKf ? KfOverlayPos(overlay.kfXExpr, start, overlay.positionX)
@@ -5156,6 +5323,135 @@ bool BatchGpuEligible(const std::vector<ExportInterval>& intervals, size_t offse
   return true;
 }
 
+/* ===== VRAM CỦA MỘT BATCH GPU (2026-10-23) =====
+ *
+ * Mỗi lớp phủ trên đồ thị GPU giữ bộ nhớ CUDA RIÊNG suốt cả lượt ffmpeg, kể cả khi chỉ hiện vài
+ * giây: pool của `hwupload` cấp sẵn 2 khung (initial_pool_size = 2), `crabgeo_cuda` giữ 4 mặt phẳng
+ * float cỡ ảnh ra + bộ đệm lượt ngang (ensure_buffer, không bao giờ trả) và pool khung ra. Ảnh RGBA
+ * là ~30 byte thô mỗi điểm ảnh ra. Batch 180 s có 100+ phụ đề nên VRAM của
+ * một lượt tỉ lệ với TỔNG cỡ ảnh lớp phủ — đo trên "Full Test" (phụ đề box 3400 px, PNG ~3460×153):
+ * 3,2–3,7 GB một lượt, trong khi bản phụ đề khít chữ chỉ ~1,1 GB.
+ * Trước đây RunBatchJobs chạy tới 4 lượt GPU cùng lúc (ExportParallelWorkers chỉ xét RAM) -> GTX
+ * 1060 6 GB cần ~13 GB: WDDM phân trang VRAM (2 khung/s), lượt khác lỗi CUDA rồi chạy lại bằng CPU.
+ * Nay ước lượng VRAM từng batch ở đây và RunBatchJobs chỉ khởi chạy thêm lượt GPU khi tổng ước lượng
+ * còn nằm trong VRAM trống (GpuVramBudgetMb). Hệ số hiệu chỉnh bằng số đo từng batch chạy một mình
+ * (đỉnh "GPU Process Memory\Dedicated Usage", 27 batch của Full Test và phim 39 phút cũ, 3840×1646,
+ * GTX 1060): VRAM ≈ 150 MB + 19 byte × điểm ảnh khung + Σ lớp phủ (1,37 × byte thô các cấp phát
+ * − 2,25 MB); ước lượng / đo = 0,99–1,16 — cố ý dư nhẹ, vì ước thiếu là tràn VRAM còn ước dư chỉ
+ * mất bớt song song. Làm tròn cấp phát 2 MiB (đoán ban đầu) ước dư tới 2,7× với ảnh nhỏ: CUDA trên
+ * WDDM gom các cấp phát nhỏ. Số đo + cách đo: docs/BAN_GIAO_RENDER_GTX1060_VRAM.md. */
+constexpr double kVramMiB = 1024.0 * 1024.0;
+constexpr double kVramRawFactor = 1.37;           // VRAM thật / byte thô của các cấp phát lớp phủ
+constexpr double kVramPerOverlayMb = 2.25;        // bớt mỗi lớp phủ (hệ số khớp, xem trên)
+constexpr double kVramBaseMb = 150.0;             // ngữ cảnh CUDA + phiên NVENC
+constexpr double kVramBaseBytesPerPixel = 19.0;   // khung lane chính, crabblend, bề mặt NVENC
+
+// Cỡ ảnh PNG đọc thẳng từ khối IHDR (8 byte chữ ký + 4 độ dài + "IHDR" + rộng + cao, big-endian).
+bool ReadPngSize(const std::string& path, int& width, int& height) {
+  std::ifstream in(path, std::ios::binary);
+  unsigned char head[24] = {};
+  if (!in.read(reinterpret_cast<char*>(head), sizeof(head))) return false;
+  if (head[0] != 0x89 || head[1] != 'P' || head[2] != 'N' || head[3] != 'G'
+      || head[12] != 'I' || head[13] != 'H' || head[14] != 'D' || head[15] != 'R') return false;
+  const auto be32 = [&](int at) {
+    return (static_cast<unsigned>(head[at]) << 24) | (static_cast<unsigned>(head[at + 1]) << 16)
+         | (static_cast<unsigned>(head[at + 2]) << 8) | static_cast<unsigned>(head[at + 3]);
+  };
+  width = static_cast<int>(be32(16));
+  height = static_cast<int>(be32(20));
+  return width > 0 && height > 0 && width < 100000 && height < 100000;
+}
+
+// Tệp của khung đầu chuỗi ("…frame_%05d.png" + seqStartFrame) — chỉ dạng %0Nd mà backend ghi.
+std::string ImageSequenceFirstFile(const ExportOverlay& overlay) {
+  const std::string& pattern = overlay.assetPath;
+  const size_t pct = pattern.rfind('%');
+  if (pct == std::string::npos || pct + 3 >= pattern.size() || pattern[pct + 1] != '0'
+      || !std::isdigit(static_cast<unsigned char>(pattern[pct + 2])) || pattern[pct + 3] != 'd') return pattern;
+  const int digits = pattern[pct + 2] - '0';
+  std::string number = std::to_string(std::max(0, overlay.seqStartFrame));
+  if (static_cast<int>(number.size()) < digits) number.insert(0, digits - number.size(), '0');
+  return pattern.substr(0, pct) + number + pattern.substr(pct + 4);
+}
+
+bool ProbeVideoSize(const std::string& path, int& width, int& height) {
+  static std::map<std::string, std::pair<int, int>> cache;
+  auto hit = cache.find(path);
+  if (hit == cache.end()) {
+    const std::string text = CommandOutput({"ffprobe", "-v", "error", "-select_streams", "v:0",
+                                            "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", path});
+    int w = 0, h = 0;
+    if (std::sscanf(text.c_str(), "%dx%d", &w, &h) != 2) w = h = 0;
+    hit = cache.emplace(path, std::make_pair(w, h)).first;
+  }
+  width = hit->second.first;
+  height = hit->second.second;
+  return width > 0 && height > 0;
+}
+
+/* Byte VRAM một lớp phủ giữ trong lượt ffmpeg GPU, theo đúng các chỗ cấp phát (WriteVisualOverlayFilter
+ * Gpu / WriteVisualOverlayFilter nhánh CpuYuv, CpuCanvas). Không đọc được cỡ nguồn -> coi như khung
+ * sequence (ước lượng dư thì chỉ mất song song, thiếu thì tràn VRAM). */
+double OverlayGpuVramBytes(const ExportOverlay& overlay, const ExportSettings& settings) {
+  const double seqW = settings.width > 0 ? settings.width : 1920;
+  const double seqH = settings.height > 0 ? settings.height : 1080;
+  const OverlayGpu mode = OverlayGpuModeFor(overlay, settings);
+  const bool image = OverlayIsImageLike(overlay) || OverlayIsImageSequence(overlay);
+  int inW = 0, inH = 0;
+  const bool known = image ? ReadPngSize(OverlayIsImageSequence(overlay) ? ImageSequenceFirstFile(overlay) : overlay.assetPath, inW, inH)
+                           : ProbeVideoSize(overlay.assetPath, inW, inH);
+  if (!known) { inW = static_cast<int>(seqW); inH = static_cast<int>(seqH); }
+  const double fit = overlay.fitScale > 0.0 ? overlay.fitScale : 1.0;
+  const double s = std::max(0.01, (overlay.scale / 100.0) * fit);
+  // Cỡ ảnh ra của crabgeo: max(2, ceil(iw*S/2)*2) + 4 (lề trong suốt).
+  const double ow = std::max(2.0, std::ceil(inW * s / 2.0) * 2.0) + 4.0;
+  const double oh = std::max(2.0, std::ceil(inH * s / 2.0) * 2.0) + 4.0;
+  const auto yuva = [](double w, double h) { return w * h * 2.5; };
+  const auto rgba = [](double w, double h) { return w * h * 4.0; };
+  // crabgeo nguồn RGB(A): 4 mặt phẳng float ở lưới ra + bộ đệm lượt ngang (ra × hàng nguồn) + 2 khung ra.
+  const auto crabgeoRgb = [&](double srcH, double w, double h) {
+    return 4.0 * w * h * 4.0 + w * srcH * 4.0 + 2.0 * yuva(w, h);
+  };
+  double raw = 0.0;
+  switch (mode) {
+    case OverlayGpu::Native:
+      if (image) raw = 2.0 * rgba(inW, inH) + crabgeoRgb(inH, ow, oh);
+      // Video: NVDEC giữ bề mặt giải mã (~16 khung) hoặc hwupload 2 khung yuva420p; crabgeo YUV(A).
+      else raw = (overlay.gpuNvdec ? 16.0 * inW * inH * 1.5 : 2.0 * yuva(inW, inH))
+               + 4.0 * ow * oh * 4.0 + ow * inH * 4.0 + 3.0 * yuva(ow, oh);
+      break;
+    case OverlayGpu::CpuYuv:
+      raw = 2.0 * yuva(ow, oh);   // chuỗi CPU ra yuva420p đã đệm -> hwupload -> crabblend
+      break;
+    case OverlayGpu::CpuCanvas:
+      raw = 2.0 * rgba(seqW, seqH) + crabgeoRgb(seqH, seqW, seqH);   // khung trong suốt cỡ sequence
+      break;
+    default:
+      return 0.0;
+  }
+  return std::max(0.5 * kVramMiB, kVramRawFactor * raw - kVramPerOverlayMb * kVramMiB);
+}
+
+/* Phần cố định của một lượt GPU: ngữ cảnh CUDA + phiên NVENC + khung lane chính (pool hwupload/NVDEC
+ * của từng input nguồn, khung ra crabgeo, bản chép của crabblend, bề mặt NVENC). */
+double BatchGpuBaseVramBytes(const ExportSettings& settings, size_t sourceInputs) {
+  const double seqW = settings.width > 0 ? settings.width : 1920;
+  const double seqH = settings.height > 0 ? settings.height : 1080;
+  // Mỗi input nguồn thêm (dải nguồn, mục 1.1) có pool giải mã/tải lên riêng: ~8 khung yuv420p.
+  const double extraInputs = static_cast<double>(std::max<size_t>(1, sourceInputs) - 1);
+  return kVramBaseMb * kVramMiB + seqW * seqH * (kVramBaseBytesPerPixel + extraInputs * 8.0 * 1.5);
+}
+
+double EstimateBatchGpuVramMb(const std::vector<ExportOverlay>& overlays, const ExportSettings& settings,
+                              size_t sourceInputs) {
+  double bytes = BatchGpuBaseVramBytes(settings, sourceInputs);
+  for (const auto& overlay : overlays) {
+    if (!OverlayIsVisual(overlay) || overlay.type == "text" || overlay.assetInputIndex < 0) continue;
+    bytes += OverlayGpuVramBytes(overlay, settings);
+  }
+  return bytes / kVramMiB;
+}
+
 void WriteOverlayAudioFilter(std::ofstream& script, const ExportOverlay& overlay, std::vector<std::string>& audioLabels) {
   const int inputIndex = 1 + overlay.assetInputIndex;
   const std::string id = std::to_string(overlay.index);
@@ -5236,7 +5532,8 @@ const std::string& X264AsmCap() {
 
 void AppendCpuEncoderArgs(std::vector<std::string>& cmd, const ExportSettings& settings) {
   if (settings.codec == "prores") {
-    cmd.insert(cmd.end(), {"-c:v", "prores_ks", "-profile:v", "3", "-c:a", "pcm_s16le"});
+    // Subsequence: 4444 (profile 4) giữ kênh alpha 16 bit; còn lại 422 HQ như cũ.
+    cmd.insert(cmd.end(), {"-c:v", "prores_ks", "-profile:v", settings.alphaOutput ? "4" : "3", "-c:a", "pcm_s16le"});
     return;
   }
   const std::string preset = QualityPreset(settings);
@@ -5244,8 +5541,8 @@ void AppendCpuEncoderArgs(std::vector<std::string>& cmd, const ExportSettings& s
   if (settings.codec != "hevc" && !X264AsmCap().empty()) {
     cmd.insert(cmd.end(), {"-x264-params", "asm=" + X264AsmCap()});
   }
-  if (RateIsCustom(settings)) {
-    // "Tùy chỉnh": bitrate trung bình người dùng nhập, đỉnh ×1,5 (bộ đệm 2 giây của đỉnh).
+  if (RateHasMbps(settings)) {
+    // Có số Mbps ("Tùy chỉnh" hoặc mức theo nguồn): bitrate trung bình, đỉnh ×1,5 (bộ đệm 2 giây của đỉnh).
     const long long kbps = RateKbps(settings);
     cmd.insert(cmd.end(), {"-b:v", KbpsArg(kbps), "-maxrate", KbpsArg(kbps * 3 / 2), "-bufsize", KbpsArg(kbps * 3)});
   } else {
@@ -5281,7 +5578,7 @@ void AppendHardwareEncoderArgs(std::vector<std::string>& cmd, const ExportSettin
      * hẳn. Đo (mục 1.20): tốc độ như nhau ở mọi mức; phim AV1 4K 39,1 -> 27,7 Mbps ở cq 19. */
     const long long kbps = RateKbps(settings);
     cmd.insert(cmd.end(), {"-c:v", plan.videoEncoder, "-preset", "fast", "-rc", "vbr"});
-    if (RateIsCustom(settings)) {
+    if (RateHasMbps(settings)) {
       cmd.insert(cmd.end(), {"-b:v", KbpsArg(kbps), "-maxrate", KbpsArg(kbps * 3 / 2), "-bufsize", KbpsArg(kbps * 3)});
     } else {
       cmd.insert(cmd.end(), {"-cq", std::to_string(RateHardwareCq(settings)), "-b:v", "0",
@@ -5418,7 +5715,8 @@ bool WriteFilterScript(
   if (overlays.empty()) {
     if (wantVideo) {
       script << concatSpec << "[vcat]" << (wantAudio ? "[a]" : "") << ";\n";
-      script << "[vcat]" << (g_gpuGraph ? GpuOutputFilters(settings) : OutputColorFilters(settings)) << "[v]\n";
+      script << "[vcat]" << (settings.alphaOutput ? AlphaBaseFilter() + "," : std::string())
+             << (g_gpuGraph ? GpuOutputFilters(settings) : OutputColorFilters(settings)) << "[v]\n";
     } else if (dummyVideo) {
       script << concatSpec << "[dvcat][a];\n[dvcat]nullsink\n";
     } else {
@@ -5436,6 +5734,10 @@ bool WriteFilterScript(
   }
 
   std::string currentVideo = "[mainv]";
+  if (wantVideo && settings.alphaOutput) {
+    script << "[mainv]" << AlphaBaseFilter() << "[mainva];\n";
+    currentVideo = "[mainva]";
+  }
   size_t visualIndex = 0;
   for (const auto& overlay : overlays) {
     if (!wantVideo) break;
@@ -5714,8 +6016,13 @@ void AppendOverlayInputArgs(
       cmd.insert(cmd.end(), {"-threads", "1", "-i", assetPath});
     } else if (OverlayIsImageLike(overlay)) {
       // Dư 1 s: lớp phủ tĩnh xén ở cuối batch dài quá mép batch (xem OverlaysForBatch).
+      cmd.insert(cmd.end(), {"-threads", "1"});
+      // Wiggle (dời dưới pixel): MỖI khung nền một khung lớp phủ — `-loop 1` mặc định 25 khung/giây
+      // thì geq tính độ dời ở mốc khung lớp phủ, lệch khung nền (xem SubpixelShiftFilter).
+      if (overlay.animSubpixel && ParseFpsValue(settings.renderFps) > 0.0) {
+        cmd.insert(cmd.end(), {"-framerate", settings.renderFps});
+      }
       cmd.insert(cmd.end(), {
-        "-threads", "1",
         "-loop", "1",
         "-t", FixedSeconds(std::max(0.05, sequenceDuration + kBatchOverlayTailSeconds)),
         "-i", assetPath
@@ -6278,6 +6585,7 @@ struct BatchJob {
    * bộ mã hoá lùi về CPU (libx264 không nhận khung CUDA) — xem UseCpuGraph. */
   bool gpu = false;
   fs::path gpuScriptPath;
+  double vramMb = 0.0;   // VRAM ước lượng của bản GPU (EstimateBatchGpuVramMb); 0 = không tính
   std::function<std::vector<std::string>(const EncoderPlan&, const std::string&)> buildCmdCpu;
   /* CACHE RENDER (mục 1.13): batch hình + lượt tiếng của lượt xuất nhiều batch (`cacheable`). RunBatchJobs
    * tính `cacheKey` theo đúng dòng lệnh sắp chạy; trùng thì `cacheHit` = tệp trong cache, không chạy
@@ -6572,6 +6880,8 @@ bool PrepareExportBatch(
   job.gpu = gpu;
   job.timing.gpu = gpu;
   job.gpuScriptPath = gpu ? gpuScriptPath : fs::path();
+  job.vramMb = gpu ? EstimateBatchGpuVramMb(overlays, settings, std::max<size_t>(1, ranges.seekTo.size())) : 0.0;
+  job.timing.vramEstMb = job.vramMb;
   if (gpu) job.buildCmd = makeBuildCmd(true);
   else job.buildCmd = job.buildCmdCpu;
   return true;
@@ -6668,6 +6978,41 @@ bool RenderCacheLookup(BatchJob& job, const EncoderPlan& plan, const std::string
   return true;
 }
 
+/* NGÂN SÁCH VRAM (MB) cho các lượt GPU chạy cùng lúc của một RunBatchJobs: VRAM TRỐNG lúc bắt đầu
+ * (nvidia-smi — đã trừ phần app khác đang giữ: giao diện CrabbyCut, trình duyệt, DWM) trừ một khoảng
+ * dự phòng. Đọc lại ở mỗi lần gọi vì lượt chạy lại (GPU lỗi -> CPU, encoder lỗi -> lần lượt) đến sau
+ * khi các lượt trước đã nhả VRAM. Nhiều GPU: lấy VRAM trống NHỎ NHẤT (thiết bị `cuda=cu` là thiết bị 0
+ * theo thứ tự của CUDA, không chắc trùng thứ tự của nvidia-smi). Không đọc được -> 0 = không giới hạn
+ * (hành vi cũ). Env CRABBYCUT_EXPORT_VRAM_MB=N đặt thẳng ngân sách (0 = tắt giới hạn). */
+double GpuVramBudgetMb(const std::vector<BatchJob*>& jobs) {
+  bool anyGpu = false;
+  for (const BatchJob* job : jobs) anyGpu = anyGpu || (job->gpu && job->vramMb > 0.0);
+  if (!anyGpu) return 0.0;
+  if (const char* env = std::getenv("CRABBYCUT_EXPORT_VRAM_MB")) {
+    if (*env) {
+      const double value = std::max(0.0, std::atof(env));
+      g_exportTiming.vramBudgetMb = value;
+      return value;
+    }
+  }
+  const std::string text = CommandOutput({"nvidia-smi", "--query-gpu=memory.total,memory.used",
+                                          "--format=csv,noheader,nounits"});
+  double budget = -1.0;
+  std::istringstream lines(text);
+  std::string line;
+  while (std::getline(lines, line)) {
+    double total = 0.0, used = 0.0;
+    if (std::sscanf(line.c_str(), "%lf, %lf", &total, &used) != 2 || !(total > 0.0)) continue;
+    const double reserve = std::max(256.0, total * 0.05);
+    const double free = std::max(0.0, total - used - reserve);
+    budget = budget >= 0.0 ? std::min(budget, free) : free;
+  }
+  if (budget < 0.0) return 0.0;   // không đọc được -> không giới hạn
+  g_exportTiming.vramBudgetMb = budget;
+  // VRAM đã gần đầy: ngân sách tối thiểu = chỉ một lượt GPU mỗi lúc (vramBlocks luôn cho lượt đầu).
+  return std::max(1.0, budget);
+}
+
 std::vector<int> RunBatchJobs(std::vector<BatchJob*>& jobs, const EncoderPlan& plan, size_t concurrency,
                               const std::string& labelSuffix) {
   std::vector<int> codes(jobs.size(), 0);
@@ -6681,23 +7026,49 @@ std::vector<int> RunBatchJobs(std::vector<BatchJob*>& jobs, const EncoderPlan& p
   };
   concurrency = std::max<size_t>(1, concurrency);
 #ifdef _WIN32
-  struct Active { size_t index; HANDLE process; ExportClock::time_point started; };
+  struct Active { size_t index; HANDLE process; ExportClock::time_point started; double vramMb; };
   std::vector<Active> active;
+  /* NGÂN SÁCH VRAM cho lượt GPU (xem EstimateBatchGpuVramMb): lượt GPU kế tiếp chỉ khởi chạy khi
+   * tổng ước lượng của các lượt GPU đang chạy cộng nó còn vừa VRAM trống; không vừa thì CHỜ một lượt
+   * xong (giữ thứ tự batch). Không có lượt GPU nào đang chạy thì luôn cho chạy — batch tự nó vượt
+   * ngân sách vẫn phải render. Chỉ nhánh Windows: đồ thị CUDA không có trên macOS. */
+  const double vramBudgetMb = GpuVramBudgetMb(jobs);
+  std::vector<char> cacheMissKnown(jobs.size(), 0);   // đã tra cache (trượt) trước khi phải chờ VRAM
+  const auto vramBlocks = [&](const BatchJob& job) {
+    if (!job.gpu || vramBudgetMb <= 0.0 || job.vramMb <= 0.0) return false;
+    double used = 0.0;
+    bool anyGpu = false;
+    for (const auto& a : active) {
+      if (a.vramMb > 0.0) { used += a.vramMb; anyGpu = true; }
+    }
+    return anyGpu && used + job.vramMb > vramBudgetMb;
+  };
   size_t next = 0;
   while (next < jobs.size() || !active.empty()) {
     while (next < jobs.size() && active.size() < concurrency) {
       BatchJob& job = *jobs[next];
       const std::string runLabel = job.timing.label + labelSuffix;
-      prefetchBefore(job);
-      if (RenderCacheLookup(job, plan, runLabel)) { codes[next++] = 0; continue; }
+      if (!cacheMissKnown[next]) {
+        prefetchBefore(job);
+        if (RenderCacheLookup(job, plan, runLabel)) { codes[next++] = 0; continue; }
+        cacheMissKnown[next] = 1;
+      }
+      if (vramBlocks(job)) {
+        if (cacheMissKnown[next] == 1) {
+          cacheMissKnown[next] = 2;
+          Emit("progress", "Chờ VRAM trống để render " + job.progressText + "...");
+        }
+        break;
+      }
       const std::vector<std::string> cmd = JobCommandForRun(job, plan, runLabel);
       Emit("progress", "Đang render " + job.progressText
                        + (concurrency > 1 ? " — " + std::to_string(active.size() + 1) + " lượt chạy cùng lúc" : "") + "...");
       int immediate = 0;
       const auto started = ExportClock::now();
+      job.timing.startMs = MsSince(g_exportTiming.started);
       HANDLE process = SpawnIn(cmd, job.tempDir, immediate);
       if (process) {
-        active.push_back({next, process, started});
+        active.push_back({next, process, started, job.gpu ? job.vramMb : 0.0});
       } else if (immediate != 0) {
         codes[next] = immediate;
       } else {
@@ -6749,6 +7120,7 @@ std::vector<int> RunBatchJobs(std::vector<BatchJob*>& jobs, const EncoderPlan& p
       Emit("progress", "Đang render " + job.progressText
                        + (concurrency > 1 ? " — " + std::to_string(active.size() + 1) + " lượt chạy cùng lúc" : "") + "...");
       const auto started = ExportClock::now();
+      job.timing.startMs = MsSince(g_exportTiming.started);
       const pid_t pid = SpawnIn(cmd, job.tempDir);
       if (pid > 0) {
         active.push_back({next, pid, started});
@@ -7139,6 +7511,741 @@ bool ApplyOutputScaleToPayload(ExportSettings& settings, std::vector<ExportInter
   return true;
 }
 
+/* ===== BIẾN DẠNG (Distort kiểu After Effects) — bản C++ của static/js/distort.js =====
+ *
+ * Video lớp phủ có hiệu ứng Distort được UỐN TRƯỚC, thành một tệp video trung gian có alpha:
+ *   ffmpeg (trim/tốc độ + xoá logo + màu + mặt nạ của CHÍNH lớp đó, đúng các bộ lọc của đồ thị
+ *   chính) -> khung PAM qua pipe -> uốn lưới bằng C++ -> ffmpeg mã hoá qtrle (.mov, ARGB).
+ * Rồi lớp phủ được trỏ sang tệp đó và bỏ các tầng đã làm (màu/mặt nạ/xoá logo); transform,
+ * keyframe, hoạt ảnh In/Out, opacity vẫn đi biểu thức ffmpeg như cũ. Tiếng tách thành một lớp
+ * "audio" riêng đọc từ tệp gốc.
+ * Thứ tự màu -> mặt nạ -> uốn -> transform trùng preview (paintDistortCanvas).
+ *
+ * Spec do backend ghi (xem writeDistortSpecFile ở backend/server.js), dạng dòng chữ:
+ *   CRDS 1 / box W H / ext HX HY / grid COLS ROWS / fps F / stacks N
+ *   rồi N mục "stack K" + K dòng "wave t shape height width direction speed pinning phase"
+ *   / frames M / M chỉ số mục.
+ * DistortEvalGrid / DistortRasterMesh viết 1-1 theo evalGrid / rasterMesh của distort.js;
+ * tests/scripts/distort.js chạy lệnh `distort-selftest` để so số của hai bản. */
+constexpr int kDistortMaxCells = 512;   // = MAX_CELLS của distort.js
+
+struct DistortWave {
+  double t = 0.0;
+  int shape = 0;     // chỉ số trong WAVE_SHAPES (distort.js)
+  double height = 0.0;
+  double width = 40.0;
+  double direction = 90.0;
+  double speed = 0.0;
+  int pinning = 0;   // chỉ số trong WAVE_PINNING (distort.js)
+  double phase = 0.0;
+};
+
+/* Một bước của ngăn hiệu ứng: Wave, Bezier (mặt Coons 24 số chuẩn hoá — thứ tự của bezierPatch ở
+ * distort.js) hoặc Mesh (rows × cols ô, mỗi đỉnh 10 số: x, y + 4 tay cầm tương đối trái/phải/lên/xuống). */
+struct DistortOp {
+  int kind = 0;   // 0 wave, 1 bezier, 2 mesh, 3 puppet, 4 liquify, -1 bỏ qua
+  // Liquify: trường N×N ô = trộn bảng (meshA, meshB, meshK) như Mesh; điểm += (D·percent/100 + offset).
+  int fieldN = 0;
+  double percent = 100.0;
+  double offX = 0.0;
+  double offY = 0.0;
+  int puppetRef = -1;
+  DistortWave wave;
+  std::vector<double> patch;
+  int rows = 0;
+  int cols = 0;
+  // Lưới = meshes[meshA] + (meshes[meshB] − meshes[meshA])·meshK (meshMixAt của distort.js).
+  int meshA = 0;
+  int meshB = 0;
+  double meshK = 0.0;
+  std::vector<double> mesh;   // lưới đã trộn — điền ở ReadDistortSpec sau khi đọc đủ bảng lưới
+};
+
+struct DistortSpec {
+  double boxW = 0.0;
+  double boxH = 0.0;
+  double extHx = 0.0;
+  double extHy = 0.0;
+  int cols = 8;
+  int rows = 8;
+  double fps = 30.0;
+  std::vector<std::vector<DistortOp>> stacks;
+  std::vector<int> frames;
+};
+
+bool ReadDistortSpec(const std::string& path, DistortSpec& spec, std::string& error) {
+  std::ifstream in(path);
+  if (!in) { error = "không mở được spec Distort: " + path; return false; }
+  std::string tag;
+  int version = 0;
+  in >> tag >> version;
+  if (tag != "CRDS" || version != 1) { error = "spec Distort sai định dạng"; return false; }
+  int stackCount = 0;
+  std::vector<std::vector<double>> meshes;
+  struct PuppetGrid { int cols; int rows; std::vector<double> pts; };
+  std::vector<PuppetGrid> puppets;
+  while (in >> tag) {
+    if (tag == "box") in >> spec.boxW >> spec.boxH;
+    else if (tag == "ext") in >> spec.extHx >> spec.extHy;
+    else if (tag == "grid") in >> spec.cols >> spec.rows;
+    else if (tag == "fps") in >> spec.fps;
+    else if (tag == "stacks") { in >> stackCount; spec.stacks.reserve(std::max(0, stackCount)); }
+    else if (tag == "stack") {
+      int k = 0;
+      in >> k;
+      std::vector<DistortOp> stack;
+      for (int i = 0; i < k && in; i++) {
+        std::string kind;
+        in >> kind;
+        DistortOp op;
+        if (kind == "wave") {
+          DistortWave& w = op.wave;
+          in >> w.t >> w.shape >> w.height >> w.width >> w.direction >> w.speed >> w.pinning >> w.phase;
+        } else if (kind == "bezier") {
+          op.kind = 1;
+          op.patch.resize(24);
+          for (double& v : op.patch) in >> v;
+        } else if (kind == "liquify") {
+          op.kind = 4;
+          in >> op.fieldN >> op.meshA >> op.meshB >> op.meshK >> op.percent >> op.offX >> op.offY;
+          if (op.fieldN < 1 || op.fieldN > 256) { error = "trường Liquify sai cỡ"; return false; }
+        } else if (kind == "puppet") {
+          op.kind = 3;
+          in >> op.puppetRef;
+        } else if (kind == "noop") {
+          op.kind = -1;
+        } else if (kind == "mesh") {
+          op.kind = 2;
+          in >> op.rows >> op.cols >> op.meshA >> op.meshB >> op.meshK;
+          if (op.rows < 1 || op.cols < 1 || op.rows > 64 || op.cols > 64) { error = "lưới Mesh Warp sai cỡ"; return false; }
+        } else {
+          error = "hiệu ứng Distort chưa hỗ trợ: " + kind;
+          return false;
+        }
+        stack.push_back(std::move(op));
+      }
+      spec.stacks.push_back(std::move(stack));
+    } else if (tag == "frames") {
+      int m = 0;
+      in >> m;
+      spec.frames.resize(std::max(0, m));
+      for (int i = 0; i < m && in; i++) in >> spec.frames[i];
+    } else if (tag == "puppetdata") {
+      int m = 0;
+      in >> m;
+      for (int i = 0; i < m && in; i++) {
+        std::string qk;
+        int pc = 0, pr = 0;
+        in >> qk >> pc >> pr;
+        if (qk != "q" || pc < 0 || pr < 0 || pc > 80 || pr > 80) { error = "bảng Puppet sai"; return false; }
+        std::vector<double> pts(pc > 0 && pr > 0 ? static_cast<size_t>(pc + 1) * (pr + 1) * 2 : 0);
+        for (double& v : pts) in >> v;
+        puppets.push_back({pc, pr, std::move(pts)});
+      }
+    } else if (tag == "meshdata") {
+      int m = 0;
+      in >> m;
+      for (int i = 0; i < m && in; i++) {
+        std::string mk;
+        int len = 0;
+        in >> mk >> len;
+        if (mk != "m" || len < 0 || len > 64 * 64 * 10) { error = "bảng lưới Distort sai"; return false; }
+        std::vector<double> mesh(static_cast<size_t>(len));
+        for (double& v : mesh) in >> v;
+        meshes.push_back(std::move(mesh));
+      }
+    } else {
+      error = "spec Distort có mục lạ: " + tag;
+      return false;
+    }
+  }
+  spec.cols = std::max(1, std::min(kDistortMaxCells, spec.cols));
+  spec.rows = std::max(1, std::min(kDistortMaxCells, spec.rows));
+  if (!(spec.boxW > 0.0 && spec.boxH > 0.0) || spec.stacks.empty() || spec.frames.empty()) {
+    error = "spec Distort thiếu dữ liệu";
+    return false;
+  }
+  for (int& f : spec.frames) f = std::max(0, std::min(static_cast<int>(spec.stacks.size()) - 1, f));
+  // Trộn sẵn lưới cho từng bước Mesh (cùng công thức x + (b − x)·k với JS).
+  for (auto& stack : spec.stacks) {
+    for (auto& op : stack) {
+      if (op.kind == 4) {
+        const size_t len = static_cast<size_t>(op.fieldN + 1) * (op.fieldN + 1) * 2;
+        const bool okA = op.meshA >= 0 && op.meshA < static_cast<int>(meshes.size()) && meshes[op.meshA].size() == len;
+        const bool okB = op.meshB >= 0 && op.meshB < static_cast<int>(meshes.size()) && meshes[op.meshB].size() == len;
+        if (!okA || !okB) { error = "trường Liquify tham chiếu sai"; return false; }
+        const auto& a = meshes[op.meshA];
+        const auto& b = meshes[op.meshB];
+        op.mesh.resize(len);
+        for (size_t i = 0; i < len; i++) op.mesh[i] = a[i] + (b[i] - a[i]) * op.meshK;
+        continue;
+      }
+      if (op.kind == 3) {
+        if (op.puppetRef < 0 || op.puppetRef >= static_cast<int>(puppets.size()) || puppets[op.puppetRef].pts.empty()) {
+          error = "lưới Puppet tham chiếu sai";
+          return false;
+        }
+        op.cols = puppets[op.puppetRef].cols;
+        op.rows = puppets[op.puppetRef].rows;
+        op.mesh = puppets[op.puppetRef].pts;   // lưới đã giải, chuẩn hoá
+        continue;
+      }
+      if (op.kind != 2) continue;
+      const size_t len = static_cast<size_t>(op.rows + 1) * (op.cols + 1) * 10;
+      const bool okA = op.meshA >= 0 && op.meshA < static_cast<int>(meshes.size()) && meshes[op.meshA].size() == len;
+      const bool okB = op.meshB >= 0 && op.meshB < static_cast<int>(meshes.size()) && meshes[op.meshB].size() == len;
+      if (!okA || !okB) { error = "lưới Mesh Warp tham chiếu sai"; return false; }
+      const auto& a = meshes[op.meshA];
+      const auto& b = meshes[op.meshB];
+      op.mesh.resize(len);
+      for (size_t i = 0; i < len; i++) op.mesh[i] = a[i] + (b[i] - a[i]) * op.meshK;
+    }
+  }
+  return true;
+}
+
+// = hash32 của distort.js (Math.imul + >>> trên số nguyên 32 bit).
+double DistortHash(double n) {
+  std::uint32_t x = static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int64_t>(n)));
+  x *= 0x27d4eb2du;
+  x ^= x >> 15;
+  x *= 0x85ebca6bu;
+  x ^= x >> 13;
+  x *= 0xc2b2ae35u;
+  x ^= x >> 16;
+  return (static_cast<double>(x) / 4294967295.0) * 2.0 - 1.0;
+}
+
+// = waveShape của distort.js. shape: 0 sine, 1 square, 2 triangle, 3 sawtooth, 4 circle,
+// 5 semicircle, 6 uncircle, 7 noise, 8 smooth_noise.
+double DistortWaveShape(int shape, double u) {
+  const double kPi = 3.14159265358979323846;
+  const double f = u - std::floor(u);
+  switch (shape) {
+    case 1: return f < 0.5 ? 1.0 : -1.0;
+    case 2: return f < 0.25 ? 4.0 * f : (f < 0.75 ? 2.0 - 4.0 * f : 4.0 * f - 4.0);
+    case 3: return f < 0.5 ? 2.0 * f : 2.0 * f - 2.0;
+    case 4: {
+      const double a = f < 0.5 ? 4.0 * f - 1.0 : 4.0 * f - 3.0;
+      const double s = std::sqrt(std::max(0.0, 1.0 - a * a));
+      return f < 0.5 ? s : -s;
+    }
+    case 5: { const double a = 2.0 * f - 1.0; return std::sqrt(std::max(0.0, 1.0 - a * a)); }
+    case 6: { const double a = 2.0 * f - 1.0; return 1.0 - std::sqrt(std::max(0.0, 1.0 - a * a)); }
+    case 7: return DistortHash(std::floor(2.0 * u));
+    case 8: {
+      const double v = 2.0 * u;
+      const double n = std::floor(v);
+      const double k = (1.0 - std::cos((v - n) * kPi)) / 2.0;
+      const double a = DistortHash(n);
+      return a + (DistortHash(n + 1.0) - a) * k;
+    }
+    default: return std::sin(2.0 * kPi * u);
+  }
+}
+
+// = pinWeight. pinning: 0 none, 1 all_edges, 2 center, 3 left, 4 top, 5 right, 6 bottom,
+// 7 horizontal_edges, 8 vertical_edges.
+double DistortPinWeight(int pinning, double nx, double ny) {
+  const double kPi = 3.14159265358979323846;
+  switch (pinning) {
+    case 1: return std::sin(kPi * nx) * std::sin(kPi * ny);
+    case 2: return std::min(1.0, 2.0 * std::hypot(nx - 0.5, ny - 0.5));
+    case 3: return nx;
+    case 4: return ny;
+    case 5: return 1.0 - nx;
+    case 6: return 1.0 - ny;
+    case 7: return std::sin(kPi * ny);
+    case 8: return std::sin(kPi * nx);
+    default: return 1.0;
+  }
+}
+
+double DistortCubic(double a, double b, double c, double d, double t) {
+  const double s = 1.0 - t;
+  return s * s * s * a + 3.0 * s * s * t * b + 3.0 * s * t * t * c + t * t * t * d;
+}
+
+// = coons của distort.js (k: 24 số, (u, v) có thể ngoài [0,1]).
+void DistortCoons(const double* k, double u, double v, double& ox, double& oy) {
+  double out[2];
+  for (int c = 0; c < 2; c++) {
+    const double p00 = k[c], p10 = k[2 + c], p01 = k[4 + c], p11 = k[6 + c];
+    const double top = DistortCubic(p00, k[8 + c], k[10 + c], p10, u);
+    const double bot = DistortCubic(p01, k[12 + c], k[14 + c], p11, u);
+    const double lft = DistortCubic(p00, k[16 + c], k[18 + c], p01, v);
+    const double rgt = DistortCubic(p10, k[20 + c], k[22 + c], p11, v);
+    out[c] = (1.0 - v) * top + v * bot + (1.0 - u) * lft + u * rgt
+             - ((1.0 - u) * (1.0 - v) * p00 + u * (1.0 - v) * p10 + (1.0 - u) * v * p01 + u * v * p11);
+  }
+  ox = out[0];
+  oy = out[1];
+}
+
+// = meshCellPatch của distort.js.
+void DistortMeshCellPatch(const std::vector<double>& m, int cols, int i, int j, double* k) {
+  const auto at = [cols](int ii, int jj) { return static_cast<size_t>(jj * (cols + 1) + ii) * 10; };
+  const size_t a = at(i, j), b = at(i + 1, j), c = at(i, j + 1), d = at(i + 1, j + 1);
+  const double v[24] = {
+    m[a], m[a + 1], m[b], m[b + 1], m[c], m[c + 1], m[d], m[d + 1],
+    m[a] + m[a + 4], m[a + 1] + m[a + 5], m[b] + m[b + 2], m[b + 1] + m[b + 3],
+    m[c] + m[c + 4], m[c + 1] + m[c + 5], m[d] + m[d + 2], m[d + 1] + m[d + 3],
+    m[a] + m[a + 8], m[a + 1] + m[a + 9], m[c] + m[c + 6], m[c + 1] + m[c + 7],
+    m[b] + m[b + 8], m[b + 1] + m[b + 9], m[d] + m[d + 6], m[d + 1] + m[d + 7],
+  };
+  std::copy(v, v + 24, k);
+}
+
+// = evalGrid: đỉnh đích (đơn vị hộp, gốc ở tâm hộp), hiệu ứng nối tiếp lên vị trí đã dời.
+void DistortEvalGrid(const std::vector<DistortOp>& stack, double boxW, double boxH, int cols, int rows,
+                     std::vector<double>& pts) {
+  const size_t n = static_cast<size_t>(cols + 1) * static_cast<size_t>(rows + 1) * 2;
+  pts.resize(n);
+  size_t q = 0;
+  for (int j = 0; j <= rows; j++) {
+    const double y = (static_cast<double>(j) / rows - 0.5) * boxH;
+    for (int i = 0; i <= cols; i++, q += 2) {
+      pts[q] = (static_cast<double>(i) / cols - 0.5) * boxW;
+      pts[q + 1] = y;
+    }
+  }
+  const double kPi = 3.14159265358979323846;
+  for (const DistortOp& op : stack) {
+    if (op.kind < 0) continue;
+    if (op.kind == 4) {
+      // = liquifyDisp của distort.js (song tuyến tính, kẹp vào hộp).
+      const int N = op.fieldN;
+      const std::vector<double>& f = op.mesh;
+      const double pct = op.percent / 100.0;
+      for (size_t p = 0; p < n; p += 2) {
+        const double x = std::max(0.0, std::min(1.0, pts[p] / boxW + 0.5)) * N;
+        const double y = std::max(0.0, std::min(1.0, pts[p + 1] / boxH + 0.5)) * N;
+        const int i = std::min(N - 1, static_cast<int>(std::floor(x)));
+        const int j = std::min(N - 1, static_cast<int>(std::floor(y)));
+        const double s = x - i;
+        const double t = y - j;
+        const size_t a = static_cast<size_t>(j * (N + 1) + i) * 2;
+        const size_t b = a + 2;
+        const size_t c = a + static_cast<size_t>(N + 1) * 2;
+        const size_t d = c + 2;
+        const double dx = (1 - s) * (1 - t) * f[a] + s * (1 - t) * f[b] + (1 - s) * t * f[c] + s * t * f[d];
+        const double dy = (1 - s) * (1 - t) * f[a + 1] + s * (1 - t) * f[b + 1] + (1 - s) * t * f[c + 1] + s * t * f[d + 1];
+        pts[p] += (dx * pct + op.offX) * boxW;
+        pts[p + 1] += (dy * pct + op.offY) * boxH;
+      }
+      continue;
+    }
+    if (op.kind == 3) {
+      // = puppetMap của distort.js: affine từng tam giác (a,b,d)/(a,d,c), ngoại suy ở mép.
+      const int pc = op.cols, pr = op.rows;
+      const std::vector<double>& d = op.mesh;
+      for (size_t p = 0; p < n; p += 2) {
+        const double U = pts[p] / boxW + 0.5;
+        const double V = pts[p + 1] / boxH + 0.5;
+        const int ci = std::max(0, std::min(pc - 1, static_cast<int>(std::floor(U * pc))));
+        const int cj = std::max(0, std::min(pr - 1, static_cast<int>(std::floor(V * pr))));
+        const double s = U * pc - ci;
+        const double t = V * pr - cj;
+        const int a = cj * (pc + 1) + ci;
+        const int b = a + 1;
+        const int c = a + pc + 1;
+        const int dd = c + 1;
+        int v0, v1, v2;
+        double w0, w1, w2;
+        if (s >= t) { v0 = a; w0 = 1.0 - s; v1 = b; w1 = s - t; v2 = dd; w2 = t; }
+        else { v0 = a; w0 = 1.0 - t; v1 = dd; w1 = s; v2 = c; w2 = t - s; }
+        const double ox = w0 * d[v0 * 2] + w1 * d[v1 * 2] + w2 * d[v2 * 2];
+        const double oy = w0 * d[v0 * 2 + 1] + w1 * d[v1 * 2 + 1] + w2 * d[v2 * 2 + 1];
+        pts[p] = (ox - 0.5) * boxW;
+        pts[p + 1] = (oy - 0.5) * boxH;
+      }
+      continue;
+    }
+    if (op.kind == 1 || op.kind == 2) {
+      std::map<int, std::vector<double>> cells;
+      for (size_t p = 0; p < n; p += 2) {
+        const double U = pts[p] / boxW + 0.5;
+        const double V = pts[p + 1] / boxH + 0.5;
+        double ox = 0.0, oy = 0.0;
+        if (op.kind == 1) {
+          DistortCoons(op.patch.data(), U, V, ox, oy);
+        } else {
+          const int ci = std::max(0, std::min(op.cols - 1, static_cast<int>(std::floor(U * op.cols))));
+          const int cj = std::max(0, std::min(op.rows - 1, static_cast<int>(std::floor(V * op.rows))));
+          std::vector<double>& k = cells[cj * op.cols + ci];
+          if (k.empty()) { k.resize(24); DistortMeshCellPatch(op.mesh, op.cols, ci, cj, k.data()); }
+          DistortCoons(k.data(), U * op.cols - ci, V * op.rows - cj, ox, oy);
+        }
+        pts[p] = (ox - 0.5) * boxW;
+        pts[p + 1] = (oy - 0.5) * boxH;
+      }
+      continue;
+    }
+    const DistortWave& w = op.wave;
+    const double rad = w.direction * kPi / 180.0;
+    const double dx = std::sin(rad);
+    const double dy = -std::cos(rad);
+    const double nx = std::cos(rad);
+    const double ny = std::sin(rad);
+    const double invW = 1.0 / std::max(1.0, std::abs(w.width));
+    const double shift = w.speed * w.t - w.phase / 360.0;
+    if (std::abs(w.height) < 1e-9) continue;
+    for (size_t p = 0; p < n; p += 2) {
+      const double px = pts[p] + boxW / 2.0;
+      const double py = pts[p + 1] + boxH / 2.0;
+      const double u = (px * dx + py * dy) * invW - shift;
+      const double d = w.height * DistortWaveShape(w.shape, u) * DistortPinWeight(w.pinning, px / boxW, py / boxH);
+      pts[p] += nx * d;
+      pts[p + 1] += ny * d;
+    }
+  }
+}
+
+/* = rasterMesh: ảnh vào RGBA thẳng sw×sh, đỉnh đích theo PIXEL ảnh ra; ảnh ra RGBA thẳng. Chỉ vẽ
+ * các hàng [rowLo, rowHi) để chia luồng theo dải hàng — trong một dải, tam giác sau vẫn thắng. */
+void DistortRasterMeshRows(const std::uint8_t* src, int sw, int sh, int cols, int rows, const std::vector<double>& pts,
+                           std::uint8_t* out, int outW, int outH, int rowLo, int rowHi) {
+  const auto put = [](double v) {
+    const double r = std::nearbyint(v);
+    return static_cast<std::uint8_t>(r < 0.0 ? 0.0 : (r > 255.0 ? 255.0 : r));
+  };
+  const auto sample = [&](double sx, double sy, size_t idx) {
+    const double fx = sx - 0.5;
+    const double fy = sy - 0.5;
+    const double flx = std::floor(fx);
+    const double fly = std::floor(fy);
+    const int ix = static_cast<int>(flx);
+    const int iy = static_cast<int>(fly);
+    const double tx = fx - flx;
+    const double ty = fy - fly;
+    double r = 0.0, g = 0.0, b = 0.0, a = 0.0;
+    for (int ddy = 0; ddy < 2; ddy++) {
+      const int yy = iy + ddy;
+      if (yy < 0 || yy >= sh) continue;
+      const double wy = ddy ? ty : 1.0 - ty;
+      for (int ddx = 0; ddx < 2; ddx++) {
+        const int xx = ix + ddx;
+        if (xx < 0 || xx >= sw) continue;
+        const double wgt = wy * (ddx ? tx : 1.0 - tx);
+        const size_t q = (static_cast<size_t>(yy) * sw + xx) * 4;
+        const double al = src[q + 3] * wgt;
+        if (al == 0.0) continue;
+        r += src[q] * al; g += src[q + 1] * al; b += src[q + 2] * al; a += al;
+      }
+    }
+    if (a > 0.0) {
+      out[idx] = put(r / a); out[idx + 1] = put(g / a); out[idx + 2] = put(b / a); out[idx + 3] = put(a);
+    } else {
+      out[idx] = 0; out[idx + 1] = 0; out[idx + 2] = 0; out[idx + 3] = 0;
+    }
+  };
+  const auto tri = [&](double x0, double y0, double x1, double y1, double x2, double y2,
+                       double u0, double v0, double u1, double v1, double u2, double v2) {
+    const double area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+    if (std::abs(area) < 1e-9) return;
+    const int bx0 = std::max(0, static_cast<int>(std::floor(std::min({x0, x1, x2}))));
+    const int by0 = std::max(rowLo, static_cast<int>(std::floor(std::min({y0, y1, y2}))));
+    const int bx1 = std::min(outW - 1, static_cast<int>(std::ceil(std::max({x0, x1, x2}))));
+    const int by1 = std::min(rowHi - 1, static_cast<int>(std::ceil(std::max({y0, y1, y2}))));
+    const double eps = -1e-7;
+    for (int py = by0; py <= by1; py++) {
+      const double cy = py + 0.5;
+      for (int px = bx0; px <= bx1; px++) {
+        const double cx = px + 0.5;
+        const double w0 = ((x1 - cx) * (y2 - cy) - (x2 - cx) * (y1 - cy)) / area;
+        const double w1 = ((x2 - cx) * (y0 - cy) - (x0 - cx) * (y2 - cy)) / area;
+        const double w2 = 1.0 - w0 - w1;
+        if (w0 < eps || w1 < eps || w2 < eps) continue;
+        sample(w0 * u0 + w1 * u1 + w2 * u2, w0 * v0 + w1 * v1 + w2 * v2,
+               (static_cast<size_t>(py) * outW + px) * 4);
+      }
+    }
+  };
+  const int stride = cols + 1;
+  for (int j = 0; j < rows; j++) {
+    const double v0 = (static_cast<double>(j) / rows) * sh;
+    const double v1 = (static_cast<double>(j + 1) / rows) * sh;
+    for (int i = 0; i < cols; i++) {
+      const double u0 = (static_cast<double>(i) / cols) * sw;
+      const double u1 = (static_cast<double>(i + 1) / cols) * sw;
+      const size_t a = (static_cast<size_t>(j) * stride + i) * 2;
+      const size_t b = a + 2;
+      const size_t c = a + static_cast<size_t>(stride) * 2;
+      const size_t d = c + 2;
+      tri(pts[a], pts[a + 1], pts[b], pts[b + 1], pts[d], pts[d + 1], u0, v0, u1, v0, u1, v1);
+      tri(pts[a], pts[a + 1], pts[d], pts[d + 1], pts[c], pts[c + 1], u0, v0, u1, v1, u0, v1);
+    }
+  }
+}
+
+void DistortRasterMesh(const std::uint8_t* src, int sw, int sh, int cols, int rows, const std::vector<double>& pts,
+                       std::uint8_t* out, int outW, int outH) {
+  const unsigned hw = std::max(1u, std::min(8u, std::thread::hardware_concurrency()));
+  const int bands = static_cast<int>(std::min<unsigned>(hw, static_cast<unsigned>(std::max(1, outH / 64))));
+  if (bands <= 1) {
+    DistortRasterMeshRows(src, sw, sh, cols, rows, pts, out, outW, outH, 0, outH);
+    return;
+  }
+  std::vector<std::thread> workers;
+  for (int k = 0; k < bands; k++) {
+    const int lo = static_cast<int>(static_cast<long long>(outH) * k / bands);
+    const int hi = static_cast<int>(static_cast<long long>(outH) * (k + 1) / bands);
+    workers.emplace_back([=, &pts]() { DistortRasterMeshRows(src, sw, sh, cols, rows, pts, out, outW, outH, lo, hi); });
+  }
+  for (auto& t : workers) t.join();
+}
+
+// Cỡ ảnh ra (pixel, chẵn) = outputSize của distort.js.
+void DistortOutputSize(const DistortSpec& spec, double k, int& outW, int& outH) {
+  outW = std::max(2, 2 * static_cast<int>(std::ceil(spec.extHx * k)));
+  outH = std::max(2, 2 * static_cast<int>(std::ceil(spec.extHy * k)));
+}
+
+// Đỉnh lưới (đơn vị hộp, theo tâm) -> pixel ảnh ra (= gridToPixels).
+void DistortGridToPixels(std::vector<double>& pts, double k, int outW, int outH) {
+  const double ox = outW / 2.0;
+  const double oy = outH / 2.0;
+  for (size_t q = 0; q < pts.size(); q += 2) {
+    pts[q] = pts[q] * k + ox;
+    pts[q + 1] = pts[q + 1] * k + oy;
+  }
+}
+
+// Đọc một khung PAM (RGB_ALPHA, 8 bit) từ pipe. false = hết luồng.
+bool ReadPamFrame(FILE* in, int& w, int& h, std::vector<std::uint8_t>& data) {
+  char line[256];
+  w = 0; h = 0;
+  int depth = 0;
+  bool started = false;
+  while (std::fgets(line, sizeof(line), in)) {
+    std::string s(line);
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+    if (!started) { if (s == "P7") started = true; continue; }
+    if (s.rfind("WIDTH ", 0) == 0) w = std::atoi(s.c_str() + 6);
+    else if (s.rfind("HEIGHT ", 0) == 0) h = std::atoi(s.c_str() + 7);
+    else if (s.rfind("DEPTH ", 0) == 0) depth = std::atoi(s.c_str() + 6);
+    else if (s == "ENDHDR") {
+      if (w <= 0 || h <= 0 || depth != 4) return false;
+      data.resize(static_cast<size_t>(w) * h * 4);
+      return std::fread(data.data(), 1, data.size(), in) == data.size();
+    }
+  }
+  return false;
+}
+
+/* Uốn video của MỘT lớp phủ thành tệp trung gian rồi trỏ lớp phủ sang đó. Trả false (kèm lỗi)
+ * khi không làm được — caller giữ lớp phủ như cũ (không biến dạng) và báo ra tiến trình. */
+bool DistortVideoPrepass(ExportOverlay& overlay, const ExportSettings& settings, const fs::path& tempDir,
+                         std::string& error) {
+  DistortSpec spec;
+  if (!ReadDistortSpec(overlay.distortSpecPath, spec, error)) return false;
+  const std::string id = "dst" + std::to_string(overlay.index) + "_";
+  std::ostringstream chainKey;
+  {
+    // Chuỗi lọc NGUỒN của lớp — cùng các hàm mà WriteVisualOverlayFilter dùng, nên màu/mặt nạ/xoá
+    // logo ra y như đồ thị chính. Mốc thời gian TUYỆT ĐỐI (setpts của lớp) để keyframe màu và cổng
+    // `enable` của lớp Điều chỉnh đọc đúng `t`; `fps` đặt khung đúng lưới khung của bản xuất.
+    const fs::path scriptPath = tempDir / (id + "prepass.txt");
+    std::ofstream script(scriptPath);
+    if (!script) { error = "không ghi được filter tiền xử lý Distort"; return false; }
+    /* Thời gian: cắt đúng đoạn nguồn, đưa về 0, đặt nhịp khung xuất (`fps` trên luồng bắt đầu từ 0
+     * cho đúng khung k = k/fps — đặt sau mốc tuyệt đối thì `fps` chèn thêm khung lấp từ 0), RỒI mới
+     * dời lên mốc tuyệt đối của lớp. */
+    const double speed = overlay.speedRate > 0.0 ? overlay.speedRate : 1.0;
+    script << "[0:v]" << UntaggedColorFix(overlay.colorUntagged)
+           << "trim=start=" << FixedSeconds(overlay.sourceStart) << ":duration=" << FixedSeconds(overlay.duration * speed)
+           << ",setpts=(PTS-STARTPTS)/" << FormatFilterNumber(speed)
+           << ",fps=" << settings.renderFps
+           << ",setpts=PTS+" << FfmpegDouble(overlay.timelineStart) << "/TB";
+    AppendLogoRemovalFilters(script, overlay.logoMode, overlay.logoRects, "logo" + id);
+    const SplitColorStages color = SplitColorStagesForScale(
+      BlockColorStages(overlay, overlay.timelineStart, "adj" + id, "adjl" + id), false);
+    script << color.pre;
+    AppendVideoMaskFilter(script, overlay.videoMaskPath, "vm" + id);
+    script << color.post << ",format=rgba[o]\n";
+    script.close();
+    std::ifstream back(scriptPath);
+    chainKey << back.rdbuf();
+  }
+  // Tệp trung gian theo NỘI DUNG (nguồn + mtime + chuỗi lọc + spec): xuất lại không đổi gì thì
+  // dùng lại, khỏi uốn lần nữa.
+  std::ostringstream specText;
+  { std::ifstream sf(overlay.distortSpecPath); specText << sf.rdbuf(); }
+  std::error_code ec;
+  const auto mtime = fs::last_write_time(overlay.assetPath, ec);
+  const std::uint64_t key = Fnv1a64("v1|" + overlay.assetPath + "|" + std::to_string(ec ? 0LL : static_cast<long long>(mtime.time_since_epoch().count()))
+                                    + "|" + chainKey.str() + "|" + specText.str() + "|" + settings.renderFps);
+  char stem[64];
+  std::snprintf(stem, sizeof(stem), "distort_%016llx.mov", static_cast<unsigned long long>(key));
+  const fs::path outPath = tempDir / "distort_cache" / stem;
+  fs::create_directories(outPath.parent_path(), ec);
+  if (!fs::exists(outPath)) {
+    const fs::path partPath = outPath.string() + ".part.mov";
+    const std::string decodeCmd = ShellCommandLine(CommandLine({
+      "ffmpeg", "-hide_banner", "-v", "error", "-nostdin", "-i", overlay.assetPath,
+      "-/filter_complex", (tempDir / (id + "prepass.txt")).string(), "-map", "[o]",
+      // passthrough: luồng mang mốc tuyệt đối, muxer CFR sẽ tự lấp khung từ 0 tới mốc đầu.
+      "-fps_mode", "passthrough", "-f", "image2pipe", "-c:v", "pam", "-pix_fmt", "rgba", "-"}));
+#ifdef _WIN32
+    FILE* dec = _popen(decodeCmd.c_str(), "rb");
+#else
+    FILE* dec = popen(decodeCmd.c_str(), "r");
+#endif
+    if (!dec) { error = "không chạy được ffmpeg giải mã cho Distort"; return false; }
+    FILE* enc = nullptr;
+    std::vector<std::uint8_t> frame;
+    std::vector<std::uint8_t> warped;
+    std::vector<double> pts;
+    int outW = 0, outH = 0, lastStack = -1, lastSw = 0, lastSh = 0;
+    long long count = 0;
+    int w = 0, h = 0;
+    while (ReadPamFrame(dec, w, h, frame)) {
+      const double k = w / spec.boxW;
+      if (!enc) {
+        DistortOutputSize(spec, k, outW, outH);
+        const std::string encodeCmd = ShellCommandLine(CommandLine({
+          "ffmpeg", "-hide_banner", "-v", "error", "-nostdin", "-y",
+          "-f", "rawvideo", "-pix_fmt", "rgba", "-s", std::to_string(outW) + "x" + std::to_string(outH),
+          "-framerate", settings.renderFps, "-i", "-", "-c:v", "qtrle", "-pix_fmt", "argb", partPath.string()}));
+#ifdef _WIN32
+        enc = _popen(encodeCmd.c_str(), "wb");
+#else
+        enc = popen(encodeCmd.c_str(), "w");
+#endif
+        if (!enc) break;
+        warped.assign(static_cast<size_t>(outW) * outH * 4, 0);
+      }
+      const int stackIdx = spec.frames[static_cast<size_t>(std::min<long long>(count, static_cast<long long>(spec.frames.size()) - 1))];
+      if (stackIdx != lastStack || w != lastSw || h != lastSh) {
+        DistortEvalGrid(spec.stacks[stackIdx], spec.boxW, spec.boxH, spec.cols, spec.rows, pts);
+        DistortGridToPixels(pts, k, outW, outH);
+        lastStack = stackIdx; lastSw = w; lastSh = h;
+      }
+      std::fill(warped.begin(), warped.end(), 0);
+      DistortRasterMesh(frame.data(), w, h, spec.cols, spec.rows, pts, warped.data(), outW, outH);
+      if (std::fwrite(warped.data(), 1, warped.size(), enc) != warped.size()) break;
+      count++;
+    }
+#ifdef _WIN32
+    const int decCode = _pclose(dec);
+    const int encCode = enc ? _pclose(enc) : -1;
+#else
+    const int decCode = pclose(dec);
+    const int encCode = enc ? pclose(enc) : -1;
+#endif
+    if (count == 0 || decCode != 0 || encCode != 0) {
+      fs::remove(partPath, ec);
+      error = "tiền xử lý Distort thất bại (giải mã " + std::to_string(decCode) + ", mã hoá "
+              + std::to_string(encCode) + ", " + std::to_string(count) + " khung)";
+      return false;
+    }
+    fs::rename(partPath, outPath, ec);
+    if (ec) { error = "không cất được tệp Distort: " + ec.message(); return false; }
+    Emit("progress", "Distort: uốn " + std::to_string(count) + " khung của lớp " + overlay.id + ".");
+  }
+  // Lớp phủ trỏ sang tệp đã uốn: khung đầu ứng với đầu block, tốc độ đã áp, các tầng nguồn đã làm.
+  overlay.assetPath = outPath.string();
+  overlay.sourceStart = 0.0;
+  overlay.speedRate = 1.0;
+  overlay.hasAudio = false;
+  overlay.colorUntagged = false;
+  overlay.logoMode.clear();
+  overlay.logoRects.clear();
+  overlay.logoAiDir.clear();
+  overlay.logoAiRects.clear();
+  overlay.videoMaskPath.clear();
+  overlay.adjustFilters.clear();
+  overlay.adjustMaskPath.clear();
+  overlay.adjustFiltersPost.clear();
+  overlay.adjEqContrastExpr.clear();
+  overlay.adjEqBrightnessExpr.clear();
+  overlay.adjEqSaturationExpr.clear();
+  overlay.adjustLutAPath.clear();
+  overlay.adjustLutBPath.clear();
+  overlay.adjustLutMixExpr.clear();
+  overlay.adjustLayerFilters.clear();
+  overlay.adjustLayerFiltersPost.clear();
+  overlay.adjLayerEqContrastExpr.clear();
+  overlay.adjLayerEqBrightnessExpr.clear();
+  overlay.adjLayerEqSaturationExpr.clear();
+  overlay.adjustLayerLutAPath.clear();
+  overlay.adjustLayerLutBPath.clear();
+  overlay.adjustLayerLutMixExpr.clear();
+  overlay.extraAdjustLayers.clear();
+  overlay.distortSpecPath.clear();
+  return true;
+}
+
+/* Mọi video lớp phủ có Distort: uốn trước (DistortVideoPrepass). Tiếng của lớp đó tách thành một
+ * lớp "audio" đọc từ tệp GỐC (giữ nguyên mốc, tốc độ, âm lượng, khử ồn, keyframe âm lượng). */
+void PrepareDistortedOverlays(std::vector<ExportOverlay>& overlays, const ExportSettings& settings,
+                              const fs::path& tempDir) {
+  int nextIndex = 0;
+  for (const auto& o : overlays) nextIndex = std::max(nextIndex, o.index + 1);
+  std::vector<ExportOverlay> audioClones;
+  for (auto& overlay : overlays) {
+    if (overlay.distortSpecPath.empty()) continue;
+    if (overlay.type != "media" || OverlayIsImageLike(overlay) || OverlayIsImageSequence(overlay)) {
+      overlay.distortSpecPath.clear();
+      continue;
+    }
+    ExportOverlay audio = overlay;
+    std::string error;
+    if (!DistortVideoPrepass(overlay, settings, tempDir, error)) {
+      Emit("progress", "Distort: bỏ biến dạng của lớp " + overlay.id + " — " + error);
+      overlay.distortSpecPath.clear();
+      continue;
+    }
+    if (OverlayHasAudio(audio)) {
+      audio.type = "audio";
+      audio.index = nextIndex++;
+      audio.id += "_audio";
+      audio.distortSpecPath.clear();
+      audioClones.push_back(audio);
+    }
+  }
+  for (auto& a : audioClones) overlays.push_back(std::move(a));
+}
+
+/* `distort-selftest <spec> <stack_index> <src.rgba> <sw> <sh> <out_prefix>` — cho
+ * tests/scripts/distort.js: ghi lưới (đơn vị hộp) ra <out_prefix>.grid và ảnh uốn (RGBA, mật độ
+ * k = sw / box.w) ra <out_prefix>.rgba, in cỡ ảnh ra. */
+int CommandDistortSelftest(int argc, char** argv) {
+  if (argc < 8) {
+    Emit("error", "distort-selftest expects spec stack_index src.rgba sw sh out_prefix", 2);
+    return 2;
+  }
+  DistortSpec spec;
+  std::string error;
+  if (!ReadDistortSpec(argv[2], spec, error)) { Emit("error", error, 3); return 3; }
+  const int stackIdx = std::max(0, std::min(static_cast<int>(spec.stacks.size()) - 1, std::atoi(argv[3])));
+  const int sw = std::atoi(argv[5]);
+  const int sh = std::atoi(argv[6]);
+  std::vector<std::uint8_t> src(static_cast<size_t>(std::max(0, sw)) * std::max(0, sh) * 4);
+  {
+    std::ifstream in(argv[4], std::ios::binary);
+    in.read(reinterpret_cast<char*>(src.data()), static_cast<std::streamsize>(src.size()));
+    if (!in || sw <= 0 || sh <= 0) { Emit("error", "không đọc được ảnh nguồn", 4); return 4; }
+  }
+  std::vector<double> pts;
+  DistortEvalGrid(spec.stacks[stackIdx], spec.boxW, spec.boxH, spec.cols, spec.rows, pts);
+  {
+    std::ofstream g(std::string(argv[7]) + ".grid");
+    g << std::setprecision(17);
+    for (double v : pts) g << v << "\n";
+  }
+  const double k = sw / spec.boxW;
+  int outW = 0, outH = 0;
+  DistortOutputSize(spec, k, outW, outH);
+  DistortGridToPixels(pts, k, outW, outH);
+  std::vector<std::uint8_t> out(static_cast<size_t>(outW) * outH * 4, 0);
+  DistortRasterMesh(src.data(), sw, sh, spec.cols, spec.rows, pts, out.data(), outW, outH);
+  std::ofstream o(std::string(argv[7]) + ".rgba", std::ios::binary);
+  o.write(reinterpret_cast<const char*>(out.data()), static_cast<std::streamsize>(out.size()));
+  std::cout << "{\"width\":" << outW << ",\"height\":" << outH << "}" << std::endl;
+  return 0;
+}
+
 int CommandExportVideo(int argc, char** argv) {
   if (argc < 8) {
     Emit("error", "export-video expects source output timeline_json_file temp_dir preset fps", 2);
@@ -7175,6 +8282,8 @@ int CommandExportVideo(int argc, char** argv) {
                      + " (hệ số " + FfmpegDouble(settings.outputScale) + ").");
   }
   g_exportTiming.graphSize = std::to_string(settings.width) + "x" + std::to_string(settings.height);
+  // Video lớp phủ có Distort: uốn trước thành tệp trung gian (trước mọi phép dò/gán input bên dưới).
+  PrepareDistortedOverlays(overlays, settings, tempDir);
   /* ĐO TRỤC THỜI GIAN CỦA FILE NGUỒN — MỘT LẦN cho cả lượt export.
    * Xem khối chú thích ở ExportSettings::videoStart: mọi mốc `trim`/`atrim` phải cộng thêm
    * mốc bắt đầu thật của luồng, nếu không mỗi điểm nối lẻ ra một khung của cảnh trước. */
@@ -7678,6 +8787,7 @@ int main(int argc, char** argv) {
     if (command == "export-video") return CommandExportVideo(argc, argv);
     if (command == "export-audio") return CommandExportAudio(argc, argv);
     if (command == "export-encoder") return CommandExportEncoder(argc, argv);
+    if (command == "distort-selftest") return CommandDistortSelftest(argc, argv);
     if (command == "transcribe-whispercpp") return CommandWhisperCpp(argc, argv);
     if (command == "--help" || command == "help") {
       PrintUsage();

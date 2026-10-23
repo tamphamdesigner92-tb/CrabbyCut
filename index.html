@@ -37,6 +37,8 @@
     <script src="/static/js/audio-waveform.js?v=waveform-strip-p5-grid"></script>
     <script src="/static/js/audio-denoise.js?v=denoise-p1"></script>
     <script src="/static/js/clip-speed.js?v=speed-p2"></script>
+    <!-- Subsequence (Nest): phần tính toán thuần; editing-runtime.js dùng qua window.NestSequence -->
+    <script src="/static/js/nest-sequence.js?v=nest-p1"></script>
     <script src="/static/js/color-adjust.js?v=coloradjust-p14"></script>
     <!-- auto-grade.js đọc window.ColorAdjust lúc khởi tạo (UMD) -> phải nạp SAU color-adjust.js -->
     <script src="/static/js/auto-grade.js?v=autograde-p1"></script>
@@ -53,6 +55,10 @@
     <!-- Hình học → GeoCode: dựng ảnh/video từ mã (electron/geocode-renderer.js). Dùng injectStyle
          của auto-subtitle.js nên nạp SAU nó. -->
     <script src="/static/js/geocode.js?v=geocode-p2"></script>
+    <!-- Văn bản → Biến dạng chữ (Warp) + Chữ theo đường. editing-runtime.js gọi vào lúc đo/vẽ chữ. -->
+    <script src="/static/js/text-deform.js?v=tdeform-p1"></script>
+    <!-- Biến dạng kiểu After Effects (Wave/Bezier/Mesh/Puppet/Liquify) cho ảnh, video, Shape. -->
+    <script src="/static/js/distort.js?v=distort-p0"></script>
     <!-- Thanh trạng thái: tiến trình tải model AI lần đầu (góc trái). -->
     <script src="/static/js/model-download-status.js?v=mdl-p1"></script>
     <style>
@@ -1622,6 +1628,23 @@
         .anim-range-val { font-size: 11px; color: var(--text-muted); min-width: 32px; text-align: right; font-variant-numeric: tabular-nums; }
         /* Lưới chọn hiệu ứng có thumbnail chuyển động (kiểu CapCut). Ô đứng yên = khung
            giữa hiệu ứng; rê chuột vào ô thì canvas chạy lặp (xem initAnimThumbs). */
+        .wgl-hint { font-size: 11px; color: var(--text-muted); margin-bottom: var(--sp-3); line-height: 1.4; }
+        .wgl-fx { border: 1px solid var(--border-color, rgba(255,255,255,.12)); border-radius: 8px; padding: 6px 8px; margin: 8px 0; }
+        .wgl-fx.is-off .wgl-row { opacity: .5; }
+        .wgl-head { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+        .wgl-head input[type="checkbox"] { flex: 0 0 auto; margin: 0; }
+        .wgl-head .wgl-name { flex: 1; min-width: 0; }
+        .wgl-thumb { flex: 0 0 auto; display: inline-flex; }
+        .wgl-thumb canvas { width: 64px; height: 36px; border-radius: 4px; display: block; }
+        .wgl-row { display: flex; align-items: center; gap: 6px; margin: 6px 0; font-size: 12px; }
+        .wgl-row[hidden] { display: none; }
+        .wgl-row > span:first-child { flex: 0 0 96px; color: var(--text-muted); }
+        .wgl-row select { flex: 1; min-width: 0; }
+        .wgl-row input[type="checkbox"] { margin: 0; }
+        .wgl-slider { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
+        .wgl-slider input[type="range"] { flex: 1; min-width: 0; margin: 0; }
+        .wgl-row .wgl-slider input[type="text"] { flex: 0 0 52px; width: 52px; min-width: 0; padding: 2px 6px; }
+        .wgl-slider button { flex: 0 0 auto; min-width: 28px; padding: 0 6px; }
         .anim-fx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(74px, 1fr)); gap: 8px; margin-bottom: var(--sp-4); }
         .anim-fx-grid.is-locked { opacity: 0.4; pointer-events: none; }
         .anim-fx-card {
@@ -4020,14 +4043,82 @@
                     <option value="h264" selected>H.264 MP4</option>
                     <option value="hevc">H.265 MP4</option>
                     <option value="prores">ProRes MOV</option>
+                    <option value="gif">GIF (ảnh động)</option>
                 </select>
+            </div>
+        </div>
+        <!-- XUẤT GIF (theo app Convert2GIF): sidecar render MP4 tạm như mọi lượt xuất, rồi backend
+             chuyển sang GIF bằng 2-pass palette (palettegen + paletteuse) — xem exportGifFromVideo
+             (backend/server.js). Khối này chỉ hiện khi Codec = GIF (syncExportGifUi). -->
+        <div id="exportGifOptions" hidden>
+            <div class="transcribe-options-grid">
+                <div class="form-group">
+                    <label for="exportGifWidth">Chiều rộng GIF</label>
+                    <select id="exportGifWidth">
+                        <option value="0">Theo kích thước video</option>
+                        <option value="320">320 px</option>
+                        <option value="480" selected>480 px</option>
+                        <option value="640">640 px</option>
+                        <option value="720">720 px</option>
+                        <option value="1080">1080 px</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="exportGifFps">FPS của GIF</label>
+                    <select id="exportGifFps">
+                        <option value="10">10 fps</option>
+                        <option value="12">12 fps</option>
+                        <option value="15" selected>15 fps</option>
+                        <option value="20">20 fps</option>
+                        <option value="24">24 fps</option>
+                        <option value="30">30 fps</option>
+                    </select>
+                </div>
+            </div>
+            <div class="transcribe-options-grid">
+                <div class="form-group">
+                    <label for="exportGifColors">Số màu tối đa</label>
+                    <select id="exportGifColors">
+                        <option value="256" selected>256 màu</option>
+                        <option value="128">128 màu</option>
+                        <option value="64">64 màu</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="exportGifDither">Dithering</label>
+                    <select id="exportGifDither">
+                        <option value="sierra2_4a" selected>Sierra2_4a</option>
+                        <option value="floyd_steinberg">Floyd-Steinberg</option>
+                        <option value="bayer">Bayer</option>
+                        <option value="none">Không dither</option>
+                    </select>
+                </div>
+            </div>
+            <div class="transcribe-options-grid">
+                <div class="form-group">
+                    <label for="exportGifEffect">Hiệu ứng</label>
+                    <select id="exportGifEffect">
+                        <option value="normal" selected>Bình thường</option>
+                        <option value="reverse">Tua ngược</option>
+                        <option value="boomerang">Boomerang (tiến + lùi)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="exportGifLoop">Lặp lại</label>
+                    <select id="exportGifLoop">
+                        <option value="0" selected>Lặp vô hạn</option>
+                        <option value="-1">Phát một lần</option>
+                    </select>
+                </div>
             </div>
         </div>
         <div class="transcribe-options-grid">
             <!-- Ô "Bitrate" kiểu CapCut (mục 1.20 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md, người dùng chốt
-                 2026-10-01) thay ô "Chất lượng" cũ. Ba mức đầu là CHẤT LƯỢNG CỐ ĐỊNH có trần: tệp tự
-                 nhỏ khi nguồn dễ nén, không bao giờ to hơn bitrate cố định cũ của cùng mức. "Tùy chỉnh"
-                 = bitrate trung bình (Mbps). ProRes không dùng bitrate -> ô bị khoá (syncExportBitrateUi). -->
+                 2026-10-01) thay ô "Chất lượng" cũ. Từ 2026-10-23 (port CrabbyStudio) ba mức đầu theo bitrate
+                 video GỐC trên lane chính (trung bình các video, quy đổi theo tỉ lệ điểm ảnh khung xuất / khung
+                 nguồn): Khuyến nghị = bằng nguồn, Thấp hơn ×0,75, Cao hơn ×2; lane chính không có video thì như
+                 cũ (chất lượng cố định có trần). "Tùy chỉnh" = bitrate trung bình (Mbps), gợi ý sẵn bằng bitrate
+                 nguồn. ProRes không dùng bitrate -> ô bị khoá (syncExportBitrateUi). -->
             <div class="form-group">
                 <label for="exportBitrate">Bitrate</label>
                 <select id="exportBitrate">
@@ -5847,8 +5938,9 @@
                được lọc theo section CÓ THẬT trong panel (xem presentSubs ở dưới), mà
                section đó chỉ được dựng cho mẫu — text thường tự không có tab này. */
             text: { label: _t('Văn bản'), subs: { basic: _t('Cơ bản'), template: _t('Mẫu'), effect: _t('Hiệu ứng'), transform: _t('Biến đổi') } },
-            anim: { label: _t('Hiệu ứng động'), subs: { in: _t('Vào'), out: _t('Ra'), combo: _t('Kết hợp') } },
+            anim: { label: _t('Hiệu ứng động'), subs: { in: _t('Vào'), out: _t('Ra'), combo: _t('Kết hợp'), wiggle: 'Wiggle' } },
             shape: { label: _t('Hình dạng'), subs: { basic: _t('Cơ bản'), transform: _t('Biến đổi') } },
+            distort: { label: _t('Biến dạng'), subs: { basic: _t('Hiệu ứng') } },
             retouch: { label: _t('Retouch'), subs: { basic: _t('Làm đẹp'), logo: _t('Xoá vật thể') } },
             adjust: {
                 label: _t('Điều chỉnh'),
@@ -5865,13 +5957,13 @@
         const INSPECTOR_KIND_TABS = {
             main: ['video'],                             // block chính (step3)
             main4: ['video', 'audio', 'speed', 'anim', 'adjust', 'retouch'], // block chính (step4): + Tốc độ, + Hiệu ứng động, + Điều chỉnh màu, + Retouch
-            media: ['video', 'audio', 'speed', 'anim', 'adjust', 'retouch'], // 'anim' chỉ hiện với ẢNH (video chưa dựng section anim)
+            media: ['video', 'audio', 'speed', 'anim', 'adjust', 'retouch', 'distort'], // 'anim' chỉ hiện với ẢNH (video chưa dựng section anim)
             // LỚP ĐIỀU CHỈNH: chỉ tab Điều chỉnh. Nó không vẽ hình nên Video/Tốc độ/
             // Hiệu ứng động/Retouch đều vô nghĩa với nó.
             adjust: ['adjust'],
             audio: ['audio', 'speed'],
             text: ['text', 'anim'],
-            shape: ['shape', 'anim'],
+            shape: ['shape', 'anim', 'distort'],
             // GeoCode: chỉ Biến đổi/Hiển thị (khối tĩnh, tab Video) + Hiệu ứng động.
             geocode: ['video', 'anim'],
         };
@@ -9764,10 +9856,19 @@
     document.getElementById('btnRotateClip90')?.addEventListener('click', () => applyQuickTransformAction('rotate90'));
     document.getElementById('btnFlipClipX')?.addEventListener('click', () => applyQuickTransformAction('flipX'));
     document.getElementById('btnFlipClipY')?.addEventListener('click', () => applyQuickTransformAction('flipY'));
+    /* Bấm vào vùng TRỐNG của khung xem trước (kể cả trong khung hình) = bỏ chọn, như các trình
+     * dựng chuyên nghiệp. Block overlay tự chặn cú bấm của nó (selectPreviewOverlayItem); các chế
+     * độ dùng cú bấm vào khung (Pen, sửa đỉnh, gõ chữ, chấm màu, vẽ vùng, mặt nạ) và khung chọn /
+     * tay cầm thì giữ nguyên lựa chọn — xem EditingRuntime.previewKeepsSelection. */
     document.getElementById('sequencePreviewShell')?.addEventListener('mousedown', (event) => {
         if (currentMode !== 'FINAL' || currentStepId !== 'step4') return;
         const frame = document.getElementById('sequencePreviewFrame');
-        if (frame?.contains(event.target)) return;
+        // Ngoài khung hình (viền đen quanh khung): bỏ chọn như trước giờ.
+        if (frame?.contains(event.target)) {
+            // Trong khung: chỉ cú bấm trái thường (Shift = đang chọn thêm, không xoá cả nhóm).
+            if (event.button !== 0 || event.shiftKey) return;
+            if (window.EditingRuntime?.previewKeepsSelection?.(event.target, event)) return;
+        }
         clearCurrentBlockSelection();
     });
     syncSequenceControls();
@@ -11581,8 +11682,15 @@
         lastProgrammaticScrollLeft = timelineOuter.scrollLeft;
         releaseProgrammaticScroll(60);
     }
+    /* scrollLeft của lượt 'scroll' trước. Cuộn DỌC giữa các lane cũng bắn 'scroll' — nếu
+       không lọc ra thì mỗi nấc cuộn dọc lại tua video về tâm khung nhìn (và hít mép block
+       khi giữ Shift) dù playhead không hề dịch chuyển. */
+    let lastTimelineScrollLeft = timelineOuter.scrollLeft;
     timelineOuter.addEventListener('scroll', () => {
+        const horizontalMoved = timelineOuter.scrollLeft !== lastTimelineScrollLeft;
+        lastTimelineScrollLeft = timelineOuter.scrollLeft;
         if (!timelineClockReady() || isProgrammaticScroll) return;
+        if (!horizontalMoved) return;
         /* CHỐT CHẶN THEO VỊ TRÍ, KHÔNG THEO THỜI GIAN.
          *
          * `isProgrammaticScroll` ở trên được xoá bởi một `setTimeout` 60 ms, nhưng Chromium
@@ -11645,8 +11753,34 @@
         return { x: e.deltaX * k, y: e.deltaY * k };
     }
 
+    /* ===== CUỘN DỌC GIỮA CÁC LANE (2026-10-22) =====
+       Lăn chuột trên timeline vốn luôn là cuộn NGANG (Shift = hít mốc, Alt/Ctrl/⌘ = zoom),
+       nên dự án nhiều lane không có cách nào lên/xuống ngoài kéo thanh cuộn. Thêm:
+         - lăn chuột khi con trỏ ở CỘT TÊN LANE (bên trái) -> cuộn dọc, như Premiere/CapCut;
+         - Alt + Shift + lăn ở bất kỳ đâu trên timeline -> cuộn dọc. Lấy trục trội hơn vì
+           macOS đổi lăn dọc của chuột thành deltaX khi giữ Shift;
+         - nhấn giữ CHUỘT GIỮA rồi kéo -> kéo khung nhìn tự do (xem handler mousedown dưới).
+       Cuộn dọc chỉ đổi scrollTop: không đụng zoom, không tua video, không dựng lại block
+       (vùng ảo hoá block tính theo trục ngang). */
+    function timelineVerticalWheelStep(e, wheelPx) {
+        if (e.ctrlKey || e.metaKey) return null;
+        if (e.altKey) {
+            if (!e.shiftKey) return null;
+            return Math.abs(wheelPx.y) >= Math.abs(wheelPx.x) ? wheelPx.y : wheelPx.x;
+        }
+        if (!e.target?.closest?.('.editing-lane-label')) return null;
+        // Vuốt NGANG trên trackpad ở cột tên lane vẫn là cuộn ngang như cũ.
+        return Math.abs(wheelPx.y) >= Math.abs(wheelPx.x) ? wheelPx.y : null;
+    }
+
     timelineOuter.addEventListener('wheel', (e) => {
         if (!timelineClockReady()) return;
+        const verticalStep = timelineVerticalWheelStep(e, wheelDeltaPx(e));
+        if (verticalStep !== null) {
+            e.preventDefault();
+            timelineOuter.scrollTop += verticalStep;
+            return;
+        }
         timelineScrollSnapActive = e.shiftKey;
         const wheelPx = wheelDeltaPx(e);
 
@@ -11708,6 +11842,36 @@
             timelineOuter.scrollLeft = clampTimelineScrollLeft(timelineOuter.scrollLeft + wheelStep);
         }
     }, { passive: false });
+
+    /* Nhấn giữ CHUỘT GIỮA + kéo = kéo khung nhìn timeline cả dọc lẫn ngang (bàn tay).
+       Pha CAPTURE + chặn lan truyền: chuột giữa không được rơi xuống block (kéo block),
+       khung quét chọn hay tua playhead. preventDefault tắt luôn autoscroll của Windows.
+       Phần ngang đi đúng đường cuộn tay của người dùng (handler 'scroll' tua theo tâm). */
+    timelineOuter.addEventListener('mousedown', (e) => {
+        if (e.button !== 1 || !timelineClockReady()) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const startX = e.clientX;
+        const startY = e.clientY;
+        const startLeft = timelineOuter.scrollLeft;
+        const startTop = timelineOuter.scrollTop;
+        const prevCursor = document.body.style.cursor;
+        document.body.style.cursor = 'grabbing';
+        const onMove = (ev) => {
+            timelineOuter.scrollTop = startTop - (ev.clientY - startY);
+            const nextLeft = clampTimelineScrollLeft(startLeft - (ev.clientX - startX));
+            if (Math.abs(nextLeft - timelineOuter.scrollLeft) >= 1) timelineOuter.scrollLeft = nextLeft;
+        };
+        const onUp = () => {
+            window.removeEventListener('mousemove', onMove, true);
+            window.removeEventListener('mouseup', onUp, true);
+            document.body.style.cursor = prevCursor;
+        };
+        window.addEventListener('mousemove', onMove, true);
+        window.addEventListener('mouseup', onUp, true);
+    }, true);
+    // Chặn "bấm chuột giữa" mặc định (mở liên kết / dán trên Linux) sau cú kéo.
+    timelineOuter.addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefault(); });
 
     function updatePlayhead() {
         if(!timelineClockReady()) return;
@@ -11936,7 +12100,9 @@
         return {
             mappedChunks: JSON.parse(JSON.stringify(globalMappedChunks || [])),
             rawSegments: JSON.parse(JSON.stringify(globalRawSegments || [])),
-            latestTimeline: JSON.parse(JSON.stringify(latestTimeline || [])),
+            /* Đang sửa trong Subsequence thì `latestTimeline` tạm là [] — snapshot (undo + .crab)
+               luôn giữ lane chính của TIMELINE GỐC (xem khối SUBSEQUENCE ở editing-runtime.js). */
+            latestTimeline: JSON.parse(JSON.stringify(window.EditingRuntime?.rootLatestTimeline?.() || latestTimeline || [])),
             /* Sổ NGUỒN cũng phải hoàn tác được: từ 2026-09-08 menu chuột phải ở panel Tệp
              * phương tiện xoá được video nguồn khỏi dự án, mà thao tác đó ghi vào đây. Không
              * chụp thì Ctrl+Z trả clip về lane chính nhưng sổ nguồn vẫn thiếu video đó. */
@@ -12788,6 +12954,13 @@
                     (item) => !item.asset_id || !skippedAssetIds.has(item.asset_id),
                 );
             }
+            // Block nằm trong Subsequence trỏ vào asset bị bỏ qua -> bỏ theo, như ở timeline gốc.
+            editingState.editingAssets.forEach((asset) => {
+                if (!window.NestSequence?.isNestAsset(asset)) return;
+                asset.nest.items = (asset.nest.items || []).filter(
+                    (item) => !item.asset_id || !skippedAssetIds.has(item.asset_id),
+                );
+            });
         }
         for (const asset of editingState.editingAssets) {
             const patch = patches.get(asset.id);
@@ -13800,6 +13973,12 @@
      * (asset đã xoá nhưng sổ nguồn còn) — Ctrl+Z một lần ra một dự án không nhất quán.
      * Nhánh lỗi vẫn executeUndo() được: bước gần nhất trên stack chính là thao tác đang dở. */
     window.rebuildMainLane = async function rebuildMainLane({ appendPaths = [], history = true } = {}) {
+        // Sequence con (Subsequence) không có lane chính nam châm: lane chính đang hiện là của
+        // nó (rỗng), dựng lại temp_input.mp4 lúc này là làm lệch lane chính của timeline gốc.
+        if (window.EditingRuntime?.isInsideNest?.()) {
+            showToast(_t('Trong Subsequence không có lane chính — thả video lên một lane video.'), { type: 'warning' });
+            return false;
+        }
         if (mainLaneRebuildInFlight) {
             setStatusText(_t('Đang dựng lane chính — đợi lượt hiện tại xong đã.'), false);
             return false;
@@ -13922,6 +14101,65 @@
         }
     };
 
+    /* NỐI THÊM nguồn vào CUỐI temp_input.mp4, GIỮ NGUYÊN bố cục cũ (SUBSEQUENCE trên lane chính).
+     *
+     * KHÁC rebuildMainLane / replaceMainLaneSource: hai hàm đó dựng danh sách nối TỪ ROW đang có,
+     * nên nguồn không còn row nào (clip vừa được gói vào Subsequence, bản dựng cũ của Subsequence)
+     * bị rơi khỏi file nối -> mốc start/end trong các bản chụp HOÀN TÁC cũ trỏ sai chỗ (hoàn tác
+     * xong row Subsequence biến mất). Ở đây danh sách nối là đúng bố cục HIỆN TẠI (bảng đoạn) cộng
+     * nguồn mới ở cuối: mọi mốc cũ — của lane chính lẫn của mọi bản chụp — vẫn đúng nguyên.
+     * Không tạo row nào; người gọi tự đặt row. Trả bảng đoạn mới. */
+    window.appendSourcesToMainConcat = async function appendSourcesToMainConcat(paths) {
+        if (!isDesktopVideoEnv()) throw new Error(_t('Gói clip lane chính vào Subsequence cần bản desktop.'));
+        if (mainLaneRebuildInFlight) throw new Error(_t('Đang dựng lane chính — đợi lượt hiện tại xong đã.'));
+        const current = (mainConcatSegments || []).map((seg) => seg.source_path).filter(Boolean);
+        const oldSources = current.length ? current : (mainConcatCache.sources || []).slice();
+        const fresh = Array.from(new Set((paths || []).filter((p) => p && !oldSources.includes(p))));
+        if (!fresh.length) return mainConcatSegments;
+        const sources = oldSources.concat(fresh);
+        mainLaneRebuildInFlight = true;
+        startStatusPolling();
+        try {
+            const oldSegments = mainConcatSegments;
+            const response = await fetch(`${API_BASE}/project/reingest`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source_paths: sources, preserve_order: true, require_all: true }),
+            });
+            if (!response.ok) {
+                const detail = await response.json().catch(() => ({}));
+                throw new Error(detail.detail || _t('Nối video thất bại (HTTP {status}).', { status: response.status }));
+            }
+            const data = await response.json();
+            const reported = normalizeConcatSegments(data.segments);
+            const newSegments = reported.length
+                ? reported
+                : window.MainLane.segmentTableFromDurations(mainLaneSourceEntries(sources, await probeDurations(sources)));
+            if (!newSegments.length) throw new Error(_t('Không đọc được thời lượng của video nguồn.'));
+            // Biên của nguồn cũ thường không đổi (chỉ nối thêm ở cuối); rebaseRows bù nếu có trôi.
+            if (oldSegments.length && latestTimeline.length) {
+                latestTimeline = window.MainLane.rebaseRows(latestTimeline, oldSegments, newSegments);
+                latestTimeline = window.MainLane.clampRowsToSegments(latestTimeline, newSegments).rows;
+                latestTimeline = normalizeTimelineTransforms(latestTimeline);
+            }
+            mainConcatSegments = newSegments;
+            mainConcatFrame = normalizeConcatFrame(data.concat_frame);
+            mainConcatCache = { sources, order: 'given' };
+            await loadTranscribedVideoAndHydrateUI({
+                segments: [],
+                videoVersion: data.video_version,
+                transcriptMode: 'FINAL',
+                transcriptTitle: _t('Lane chính'),
+                fallbackDurationOverride: newSegments[newSegments.length - 1]?.end || 0,
+            });
+            markProjectDirty();
+            return newSegments;
+        } finally {
+            stopStatusPolling();
+            mainLaneRebuildInFlight = false;
+        }
+    };
+
     /* Đưa video ĐÃ CÓ trong panel Tệp phương tiện lên lane chính.
      *
      * KHÔNG còn nút "Video nguồn" riêng và KHÔNG còn hai hạng video: mọi tệp trong panel
@@ -13976,7 +14214,8 @@
      * lúc đó không suy được gì từ clip, mà cả thư viện chính là nguồn của lane chính, nên
      * rơi về sổ nguồn như cũ. */
     window.getMainLaneSourcePaths = function getMainLaneSourcePaths() {
-        const fromRows = window.MainLane?.concatSourcesFromRows(latestTimeline);
+        const rows = window.EditingRuntime?.rootLatestTimeline?.() || latestTimeline;
+        const fromRows = window.MainLane?.concatSourcesFromRows(rows);
         if (Array.isArray(fromRows)) return fromRows;
         return projectVideoLibrary.map((item) => item.source_path).filter(Boolean);
     };
@@ -13993,6 +14232,7 @@
      * Lane chính do LUỒNG LỌC sinh ra thì chỉ dọn sổ nguồn: row của nó không mang
      * source_path nên không biết clip nào thuộc video nào, dựng lại là mất kết quả lọc. */
     window.removeSourcePathsFromMainLane = async function removeSourcePathsFromMainLane(paths, options = {}) {
+        window.EditingRuntime?.exitAllNests?.();   // thao tác trên lane chính của timeline gốc
         // `history: false` khi người gọi đã chụp lịch sử — xem chú thích ở rebuildMainLane.
         const history = options.history !== false;
         const drop = new Set((paths || []).filter(Boolean));
@@ -16355,7 +16595,7 @@
         // Có Video -> hỏi chỗ lưu video (tệp âm thanh riêng, nếu chọn, nằm cạnh nó); chỉ Audio -> đuôi âm thanh.
         const picked = await window.desktopEnv.pickExportOutput({
             suggestedName,
-            ext: kind.video ? (codec === 'prores' ? 'mov' : 'mp4') : EXPORT_AUDIO_EXT[kind.format],
+            ext: kind.video ? exportVideoExt(codec) : EXPORT_AUDIO_EXT[kind.format],
             projectPath: currentProjectPath || '',
         });
         if (picked?.canceled) return false;
@@ -16436,6 +16676,8 @@
             return;
         }
         videoExportInFlight = true;
+        // SUBSEQUENCE trên lane chính: chờ lượt dựng lại (nếu nội dung vừa đổi) xong rồi mới đọc lane chính.
+        try { await window.EditingRuntime?.syncMainLaneNests?.(); } catch (_) { /* lỗi đã báo ở lượt dựng */ }
         /* Dừng preview trước khi xuất: vòng phát (Pixi + overlay + cuộn timeline, ~60 Hz) giành
          * CPU/GPU với ffmpeg vốn đã bão hoà CPU. Đo 2026-09-28 (bản cắt 300 s 4K): cùng payload,
          * lượt xuất khi preview đang phát chậm hơn ~21–30%. Nút Play tự đồng bộ theo sự kiện
@@ -16566,6 +16808,10 @@
                 const kf = TextAnimations.keyframeFfmpegExprs(clip.keyframes) || {};
                 const volumeExpr = TextAnimations.volumeKeyframeFfmpegExpr(clip.keyframes);
                 if (volumeExpr) kf.volume_expr = volumeExpr;
+                // WIGGLE ĐỘ MỜ: nhân lên keyframe/giá trị tĩnh của độ mờ (xem wiggleOpacityFfmpegExpr).
+                const wop = TextAnimations.wiggleOpacityFfmpegExpr?.(clip.animation, kf.opacity_expr,
+                    normalizeClipTransformForUi(clip.transform).opacity);
+                if (wop) kf.opacity_expr = wop;
                 if (Object.keys(kf).length) out = { ...out, keyframe_expr: kf };
             }
             return out;
@@ -16601,6 +16847,8 @@
         const exportFps = document.getElementById('exportFps')?.value || 'source';
         const exportCodec = document.getElementById('exportCodec')?.value || 'h264';
         const exportRate = readExportBitrate();
+        // Ba mức đầu tính theo bitrate video gốc trên lane chính (backend nhân ×0,75 / ×1 / ×2).
+        const exportSourceMbps = exportRate.mode !== 'custom' ? await mainLaneSourceBitrateMbps() : null;
         const exportAudioBitrate = document.getElementById('exportAudioBitrate')?.value || '192k';
         const exportSettings = {
             resolution: 'sequence',
@@ -16610,11 +16858,13 @@
             codec: exportCodec,
             rate_mode: exportRate.mode,
             ...(exportRate.mode === 'custom' ? { rate_mbps: exportRate.mbps } : {}),
+            ...(exportSourceMbps ? { source_mbps: exportSourceMbps } : {}),
             audio_bitrate: exportAudioBitrate,
             export_video: exportKind.video,
             export_audio: exportKind.audio,
             audio_file_format: exportKind.format,
             audio_file_bitrate: exportKind.bitrate,
+            ...(exportCodec === 'gif' ? { gif: readExportGifOptions() } : {}),
         };
         const exportFileNameRaw = document.getElementById('exportFileName')?.value || '';
         // Cùng bộ lọc với tên dự án: ô này nhận tên tiếng Việt có dấu, nhưng ký tự cấm của
@@ -16679,7 +16929,7 @@
         console.info('[export-timing]', exportTiming);
         const a = document.createElement("a");
         a.href = URL.createObjectURL(exportBlob);
-        a.download = `${exportFileName}.${audioOnly ? EXPORT_AUDIO_EXT[exportKind.format] : (exportCodec === 'prores' ? 'mov' : 'mp4')}`;
+        a.download = `${exportFileName}.${audioOnly ? EXPORT_AUDIO_EXT[exportKind.format] : exportVideoExt(exportCodec)}`;
         // Job xuất của MCP chờ đúng lượt tải này xong mới báo tệp nằm ở đâu (automation-bridge.js).
         exportTiming.download_url = a.href;
         a.click();
@@ -16736,6 +16986,22 @@
     /* HAI Ô VIDEO / AUDIO (kiểu CapCut, người dùng chốt 2026-10-11) — xem ghi chú ở markup.
      * Đuôi tệp phải khớp EXPORT_AUDIO_FORMATS (backend/server.js) và EXPORT_OUTPUT_KINDS (main.js). */
     const EXPORT_AUDIO_EXT = { mp3: 'mp3', wav: 'wav', aac: 'm4a', flac: 'flac' };
+    // Đuôi tệp video theo Codec — phải khớp exportOutputName (backend/server.js) và EXPORT_OUTPUT_KINDS (main.js).
+    function exportVideoExt(codec) {
+        return codec === 'prores' ? 'mov' : codec === 'gif' ? 'gif' : 'mp4';
+    }
+    // Tuỳ chọn GIF (khối #exportGifOptions) — backend kiểm lại từng giá trị (normalizeGifSettings).
+    function readExportGifOptions() {
+        const val = (id, fallback) => document.getElementById(id)?.value || fallback;
+        return {
+            width: Number(val('exportGifWidth', '480')),
+            fps: Number(val('exportGifFps', '15')),
+            max_colors: Number(val('exportGifColors', '256')),
+            dither: val('exportGifDither', 'sierra2_4a'),
+            effect: val('exportGifEffect', 'normal'),
+            loop: Number(val('exportGifLoop', '0')),
+        };
+    }
     function readExportKind() {
         const format = document.getElementById('exportAudioFormat')?.value || 'mp3';
         return {
@@ -16795,7 +17061,8 @@
         vertical_720: [720, 1280], vertical_1080: [1080, 1920], vertical_1440: [1440, 2560],
         vertical_2160: [2160, 3840], square_1080: [1080, 1080],
     };
-    // Số điền sẵn cho "Tùy chỉnh": trần của mức Khuyến nghị (13 Mbps cho H.264 1080p, 11 cho H.265).
+    // Số điền tạm cho "Tùy chỉnh" (lane chính không có video đo được thì giữ luôn): trần cũ của mức
+    // Khuyến nghị (13 Mbps cho H.264 1080p, 11 cho H.265).
     function recommendedExportMbps() {
         const preset = document.getElementById('exportResolution')?.value || 'source';
         let seq = { width: 1920, height: 1080 };
@@ -16805,19 +17072,65 @@
         const mbps = base * (w * h) / (1920 * 1080);
         return Math.min(80, Math.max(2.5, Math.round(mbps * 2) / 2));
     }
+    /* Bitrate video TRUNG BÌNH của các nguồn trên lane chính (Mbps), hoặc null khi lane chính không có
+     * video đo được. Khuyến nghị = số này, Thấp hơn ×0,75, Cao hơn ×2 (backend nhân), và là số gợi ý
+     * của "Tùy chỉnh". Bitrate từng nguồn quy đổi theo tỉ lệ điểm ảnh khung XUẤT / khung nguồn (khung
+     * xuất = preset của "Kích thước video", hoặc cỡ sequence khi "Theo Sequence"). */
+    async function mainLaneSourceBitrateMbps() {
+        const paths = (window.getMainLaneSourcePaths?.() || []).filter(Boolean);
+        if (!paths.length) return null;
+        const preset = document.getElementById('exportResolution')?.value || 'source';
+        let seq = null;
+        try { seq = getSequencePayload(); } catch (_) { /* chưa có sequence: không quy đổi */ }
+        const [width, height] = EXPORT_PRESET_FRAMES[preset] || [seq?.width, seq?.height];
+        try {
+            const resp = await fetch(`${API_BASE}/media-bitrate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ paths, width, height }),
+            });
+            if (!resp.ok) return null;
+            const mbps = Number((await resp.json()).average_mbps);
+            return Number.isFinite(mbps) && mbps > 0 ? mbps : null;
+        } catch (_) {
+            return null;
+        }
+    }
     let exportBitrateMbpsTouched = false;
     function syncExportBitrateUi() {
         const select = document.getElementById('exportBitrate');
         const row = document.getElementById('exportBitrateCustomRow');
         const input = document.getElementById('exportBitrateMbps');
         if (!select || !row || !input) return;
-        const prores = document.getElementById('exportCodec')?.value === 'prores';
-        select.disabled = prores;
-        input.disabled = prores;
-        select.title = prores ? _t('ProRes không dùng bitrate (chất lượng cố định theo profile).') : '';
+        const codec = document.getElementById('exportCodec')?.value;
+        const prores = codec === 'prores';
+        const gif = codec === 'gif';
+        select.disabled = prores || gif;
+        input.disabled = prores || gif;
+        select.title = prores ? _t('ProRes không dùng bitrate (chất lượng cố định theo profile).')
+            : gif ? _t('GIF không dùng bitrate (chất lượng theo số màu và dithering).') : '';
+        // GIF không có tiếng: khoá ô bitrate tiếng trong video, hiện khối tuỳ chọn GIF.
+        const audioRate = document.getElementById('exportAudioBitrate');
+        if (audioRate) {
+            audioRate.disabled = gif;
+            audioRate.title = gif ? _t('GIF không có âm thanh.') : '';
+        }
+        const gifBox = document.getElementById('exportGifOptions');
+        if (gifBox) gifBox.hidden = !gif;
         const custom = select.value === 'custom';
         row.hidden = !custom;
-        if (custom && !exportBitrateMbpsTouched) input.value = String(recommendedExportMbps());
+        if (custom && !exportBitrateMbpsTouched) {
+            // Điền ngay số cũ (theo cỡ khung), rồi thay bằng bitrate trung bình của nguồn khi đo xong —
+            // chỉ khi ô vẫn giữ đúng số vừa điền (người dùng / automation chưa gõ số khác).
+            const placeholder = String(recommendedExportMbps());
+            input.value = placeholder;
+            mainLaneSourceBitrateMbps().then((mbps) => {
+                const clamped = mbps ? Math.min(400, Math.max(0.5, mbps)) : null;
+                if (clamped && select.value === 'custom' && !exportBitrateMbpsTouched && input.value === placeholder) {
+                    input.value = String(clamped);
+                }
+            });
+        }
     }
     function readExportBitrate() {
         const mode = document.getElementById('exportBitrate')?.value || 'recommended';
@@ -16852,7 +17165,7 @@
     function syncExportCodecForFrame() {
         if (!exportAutoHevc || exportCodecTouched) return;
         const select = document.getElementById('exportCodec');
-        if (!select || select.value === 'prores') return;
+        if (!select || select.value === 'prores' || select.value === 'gif') return;
         const want = exportFrameIs4k() ? 'hevc' : 'h264';
         if (select.value === want) return;
         select.value = want;
@@ -16887,7 +17200,7 @@
         })
         .catch(() => { /* không hỏi được: giữ H.264 như trước */ });
 </script>
-<script src="/static/js/editing-runtime.js?v=lumen-p5-geocode2"></script>
+<script src="/static/js/editing-runtime.js?v=lumen-p5-tdeform1"></script>
 <script src="/static/js/automation-bridge.js?v=bridge-p2"></script>
 <script src="/static/js/perf-runtime.js"></script>
 <!-- Dụng cụ đo hiệu năng (Giai đoạn 0). Nạp SAU perf-runtime.js vì nó bọc chính những

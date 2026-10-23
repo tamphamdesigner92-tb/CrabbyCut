@@ -57,6 +57,7 @@
         { id: 'edit.undo', group: 'edit', label: _t('Hoàn tác'), combo: 'Cmd+KeyZ' },
         { id: 'edit.redo', group: 'edit', label: _t('Làm lại'), combo: 'Cmd+Shift+KeyZ' },
         { id: 'edit.delete', group: 'edit', label: _t('Xoá block / clip đang chọn'), combo: 'Delete' },
+        { id: 'edit.nest', group: 'edit', label: _t('Tạo Subsequence (Nest) từ các block đang chọn'), combo: 'Alt+Shift+KeyN' },
 
         { id: 'tool.razor', group: 'tool', label: _t('Dao cắt (bật/tắt)'), combo: 'Cmd+KeyK' },
 
@@ -84,6 +85,9 @@
         { display: _t('Alt + kéo block'), label: _t('Nhân bản block') },
         { display: _t('Alt + lăn chuột'), label: _t('Phóng to/thu nhỏ timeline') },
         { display: _t('Shift + lăn chuột'), label: _t('Hít playhead vào mốc block') },
+        { display: _t('Alt + Shift + lăn chuột'), label: _t('Cuộn dọc giữa các lane timeline') },
+        { display: _t('Lăn chuột trên cột tên lane'), label: _t('Cuộn dọc giữa các lane timeline') },
+        { display: _t('Giữ chuột giữa + kéo'), label: _t('Kéo khung nhìn timeline (dọc lẫn ngang)') },
         { display: _t('Shift / Alt + kéo số'), label: _t('Tinh chỉnh ×0.1 / tăng nhanh ×10 ở bảng thông số') },
     ];
 

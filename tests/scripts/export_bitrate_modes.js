@@ -60,6 +60,30 @@ function testBackend() {
   console.log(`  ok  backend: ${cases.length} ca mức / số Mbps / lùi về Khuyến nghị / payload cũ`);
 }
 
+/* Ba mức theo bitrate video GỐC (port CrabbyStudio eba80b0): `source_mbps` = trung bình bitrate các
+ * video trên lane chính; Khuyến nghị ×1, Thấp hơn ×0,75, Cao hơn ×2, kẹp trong 0,5..400. "Tùy chỉnh"
+ * vẫn là số người dùng nhập; source_mbps sai thì như cũ (không mang rate_mbps). */
+function testBackendSource() {
+  const { normalizeExportSettings } = require('../../backend/server');
+  const norm = (settings) => normalizeExportSettings({ export_settings: JSON.stringify(settings) });
+  const pick = (s) => ({ rate_mode: s.rate_mode, rate_mbps: s.rate_mbps });
+  const cases = [
+    [{ rate_mode: 'recommended', source_mbps: 8 }, { rate_mode: 'recommended', rate_mbps: 8 }],
+    [{ rate_mode: 'lower', source_mbps: 8 }, { rate_mode: 'lower', rate_mbps: 6 }],
+    [{ rate_mode: 'higher', source_mbps: 8 }, { rate_mode: 'higher', rate_mbps: 16 }],
+    [{ rate_mode: 'lower', source_mbps: 3.333 }, { rate_mode: 'lower', rate_mbps: 2.5 }],
+    [{ rate_mode: 'higher', source_mbps: 300 }, { rate_mode: 'higher', rate_mbps: 400 }],
+    [{ rate_mode: 'lower', source_mbps: 0.4 }, { rate_mode: 'lower', rate_mbps: 0.5 }],
+    [{ rate_mode: 'custom', rate_mbps: 12, source_mbps: 8 }, { rate_mode: 'custom', rate_mbps: 12 }],
+    [{ rate_mode: 'recommended', source_mbps: 0 }, { rate_mode: 'recommended', rate_mbps: undefined }],
+    [{ rate_mode: 'recommended', source_mbps: 'abc' }, { rate_mode: 'recommended', rate_mbps: undefined }],
+  ];
+  for (const [input, want] of cases) {
+    assert.deepStrictEqual(pick(norm(input)), want, `normalizeExportSettings(${JSON.stringify(input)})`);
+  }
+  console.log(`  ok  backend: ${cases.length} ca mức theo bitrate nguồn (×0,75 / ×1 / ×2, kẹp dải)`);
+}
+
 function nvencAvailable() {
   const r = run('ffmpeg', ['-hide_banner', '-v', 'error', '-f', 'lavfi', '-i', 'color=s=256x256:d=0.2',
     '-c:v', 'h264_nvenc', '-f', 'null', '-']);
@@ -132,6 +156,9 @@ function testSidecar() {
     ['cpu_legacy_balanced', { quality: 'balanced' }, ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23']],
     ['cpu_legacy_small', { quality: 'small' }, ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23']],
     ['cpu_bad_custom', { rate_mode: 'custom', rate_mbps: 1000 }, ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18']],
+    // Mức theo bitrate nguồn (backend đã đổi ra rate_mbps): bitrate trung bình, đỉnh ×1,5 như Tùy chỉnh.
+    ['cpu_source_recommended', { rate_mode: 'recommended', rate_mbps: 8 }, ['-c:v', 'libx264', '-preset', 'veryfast', '-b:v', '8000k', '-maxrate', '12000k', '-bufsize', '24000k']],
+    ['cpu_source_lower', { rate_mode: 'lower', rate_mbps: 6 }, ['-c:v', 'libx264', '-preset', 'veryfast', '-b:v', '6000k', '-maxrate', '9000k', '-bufsize', '18000k']],
   ];
   // `-x264-params asm=avx2` chỉ có trên CPU AVX-512 (X264AsmCap, core_process.cpp) — runner CI có
   // máy có máy không, nên bỏ cặp này trước khi so.
@@ -177,5 +204,6 @@ function testSidecar() {
 }
 
 testBackend();
+testBackendSource();
 testSidecar();
 console.log('export bitrate modes ok');
