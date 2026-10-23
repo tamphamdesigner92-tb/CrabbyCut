@@ -25,6 +25,11 @@ geocode_cache/
 concat_cache/
 # Tệp dựng của Subsequence (Nest) — xem NEST_CACHE_DIR ở backend/server.js
 nest_cache/
+# Cache xuất video (<USER_DATA_ROOT>, có thể là gốc repo khi chạy dev) — bản render dùng lại,
+# khung vẽ trước và kết quả dò GPU; xoá là sinh lại được. render_cache có thể nặng hàng chục GB.
+render_cache/
+prebake_cache/
+gpu_probe_cache.txt
 vendor/
 
 # ── KHO TÀI NGUYÊN MEDIA — KHÔNG ĐƯỢC CÔNG KHAI ────────────────────────────────
