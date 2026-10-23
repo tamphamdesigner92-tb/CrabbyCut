@@ -10245,3 +10245,30 @@ Viết mã HTML/CSS/JS, JavaScript canvas hoặc Python → ảnh tĩnh / chuỗ
 - **Xuất**: renderer chỉ gửi `{ render_key, loop }` (không gửi mã, không gửi đường dẫn) + `animation_video` (hoạt ảnh In/Out như video) + `keyframe_expr`. Backend `materializeGeocodeFrames` dựng đường dẫn TỪ KHOÁ: ảnh → overlay `media_image`; video → `image_seq` (loop dài hơn clip → thư mục liên kết cứng khung k → k % N; không loop → sidecar giữ khung cuối). Sidecar không sửa gì. Đã kiểm: khung xuất (GPU lẫn CPU) khớp khung cache, lệch 0 px.
 - **MCP**: `crabbycut_add_geocode` (job) / `add_geocode` trong `crabbycut_batch`, `crabbycut_catalog geocode`.
 - Test: `tests/scripts/geocode_render.js` (Electron thật: cỡ đúng kể cả 4K, alpha, đồng hồ ảo tất định, timer, canvas, nền màu, proxy, sandbox, Python, xem thử).
+
+## Xuất phim dài có lồng tiếng chết với "ffmpeg batch export failed" (exit 7) (2026-10-23)
+
+**Triệu chứng:** dự án thật "[App] Forever Inside" (một clip 39 phút 4K, 1.048 phụ đề song ngữ, 23 GeoCode,
+lồng tiếng tiếng Việt) — toast `ffmpeg batch export failed` sau ~25 s; báo cáo dự án ghi `exit_code 7`, `stderr`
+trống. Mã 7 là của `SpawnIn`: dòng lệnh vượt trần 32.766 ký tự của CreateProcess. Câu báo rõ nguyên nhân bị câu
+chung chung của `RunBatchJobs` đè mất — nay mã 7 không phát câu chung chung nữa.
+
+**Ba lỗi chồng nhau, mỗi lỗi chỉ lộ ra khi sửa xong lỗi trước:**
+
+1. **Không chia được batch nào** (log: `Đang render batch 1/1`) -> 1.074 lớp phủ trên MỘT dòng lệnh.
+   - `IntervalIsTimeVarying` tính cả `kfVolumeExpr`. Lồng tiếng tự hạ tiếng gốc bằng keyframe âm lượng trên clip
+     duy nhất -> cả clip "biến thiên" -> cấm cắt bên trong. Keyframe TIẾNG không liên quan tới batch HÌNH
+     (`FilterScriptMode::VideoOnly`; tiếng là một lượt liền) -> bỏ khỏi điều kiện.
+   - Cửa sổ dò mốc cắt (90 s) hết mà chưa có mốc thì `PlanOverlayBatches` **bỏ cuộc cho cả phần còn lại của
+     clip**. GeoCode động dài 236 s nối nhau, khe 4 s: chỉ cắt được ở 240 s. Nay `SkipPastBlockers` nhảy tới sau
+     mép đóng của lớp phủ đang chặn rồi thử lại (tốn theo số lớp phủ chặn, không theo số khung). Kết quả: 14 batch.
+2. **Lượt tiếng chết**: `Error when evaluating the volume expression`. Biểu thức keyframe là chuỗi `if(` nối đuôi
+   — độ sâu = số keyframe (~600), mà `libavutil/eval.c` chỉ cho lồng 100 tầng (lỗi từ ~95 keyframe). Nay
+   `keyframeFieldFfmpegExpr` chọn đoạn bằng cây nhị phân (độ sâu log2 n), giá trị giống hệt (đối chiếu số với
+   `evalKeyframeField`). Áp cho MỌI field keyframe, không chỉ âm lượng.
+3. **Biểu thức bị xén cụt**: `Missing ')'`. `sanitizeFfmpegExpr` (backend) `.slice(0, 8000)` — 600 keyframe là
+   ~70.000 ký tự, xén giữa chừng không bao giờ còn hợp lệ. Nay trần 2.000.000 và quá trần thì BỎ biểu thức (cảnh
+   báo), không xén. Biểu thức đi vào filter script (tệp) nên không đụng trần dòng lệnh.
+
+Test: `tests/scripts/export_long_subtitles.js` ca 6 (keyframe tiếng + khối hoạt ảnh dài nối nhau vẫn chia ≥ 3
+batch), `tests/scripts/auto_sfx_assets.js` (600 keyframe: độ sâu ngoặc < 60, khớp preview).

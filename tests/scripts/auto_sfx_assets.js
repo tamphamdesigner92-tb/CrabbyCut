@@ -258,6 +258,21 @@ const FIRST = () => 0;   // random giả lập: luôn lấy ứng viên đầu (
 
   assert.strictEqual(TA.volumeAt({}, 1), null, 'không có keyframe -> null để caller dùng giá trị tĩnh');
   assert.strictEqual(TA.volumeKeyframeFfmpegExpr({}), null);
+
+  /* NHIỀU keyframe (lồng tiếng tự hạ tiếng gốc: ~600 trên phim 39 phút): FFmpeg chỉ cho lồng 100
+   * tầng biểu thức, nên độ sâu `if(` phải theo log2 n — chuỗi if nối đuôi từng làm chết lượt tiếng. */
+  const many = { volume: Array.from({ length: 600 }, (_, i) => ({ t: i * 0.5 + (i % 2 ? 0.3 : 0), v: i % 2 ? 20 : 100, e: 'ease-in-out' })) };
+  const manyExpr = TA.volumeKeyframeFfmpegExpr(many);
+  let depth = 0;
+  let maxDepth = 0;
+  for (const ch of manyExpr) {
+    if (ch === '(') maxDepth = Math.max(maxDepth, ++depth);
+    else if (ch === ')') depth -= 1;
+  }
+  assert.ok(maxDepth < 60, `600 keyframe lồng ${maxDepth} tầng ngoặc — FFmpeg từ chối quá 100`);
+  let manyErr = 0;
+  for (let t = -1; t < 305; t += 0.37) manyErr = Math.max(manyErr, Math.abs(TA.volumeAt(many, t) / 100 - ffEval(manyExpr, t)));
+  assert.ok(manyErr < 1e-3, `600 keyframe: preview và bản xuất lệch ${manyErr}`);
 }
 
 console.log('[auto-sfx] OK — luật nhóm theo auto_sfx.txt, engine đọc cấu hình, đặt block theo đỉnh sóng, keyframe âm lượng preview≙xuất.');

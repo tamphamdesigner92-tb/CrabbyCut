@@ -5781,8 +5781,16 @@ function normalizeLogoRemovalFields(raw) {
 
 // Biểu thức keyframe -> FFmpeg do frontend sinh (chỉ số/hàm toán). Whitelist ký tự để
 // không thể chèn ký tự phá cú pháp filtergraph (nháy, ; , [ ] : \). null nếu rỗng.
-function sanitizeFfmpegExpr(value, maxLength = 8000) {
-  const out = String(value ?? '').replace(/[^0-9a-zA-Z_.,+\-*/() ]/g, '').trim().slice(0, maxLength);
+/* Quá dài thì BỎ (null), không xén: xén giữa chừng không bao giờ còn là biểu thức hợp lệ. ĐÃ TRẢ GIÁ
+ * (2026-10-23): trần cũ 8.000 xén biểu thức ~600 keyframe âm lượng của lồng tiếng (~70.000 ký tự) ->
+ * "Missing ')'" -> lượt tiếng chết, toast "ffmpeg batch export failed". Biểu thức đi vào filter script
+ * (tệp), không vào dòng lệnh, nên trần mặc định chỉ để chặn dữ liệu vô lý (~10.000 keyframe). */
+function sanitizeFfmpegExpr(value, maxLength = 2000000) {
+  const out = String(value ?? '').replace(/[^0-9a-zA-Z_.,+\-*/() ]/g, '').trim();
+  if (out.length > maxLength) {
+    console.warn(`[export] bỏ biểu thức keyframe dài ${out.length} ký tự (trần ${maxLength})`);
+    return null;
+  }
   return out || null;
 }
 
@@ -5794,11 +5802,11 @@ function sanitizeFfmpegExpr(value, maxLength = 8000) {
  * không phải trả giá cho filter rotate + scale=eval=frame. */
 function normalizeAnimVideoExprFields(av) {
   const out = {};
-  const x = sanitizeFfmpegExpr(av?.x_expr, 4000); if (x) out.anim_x_expr = x;
-  const y = sanitizeFfmpegExpr(av?.y_expr, 4000); if (y) out.anim_y_expr = y;
-  const sx = sanitizeFfmpegExpr(av?.scale_x_expr, 4000); if (sx) out.anim_sx_expr = sx;
-  const sy = sanitizeFfmpegExpr(av?.scale_y_expr, 4000); if (sy) out.anim_sy_expr = sy;
-  const r = sanitizeFfmpegExpr(av?.rot_expr, 4000); if (r) out.anim_rot_expr = r;
+  const x = sanitizeFfmpegExpr(av?.x_expr); if (x) out.anim_x_expr = x;
+  const y = sanitizeFfmpegExpr(av?.y_expr); if (y) out.anim_y_expr = y;
+  const sx = sanitizeFfmpegExpr(av?.scale_x_expr); if (sx) out.anim_sx_expr = sx;
+  const sy = sanitizeFfmpegExpr(av?.scale_y_expr); if (sy) out.anim_sy_expr = sy;
+  const r = sanitizeFfmpegExpr(av?.rot_expr); if (r) out.anim_rot_expr = r;
   // Block có Wiggle vị trí: sidecar dời phần lẻ dưới pixel (SubpixelShiftFilter) — chỉ cờ.
   if (av?.subpixel === true) out.anim_subpixel = true;
   return out;

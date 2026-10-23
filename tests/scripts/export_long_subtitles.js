@@ -228,6 +228,39 @@ function main() {
     assert.ok(Math.abs(Number(animMeta.format.duration) - 300) < 0.15, 'nhánh lùi vẫn phải ra đúng thời lượng');
     console.log('  ok  lớp phủ hoạt ảnh phủ trọn phim: nhận ra và lùi về một lượt, vẫn đúng');
 
+    /* --- 6. KEYFRAME ÂM LƯỢNG + KHỐI HOẠT ẢNH DÀI NỐI NHAU -> VẪN PHẢI CHIA ---
+     * Hình dạng của "Forever Inside" (2026-10-23): lồng tiếng hạ tiếng gốc bằng keyframe âm lượng
+     * trên clip duy nhất, và các khối GeoCode động dài 236 s chỉ chừa khe 4 s. Trước đây keyframe
+     * TIẾNG chặn mọi mốc cắt hình (batch chỉ dựng hình), còn mốc nào rơi giữa khối mà cửa sổ dò 90 s
+     * không chạm khe thì bỏ cuộc cho cả phần còn lại -> một batch, dòng lệnh vượt trần (exit 7). */
+    const kfDir = path.join(TEST_DIR, 'kf-tieng');
+    fs.mkdirSync(kfDir, { recursive: true });
+    const kfProject = buildProject(kfDir, VIDEO_SECONDS, 24);
+    const kfTl = JSON.parse(fs.readFileSync(kfProject.timelineFile, 'utf8'));
+    kfTl.intervals[0].kf_volume_expr = 'if(lt(LOCALT,100),1.0,0.4)';
+    [[20, 236], [260, 236], [500, 96]].forEach(([start, dur], k) => {
+        kfTl.overlays.push({
+            ...kfTl.overlays[0],
+            index: 900 + k,
+            id: `khoi_dong_${k}`,
+            timeline_start: start,
+            duration: dur,
+            anim_x_expr: '20*sin(LOCALT)',
+            anim_y_expr: '0',
+        });
+    });
+    fs.writeFileSync(kfProject.timelineFile, JSON.stringify(kfTl), 'utf8');
+    const kfOut = path.join(kfDir, 'out.mp4');
+    const kr = run(SIDECAR, ['export-video', kfProject.source, kfOut, kfProject.timelineFile,
+        kfDir, 'sequence', String(FPS)], { timeout: 900000 });
+    assert.strictEqual(kr.status, 0, `xuất dự án keyframe tiếng thất bại:\n${kr.stdout}\n${kr.stderr}`);
+    const kfBatches = /Chia (\d+) lượt render theo thời gian/.exec(`${kr.stdout}`);
+    assert.ok(kfBatches && Number(kfBatches[1]) >= 3,
+        `keyframe âm lượng / khối hoạt ảnh dài không được chặn chia batch — đang ${kfBatches ? kfBatches[1] : 1} lượt`);
+    const kfMeta = probe(kfOut, 'format=duration');
+    assert.ok(Math.abs(Number(kfMeta.format.duration) - VIDEO_SECONDS) < 0.15, 'phải ra đúng thời lượng');
+    console.log(`  ok  keyframe âm lượng + khối hoạt ảnh nối nhau: vẫn chia ${kfBatches[1]} lượt`);
+
     fs.rmSync(TEST_DIR, { recursive: true, force: true });
     console.log('export_long_subtitles: PASS');
 }

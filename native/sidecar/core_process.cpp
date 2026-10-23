@@ -4309,9 +4309,13 @@ bool IntervalIsTimeVarying(const ExportInterval& item) {
       || ExtraAdjustLayersTimeVarying(item.extraAdjustLayers)) {
     return true;
   }
+  /* KHÔNG tính `kfVolumeExpr`: batch chỉ dựng HÌNH (FilterScriptMode::VideoOnly), tiếng là MỘT lượt liền
+   * trên intervals gốc chưa cắt. ĐÃ TRẢ GIÁ (2026-10-23, "Forever Inside" 39 phút): lồng tiếng tự hạ âm lượng
+   * gốc bằng keyframe tiếng -> clip duy nhất bị coi là biến thiên, không cắt được batch nào, 1.074 lớp phủ
+   * dồn vào MỘT dòng lệnh vượt trần 32.766 của CreateProcess -> "ffmpeg batch export failed" (exit 7). */
   return HasAnyExpr({&item.animXExpr, &item.animYExpr, &item.animSxExpr, &item.animSyExpr,
                      &item.animRotExpr, &item.kfXExpr, &item.kfYExpr, &item.kfScaleExpr,
-                     &item.kfRotExpr, &item.kfOpacityExpr, &item.kfVolumeExpr,
+                     &item.kfRotExpr, &item.kfOpacityExpr,
                      &item.adjEqContrastExpr, &item.adjEqBrightnessExpr, &item.adjEqSaturationExpr,
                      &item.adjustLutMixExpr, &item.adjLayerEqContrastExpr, &item.adjLayerEqBrightnessExpr,
                      &item.adjLayerEqSaturationExpr, &item.adjustLayerLutMixExpr});
@@ -4499,6 +4503,26 @@ std::vector<OverlayBatch> PlanOverlayBatches(
     }
     return true;
   };
+  /* CỬA SỔ DÒ HẾT MÀ CHƯA CÓ MỐC: nhảy thẳng tới khung đầu tiên SAU mép đóng của những lớp phủ đang
+   * vắt qua, lặp tới khi an toàn — mỗi lần nhảy qua trọn một lớp phủ nên tốn tối đa số lớp phủ chặn, không
+   * phải số khung. Trước đây (2026-10-23) bỏ cuộc luôn cho CẢ PHẦN CÒN LẠI của clip: phim một clip 39 phút
+   * với GeoCode động dài 236 s nối nhau (mép mỗi khối 4 s) chỉ cắt được ở mốc 240 s — mốc kế 360 s rơi giữa
+   * khối, cửa sổ 90 s không chạm khe -> 2.100 s còn lại với ~950 phụ đề là MỘT batch, dòng lệnh vượt trần
+   * 32.766 của CreateProcess, toast "ffmpeg batch export failed" (exit 7). Trả -1 nếu tới `lastFrame` vẫn chặn. */
+  auto SkipPastBlockers = [&](long long frame, long long lastFrame, double itemStart) -> long long {
+    while (frame <= lastFrame) {
+      const double at = itemStart + static_cast<double>(frame) / fps;
+      double clearAt = -1.0;
+      for (const auto* overlay : blocking) {
+        if (!OverlayStraddles(*overlay, at, fps) || SequenceCutFrame(*overlay, at) >= 0) continue;
+        clearAt = std::max(clearAt, overlay->timelineStart + std::max(0.05, overlay->duration));
+      }
+      if (clearAt < 0.0) return frame;
+      const long long next = static_cast<long long>(std::ceil((clearAt - itemStart) * fps - 1e-6));
+      frame = std::max(frame + 1, next);
+    }
+    return -1;
+  };
   auto closeBatch = [&](double at) {
     current.sequenceStart = batchStart;
     current.sequenceDuration = at - batchStart;
@@ -4529,6 +4553,7 @@ std::vector<OverlayBatch> PlanOverlayBatches(
       for (long long f = std::max<long long>(1, frame); f <= limit; f += 1) {
         if (safeToCutAt(itemStart + static_cast<double>(f) / fps)) { chosen = f; break; }
       }
+      if (chosen < 0) chosen = SkipPastBlockers(limit + 1, item.renderFrames - 1, itemStart);
       if (chosen < 0) break;                            // không còn chỗ an toàn trong clip này
       ExportInterval tail = SplitIntervalAtFrame(item, chosen, fps);
       current.intervals.push_back(item);
@@ -7247,7 +7272,8 @@ int RunExportJobs(std::vector<BatchJob>& jobs, EncoderPlan& plan, size_t concurr
     g_exportTiming.runs.push_back(jobs[i].timing);
   }
   if (failure != 0) {
-    Emit("error", "ffmpeg batch export failed", failure);
+    // 7 = dòng lệnh vượt trần, SpawnIn đã báo rõ nguyên nhân — câu chung chung ở đây sẽ đè mất câu đó.
+    if (failure != 7) Emit("error", "ffmpeg batch export failed", failure);
     return failure;
   }
   if (g_exportBenchDir.empty()) {

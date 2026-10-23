@@ -788,18 +788,26 @@
             .map((k) => ({ t: Number(k.t) || 0, v: Number(k.v) || 0, e: EASING_VALUES.has(k.e) ? k.e : 'ease-in-out' }))
             .sort((a, b) => a.t - b.t);
         if (arr.length === 1) return `(${kfNum(arr[0].v)})`;
-        // Giữ mép: sau kf cuối = v cuối. Dựng if lồng từ đoạn CUỐI về ĐẦU; đoạn đầu tiên
+        // Đoạn i = nội suy giữa kf i và i+1; đoạn n-1 = giữ mép (sau kf cuối = v cuối). Đoạn đầu
         // (LOCALT < t[1]) đã bao trường hợp trước kf đầu vì progress bị clip(…,0,1)=0 -> v[0].
-        let expr = `(${kfNum(arr[arr.length - 1].v)})`;
-        for (let i = arr.length - 2; i >= 0; i -= 1) {
+        const segment = (i) => {
+            if (i === arr.length - 1) return `(${kfNum(arr[i].v)})`;
             const a = arr[i];
             const b = arr[i + 1];
             const dt = Math.max(1e-6, b.t - a.t);
             const p = `clip((LOCALT-${kfNum(a.t)})/${kfNum(dt)},0,1)`;
-            const seg = `(${kfNum(a.v)}+(${kfNum(b.v - a.v)})*(${ffEase(a.e, p)}))`;
-            expr = `if(lt(LOCALT,${kfNum(b.t)}),${seg},${expr})`;
-        }
-        return expr;
+            return `(${kfNum(a.v)}+(${kfNum(b.v - a.v)})*(${ffEase(a.e, p)}))`;
+        };
+        /* Chọn đoạn bằng if lồng kiểu CÂY NHỊ PHÂN (độ sâu log2 n), không phải chuỗi if nối đuôi (độ
+         * sâu n): bộ phân tích biểu thức của FFmpeg (libavutil/eval.c) chỉ cho lồng 100 tầng. ĐÃ TRẢ
+         * GIÁ (2026-10-23, "Forever Inside"): lồng tiếng tự hạ tiếng gốc = ~600 keyframe âm lượng ->
+         * "Error when evaluating the volume expression", lượt tiếng của bản xuất chết. */
+        const build = (lo, hi) => {
+            if (lo === hi) return segment(lo);
+            const mid = (lo + hi) >> 1;
+            return `if(lt(LOCALT,${kfNum(arr[mid + 1].t)}),${build(lo, mid)},${build(mid + 1, hi)})`;
+        };
+        return build(0, arr.length - 1);
     }
 
     // Trả object {x_expr,y_expr,scale_expr,rot_expr,opacity_expr} cho các field CÓ keyframe,
