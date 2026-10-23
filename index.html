@@ -4114,9 +4114,11 @@
         </div>
         <div class="transcribe-options-grid">
             <!-- Ô "Bitrate" kiểu CapCut (mục 1.20 của docs/KE_HOACH_TOI_UU_EXPORT_WIN.md, người dùng chốt
-                 2026-10-01) thay ô "Chất lượng" cũ. Ba mức đầu là CHẤT LƯỢNG CỐ ĐỊNH có trần: tệp tự
-                 nhỏ khi nguồn dễ nén, không bao giờ to hơn bitrate cố định cũ của cùng mức. "Tùy chỉnh"
-                 = bitrate trung bình (Mbps). ProRes không dùng bitrate -> ô bị khoá (syncExportBitrateUi). -->
+                 2026-10-01) thay ô "Chất lượng" cũ. Từ 2026-10-23 (port CrabbyStudio) ba mức đầu theo bitrate
+                 video GỐC trên lane chính (trung bình các video, quy đổi theo tỉ lệ điểm ảnh khung xuất / khung
+                 nguồn): Khuyến nghị = bằng nguồn, Thấp hơn ×0,75, Cao hơn ×2; lane chính không có video thì như
+                 cũ (chất lượng cố định có trần). "Tùy chỉnh" = bitrate trung bình (Mbps), gợi ý sẵn bằng bitrate
+                 nguồn. ProRes không dùng bitrate -> ô bị khoá (syncExportBitrateUi). -->
             <div class="form-group">
                 <label for="exportBitrate">Bitrate</label>
                 <select id="exportBitrate">
@@ -16845,6 +16847,8 @@
         const exportFps = document.getElementById('exportFps')?.value || 'source';
         const exportCodec = document.getElementById('exportCodec')?.value || 'h264';
         const exportRate = readExportBitrate();
+        // Ba mức đầu tính theo bitrate video gốc trên lane chính (backend nhân ×0,75 / ×1 / ×2).
+        const exportSourceMbps = exportRate.mode !== 'custom' ? await mainLaneSourceBitrateMbps() : null;
         const exportAudioBitrate = document.getElementById('exportAudioBitrate')?.value || '192k';
         const exportSettings = {
             resolution: 'sequence',
@@ -16854,6 +16858,7 @@
             codec: exportCodec,
             rate_mode: exportRate.mode,
             ...(exportRate.mode === 'custom' ? { rate_mbps: exportRate.mbps } : {}),
+            ...(exportSourceMbps ? { source_mbps: exportSourceMbps } : {}),
             audio_bitrate: exportAudioBitrate,
             export_video: exportKind.video,
             export_audio: exportKind.audio,
@@ -17056,7 +17061,8 @@
         vertical_720: [720, 1280], vertical_1080: [1080, 1920], vertical_1440: [1440, 2560],
         vertical_2160: [2160, 3840], square_1080: [1080, 1080],
     };
-    // Số điền sẵn cho "Tùy chỉnh": trần của mức Khuyến nghị (13 Mbps cho H.264 1080p, 11 cho H.265).
+    // Số điền tạm cho "Tùy chỉnh" (lane chính không có video đo được thì giữ luôn): trần cũ của mức
+    // Khuyến nghị (13 Mbps cho H.264 1080p, 11 cho H.265).
     function recommendedExportMbps() {
         const preset = document.getElementById('exportResolution')?.value || 'source';
         let seq = { width: 1920, height: 1080 };
@@ -17065,6 +17071,30 @@
         const base = (document.getElementById('exportCodec')?.value === 'hevc') ? 11 : 13;
         const mbps = base * (w * h) / (1920 * 1080);
         return Math.min(80, Math.max(2.5, Math.round(mbps * 2) / 2));
+    }
+    /* Bitrate video TRUNG BÌNH của các nguồn trên lane chính (Mbps), hoặc null khi lane chính không có
+     * video đo được. Khuyến nghị = số này, Thấp hơn ×0,75, Cao hơn ×2 (backend nhân), và là số gợi ý
+     * của "Tùy chỉnh". Bitrate từng nguồn quy đổi theo tỉ lệ điểm ảnh khung XUẤT / khung nguồn (khung
+     * xuất = preset của "Kích thước video", hoặc cỡ sequence khi "Theo Sequence"). */
+    async function mainLaneSourceBitrateMbps() {
+        const paths = (window.getMainLaneSourcePaths?.() || []).filter(Boolean);
+        if (!paths.length) return null;
+        const preset = document.getElementById('exportResolution')?.value || 'source';
+        let seq = null;
+        try { seq = getSequencePayload(); } catch (_) { /* chưa có sequence: không quy đổi */ }
+        const [width, height] = EXPORT_PRESET_FRAMES[preset] || [seq?.width, seq?.height];
+        try {
+            const resp = await fetch(`${API_BASE}/media-bitrate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ paths, width, height }),
+            });
+            if (!resp.ok) return null;
+            const mbps = Number((await resp.json()).average_mbps);
+            return Number.isFinite(mbps) && mbps > 0 ? mbps : null;
+        } catch (_) {
+            return null;
+        }
     }
     let exportBitrateMbpsTouched = false;
     function syncExportBitrateUi() {
@@ -17089,7 +17119,18 @@
         if (gifBox) gifBox.hidden = !gif;
         const custom = select.value === 'custom';
         row.hidden = !custom;
-        if (custom && !exportBitrateMbpsTouched) input.value = String(recommendedExportMbps());
+        if (custom && !exportBitrateMbpsTouched) {
+            // Điền ngay số cũ (theo cỡ khung), rồi thay bằng bitrate trung bình của nguồn khi đo xong —
+            // chỉ khi ô vẫn giữ đúng số vừa điền (người dùng / automation chưa gõ số khác).
+            const placeholder = String(recommendedExportMbps());
+            input.value = placeholder;
+            mainLaneSourceBitrateMbps().then((mbps) => {
+                const clamped = mbps ? Math.min(400, Math.max(0.5, mbps)) : null;
+                if (clamped && select.value === 'custom' && !exportBitrateMbpsTouched && input.value === placeholder) {
+                    input.value = String(clamped);
+                }
+            });
+        }
     }
     function readExportBitrate() {
         const mode = document.getElementById('exportBitrate')?.value || 'recommended';

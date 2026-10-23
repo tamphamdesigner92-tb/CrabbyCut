@@ -1017,6 +1017,47 @@ function mediaHasAudio(filePath) {
   return !!String(text || '').trim();
 }
 
+/* BITRATE LUỒNG HÌNH của một tệp, kbps, kèm số điểm ảnh của khung (ô "Bitrate" của hộp Xuất — port
+ * CrabbyStudio eba80b0: Khuyến nghị = trung bình bitrate video gốc trên lane chính, quy đổi theo tỉ lệ
+ * điểm ảnh khi xuất khác cỡ nguồn). Lấy `bit_rate` của luồng hình; MKV/WebM thường không khai số đó ->
+ * lấy bitrate container trừ các luồng tiếng, cuối cùng là cỡ tệp / thời lượng.
+ * Đệm theo đường dẫn + mtime + cỡ: mỗi lần mở hộp Xuất / bấm Xuất đều hỏi lại. */
+const mediaVideoBitrateCache = new Map();
+function mediaVideoBitrateInfo(filePath) {
+  let stat;
+  try { stat = fs.statSync(filePath); } catch (_) { return null; }
+  const cacheKey = `${filePath}|${stat.mtimeMs}|${stat.size}`;
+  if (mediaVideoBitrateCache.has(cacheKey)) return mediaVideoBitrateCache.get(cacheKey);
+  const text = commandText('ffprobe', [
+    '-v', 'error',
+    '-show_entries', 'stream=codec_type,bit_rate,width,height:format=bit_rate,duration',
+    '-of', 'json',
+    filePath,
+  ], 5000);
+  let info = null;
+  try {
+    const payload = JSON.parse(text || '{}');
+    const streams = Array.isArray(payload.streams) ? payload.streams : [];
+    const video = streams.find((stream) => stream.codec_type === 'video');
+    if (video) {
+      const streamRate = Number(video.bit_rate);
+      const formatRate = Number(payload.format?.bit_rate);
+      const duration = Number(payload.format?.duration);
+      const audioRate = streams
+        .filter((stream) => stream.codec_type === 'audio')
+        .reduce((sum, stream) => sum + (Number(stream.bit_rate) || 0), 0);
+      let bps = null;
+      if (Number.isFinite(streamRate) && streamRate > 0) bps = streamRate;
+      else if (Number.isFinite(formatRate) && formatRate > audioRate) bps = formatRate - audioRate;
+      else if (Number.isFinite(duration) && duration > 0) bps = (stat.size * 8) / duration - audioRate;
+      const pixels = Number(video.width) * Number(video.height);
+      if (bps > 0) info = { kbps: Math.round(bps / 1000), pixels: pixels > 0 ? pixels : null };
+    }
+  } catch (_) { /* không đo được -> null */ }
+  mediaVideoBitrateCache.set(cacheKey, info);
+  return info;
+}
+
 function publicTempUrl(filePath) {
   const rel = path.relative(TEMP_DIR, filePath).split(path.sep).map(encodeURIComponent).join('/');
   return `/temp_uploads/${rel}`;
@@ -1549,7 +1590,7 @@ async function writeProjectReport(reason) {
   lines.push(reportLine(2, 'codec', render?.codec));
   lines.push(reportLine(2, 'quality', render?.quality));
   lines.push(reportLine(2, 'bitrate', render?.rate_mode
-    ? (render.rate_mode === 'custom' ? `custom ${render.rate_mbps} Mbps` : render.rate_mode) : null));
+    ? (render.rate_mbps ? `${render.rate_mode} ${render.rate_mbps} Mbps` : render.rate_mode) : null));
   lines.push(reportLine(2, 'encoder', render?.encoder));
   lines.push(reportLine(2, 'audio_bitrate', render?.audio_bitrate));
   lines.push(reportLine(2, 'interval_count', render?.interval_count));
@@ -5063,6 +5104,10 @@ const EXPORT_RATE_MBPS_MIN = 0.5;
 const EXPORT_RATE_MBPS_MAX = 400;
 // Payload/khách cũ chỉ gửi `quality`: Cao -> Khuyến nghị, Cân bằng / Tệp nhỏ -> Thấp hơn.
 const RATE_MODE_FROM_QUALITY = { high: 'recommended', balanced: 'lower', small: 'lower' };
+/* Ba mức theo bitrate video GỐC (port CrabbyStudio eba80b0): hộp Xuất gửi `source_mbps` = trung bình
+ * bitrate các video trên lane chính; Khuyến nghị = đúng số đó, Thấp hơn ×0,75, Cao hơn ×2. Không có
+ * `source_mbps` (lane chính không có video, khách cũ) thì sidecar tính như trước theo cỡ khung. */
+const RATE_FACTOR_FROM_SOURCE = { lower: 0.75, recommended: 1, higher: 2 };
 // Chiều ngược lại cho `quality` (preset CPU, báo cáo): Thấp hơn là Cân bằng cũ.
 const QUALITY_FROM_RATE_MODE = { lower: 'balanced', recommended: 'high', higher: 'high', custom: 'high' };
 const EXPORT_AUDIO_VALUES = new Set(['128k', '192k', '320k']);
@@ -5119,6 +5164,12 @@ function normalizeExportSettings(body = {}) {
   // "Tùy chỉnh" mà số không hợp lệ -> Khuyến nghị (sidecar cũng tự lùi như vậy).
   if (rateMode === 'custom' && rateMbps === null) rateMode = 'recommended';
   if (EXPORT_RATE_MODES.has(String(raw.rate_mode || ''))) quality = QUALITY_FROM_RATE_MODE[rateMode];
+  const sourceMbps = Number(raw.source_mbps);
+  // GIF/ProRes không dùng bitrate -> không mang số (báo cáo khỏi ghi một con số không dùng tới).
+  const rateFromSource = (codec === 'h264' || codec === 'hevc')
+    && RATE_FACTOR_FROM_SOURCE[rateMode] && Number.isFinite(sourceMbps) && sourceMbps > 0
+    ? Math.round(Math.min(EXPORT_RATE_MBPS_MAX, Math.max(EXPORT_RATE_MBPS_MIN, sourceMbps * RATE_FACTOR_FROM_SOURCE[rateMode])) * 100) / 100
+    : null;
   const audioBitrate = EXPORT_AUDIO_VALUES.has(String(raw.audio_bitrate || '192k')) ? String(raw.audio_bitrate || '192k') : '192k';
   /* Hai ô Video / Audio (kiểu CapCut). Video mặc định bật — khách cũ không gửi gì thì xuất như
    * trước. Audio bật = thêm một tệp âm thanh riêng (cạnh video, hoặc là tệp duy nhất khi tắt Video).
@@ -5151,6 +5202,7 @@ function normalizeExportSettings(body = {}) {
     quality,
     rate_mode: rateMode,
     ...(rateMode === 'custom' ? { rate_mbps: rateMbps } : {}),
+    ...(rateFromSource ? { rate_mbps: rateFromSource, source_mbps: Math.round(sourceMbps * 100) / 100 } : {}),
     audio_bitrate: audioBitrate,
     ...(codec === 'gif' ? { gif: normalizeGifSettings(raw.gif && typeof raw.gif === 'object' ? raw.gif : {}) } : {}),
   };
@@ -6911,6 +6963,35 @@ function createApp() {
         };
       });
       res.json({ status: 'success', videos });
+    } catch (error) {
+      httpError(res, 500, error);
+    }
+  });
+
+  /* Bitrate video TRUNG BÌNH của các nguồn trên lane chính (ô "Bitrate" của hộp Xuất): trung bình
+   * cộng theo từng video, bỏ qua ảnh/âm thanh và tệp không đo được. Không có video nào -> null
+   * (hộp Xuất lùi về cách tính cũ theo cỡ khung). Có `width`/`height` (khung XUẤT) thì bitrate từng
+   * video nhân theo tỉ lệ điểm ảnh khung xuất / khung nguồn trước khi lấy trung bình. */
+  app.post('/api/media-bitrate', (req, res) => {
+    try {
+      const paths = Array.isArray(req.body?.paths) ? req.body.paths : [];
+      const targetPixels = Math.round(Number(req.body?.width)) * Math.round(Number(req.body?.height));
+      const unique = [...new Set(paths.map((item) => path.resolve(String(item || ''))))];
+      const rates = [];
+      for (const filePath of unique) {
+        if (!isSourceAccessAllowed(filePath) || !isSupportedEditingAssetFile(filePath)) continue;
+        if (editingAssetKindForPath(filePath) !== 'media_video') continue;
+        const info = mediaVideoBitrateInfo(filePath);
+        if (!(info?.kbps > 0)) continue;
+        const scale = targetPixels > 0 && info.pixels > 0 ? targetPixels / info.pixels : 1;
+        rates.push(info.kbps * scale);
+      }
+      const averageKbps = rates.length ? rates.reduce((sum, value) => sum + value, 0) / rates.length : null;
+      res.json({
+        status: 'success',
+        count: rates.length,
+        average_mbps: averageKbps ? Math.round(averageKbps / 10) / 100 : null,
+      });
     } catch (error) {
       httpError(res, 500, error);
     }

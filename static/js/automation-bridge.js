@@ -1791,7 +1791,10 @@
         setSelect('exportBitrate', options.bitrate);
         if (options.bitrate_mbps !== undefined) {
             setSelect('exportBitrate', 'custom');
-            document.getElementById('exportBitrateMbps').value = String(options.bitrate_mbps);
+            const mbpsInput = document.getElementById('exportBitrateMbps');
+            mbpsInput.value = String(options.bitrate_mbps);
+            // Như người dùng gõ: đánh dấu "đã chạm" để số gợi ý (bitrate nguồn, đo bất đồng bộ) không đè lên.
+            mbpsInput.dispatchEvent(new Event('input', { bubbles: true }));
         }
         setSelect('exportAudioBitrate', options.audio_bitrate);
         setSelect('exportAudioFormat', options.audio_format);

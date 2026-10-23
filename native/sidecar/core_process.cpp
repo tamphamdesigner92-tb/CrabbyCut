@@ -1749,8 +1749,11 @@ std::string RateModeFromQuality(const std::string& quality) {
   return "recommended";
 }
 
-bool RateIsCustom(const ExportSettings& settings) {
-  return settings.rateMode == "custom" && settings.rateMbps >= kRateMbpsMin && settings.rateMbps <= kRateMbpsMax;
+/* Có con số Mbps cụ thể: "Tùy chỉnh", hoặc ba mức khi backend đã tính từ bitrate video gốc trên
+ * lane chính (Khuyến nghị = trung bình nguồn, Thấp hơn ×0,75, Cao hơn ×2 — port CrabbyStudio eba80b0).
+ * Không có số (không đo được nguồn, GIF) thì ba mức giữ CQ/CRF + trần như cũ. */
+bool RateHasMbps(const ExportSettings& settings) {
+  return settings.rateMbps >= kRateMbpsMin && settings.rateMbps <= kRateMbpsMax;
 }
 
 /* Mức chất lượng cố định của từng mức. NVENC `-cq` (đo VMAF trên 4.320 khung 4K, mục 1.20:
@@ -1772,7 +1775,7 @@ std::string RateCpuCrf(const ExportSettings& settings) {
  * "Cao hơn" gấp đôi Cao), hoặc bitrate TRUNG BÌNH người dùng nhập ở "Tùy chỉnh" (không nhân theo cỡ
  * khung — người dùng đã chọn con số). Các mức theo khung THẬT SỰ được mã hoá (cỡ xuất ở mục 1.12). */
 int RateKbps(const ExportSettings& settings) {
-  if (RateIsCustom(settings)) {
+  if (RateHasMbps(settings)) {
     return static_cast<int>(std::round(settings.rateMbps * 1000.0));
   }
   const int width = OutputResized(settings) ? settings.outputWidth : (settings.width > 0 ? settings.width : 1920);
@@ -5538,8 +5541,8 @@ void AppendCpuEncoderArgs(std::vector<std::string>& cmd, const ExportSettings& s
   if (settings.codec != "hevc" && !X264AsmCap().empty()) {
     cmd.insert(cmd.end(), {"-x264-params", "asm=" + X264AsmCap()});
   }
-  if (RateIsCustom(settings)) {
-    // "Tùy chỉnh": bitrate trung bình người dùng nhập, đỉnh ×1,5 (bộ đệm 2 giây của đỉnh).
+  if (RateHasMbps(settings)) {
+    // Có số Mbps ("Tùy chỉnh" hoặc mức theo nguồn): bitrate trung bình, đỉnh ×1,5 (bộ đệm 2 giây của đỉnh).
     const long long kbps = RateKbps(settings);
     cmd.insert(cmd.end(), {"-b:v", KbpsArg(kbps), "-maxrate", KbpsArg(kbps * 3 / 2), "-bufsize", KbpsArg(kbps * 3)});
   } else {
@@ -5575,7 +5578,7 @@ void AppendHardwareEncoderArgs(std::vector<std::string>& cmd, const ExportSettin
      * hẳn. Đo (mục 1.20): tốc độ như nhau ở mọi mức; phim AV1 4K 39,1 -> 27,7 Mbps ở cq 19. */
     const long long kbps = RateKbps(settings);
     cmd.insert(cmd.end(), {"-c:v", plan.videoEncoder, "-preset", "fast", "-rc", "vbr"});
-    if (RateIsCustom(settings)) {
+    if (RateHasMbps(settings)) {
       cmd.insert(cmd.end(), {"-b:v", KbpsArg(kbps), "-maxrate", KbpsArg(kbps * 3 / 2), "-bufsize", KbpsArg(kbps * 3)});
     } else {
       cmd.insert(cmd.end(), {"-cq", std::to_string(RateHardwareCq(settings)), "-b:v", "0",
