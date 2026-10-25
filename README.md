@@ -9,6 +9,8 @@ trình dựng phim bình thường: lane phủ, chữ, hiệu ứng chuyển, ch
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3%20or%20later-blue.svg)](LICENSE)
 
+[English](README.en.md)
+
 > **Trạng thái:** đang phát triển. **Bộ cài đóng gói chỉ có cho Windows x64.** Chạy từ mã
 > nguồn thì cả Windows lẫn **macOS** đều được — đường macOS bóc băng bằng `mlx_whisper`
 > (Apple Silicon) thay cho `faster-whisper`, xem [Chạy từ mã nguồn](#chạy-từ-mã-nguồn).
