@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest a new feature or an improvement
+labels: ["feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        English or Vietnamese is fine (Tiếng Việt cũng được).
+        Not sure yet? Start a thread in [Discussions › Ideas](https://github.com/tamphamdesigner92-tb/CrabbyCut/discussions) first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The problem or workflow, not the solution yet.
+      placeholder: "When I edit a talking-head video, I have to ..."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like CrabbyCut to do?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: How do you work around it today?

@@ -1,0 +1,20 @@
+name: Question
+description: Ask how to do something in CrabbyCut
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Tip: [Discussions › Q&A](https://github.com/tamphamdesigner92-tb/CrabbyCut/discussions) is the best place for questions, so other users can find the answer too.
+        English or Vietnamese is fine (Tiếng Việt cũng được).
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: CrabbyCut version and OS
+      placeholder: "e.g. 1.1.17 on Windows 11"
