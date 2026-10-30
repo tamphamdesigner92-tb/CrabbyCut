@@ -1,4 +1,4 @@
-// Xuất ảnh social preview và banner từ docs/brand/brand-assets.html ra PNG.
+// Xuất ảnh social preview, banner và ảnh đại diện từ docs/brand/brand-assets.html ra PNG.
 // Chạy: node docs/brand/render.js  (cần Playwright + Chromium)
 const path = require('path');
 const { chromium } = require('playwright');
@@ -9,6 +9,8 @@ const ASSETS = [
   { id: 'preview', file: 'social-preview-1280x640.png', w: 1280, h: 640 },
   { id: 'banner', file: 'banner-1500x500.png', w: 1500, h: 500 },
   { id: 'youtube', file: 'banner-youtube-2560x1440.png', w: 2560, h: 1440 },
+  { id: 'avatar', file: 'avatar-1024.png', w: 1024, h: 1024 },
+  { id: 'avatar-dark', file: 'avatar-dark-1024.png', w: 1024, h: 1024 },
 ];
 
 (async () => {
