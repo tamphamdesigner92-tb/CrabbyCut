@@ -58,9 +58,14 @@ Xem `docs/QUY_UOC_DAT_TEN_TAI_NGUYEN.md` để biết đầy đủ.
 Nếu bạn muốn đóng góp tài nguyên mẫu vào repo công khai, chỉ dùng thứ **bạn tự tạo** hoặc
 thứ có giấy phép cho phép phân phối lại — ví dụ CC0 / Public Domain:
 
-- [Pixabay](https://pixabay.com) — nhạc, video, hình ảnh
 - [Freesound](https://freesound.org) — hiệu ứng âm thanh (lọc theo CC0)
-- [Openverse](https://openverse.org) — hình ảnh
+- [Free Music Archive](https://freemusicarchive.org), [OpenGameArt](https://opengameart.org) — nhạc (lọc theo CC0)
+- [Openverse](https://openverse.org) — hình ảnh (lọc theo CC0 / Public Domain)
+- [Tabler Icons](https://tabler.io/icons) — icon (MIT, kèm văn bản giấy phép)
+
+Pixabay, Pexels, Mixkit **không** phải CC0: chúng có giấy phép riêng, hạn chế phân phối lại tệp gốc,
+nên không dùng cho tài nguyên đưa vào repo hay gói tải. Bộ tài nguyên khởi đầu: xem
+[`docs/starter-pack/`](../docs/starter-pack/README.md).
 
 Kèm theo tài nguyên phải có một tệp ghi rõ **nguồn và giấy phép** của từng tệp. Tài nguyên
 không rõ nguồn gốc sẽ không được nhận.

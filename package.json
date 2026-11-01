@@ -44,6 +44,7 @@
     "test:asr-strict": "node tests/scripts/asr_strict_engine.js",
     "test:asr-report": "node tests/scripts/asr_report_smoke.js",
     "test:script-markdown": "node tests/scripts/script_markdown_parser.js",
+    "test:starter-pack": "node docs/starter-pack/check_starter_pack.js",
     "test:magic-fill-assets": "node tests/scripts/magic_fill_assets.js",
     "test:app-settings": "node tests/scripts/app_settings.js",
     "test:i18n": "node tests/scripts/i18n.js",
