@@ -1,0 +1,63 @@
+<!-- S-04 · Chữ chuyển động "Create anything. Pay nothing." — GeoCode HTML/CSS/JS
+     Khung 1080×1920, video 13 s, 30 fps; đặt ở giây 2 → 15 (sau thẻ câu lệnh). Nền trong suốt:
+     nền tối của short là một Shape rectangle 1080×1920 #23262f ở track dưới (hoặc Nền › Màu).
+     Mọi chuyển động tính từ t qua geocode.onFrame. Phông Bricolage Grotesque qua https (Google Fonts).
+     Nhịp: 0–4 s "Create" + "anything." từng chữ cái bật lên · 4–8 s "Pay nothing." trượt vào, gạch dưới đỏ
+     · 8–13 s hai dòng thu lại, chữ CrabbyCut + "free & open source" hiện ra. -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@700;800&family=Inter:wght@500;600&display=block">
+<style>
+  .stage { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:28px;
+           font-family:'Bricolage Grotesque', Inter, Arial, sans-serif; color:#fff; }
+  .line { font-size:150px; font-weight:800; line-height:1; letter-spacing:-3px; white-space:nowrap; }
+  .line span { display:inline-block; will-change:transform; }
+  .accent { color:#ffb020; }
+  .red { position:relative; }
+  .bar { position:absolute; left:0; bottom:-18px; height:16px; background:#d0142c; border-radius:8px; }
+  .brand { position:absolute; left:0; right:0; bottom:520px; text-align:center; color:#fff; font-family:'Bricolage Grotesque', Inter, Arial, sans-serif; }
+  .brand .name { font-size:110px; font-weight:800; letter-spacing:-2px; }
+  .brand .name b { color:#d0142c; }
+  .brand .sub { margin-top:18px; font:600 44px Inter, Arial, sans-serif; color:#d7dde5; }
+</style>
+<div class="stage" id="stage">
+  <div class="line" id="l1"></div>
+  <div class="line" id="l2"></div>
+  <div class="line red" id="l3"></div>
+</div>
+<div class="brand" id="brand"><div class="name"><b>Crabby</b>Cut</div><div class="sub">free &amp; open source video editor</div></div>
+<script>
+  const LINES = [['Create', ''], ['anything.', 'accent'], ['Pay nothing.', '']];
+  const clamp = (v) => Math.max(0, Math.min(1, v));
+  const back = (k) => { const c = 1.70158; k = clamp(k) - 1; return 1 + (c + 1) * k * k * k + c * k * k; };
+  const easeOut = (k) => 1 - Math.pow(1 - clamp(k), 3);
+
+  const spans = LINES.map(([txt, cls], i) => {
+    const el = document.getElementById('l' + (i + 1));
+    if (cls) el.classList.add(cls);
+    return [...txt].map((ch) => { const s = document.createElement('span'); s.textContent = ch === ' ' ? ' ' : ch; el.appendChild(s); return s; });
+  });
+  const bar = document.createElement('div'); bar.className = 'bar'; document.getElementById('l3').appendChild(bar);
+  const brand = document.getElementById('brand'), stage = document.getElementById('stage');
+
+  function frame(t) {
+    // dòng 1 và 2: mỗi chữ cái bật lên lệch 0,06 s
+    [[0, 0.3], [1, 1.4]].forEach(([li, t0]) => spans[li].forEach((s, j) => {
+      const k = back((t - t0 - j * 0.06) / 0.5);
+      s.style.transform = `translateY(${((1 - k) * 160).toFixed(1)}px) scale(${(0.6 + 0.4 * k).toFixed(3)})`;
+      s.style.opacity = clamp((t - t0 - j * 0.06) / 0.2).toFixed(3);
+    }));
+    // dòng 3: cả cụm trượt từ phải vào, gạch dưới chạy từ trái sang
+    const k3 = easeOut((t - 4.2) / 0.8);
+    spans[2].forEach((s) => { s.style.transform = `translateX(${((1 - k3) * 900).toFixed(1)}px)`; s.style.opacity = clamp((t - 4.2) / 0.3).toFixed(3); });
+    bar.style.width = (100 * easeOut((t - 5.2) / 0.7)).toFixed(1) + '%';
+    // nhịp nhẹ ở 6–8 s
+    const pulse = t > 6 && t < 8 ? 1 + 0.03 * Math.sin(2 * Math.PI * (t - 6)) : 1;
+    // 8–9 s: cả khối thu nhỏ, đẩy lên; thương hiệu hiện
+    const k4 = easeOut((t - 8) / 1);
+    stage.style.transform = `translateY(${(-260 * k4).toFixed(1)}px) scale(${((1 - 0.35 * k4) * pulse).toFixed(3)})`;
+    const k5 = back((t - 8.6) / 0.7);
+    brand.style.opacity = clamp((t - 8.6) / 0.3).toFixed(3);
+    brand.style.transform = `translateY(${((1 - k5) * 80).toFixed(1)}px)`;
+  }
+  frame(0);
+  if (window.geocode) geocode.onFrame((t) => frame(t));
+</script>

@@ -1,0 +1,37 @@
+<!-- Thẻ câu lệnh (2 s đầu) và thẻ cuối (2 s cuối) dùng chung cho mọi short — GeoCode HTML, template.
+     Gửi MỘT lần qua crabbycut_add_geocode: template = tệp này, items[] chỉ khác vars.
+       Thẻ câu lệnh: vars { mode: "prompt", label: "Câu lệnh cho Claude", text_json: "\"<câu lệnh nguyên văn>\"" }
+       Thẻ cuối:     vars { mode: "end",    label: "Made by Claude in CrabbyCut", text_json: "\"MCP + GeoCode · free & open source\"" }
+       text_json là chuỗi JSON CÓ dấu ngoặc kép (JSON.stringify của câu), để câu có dấu nháy hay xuống dòng không làm vỡ mã.
+       Bản tiếng Trung: label "由 AI 助手在 CrabbyCut 中制作" (không ghi tên Claude).
+     Khung 1080×1920, video 2 s, 30 fps, nền trong suốt (đặt trên cùng). Chữ gõ dần theo t (hiệu ứng máy gõ),
+     nên ảnh tại t = 0 của thẻ cuối vẫn đủ chữ (mode "end" không gõ dần). -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@500;700&family=JetBrains+Mono:wght@500&display=block">
+<style>
+  .wrap { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(14,15,22,0.86); }
+  .card { width:900px; padding:56px 60px; border-radius:40px; background:#23262f; border:3px solid #3a3f4c;
+          box-shadow:0 30px 80px rgba(0,0,0,0.45); color:#fff; font-family:Inter, Arial, sans-serif; }
+  .label { font-size:40px; font-weight:700; color:#ffb020; margin-bottom:28px; display:flex; align-items:center; gap:18px; }
+  .dot { width:22px; height:22px; border-radius:50%; background:#d0142c; }
+  .text { font:500 46px/1.4 'JetBrains Mono', Consolas, monospace; color:#e7e9ee; white-space:pre-wrap; min-height:130px; }
+  .caret { display:inline-block; width:22px; height:52px; background:#ffb020; vertical-align:-8px; margin-left:4px; }
+  .end .text { font-family:Inter, Arial, sans-serif; font-weight:700; font-size:52px; color:#fff; }
+  .end .card { text-align:center; } .end .label { justify-content:center; font-size:46px; }
+</style>
+<div class="wrap {{mode}}" id="wrap">
+  <div class="card"><div class="label"><span class="dot"></span><span>{{label}}</span></div>
+    <div class="text"><span id="typed"></span><span class="caret" id="caret"></span></div></div>
+</div>
+<script>
+  const MODE = '{{mode}}';
+  const FULL = {{text_json}};
+  const typed = document.getElementById('typed'), caret = document.getElementById('caret');
+  function frame(t) {
+    if (MODE === 'end') { typed.textContent = FULL; caret.style.display = 'none'; return; }
+    const n = Math.round(Math.min(1, t / 1.4) * FULL.length);   // gõ xong ở giây 1,4
+    typed.textContent = FULL.slice(0, n);
+    caret.style.opacity = (Math.floor(t * 3) % 2 === 0) ? '1' : '0';
+  }
+  frame(MODE === 'end' ? 0 : 1.5);   // ảnh tĩnh t = 0 vẫn đủ chữ
+  if (window.geocode) geocode.onFrame((t) => frame(t));
+</script>
