@@ -28,6 +28,7 @@
 <script>
   const BODY_COLOR = '#d0142c';   // đỏ thương hiệu CrabbyCut
   const CLAW_WAVE = 0;            // 0 = càng đứng yên; 1 = vẫy càng  ← S-07 lần 2: "cho cua vẫy càng"
+  const CLAW_ANGLE = 30;          // biên độ vẫy (độ); buổi dựng 7/11 tăng từ 14 vì 14° khó thấy
   const STEP = 1;                 // giây cho một nhịp bước (2 s / 1 s = 2 nhịp, lặp mượt)
 
   const ns = 'http://www.w3.org/2000/svg';
@@ -55,7 +56,7 @@
     }
     const bob = 6 * Math.sin(2 * ph);
     document.getElementById('crab').setAttribute('transform', `translate(0 ${bob.toFixed(2)})`);
-    const wave = CLAW_WAVE * 14 * Math.sin(ph);
+    const wave = CLAW_WAVE * CLAW_ANGLE * Math.sin(ph);
     document.getElementById('clawL').setAttribute('transform', `rotate(${(-wave).toFixed(2)} 190 330)`);
     document.getElementById('clawR').setAttribute('transform', `rotate(${wave.toFixed(2)} 410 330)`);
     const look = 4 * Math.sin(ph / 2);

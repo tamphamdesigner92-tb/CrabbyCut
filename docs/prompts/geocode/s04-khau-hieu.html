@@ -1,9 +1,9 @@
 <!-- S-04 · Chữ chuyển động "Create anything. Pay nothing." — GeoCode HTML/CSS/JS
-     Khung 1080×1920, video 13 s, 30 fps; đặt ở giây 2 → 15 (sau thẻ câu lệnh). Nền trong suốt:
+     Khung 1080×1920, video 11 s, 30 fps; đặt ở giây 2 → 13 (sau thẻ câu lệnh, trước thẻ cuối 2 s; buổi dựng 7/11). Nền trong suốt:
      nền tối của short là một Shape rectangle 1080×1920 #23262f ở track dưới (hoặc Nền › Màu).
      Mọi chuyển động tính từ t qua geocode.onFrame. Phông Bricolage Grotesque qua https (Google Fonts).
      Nhịp: 0–4 s "Create" + "anything." từng chữ cái bật lên · 4–8 s "Pay nothing." trượt vào, gạch dưới đỏ
-     · 8–13 s hai dòng thu lại, chữ CrabbyCut + "free & open source" hiện ra. -->
+     · 8–11 s hai dòng thu lại, chữ CrabbyCut + "free & open source" hiện ra. -->
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@700;800&family=Inter:wght@500;600&display=block">
 <style>
   .stage { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:28px;
@@ -11,8 +11,8 @@
   .line { font-size:150px; font-weight:800; line-height:1; letter-spacing:-3px; white-space:nowrap; }
   .line span { display:inline-block; will-change:transform; }
   .accent { color:#ffb020; }
-  .red { position:relative; }
-  .bar { position:absolute; left:0; bottom:-18px; height:16px; background:#d0142c; border-radius:8px; }
+  .red { position:relative; padding-bottom:10px; }
+  .bar { position:absolute; left:0; bottom:-26px; height:16px; background:#d0142c; border-radius:8px; }
   .brand { position:absolute; left:0; right:0; bottom:520px; text-align:center; color:#fff; font-family:'Bricolage Grotesque', Inter, Arial, sans-serif; }
   .brand .name { font-size:110px; font-weight:800; letter-spacing:-2px; }
   .brand .name b { color:#d0142c; }

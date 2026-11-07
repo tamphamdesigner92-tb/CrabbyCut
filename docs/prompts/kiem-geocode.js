@@ -24,15 +24,15 @@ const OUT = path.resolve(process.argv[2] || path.join(os.tmpdir(), 'crabbycut-ge
 
 // Khai báo từng tệp: kích thước, thời lượng, mốc t cần xem, có lặp không, có cần trong suốt không, vars (nếu là template).
 const CASES = [
-  { file: 's01-nen-bien.canvas.js', w: 1080, h: 1920, dur: 20, times: [0, 6, 13, 19.9] },
+  { file: 's01-nen-bien.canvas.js', w: 1080, h: 1920, dur: 22, times: [0, 6, 13, 21.9] },
   { file: 's01-crabby.html', w: 600, h: 600, dur: 2, times: [0, 0.25, 0.5, 1.5], loop: true, transparent: true },
   { file: 's01-crabby.html', label: 's01-crabby (vẫy càng)', w: 600, h: 600, dur: 2, times: [0.25, 0.75], loop: true, transparent: true,
     patch: [['const CLAW_WAVE = 0;', 'const CLAW_WAVE = 1;']] },
-  { file: 's01-nen-bien.canvas.js', label: 's01-nen-bien (ban đêm)', w: 1080, h: 1920, dur: 20, times: [2, 12],
+  { file: 's01-nen-bien.canvas.js', label: 's01-nen-bien (ban đêm)', w: 1080, h: 1920, dur: 22, times: [2, 12],
     patch: [["const TIME_OF_DAY = 'sunset';", "const TIME_OF_DAY = 'night';"]] },
   { file: 's02-tan-xa.canvas.js', w: 1080, h: 1920, dur: 36, times: [2, 6, 14, 24, 33] },
-  { file: 's03-he-mat-troi.canvas.js', w: 1080, h: 1920, dur: 26, times: [1, 8, 15, 25] },
-  { file: 's04-khau-hieu.html', w: 1080, h: 1920, dur: 13, times: [1, 3, 6, 10, 12.9], transparent: true },
+  { file: 's03-he-mat-troi.canvas.js', w: 1080, h: 1920, dur: 30, times: [1, 8, 15, 29.9] },
+  { file: 's04-khau-hieu.html', w: 1080, h: 1920, dur: 11, times: [1, 3, 6, 8.5, 10.9], transparent: true },
   { file: 's05-mua-pho-dem.canvas.js', w: 1080, h: 1920, dur: 10, times: [0, 3.3, 7.7], loop: true },
   { file: 'the-cau-lenh-va-the-cuoi.html', label: 'the-cau-lenh', w: 1080, h: 1920, dur: 2, times: [0.5, 1.9], transparent: false,
     vars: { mode: 'prompt', label: 'Câu lệnh cho Claude', text_json: JSON.stringify('Làm cho tôi một short 20 giây: con cua Crabby đi dạo trên bãi biển lúc hoàng hôn.') } },

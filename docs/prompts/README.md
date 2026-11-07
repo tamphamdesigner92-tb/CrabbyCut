@@ -5,8 +5,8 @@ CrabbyCut miễn phí, mã nguồn mở. Để Claude điều khiển app, bạn
 và bật **Cài đặt › Chung › Nâng cao › "Cho phép Claude điều khiển (MCP)"**. Cách kết nối: [`mcp/README.md`](../../mcp/README.md).
 Quy tắc viết mã GeoCode: [`docs/HUONG_DAN_GEOCODE.md`](../HUONG_DAN_GEOCODE.md).
 
-> Trạng thái: **bản nháp trước buổi dựng 7/11/2026.** Mã trong `geocode/` đã kiểm ngoài app bằng `kiem-geocode.js`
-> (tất định, lặp khít, nền trong suốt) nhưng chưa chạy trong CrabbyCut. Câu lệnh sẽ được sửa theo kết quả thật sau buổi dựng.
+> Trạng thái: **đã dùng trong buổi dựng 7/11/2026** (Claude điều khiển CrabbyCut qua MCP trên macOS, bản dev).
+> Mã trong `geocode/` đã cập nhật theo giá trị dùng thật (xem "Khác với bản nháp đầu" bên dưới) và kiểm lại bằng `kiem-geocode.js`.
 
 ## Câu lệnh
 
@@ -26,16 +26,31 @@ Mỗi câu là đúng chữ gõ cho Claude và hiện ở 2 giây đầu của s
 
 | Tệp | Dùng cho | Ngôn ngữ · cỡ · thời lượng |
 |---|---|---|
-| `geocode/s01-nen-bien.canvas.js` | S-01, S-06, S-07: nền biển hoàng hôn; `TIME_OF_DAY` đổi sang `'night'` | canvas · 1080×1920 · 20 s |
+| `geocode/s01-nen-bien.canvas.js` | S-01, S-06, S-07: nền biển hoàng hôn; `TIME_OF_DAY` đổi sang `'night'` | canvas · 1080×1920 · 22 s |
 | `geocode/s01-crabby.html` | S-01, S-07: linh vật cua bước đi, lặp 2 s; `CLAW_WAVE` = 1 để vẫy càng | HTML/SVG · 600×600 · 2 s lặp |
 | `geocode/s02-tan-xa.canvas.js` | S-02: sơ đồ tán xạ 4 cảnh | canvas · 1080×1920 · 36 s |
-| `geocode/s03-he-mat-troi.canvas.js` | S-03: 8 hành tinh, tên hiện dần mỗi 2,5 s | canvas · 1080×1920 · 26 s |
-| `geocode/s04-khau-hieu.html` | S-04: chữ chuyển động + chữ CrabbyCut | HTML · 1080×1920 · 13 s |
+| `geocode/s03-he-mat-troi.canvas.js` | S-03: 8 hành tinh, tên hiện dần mỗi 2,5 s từ giây 4 | canvas · 1080×1920 · 30 s |
+| `geocode/s04-khau-hieu.html` | S-04: chữ chuyển động + chữ CrabbyCut | HTML · 1080×1920 · 11 s |
 | `geocode/s05-mua-pho-dem.canvas.js` | S-05: phố đêm mưa, lặp khít 10 s | canvas · 1080×1920 · 10 s lặp |
 | `geocode/the-cau-lenh-va-the-cuoi.html` | Thẻ câu lệnh (2 s đầu) và thẻ cuối (2 s cuối), template `{{mode}}` `{{label}}` `{{text_json}}` | HTML · 1080×1920 · 2 s |
 
 Các hằng số ở đầu mỗi tệp (`TIME_OF_DAY`, `CLAW_WAVE`, `RAIN_DENSITY`, `NAMES`…) được đặt sẵn để "sửa bằng lời" chỉ cần một lệnh
 `crabbycut_update_geocode` với `replace: [{find, with}]`, không phải gửi lại mã.
+
+## Khác với bản nháp đầu (sau buổi dựng 7/11)
+
+- **S-01**: nền `DUR = 22`, đặt từ giây 0 và chạy dưới thẻ đầu/cuối. Cua là block 600×600 lặp 2 s, scale 70 %, `position_y` 650,
+  keyframe `position_x` −720 → 720 (linear) trong 18 s. Đổi vị trí block đã có keyframe thì gửi `keyframes` với `keyframe_mode: replace`.
+- **S-03**: cảnh chạy cả 30 s; `LABEL_START` 4; bán trục dọc quỹ đạo = `orbit × 1.15`; Hải Vương 515; tâm `H × 0.43`;
+  tên hành tinh kẹp `x` trong [160, W−160] vì tên sát mép bị cắt.
+- **S-04**: khối chữ 11 s (giây 2–13) để vừa 15 s; gạch đỏ `bottom: -26px`, dòng "Pay nothing." thêm `padding-bottom: 10px`.
+  Nền là Shape rectangle `#23262f` ở track dưới.
+- **S-02**: giữ nguyên mã. Lồng tiếng Việt phải chỉ rõ `engine: vieneu3` (giọng mặc định Chatterbox không có tiếng Việt);
+  lồng tiếng theo cue không tự tạo phụ đề, nên phụ đề là 6 block chữ.
+- **S-05**: giữ nguyên mã; video 10 s, `loop: true`, `block_duration` 30.
+- **S-07**: lần 2 tăng biên độ vẫy càng 14° → 30° vì 14° khó thấy trong khung dọc.
+- Khung dọc: `crabbycut_new_project` chưa có tham số khung hình; chọn **FHD 1080p 1080x1920** qua nút `#btnPreviewAspect`
+  (bấm theo `ref` từ `crabbycut_ui_snapshot`).
 
 ## Kiểm mã ngoài app
 

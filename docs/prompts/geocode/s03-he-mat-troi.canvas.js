@@ -1,12 +1,12 @@
 // S-03 · Hệ Mặt Trời trong 30 giây — GeoCode JavaScript canvas
-// Khung 1080×1920, video 26 s, 30 fps; đặt ở giây 2 → 28 (sau thẻ câu lệnh, trước thẻ cuối).
+// Khung 1080×1920, video 30 s, 30 fps; chạy cả 30 s, thẻ câu lệnh và thẻ cuối nằm đè lên (buổi dựng 7/11).
 // 8 hành tinh quay quanh Mặt Trời; tên hiện dần theo thứ tự, mỗi tên cách nhau 2,5 s.
 // Quỹ đạo không theo tỉ lệ thật (để vừa khung dọc); chu kỳ quay giữ đúng THỨ TỰ nhanh → chậm.
 // Quy tắc vàng: góc = góc đầu + 2π·t/chu kỳ; sao nền có seed; nền đen là chủ ý (lớp nền).
 // Muốn đổi tên sang tiếng Anh/Trung: crabbycut_update_geocode replace mảng NAMES.
 
 const NAMES = ['Sao Thủy', 'Sao Kim', 'Trái Đất', 'Sao Hỏa', 'Sao Mộc', 'Sao Thổ', 'Sao Thiên Vương', 'Sao Hải Vương'];
-const LABEL_START = 3, LABEL_GAP = 2.5;   // tên đầu ở giây 3, tên cuối ở giây 20,5
+const LABEL_START = 4, LABEL_GAP = 2.5;   // tên đầu ở giây 4 (sau thẻ câu lệnh), tên cuối ở giây 21,5
 const PLANETS = [
   { r: 6,  color: '#b9b2a8', orbit: 120, period: 3   },
   { r: 11, color: '#e8c27a', orbit: 165, period: 5   },
@@ -15,9 +15,10 @@ const PLANETS = [
   { r: 34, color: '#d9a066', orbit: 335, period: 16  },
   { r: 28, color: '#e8d08e', orbit: 410, period: 22  , ring: true },
   { r: 19, color: '#8fe0e6', orbit: 470, period: 30  },
-  { r: 18, color: '#4a6cff', orbit: 520, period: 38  },
+  { r: 18, color: '#4a6cff', orbit: 515, period: 38  },
 ];
-const TILT = 0.55;   // nén trục dọc để quỹ đạo thành elip nhìn nghiêng
+const SQUASH = 1.15;  // bán trục dọc = orbit × SQUASH (buổi dựng 7/11: thay TILT×2.2 để quỹ đạo ngoài vừa khung)
+const LABEL_MARGIN = 160;  // tên hành tinh kẹp x trong [160, W−160], sát mép bị cắt
 
 function rng(seed) {
   return function () {
@@ -39,15 +40,15 @@ function draw(ctx, t, W, H) {
   }
   ctx.globalAlpha = 1;
 
-  const cx = W / 2, cy = H * 0.46;
+  const cx = W / 2, cy = H * 0.43;
   // Quỹ đạo
   ctx.strokeStyle = 'rgba(215,221,229,0.18)'; ctx.lineWidth = 2;
-  for (const p of PLANETS) { ctx.beginPath(); ctx.ellipse(cx, cy, p.orbit, p.orbit * TILT * 2.2, 0, 0, Math.PI * 2); ctx.stroke(); }
+  for (const p of PLANETS) { ctx.beginPath(); ctx.ellipse(cx, cy, p.orbit, p.orbit * SQUASH, 0, 0, Math.PI * 2); ctx.stroke(); }
 
   // Tính vị trí; vẽ hành tinh phía sau Mặt Trời trước, phía trước sau
   const pos = PLANETS.map((p, i) => {
     const a = START[i] + 2 * Math.PI * t / p.period;
-    return { p, i, x: cx + Math.cos(a) * p.orbit, y: cy + Math.sin(a) * p.orbit * TILT * 2.2, front: Math.sin(a) > 0 };
+    return { p, i, x: cx + Math.cos(a) * p.orbit, y: cy + Math.sin(a) * p.orbit * SQUASH, front: Math.sin(a) > 0 };
   });
   const drawPlanet = ({ p, x, y }) => {
     if (p.ring) { ctx.strokeStyle = 'rgba(232,208,142,0.8)'; ctx.lineWidth = 5; ctx.beginPath(); ctx.ellipse(x, y, p.r * 2, p.r * 0.6, -0.3, 0, Math.PI * 2); ctx.stroke(); }
@@ -69,7 +70,8 @@ function draw(ctx, t, W, H) {
     if (k <= 0) continue;
     ctx.globalAlpha = k;
     ctx.fillStyle = '#ffffff'; ctx.strokeStyle = 'rgba(0,0,0,0.7)'; ctx.lineWidth = 6;
-    ctx.strokeText(NAMES[q.i], q.x, q.y - q.p.r - 12); ctx.fillText(NAMES[q.i], q.x, q.y - q.p.r - 12);
+    const lx = Math.max(LABEL_MARGIN, Math.min(W - LABEL_MARGIN, q.x));
+    ctx.strokeText(NAMES[q.i], lx, q.y - q.p.r - 12); ctx.fillText(NAMES[q.i], lx, q.y - q.p.r - 12);
   }
   ctx.globalAlpha = 1;
 

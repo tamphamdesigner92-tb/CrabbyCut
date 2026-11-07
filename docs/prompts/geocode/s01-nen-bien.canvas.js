@@ -1,11 +1,11 @@
 // S-01 · Nền bãi biển lúc hoàng hôn — GeoCode JavaScript canvas
-// Khung 1080×1920, video 20 s, 30 fps. Lớp DƯỚI CÙNG: vẽ kín khung là chủ ý (đây là cảnh nền).
-// Quy tắc vàng: mọi chuyển động tính từ t; ngẫu nhiên có seed; sóng lặp theo chu kỳ chia hết 20 s.
+// Khung 1080×1920, video 22 s (giây 0 → 22, chạy dưới thẻ đầu/cuối), 30 fps. Lớp DƯỚI CÙNG: vẽ kín khung là chủ ý (đây là cảnh nền).
+// Quy tắc vàng: mọi chuyển động tính từ t; ngẫu nhiên có seed. Nền này không lặp nên không cần chu kỳ chia hết DUR.
 // S-07 "Sửa bằng lời" vá đúng các hằng số dưới đây bằng crabbycut_update_geocode replace.
 
-const DUR = 20;                 // thời lượng video (s)
+const DUR = 22;                 // thời lượng video (s) — buổi dựng 7/11 dùng 22 s
 const TIME_OF_DAY = 'sunset';   // 'sunset' | 'night'  ← S-07 lần 1: "đổi sang ban đêm"
-const WAVE_PERIOD = 4;          // giây cho một nhịp sóng (20 / 4 = 5 nhịp, lặp mượt)
+const WAVE_PERIOD = 4;          // giây cho một nhịp sóng
 
 const PALETTES = {
   sunset: { skyTop: '#2b1d4f', skyMid: '#c2456b', skyLow: '#ffb020', sun: '#ffd27a',
@@ -36,7 +36,7 @@ function draw(ctx, t, W, H) {
   sky.addColorStop(0, P.skyTop); sky.addColorStop(0.6, P.skyMid); sky.addColorStop(1, P.skyLow);
   ctx.fillStyle = sky; ctx.fillRect(0, 0, W, horizon);
 
-  if (night) {                   // sao nhấp nháy, chu kỳ 2 s (chia hết 20)
+  if (night) {                   // sao nhấp nháy, chu kỳ 2 s
     for (const s of STARS) {
       const a = 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(2 * Math.PI * (t / 2 + s.ph)));
       ctx.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`;
@@ -44,7 +44,7 @@ function draw(ctx, t, W, H) {
     }
   }
 
-  // Mặt trời (hoặc trăng) lặn dần trong 20 s: từ 0.30H xuống chạm đường chân trời
+  // Mặt trời (hoặc trăng) lặn dần trong DUR giây: từ 0.30H xuống chạm đường chân trời
   const k = Math.min(1, t / DUR);
   const sunY = H * 0.30 + (horizon - H * 0.30 + 40) * k;
   const sunR = W * 0.16;
