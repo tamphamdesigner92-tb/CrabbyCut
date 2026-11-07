@@ -1,0 +1,68 @@
+<!-- S-01 · Linh vật Crabby (cua đỏ) đang bước — GeoCode HTML/SVG
+     Khối 600×600, video 2 s, 30 fps, lặp mượt (bước chân và thân nhún theo chu kỳ 1 s).
+     Nền trong suốt: không đặt background cho body. Chuyển động qua geocode.onFrame(t).
+     Đi ngang bãi biển bằng keyframe position của block (không vẽ trong mã), nên đổi tốc độ không cần dựng lại.
+     S-07 vá các hằng số CLAW_WAVE / BODY_COLOR bằng crabbycut_update_geocode replace. -->
+<style>
+  svg { position:absolute; inset:0; width:600px; height:600px; overflow:visible; }
+</style>
+<svg viewBox="0 0 600 600" xmlns="http://www.w3.org/2000/svg">
+  <ellipse cx="300" cy="520" rx="170" ry="22" fill="rgba(0,0,0,0.22)"/>
+  <g id="crab">
+    <g id="legs" stroke-width="16" stroke-linecap="round" fill="none"></g>
+    <g id="clawL"><path d="M190 330 Q120 300 110 240" stroke-width="18" stroke-linecap="round" fill="none"/>
+      <path class="pincer" d="M110 240 q-55 -20 -40 -75 q35 15 40 45 q25 -40 60 -20 q-20 50 -60 50z"/></g>
+    <g id="clawR"><path d="M410 330 Q480 300 490 240" stroke-width="18" stroke-linecap="round" fill="none"/>
+      <path class="pincer" d="M490 240 q55 -20 40 -75 q-35 15 -40 45 q-25 -40 -60 -20 q20 50 60 50z"/></g>
+    <ellipse id="body" cx="300" cy="370" rx="160" ry="105"/>
+    <ellipse cx="300" cy="400" rx="110" ry="45" fill="rgba(255,255,255,0.12)"/>
+    <g id="eyes">
+      <line x1="255" y1="280" x2="245" y2="225" stroke-width="10" stroke-linecap="round"/>
+      <line x1="345" y1="280" x2="355" y2="225" stroke-width="10" stroke-linecap="round"/>
+      <circle cx="245" cy="215" r="24" fill="#fff"/><circle cx="355" cy="215" r="24" fill="#fff"/>
+      <circle id="pupilL" cx="250" cy="218" r="11" fill="#23262f"/><circle id="pupilR" cx="360" cy="218" r="11" fill="#23262f"/>
+    </g>
+    <path d="M265 400 q35 28 70 0" stroke="#23262f" stroke-width="8" fill="none" stroke-linecap="round"/>
+  </g>
+</svg>
+<script>
+  const BODY_COLOR = '#d0142c';   // đỏ thương hiệu CrabbyCut
+  const CLAW_WAVE = 0;            // 0 = càng đứng yên; 1 = vẫy càng  ← S-07 lần 2: "cho cua vẫy càng"
+  const CLAW_ANGLE = 30;          // biên độ vẫy (độ); buổi dựng 7/11 tăng từ 14 vì 14° khó thấy
+  const STEP = 1;                 // giây cho một nhịp bước (2 s / 1 s = 2 nhịp, lặp mượt)
+
+  const ns = 'http://www.w3.org/2000/svg';
+  const legs = document.getElementById('legs');
+  const legEls = [];
+  for (let i = 0; i < 6; i++) {
+    const p = document.createElementNS(ns, 'path');
+    legs.appendChild(p); legEls.push(p);
+  }
+  document.querySelectorAll('#crab [stroke-width]').forEach((e) => { if (!e.getAttribute('stroke')) e.setAttribute('stroke', BODY_COLOR); });
+  legs.setAttribute('stroke', BODY_COLOR);
+  document.getElementById('body').setAttribute('fill', BODY_COLOR);
+  document.querySelectorAll('.pincer').forEach((e) => e.setAttribute('fill', BODY_COLOR));
+
+  function frame(t) {
+    const ph = 2 * Math.PI * t / STEP;
+    // 3 chân mỗi bên, chân kề nhau lệch pha nửa nhịp
+    for (let i = 0; i < 6; i++) {
+      const side = i < 3 ? -1 : 1, j = i % 3;
+      const lift = 18 * Math.max(0, Math.sin(ph + (j % 2 ? Math.PI : 0)));
+      const sx = 300 + side * (110 + j * 18), sy = 400 + j * 22;
+      const kx = sx + side * 70, ky = sy - 40 - lift;
+      const fx = kx + side * 45, fy = 500 + j * 6 - lift;
+      legEls[i].setAttribute('d', `M${sx} ${sy} Q${kx} ${ky} ${fx} ${fy}`);
+    }
+    const bob = 6 * Math.sin(2 * ph);
+    document.getElementById('crab').setAttribute('transform', `translate(0 ${bob.toFixed(2)})`);
+    const wave = CLAW_WAVE * CLAW_ANGLE * Math.sin(ph);
+    document.getElementById('clawL').setAttribute('transform', `rotate(${(-wave).toFixed(2)} 190 330)`);
+    document.getElementById('clawR').setAttribute('transform', `rotate(${wave.toFixed(2)} 410 330)`);
+    const look = 4 * Math.sin(ph / 2);
+    document.getElementById('pupilL').setAttribute('cx', (250 + look).toFixed(2));
+    document.getElementById('pupilR').setAttribute('cx', (360 + look).toFixed(2));
+  }
+  frame(0);   // ảnh tại t = 0 đã đủ hình
+  if (window.geocode) geocode.onFrame((t) => frame(t));
+</script>
